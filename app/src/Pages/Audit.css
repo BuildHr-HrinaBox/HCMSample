@@ -1,0 +1,358 @@
+/* Audit – white card, outer beige background, image model */
+
+.audit-page {
+  padding: 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+  background: #FFEFD5;
+  min-height: 100%;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.audit-card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 28px 32px 32px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e7eb;
+}
+
+.audit-header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.audit-header-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.audit-title {
+  margin: 0 0 6px 0;
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: #8B4513;
+}
+
+.audit-subtitle {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #6b7280;
+}
+
+.audit-btn-send {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: #60a5fa;
+  color: #fff;
+  border: 1px solid #3b82f6;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 3px rgba(59, 130, 246, 0.2);
+}
+
+.audit-btn-send:hover:not(:disabled) {
+  background: #3b82f6;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35);
+}
+
+.audit-btn-send:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.audit-message {
+  margin: 0 0 16px 0;
+  padding: 10px 14px;
+  background: #f0fdf4;
+  color: #166534;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.audit-table-wrap {
+  overflow-x: auto;
+  border-radius: 12px;
+}
+
+.audit-loading {
+  margin: 32px 0;
+  color: #6b7280;
+  text-align: center;
+}
+
+.audit-table {
+  width: 100%;
+  min-width: 800px;
+  border-collapse: collapse;
+  font-size: var(--hcm-data-table-body-font-size);
+}
+
+.audit-table th,
+.audit-table td {
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.audit-table th {
+  background: #f9fafb;
+  font-weight: 600;
+  color: #1f2937;
+  font-size: var(--hcm-data-table-header-font-size);
+}
+
+.audit-table td {
+  color: #374151;
+  font-size: var(--hcm-data-table-body-font-size);
+}
+
+.audit-col-check {
+  width: 44px;
+  text-align: center;
+}
+
+.audit-col-check input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.audit-empty {
+  color: #9ca3af;
+  font-style: italic;
+  text-align: center;
+  padding: 40px 20px;
+}
+
+/* Editable Maximum Marks & Applicability - blue underlined link style */
+.audit-edit-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: #2563eb;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.audit-edit-link:hover {
+  color: #1d4ed8;
+}
+
+/* Edit Maximum Marks & Applicability modal */
+.audit-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  padding: 20px;
+}
+
+.audit-modal {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.15);
+  width: 100%;
+  max-width: 480px;
+  overflow: hidden;
+}
+
+.audit-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.audit-modal-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.audit-modal-close {
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: #6b7280;
+  cursor: pointer;
+}
+
+.audit-modal-close:hover {
+  color: #374151;
+}
+
+.audit-modal-body {
+  padding: 24px;
+}
+
+.audit-modal-field {
+  margin-bottom: 20px;
+}
+
+.audit-modal-field:last-child {
+  margin-bottom: 0;
+}
+
+.audit-modal-field label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 6px;
+}
+
+.audit-modal-static {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #4b5563;
+  line-height: 1.5;
+}
+
+.audit-modal-stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.audit-stepper-btn {
+  width: 36px;
+  height: 36px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #f9fafb;
+  font-size: 1.25rem;
+  color: #374151;
+  cursor: pointer;
+}
+
+.audit-stepper-btn:hover {
+  background: #f3f4f6;
+}
+
+.audit-modal-input {
+  width: 80px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 1rem;
+  text-align: center;
+}
+
+.audit-modal-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.audit-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 24px;
+  border-top: 1px solid #e5e7eb;
+  background: #f9fafb;
+}
+
+.audit-btn {
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.audit-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.audit-btn-cancel {
+  background: #f3f4f6;
+  color: #374151;
+  border: 1px solid #d1d5db;
+}
+
+.audit-btn-cancel:hover:not(:disabled) {
+  background: #e5e7eb;
+}
+
+.audit-btn-save {
+  background: #3b82f6;
+  color: #fff;
+  border: 1px solid #2563eb;
+}
+
+.audit-btn-save:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+/* Inline Remarks edit */
+.audit-remarks-cell {
+  min-width: 180px;
+}
+
+.audit-remarks-trigger {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: #6b7280;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+
+.audit-remarks-trigger:hover {
+  color: #2563eb;
+}
+
+.audit-remarks-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.audit-remarks-textarea {
+  width: 100%;
+  min-width: 200px;
+  min-height: 60px;
+  padding: 8px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.audit-remarks-textarea:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.audit-remarks-textarea::placeholder {
+  color: #9ca3af;
+}
+
+.audit-remarks-actions {
+  display: flex;
+  gap: 8px;
+}

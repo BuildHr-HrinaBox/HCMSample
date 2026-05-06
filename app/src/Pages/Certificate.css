@@ -1,0 +1,333 @@
+.certificate-management-page {
+  padding: 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+  background: #fffef8;
+  min-height: 100%;
+}
+
+/* When form is open: center the form on the page */
+.certificate-management-page-form-open {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100vh - 120px);
+  padding-top: 48px;
+  padding-bottom: 48px;
+}
+
+.certificate-management-form-center {
+  width: 100%;
+  max-width: 800px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.certificate-management-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.certificate-management-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.certificate-management-header-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: #e3f2fd;
+  color: #1976d2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.certificate-management-title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.certificate-management-subtitle {
+  margin: 4px 0 0;
+  font-size: 0.9rem;
+  color: #6b7280;
+}
+
+.certificate-management-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.certificate-management-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.certificate-management-btn-icon {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+.certificate-management-btn-icon:hover:not(:disabled) {
+  background: #fed7aa;
+}
+
+.certificate-management-btn-icon:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.certificate-management-btn-add {
+  background: #6b4423;
+  color: #fff;
+}
+
+.certificate-management-btn-add:hover {
+  background: #5a3920;
+}
+
+.certificate-management-btn-add-icon {
+  font-size: 1.2rem;
+  margin-right: 6px;
+  line-height: 1;
+}
+
+.certificate-management-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e7eb;
+}
+
+.certificate-management-message {
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border-radius: 8px;
+  background: #ecfdf5;
+  color: #059669;
+  font-size: 0.9rem;
+}
+
+.certificate-management-loading,
+.certificate-management-empty {
+  text-align: center;
+  color: #6b7280;
+  padding: 32px 16px;
+}
+
+.certificate-management-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 20px;
+}
+
+.certificate-management-item {
+  background: #f9fafb;
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+  border: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.certificate-management-item-icon {
+  color: #1976d2;
+}
+
+.certificate-management-item-name {
+  font-weight: 600;
+  color: #374151;
+  font-size: 1rem;
+}
+
+.certificate-management-item-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.certificate-management-item-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+
+.certificate-management-item-btn.edit {
+  background: #dbeafe;
+  color: #2563eb;
+}
+
+.certificate-management-item-btn.edit:hover {
+  background: #bfdbfe;
+}
+
+.certificate-management-item-btn.delete {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.certificate-management-item-btn.delete:hover {
+  background: #fecaca;
+}
+
+/* Inline form card */
+.certificate-management-form-card {
+  width: 100%;
+  max-width: 800px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.certificate-management-form-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 0 16px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.certificate-management-form-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.certificate-management-form-close {
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: #6b7280;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.certificate-management-form-close:hover {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.certificate-management-form {
+  padding: 0;
+}
+
+.certificate-management-form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 24px;
+}
+
+@media (max-width: 640px) {
+  .certificate-management-form-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.certificate-management-form-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.certificate-management-form-section:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.certificate-management-form-section strong {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 0.95rem;
+  color: #374151;
+}
+
+.certificate-management-form-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.certificate-management-form-col label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #374151;
+}
+
+.certificate-management-form-col input {
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.certificate-management-form-col input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.certificate-management-form-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 24px;
+  margin-top: 20px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.certificate-management-btn-secondary {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.certificate-management-btn-secondary:hover {
+  background: #e5e7eb;
+}
+
+.certificate-management-btn-primary {
+  background: #6b4423;
+  color: #fff;
+}
+
+.certificate-management-btn-primary:hover {
+  background: #5a3920;
+}

@@ -1,0 +1,10 @@
+{
+	"name": "mainreport_function",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "user39@demo1.buildhr.co.in",
+	"dependencies": {
+		"express": "^5.1.0",
+		"zcatalyst-sdk-node": "latest"
+	}
+}

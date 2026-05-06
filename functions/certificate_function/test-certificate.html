@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Certificate Function Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .test-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        .test-section h3 {
+            margin-top: 0;
+            color: #555;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .result {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            white-space: pre-wrap;
+            font-family: monospace;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Certificate Function Test</h1>
+        
+        <div class="test-section">
+            <h3>1. Health Check</h3>
+            <button onclick="testHealthCheck()">Test Health Check</button>
+            <div id="healthResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>2. Test Table Access</h3>
+            <button onclick="testTableAccess()">Test Certificate Table Access</button>
+            <div id="tableResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>3. Test File Store Access</h3>
+            <button onclick="testFileStoreAccess()">Test File Store Access</button>
+            <div id="filestoreResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>4. Create Certificate</h3>
+            <button onclick="createCertificate()">Create Test Certificate</button>
+            <div id="createResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>5. List Certificates</h3>
+            <button onclick="listCertificates()">List All Certificates</button>
+            <div id="listResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>6. File Upload Test</h3>
+            <input type="file" id="testFile" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx">
+            <button onclick="testFileUpload()">Test File Upload</button>
+            <div id="uploadResult" class="result"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/server/certificate_function';
+
+        async function makeRequest(url, options = {}) {
+            try {
+                const response = await fetch(url, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...options.headers
+                    },
+                    ...options
+                });
+                
+                const data = await response.json();
+                return { success: response.ok, data, status: response.status };
+            } catch (error) {
+                return { success: false, error: error.message };
+            }
+        }
+
+        async function testHealthCheck() {
+            const result = await makeRequest(`${API_BASE}/`);
+            const resultDiv = document.getElementById('healthResult');
+            
+            if (result.success) {
+                resultDiv.className = 'result success';
+                resultDiv.textContent = `✅ Health Check Passed\nStatus: ${result.data.status}\nMessage: ${result.data.message}`;
+            } else {
+                resultDiv.className = 'result error';
+                resultDiv.textContent = `❌ Health Check Failed\nError: ${result.error || result.data.message}`;
+            }
+        }
+
+        async function testTableAccess() {
+            const result = await makeRequest(`${API_BASE}/test-table`);
+            const resultDiv = document.getElementById('tableResult');
+            
+            if (result.success) {
+                resultDiv.className = 'result success';
+                resultDiv.textContent = `✅ Table Access Successful\nTable: ${result.data.tableInfo.tableName}\nRecords: ${result.data.tableInfo.recordCount}`;
+            } else {
+                resultDiv.className = 'result error';
+                resultDiv.textContent = `❌ Table Access Failed\nError: ${result.error || result.data.message}`;
+            }
+        }
+
+        async function testFileStoreAccess() {
+            const result = await makeRequest(`${API_BASE}/test-filestore`);
+            const resultDiv = document.getElementById('filestoreResult');
+            
+            if (result.success) {
+                resultDiv.className = 'result success';
+                resultDiv.textContent = `✅ File Store Access Successful\nFolder: ${result.data.fileStoreInfo.folderName}\nFiles: ${result.data.fileStoreInfo.fileCount}`;
+            } else {
+                resultDiv.className = 'result error';
+                resultDiv.textContent = `❌ File Store Access Failed\nError: ${result.error || result.data.message}`;
+            }
+        }
+
+        async function createCertificate() {
+            const testData = {
+                GSTNo: 'TESTGST123456789',
+                GSTDate: '2024-01-01',
+                CompanyPANNo: 'TESTPAN123456',
+                CompanyPANDate: '2024-01-01',
+                IncorporationNo: 'INC123456789',
+                IncorporationDate: '2024-01-01',
+                MOANo: 'MOA123456789',
+                MOADate: '2024-01-01',
+                AOANo: 'AOA123456789',
+                AOADate: '2024-01-01',
+                EPFNo: 'EPF123456789',
+                EPFDate: '2024-01-01',
+                ESINo: 'ESI123456789',
+                ESIDate: '2024-01-01',
+                FactoryLicenseNo: 'FL123456789',
+                FactoryLicenseDate: '2024-01-01',
+                LAFNo: 'LAF123456789',
+                LRFDate: '2024-01-01',
+                PTNo: 'PT123456789',
+                PTDate: '2024-01-01'
+            };
+
+            const result = await makeRequest(`${API_BASE}/certificate`, {
+                method: 'POST',
+                body: JSON.stringify(testData)
+            });
+            
+            const resultDiv = document.getElementById('createResult');
+            
+            if (result.success) {
+                resultDiv.className = 'result success';
+                resultDiv.textContent = `✅ Certificate Created Successfully\nID: ${result.data.certificate.ROWID}\nGST No: ${result.data.certificate.GSTNo}`;
+            } else {
+                resultDiv.className = 'result error';
+                resultDiv.textContent = `❌ Certificate Creation Failed\nError: ${result.error || result.data.message}`;
+            }
+        }
+
+        async function listCertificates() {
+            const result = await makeRequest(`${API_BASE}/certificate`);
+            const resultDiv = document.getElementById('listResult');
+            
+            if (result.success) {
+                resultDiv.className = 'result success';
+                resultDiv.textContent = `✅ Certificates Retrieved\nTotal: ${result.data.total}\nRecords: ${result.data.certificateDetails.length}\n\n${JSON.stringify(result.data.certificateDetails, null, 2)}`;
+            } else {
+                resultDiv.className = 'result error';
+                resultDiv.textContent = `❌ Failed to Retrieve Certificates\nError: ${result.error || result.data.message}`;
+            }
+        }
+
+        async function testFileUpload() {
+            const fileInput = document.getElementById('testFile');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                const resultDiv = document.getElementById('uploadResult');
+                resultDiv.className = 'result error';
+                resultDiv.textContent = '❌ Please select a file first';
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch(`${API_BASE}/certificate/upload/GSTFile`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                const resultDiv = document.getElementById('uploadResult');
+                
+                if (response.ok) {
+                    resultDiv.className = 'result success';
+                    resultDiv.textContent = `✅ File Upload Successful\nFile ID: ${data.fileId}\nFile Name: ${data.fileName}`;
+                } else {
+                    resultDiv.className = 'result error';
+                    resultDiv.textContent = `❌ File Upload Failed\nError: ${data.message}`;
+                }
+            } catch (error) {
+                const resultDiv = document.getElementById('uploadResult');
+                resultDiv.className = 'result error';
+                resultDiv.textContent = `❌ File Upload Error\nError: ${error.message}`;
+            }
+        }
+
+        // Auto-run health check on page load
+        window.onload = function() {
+            testHealthCheck();
+        };
+    </script>
+</body>
+</html>

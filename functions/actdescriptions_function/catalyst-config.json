@@ -1,0 +1,22 @@
+{
+	"deployment": {
+		"name": "actdescriptions_function",
+		"stack": "node20",
+		"type": "advancedio",
+		"env_variables": {}
+	},
+	"execution": {
+		"main": "index.js"
+	},
+	"policies": [
+		{
+			"name": "datastore",
+			"type": "datastore",
+			"permissions": [
+				"read",
+				"write",
+				"delete"
+			]
+		}
+	]
+}

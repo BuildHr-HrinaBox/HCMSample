@@ -1,0 +1,25 @@
+{
+  "name": "statutorymasterfactory_function",
+  "version": "1.0.0",
+  "description": "Backend function for Statutorymasterfactory CRUD operations",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "express": "^4.21.2",
+    "express-fileupload": "^1.5.2",
+    "zcatalyst-sdk-node": "^3.0.0"
+  },
+  "keywords": [
+    "statutory",
+    "master",
+    "factory",
+    "crud",
+    "catalyst"
+  ],
+  "author": "",
+  "license": "ISC"
+}

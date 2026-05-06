@@ -1,0 +1,23 @@
+{
+  "name": "certificate_function",
+  "version": "1.0.0",
+  "description": "Certificate management function for statutory compliance",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "express-fileupload": "^1.5.2",
+    "zcatalyst-sdk-node": "^3.0.0"
+  },
+  "keywords": [
+    "certificate",
+    "statutory",
+    "compliance",
+    "catalyst"
+  ],
+  "author": "",
+  "license": "ISC"
+}

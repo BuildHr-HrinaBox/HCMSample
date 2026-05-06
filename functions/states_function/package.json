@@ -1,0 +1,10 @@
+{
+	"name": "states_function",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "afrindinusha.j@buildhr.co.in",
+	"dependencies": {
+		"express": "^5.1.0",
+		"zcatalyst-sdk-node": "latest"
+	}
+}

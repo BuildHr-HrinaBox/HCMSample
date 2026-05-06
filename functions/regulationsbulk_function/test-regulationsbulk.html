@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RegulationsBulk Function Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        button {
+            background-color: #20a7db;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #1a8bb8;
+        }
+        .result {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .success {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .info {
+            background-color: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>RegulationsBulk Function Test</h1>
+        
+        <div class="test-section">
+            <h3>1. Health Check</h3>
+            <button onclick="testHealthCheck()">Test Health Check</button>
+            <div id="healthResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>2. Table Access Test</h3>
+            <button onclick="testTableAccess()">Test Table Access</button>
+            <div id="tableResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>3. Add Single Record</h3>
+            <button onclick="testAddRecord()">Add Test Record</button>
+            <div id="addResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>4. Bulk Import Test</h3>
+            <button onclick="testBulkImport()">Test Bulk Import</button>
+            <div id="bulkResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>5. Get All Records</h3>
+            <button onclick="testGetAll()">Get All Records</button>
+            <div id="getAllResult" class="result"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>6. Get Count</h3>
+            <button onclick="testGetCount()">Get Record Count</button>
+            <div id="countResult" class="result"></div>
+        </div>
+    </div>
+
+    <script>
+        const baseUrl = '/regulationsbulk_function';
+
+        function showResult(elementId, data, isError = false) {
+            const element = document.getElementById(elementId);
+            element.textContent = JSON.stringify(data, null, 2);
+            element.className = `result ${isError ? 'error' : 'success'}`;
+        }
+
+        function showInfo(elementId, message) {
+            const element = document.getElementById(elementId);
+            element.textContent = message;
+            element.className = 'result info';
+        }
+
+        async function testHealthCheck() {
+            showInfo('healthResult', 'Testing health check...');
+            try {
+                const response = await fetch(`${baseUrl}/`);
+                const data = await response.json();
+                showResult('healthResult', data, !response.ok);
+            } catch (error) {
+                showResult('healthResult', { error: error.message }, true);
+            }
+        }
+
+        async function testTableAccess() {
+            showInfo('tableResult', 'Testing table access...');
+            try {
+                const response = await fetch(`${baseUrl}/test-table`);
+                const data = await response.json();
+                showResult('tableResult', data, !response.ok);
+            } catch (error) {
+                showResult('tableResult', { error: error.message }, true);
+            }
+        }
+
+        async function testAddRecord() {
+            showInfo('addResult', 'Adding test record...');
+            try {
+                const testData = {
+                    sector: "Test Sector",
+                    regulations: "Test Regulation",
+                    type: "Test Type",
+                    states: "Test State",
+                    description: "Test Description"
+                };
+
+                const response = await fetch(`${baseUrl}/test-add`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(testData)
+                });
+
+                const data = await response.json();
+                showResult('addResult', data, !response.ok);
+            } catch (error) {
+                showResult('addResult', { error: error.message }, true);
+            }
+        }
+
+        async function testBulkImport() {
+            showInfo('bulkResult', 'Testing bulk import...');
+            try {
+                const testData = [
+                    {
+                        sector: "Manufacturing",
+                        regulations: "Factories Act, 1948",
+                        type: "Central Act",
+                        states: "All States",
+                        description: "An Act to consolidate and amend the law regulating labour in factories."
+                    },
+                    {
+                        sector: "Healthcare",
+                        regulations: "Clinical Establishments Act, 2010",
+                        type: "Central Act",
+                        states: "All States",
+                        description: "An Act to provide for registration and regulation of clinical establishments."
+                    },
+                    {
+                        sector: "Finance",
+                        regulations: "Banking Regulation Act, 1949",
+                        type: "Central Act",
+                        states: "All States",
+                        description: "An Act to consolidate and amend the law relating to banking."
+                    }
+                ];
+
+                const response = await fetch(`${baseUrl}/regulationsbulk?action=bulkImport`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(testData)
+                });
+
+                const data = await response.json();
+                showResult('bulkResult', data, !response.ok);
+            } catch (error) {
+                showResult('bulkResult', { error: error.message }, true);
+            }
+        }
+
+        async function testGetAll() {
+            showInfo('getAllResult', 'Getting all records...');
+            try {
+                const response = await fetch(`${baseUrl}/regulationsbulk?action=getAll`);
+                const data = await response.json();
+                showResult('getAllResult', data, !response.ok);
+            } catch (error) {
+                showResult('getAllResult', { error: error.message }, true);
+            }
+        }
+
+        async function testGetCount() {
+            showInfo('countResult', 'Getting record count...');
+            try {
+                const response = await fetch(`${baseUrl}/regulationsbulk?action=count`);
+                const data = await response.json();
+                showResult('countResult', data, !response.ok);
+            } catch (error) {
+                showResult('countResult', { error: error.message }, true);
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+	"name": "authorized_portal_function",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "afrindinusha.j@buildhr.co.in",
+	"dependencies": {
+		"zcatalyst-sdk-node": "latest"
+	}
+}

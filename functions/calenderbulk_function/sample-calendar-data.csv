@@ -1,0 +1,11 @@
+S.No,Forms,Sector,Description,Rules,Schedule Of Submission/ Maintenance,Jan,Feb,Mar,Apr,May,June,July,Aug,Sep,Oct,Nov,Dec
+1,Form 3,Manufacturing,Construction Permission,Rule 3,"Permission to be obtained with relevant documents before construction, reconstruction or extension.",,,,,,,,31,,,,
+2,Form 4,Manufacturing,Registration/License Renewal,Rule 4,"Registration/license to be obtained before commencement of manufacturing process for the first time and application to be submitted on or before October 31st of every year for renewal.",,,,,,,,,31,,
+3,Form 3-A,Healthcare,Manager Change Notice,Rule 12-A,"The notice of change of manager shall be in Form 3-A.",,,,,,,,,31,,
+4,Form 4(6),Finance,Registration Authority,Rule 4(6),"The registration and license shall be obtained from the concerned authority.",,,,,,,,,,,15
+5,Form 10,Manufacturing,Overtime Work Entry,Rule 78,"Period of overtime work shall be entered in Form 10.",,,,,,,,,30,,
+6,Form 12,Manufacturing,Register of Adult Workers,Rule 80 & 86,"The Register of adult workers shall be in Form 12.",,,,,,,,,30,,
+7,Form 15,Manufacturing,Leave Register,Rule 87 & 88,"The manager shall keep an up-to-date Register in Form 15 for leave",,,,,,,,,30,,
+8,Accident Report,Manufacturing,Accident Reporting,Rule 96,"Within 12 hours for death or dangerous occurrence and within 24 hours of the expiry of 48 hours of the accident (bodily injury), the factory manager shall send the report to the concerned authority.",,,,,,,,,30,,
+9,Form 16,Healthcare,Medical Examination Record,Rule 16,"Medical examination of workers to be conducted annually",15,,,,,,,,,,
+10,Form 18,Finance,Annual Return,Rule 18,"Annual return to be submitted by 31st March every year",,31,,,,,,,,,

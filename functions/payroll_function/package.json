@@ -1,0 +1,9 @@
+{
+	"name": "payroll_function",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "user39@demo1.buildhr.co.in",
+	"dependencies": {
+		"zcatalyst-sdk-node": "latest"
+	}
+}

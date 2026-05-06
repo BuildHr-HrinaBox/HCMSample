@@ -1,0 +1,30 @@
+{
+  "defaults": {
+    "project": 1,
+    "env": 1
+  },
+  "actives": {
+    "project": 1,
+    "env": 1
+  },
+  "projects": [
+    {
+      "idx": 1,
+      "id": "31459000000468003",
+      "name": "HCM",
+      "domain": {
+        "id": "50040733189",
+        "name": "hcm-60066164950.development"
+      },
+      "timezone": "Asia/Kolkata",
+      "env": [
+        {
+          "idx": 1,
+          "id": "60066164950",
+          "name": "Development",
+          "type": 3
+        }
+      ]
+    }
+  ]
+}

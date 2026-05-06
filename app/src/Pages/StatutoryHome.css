@@ -1,0 +1,557 @@
+/* Statutory Home - Dashboard matching image model */
+
+.statutory-home {
+  min-height: 100vh;
+  background: #FFEFD5;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+/* Header - reddish-brown gradient */
+.statutory-home-header {
+  background: linear-gradient(135deg, #8B4513 0%, #A0522D 50%, #8B4513 100%);
+  padding: 1rem 1.5rem 1.5rem;
+  border-radius: 0 0 24px 24px;
+  box-shadow: 0 8px 24px rgba(139, 69, 19, 0.35);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1rem;
+}
+
+.statutory-home-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.statutory-home-header-left {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.statutory-home-menu-btn {
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  border-radius: 10px;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #fff;
+}
+
+.statutory-home-menu-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.statutory-home-logo-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.statutory-home-logo-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.statutory-home-logo-sub {
+  font-size: 0.7rem;
+  opacity: 0.95;
+  font-weight: 500;
+}
+
+.statutory-home-logo-img {
+  height: 44px;
+  width: auto;
+  display: block;
+  object-fit: contain;
+}
+
+.statutory-home-header-center {
+  flex: 1;
+  text-align: center;
+  min-width: 120px;
+}
+
+.statutory-home-title {
+  font-size: 2.5rem;
+  font-weight: 800;
+  letter-spacing: 2px;
+  margin: 0;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+/* KPI cards - yellow, in a row below HCM text */
+.statutory-home-kpis-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.statutory-home-kpi {
+  backdrop-filter: blur(5px);
+  background: linear-gradient(135deg, rgba(252, 211, 77, 0.95) 0%, rgba(251, 191, 36, 0.95) 100%);
+  color: #1f2937;
+  padding: 0.6rem 1.5rem;
+  border-radius: 26px;
+  box-shadow: 35px 35px 68px 0px rgba(145, 192, 255, 0.5), inset -8px -8px 16px 0px rgba(145, 192, 255, 0.6), inset 0px 11px 28px 0px rgb(255, 255, 255);
+  min-width: 160px;
+  text-align: center;
+}
+
+.statutory-home-kpi-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.9;
+  margin-bottom: 2px;
+}
+
+.statutory-home-kpi-value {
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+/* Header right - bell + avatar */
+.statutory-home-header-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.statutory-home-bell-wrap {
+  position: relative;
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  border-radius: 10px;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #fff;
+}
+
+.statutory-home-bell-wrap:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.statutory-home-bell-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+
+.statutory-home-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  color: #8B4513;
+  font-weight: 700;
+  font-size: 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.statutory-home-profile-wrap {
+  position: relative;
+}
+
+.statutory-home-avatar-btn {
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.statutory-home-avatar-btn:hover {
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.statutory-home-profile-dropdown {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  min-width: 260px;
+  padding: 1rem 1.25rem;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  z-index: 1000;
+  border: 1px solid rgba(139, 69, 19, 0.15);
+}
+
+.statutory-home-profile-dropdown-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
+.statutory-home-profile-dropdown-email {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #1f2937;
+  word-break: break-all;
+}
+
+/* Main content */
+.statutory-home-main {
+  display: flex;
+  gap: 1.5rem;
+  padding: 1.5rem;
+  max-width: 1400px;
+  margin: 0 auto;
+  align-items: flex-start;
+}
+
+.statutory-home-content-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* About card - claymorphism */
+.statutory-home-about-card {
+  backdrop-filter: blur(5px);
+  background-color: rgba(255, 255, 255, 1);
+  border-radius: 26px;
+  box-shadow: 35px 35px 68px 0px rgba(145, 192, 255, 0.5), inset -8px -8px 16px 0px rgba(145, 192, 255, 0.6), inset 0px 11px 28px 0px rgb(255, 255, 255);
+  padding: 1.5rem 2rem;
+}
+
+.statutory-home-about-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #1f2937;
+  margin: 0 0 0.5rem 0;
+}
+
+.statutory-home-about-subtitle {
+  font-size: 0.95rem;
+  color: #6b7280;
+  margin: 0 0 1rem 0;
+}
+
+.statutory-home-about-desc {
+  font-size: 0.95rem;
+  line-height: 1.65;
+  color: #374151;
+  margin: 0;
+}
+
+/* System diagram - triangle view, claymorphism */
+.statutory-home-diagram-card {
+  backdrop-filter: blur(5px);
+  background-color: rgba(255, 255, 255, 1);
+  border-radius: 26px;
+  box-shadow: 35px 35px 68px 0px rgba(145, 192, 255, 0.5), inset -8px -8px 16px 0px rgba(145, 192, 255, 0.6), inset 0px 11px 28px 0px rgb(255, 255, 255);
+  padding: 1.5rem;
+  position: relative;
+}
+
+.statutory-home-diagram-triangle-view {
+  position: relative;
+  width: 100%;
+  height: 400px;
+  min-height: 360px;
+}
+
+/* Single SVG: triangle + connection lines with arrows (same format as reference model) */
+.statutory-home-diagram-svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+  overflow: visible;
+}
+
+.statutory-home-triangle-fill {
+  filter: drop-shadow(0 4px 12px rgba(0, 255, 255, 0.2));
+}
+
+.statutory-home-triangle-animated-border {
+  animation: statutory-triangle-border-pulse 2s ease-in-out infinite;
+}
+
+@keyframes statutory-triangle-border-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.85; }
+}
+
+/* Dashed connection lines with arrowheads - same style as reference */
+.statutory-home-connection-line {
+  transition: opacity 0.3s ease, stroke-width 0.3s ease;
+  pointer-events: none;
+}
+
+.statutory-home-diagram-triangle-view:hover .statutory-home-connection-line {
+  opacity: 0.8;
+}
+
+.statutory-home-triangle-label {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  backdrop-filter: blur(5px);
+  background-color: rgba(255, 255, 255, 1);
+  padding: 0.6rem 1rem;
+  border-radius: 26px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #0f766e;
+  white-space: nowrap;
+  box-shadow: 35px 35px 68px 0px rgba(145, 192, 255, 0.5), inset -8px -8px 16px 0px rgba(145, 192, 255, 0.6), inset 0px 11px 28px 0px rgb(255, 255, 255);
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* Module boxes around triangle - same card style as reference, clickable */
+.statutory-home-module {
+  position: absolute;
+  pointer-events: auto;
+  backdrop-filter: blur(5px);
+  background-color: rgba(255, 255, 255, 1);
+  border: 2px solid rgba(229, 231, 235, 0.8);
+  border-radius: 26px;
+  padding: 0.6rem 0.9rem;
+  min-width: 100px;
+  text-align: center;
+  box-shadow: 35px 35px 68px 0px rgba(145, 192, 255, 0.5), inset -8px -8px 16px 0px rgba(145, 192, 255, 0.6), inset 0px 11px 28px 0px rgb(255, 255, 255);
+  text-decoration: none;
+  color: #374151;
+  font-size: 0.8rem;
+  font-weight: 600;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.statutory-home-module::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  left: 8px;
+  right: 8px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.statutory-home-module.yellow::before {
+  background: #eab308;
+}
+
+.statutory-home-module.pink::before {
+  background: #ec4899;
+}
+
+.statutory-home-module.green::before {
+  background: #22c55e;
+}
+
+.statutory-home-module svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+.statutory-home-module .mod-label {
+  line-height: 1.2;
+}
+
+/* Module positions aligned to SVG line endpoints (viewBox 0 0 500 400) */
+.statutory-home-module.lib {
+  left: 50%;
+  top: 3%;
+  transform: translate(-50%, 0);
+}
+
+.statutory-home-module.acts {
+  left: 82%;
+  top: 4.5%;
+  transform: translate(-50%, 0);
+}
+
+.statutory-home-module.checklist {
+  left: 5%;
+  top: 38.75%;
+  transform: translate(-50%, -50%);
+}
+
+.statutory-home-module.calendar {
+  left: 5%;
+  top: 71.25%;
+  transform: translate(-50%, -50%);
+}
+
+.statutory-home-module.transaction {
+  left: 33%;
+  bottom: 8%;
+  top: auto;
+  transform: translate(-50%, 50%);
+}
+
+.statutory-home-module.audit {
+  left: 67%;
+  bottom: 8%;
+  top: auto;
+  right: auto;
+  transform: translate(-50%, 50%);
+}
+
+.statutory-home-module.report {
+  left: 95%;
+  top: 38.75%;
+  right: auto;
+  transform: translate(-50%, -50%);
+}
+
+.statutory-home-module.dashboard {
+  left: 95%;
+  top: 71.25%;
+  right: auto;
+  transform: translate(-50%, -50%);
+}
+
+/* Recent Activity sidebar - claymorphism */
+.statutory-home-activity {
+  width: 320px;
+  flex-shrink: 0;
+  backdrop-filter: blur(5px);
+  background-color: rgba(255, 255, 255, 1);
+  border-radius: 26px;
+  box-shadow: 35px 35px 68px 0px rgba(145, 192, 255, 0.5), inset -8px -8px 16px 0px rgba(145, 192, 255, 0.6), inset 0px 11px 28px 0px rgb(255, 255, 255);
+  padding: 1.25rem;
+}
+
+.statutory-home-activity-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #1f2937;
+  margin: 0 0 1rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.statutory-home-activity-title svg {
+  color: #7c3aed;
+  flex-shrink: 0;
+}
+
+.statutory-home-activity-item {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.statutory-home-activity-item:last-child {
+  border-bottom: none;
+}
+
+.statutory-home-activity-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.statutory-home-activity-icon.bell {
+  background: #fef3c7;
+  color: #d97706;
+}
+
+.statutory-home-activity-icon.report {
+  background: #dbeafe;
+  color: #2563eb;
+}
+
+.statutory-home-activity-icon.check {
+  background: #d1fae5;
+  color: #059669;
+}
+
+.statutory-home-activity-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.statutory-home-activity-desc {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #374151;
+  margin: 0 0 2px 0;
+}
+
+.statutory-home-activity-time {
+  font-size: 0.75rem;
+  color: #9ca3af;
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .statutory-home-main {
+    flex-direction: column;
+  }
+
+  .statutory-home-activity {
+    width: 100%;
+  }
+
+  .statutory-home-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .statutory-home-header-center {
+    order: -1;
+  }
+
+  .statutory-home-kpis-row {
+    justify-content: center;
+  }
+}

@@ -1,0 +1,117 @@
+/* Audit Report – month filter and report cards */
+
+.audit-report-page {
+  padding: 24px;
+  max-width: 1000px;
+  margin: 0 auto;
+  background: #FFEFD5;
+  min-height: 100%;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.audit-report-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.audit-report-title {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.audit-report-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.audit-report-filter label {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #374151;
+}
+
+.audit-report-select {
+  padding: 8px 32px 8px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  color: #374151;
+  background: #fff;
+}
+
+.audit-report-select:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.audit-report-section {
+  margin-top: 24px;
+}
+
+.audit-report-site {
+  margin: 0 0 16px 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #1f2937;
+  border-bottom: 2px solid #374151;
+  padding-bottom: 8px;
+}
+
+.audit-report-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 640px) {
+  .audit-report-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+.audit-report-card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 20px 24px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e7eb;
+}
+
+.audit-report-card-title {
+  margin: 0 0 12px 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #374151;
+}
+
+.audit-report-card-count {
+  margin: 0 0 12px 0;
+  font-size: 0.95rem;
+  color: #6b7280;
+}
+
+.audit-report-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 0.95rem;
+  color: #2563eb;
+  cursor: pointer;
+}
+
+.audit-report-link:hover {
+  text-decoration: underline;
+}
+
+.audit-report-link:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

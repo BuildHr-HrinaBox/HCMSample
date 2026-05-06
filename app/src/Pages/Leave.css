@@ -1,0 +1,138 @@
+.leave-page {
+  box-sizing: border-box;
+  padding: 24px 28px 32px;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  background: #ffffff;
+  min-height: 100%;
+}
+
+.leave-header {
+  margin-bottom: 24px;
+}
+
+.leave-title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.leave-subtitle {
+  margin: 4px 0 0;
+  font-size: 0.9rem;
+  color: #6b7280;
+}
+
+.leave-actions {
+  margin-bottom: 24px;
+}
+
+.leave-fetch-btn {
+  padding: 12px 24px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--nd-green, #2ecc71);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+}
+
+.leave-fetch-btn:hover:not(:disabled) {
+  background: #27ae60;
+  transform: translateY(-1px);
+}
+
+.leave-fetch-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.leave-error {
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: #fef2f2;
+  color: #b91c1c;
+  border-radius: 8px;
+  font-size: 0.95rem;
+}
+
+.leave-loading {
+  padding: 24px;
+  text-align: center;
+  color: #6b7280;
+  font-size: 1rem;
+}
+
+.leave-content {
+  width: 100%;
+  max-width: 100%;
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  border: 1px solid #e5e7eb;
+}
+
+.leave-empty {
+  margin: 0;
+  color: #6b7280;
+  font-size: 0.95rem;
+}
+
+.leave-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 16px;
+}
+
+.leave-table {
+  width: 100%;
+  min-width: 600px;
+  border-collapse: collapse;
+  font-size: var(--hcm-data-table-body-font-size);
+}
+
+.leave-table th,
+.leave-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.leave-table th {
+  background: #f7f8fa;
+  font-weight: 600;
+  color: #374151;
+  font-size: var(--hcm-data-table-header-font-size);
+}
+
+.leave-table td {
+  color: #4b5563;
+  font-size: var(--hcm-data-table-body-font-size);
+}
+
+.leave-table tbody tr:hover {
+  background: #f9fafb;
+}
+
+.leave-meta {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+
+.leave-raw-cell {
+  max-width: 600px;
+  overflow-x: auto;
+  vertical-align: top;
+}
+
+.leave-raw-cell pre {
+  margin: 0;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

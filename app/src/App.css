@@ -1,0 +1,205 @@
+/* Ocean Glassmorphic Color Palette */
+:root {
+  /* Background Gradient Colors - Deep Ocean to Teal */
+  --deep-ocean: #0f172a;
+  --ocean-blue: #1e293b;
+  --teal-dark: #0d9488;
+  --teal-bright: #14b8a6;
+  --cyan-light: #06b6d4;
+  
+  /* Glassmorphic Surface Colors */
+  --glass-white: rgba(255, 255, 255, 0.1);
+  --glass-white-strong: rgba(255, 255, 255, 0.2);
+  --glass-border: rgba(255, 255, 255, 0.18);
+  --glass-shadow: rgba(0, 0, 0, 0.1);
+  
+  /* Text Colors */
+  --text-primary: #ffffff;
+  --text-secondary: rgba(255, 255, 255, 0.8);
+  --text-muted: rgba(255, 255, 255, 0.6);
+  
+  /* Accent Colors */
+  --accent-teal: #14b8a6;
+  --accent-cyan: #06b6d4;
+  --accent-blue: #3b82f6;
+  --accent-emerald: #10b981;
+  --accent-orange: #f59e0b;
+  
+  /* Interactive Colors */
+  --hover-bg: rgba(255, 255, 255, 0.1);
+  --active-bg: rgba(255, 255, 255, 0.2);
+  --button-primary: linear-gradient(135deg, #14b8a6, #06b6d4);
+  --button-secondary: rgba(255, 255, 255, 0.1);
+
+  /* Single typography for all form fields (matches body) */
+  --app-form-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  --app-form-font-size: 0.9375rem;
+
+  /* HCM data / list tables — same as Company Details (header row / body / mono-style cells) */
+  --hcm-data-table-header-font-size: 10.5px;
+  --hcm-data-table-body-font-size: 12px;
+  --hcm-data-table-mono-font-size: 13px;
+}
+
+/* Responsive font size for all pages */
+html {
+  font-size: 75% !important;
+}
+
+/* Responsive adjustments for different laptop screen sizes */
+@media (min-width: 1024px) and (max-width: 1365px) {
+  html {
+    font-size: 70%;
+  }
+}
+
+@media (min-width: 1366px) and (max-width: 1919px) {
+  html {
+    font-size: 75%;
+  }
+}
+
+@media (min-width: 1920px) {
+  html {
+    font-size: 80%;
+  }
+}
+
+
+.App {
+  text-align: center;
+  background: linear-gradient(135deg, var(--deep-ocean) 0%, var(--ocean-blue) 25%, var(--teal-dark) 50%, var(--teal-bright) 75%, var(--cyan-light) 100%);
+  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.App-logo {
+  height: 40vmin;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .App-logo {
+    animation: App-logo-spin infinite 20s linear;
+  }
+}
+
+.App-header {
+  background: linear-gradient(135deg, var(--deep-ocean) 0%, var(--ocean-blue) 50%, var(--teal-dark) 100%);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(10px + 2vmin);
+  color: var(--text-primary);
+}
+
+.App-link {
+  color: var(--accent-cyan);
+}
+
+@keyframes App-logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Global Styles */
+body {
+  margin: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: linear-gradient(135deg, var(--deep-ocean) 0%, var(--ocean-blue) 25%, var(--teal-dark) 50%, var(--teal-bright) 75%, var(--cyan-light) 100%);
+  min-height: 100vh;
+  overflow: hidden;
+  font-size: 0.9375rem;
+}
+
+html {
+  height: 100%;
+}
+
+#root {
+  height: 100%;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Unified font family and size for form controls and field labels app-wide */
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']):not([type='hidden']),
+select,
+textarea,
+label,
+legend {
+  font-family: var(--app-form-font-family) !important;
+  font-size: var(--app-form-font-size) !important;
+}
+
+select option {
+  font-family: var(--app-form-font-family) !important;
+  font-size: var(--app-form-font-size) !important;
+}
+
+form button,
+form input[type='submit'],
+form input[type='button'],
+form input[type='reset'] {
+  font-family: var(--app-form-font-family) !important;
+  font-size: var(--app-form-font-size) !important;
+}
+
+/* Primary scroll region for routed content — mouse wheel targets this instead of broken nested overflow chains */
+.main-app-routes-shell {
+  flex: 1 1 0%;
+  min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Dropdown Animation */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Notification Bell Animation */
+@keyframes bellShake {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-10deg); }
+  75% { transform: rotate(10deg); }
+}
+
+.notification-bell:hover {
+  animation: bellShake 0.5s ease-in-out;
+}
+
+/* Global claymorphism effect for boxes */
+.clay-box {
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  background-color: rgba(255, 255, 255, 1);
+  border-radius: 26px;
+  box-shadow: 35px 35px 68px 0px rgba(145, 192, 255, 0.5), inset -8px -8px 16px 0px rgba(145, 192, 255, 0.6), inset 0px 11px 28px 0px rgb(255, 255, 255);
+}

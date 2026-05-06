@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DataStore API Fix Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px;
+            transition: background-color 0.3s;
+        }
+        .button:hover {
+            background: #0056b3;
+        }
+        .button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .success {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+            border: 1px solid #f5c6cb;
+        }
+        .info {
+            background: #d1ecf1;
+            color: #0c5460;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+            border: 1px solid #bee5eb;
+        }
+        .code-block {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+            font-family: monospace;
+            font-size: 12px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>DataStore API Fix Test</h1>
+        
+        <div class="info">
+            <strong>Issue Fixed:</strong> TypeError: table.select is not a function
+        </div>
+
+        <div class="success">
+            <strong>✅ Problem Solved!</strong><br>
+            The DataStore API methods have been corrected to use the proper Catalyst SDK methods.
+        </div>
+
+        <div class="code-block">
+// Before (Error):
+const query = table.select(); // ❌ table.select is not a function
+const result = await query.execute();
+
+// After (Fixed):
+const result = await table.getAllRows(); // ✅ Correct method
+const result = await table.getRow(id); // ✅ For single record
+        </div>
+
+        <div style="text-align: center; margin: 30px 0;">
+            <button class="button" onclick="testGetAll()" id="getAllBtn">
+                Test Get All Data
+            </button>
+            
+            <button class="button" onclick="testCount()" id="countBtn">
+                Test Get Count
+            </button>
+            
+            <button class="button" onclick="testPopulate()" id="populateBtn">
+                Test Populate Data
+            </button>
+            
+            <button class="button" onclick="testGetBySector()" id="sectorBtn">
+                Test Get By Sector
+            </button>
+        </div>
+        
+        <div id="result"></div>
+    </div>
+
+    <script>
+        const API_BASE = '/server/calenderbulk_function';
+        
+        function showLoading(message = 'Loading...') {
+            document.getElementById('result').innerHTML = `
+                <div class="info">
+                    <div>${message}</div>
+                </div>
+            `;
+        }
+        
+        function showResult(content, type = 'info') {
+            document.getElementById('result').innerHTML = `
+                <div class="${type}">
+                    ${content}
+                </div>
+            `;
+        }
+        
+        async function testGetAll() {
+            const btn = document.getElementById('getAllBtn');
+            btn.disabled = true;
+            btn.textContent = 'Testing...';
+            
+            showLoading('Testing get all data with correct DataStore API...');
+            
+            try {
+                const response = await fetch(`${API_BASE}/calenderbulk?action=getAll`);
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    showResult(`
+                        <strong>✅ Get All Data Successful!</strong><br>
+                        The DataStore API is now working correctly.<br>
+                        <br>
+                        <strong>Response:</strong><br>
+                        Status: ${result.status}<br>
+                        Message: ${result.message}<br>
+                        Records Found: ${result.count}<br>
+                        <br>
+                        <strong>Sample Data:</strong><br>
+                        ${result.data && result.data.length > 0 ? 
+                            result.data.slice(0, 3).map(item => 
+                                `• ${item.forms} (${item.sector}) - ${item.description}`
+                            ).join('<br>') : 
+                            'No data found - try populating first'
+                        }
+                    `, 'success');
+                } else {
+                    showResult(`
+                        <strong>⚠️ Get All Data Error:</strong><br>
+                        Status: ${result.status}<br>
+                        Message: ${result.message}<br>
+                        ${result.error ? `Error: ${result.error}` : ''}
+                    `, 'error');
+                }
+            } catch (error) {
+                showResult(`
+                    <strong>❌ Network Error:</strong><br>
+                    ${error.message}
+                `, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Test Get All Data';
+            }
+        }
+        
+        async function testCount() {
+            const btn = document.getElementById('countBtn');
+            btn.disabled = true;
+            btn.textContent = 'Testing...';
+            
+            showLoading('Testing get count...');
+            
+            try {
+                const response = await fetch(`${API_BASE}/calenderbulk?action=count`);
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    showResult(`
+                        <strong>✅ Get Count Successful!</strong><br>
+                        Status: ${result.status}<br>
+                        Message: ${result.message}<br>
+                        Total Records: ${result.count}
+                    `, 'success');
+                } else {
+                    showResult(`
+                        <strong>⚠️ Get Count Error:</strong><br>
+                        Status: ${result.status}<br>
+                        Message: ${result.message}<br>
+                        ${result.error ? `Error: ${result.error}` : ''}
+                    `, 'error');
+                }
+            } catch (error) {
+                showResult(`
+                    <strong>❌ Network Error:</strong><br>
+                    ${error.message}
+                `, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Test Get Count';
+            }
+        }
+        
+        async function testPopulate() {
+            const btn = document.getElementById('populateBtn');
+            btn.disabled = true;
+            btn.textContent = 'Testing...';
+            
+            showLoading('Testing populate with sample data...');
+            
+            try {
+                const response = await fetch(`${API_BASE}/calenderbulk?action=populate`);
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    showResult(`
+                        <strong>✅ Populate Data Successful!</strong><br>
+                        Status: ${result.status}<br>
+                        Message: ${result.message}<br>
+                        Records Added: ${result.data ? result.data.length : 'Unknown'}<br>
+                        <br>
+                        <strong>Added Records:</strong><br>
+                        ${result.data ? result.data.map(record => 
+                            `• ${record.forms} (${record.sector}) - ${record.description}`
+                        ).join('<br>') : 'No data returned'}
+                    `, 'success');
+                } else {
+                    showResult(`
+                        <strong>⚠️ Populate Data Error:</strong><br>
+                        Status: ${result.status}<br>
+                        Message: ${result.message}<br>
+                        ${result.error ? `Error: ${result.error}` : ''}
+                    `, 'error');
+                }
+            } catch (error) {
+                showResult(`
+                    <strong>❌ Network Error:</strong><br>
+                    ${error.message}
+                `, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Test Populate Data';
+            }
+        }
+        
+        async function testGetBySector() {
+            const btn = document.getElementById('sectorBtn');
+            btn.disabled = true;
+            btn.textContent = 'Testing...';
+            
+            showLoading('Testing get by sector (Manufacturing)...');
+            
+            try {
+                const response = await fetch(`${API_BASE}/calenderbulk?action=getBySector&sector=Manufacturing`);
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    showResult(`
+                        <strong>✅ Get By Sector Successful!</strong><br>
+                        Status: ${result.status}<br>
+                        Message: ${result.message}<br>
+                        Records Found: ${result.count}<br>
+                        <br>
+                        <strong>Manufacturing Records:</strong><br>
+                        ${result.data && result.data.length > 0 ? 
+                            result.data.map(item => 
+                                `• ${item.forms} - ${item.description}`
+                            ).join('<br>') : 
+                            'No Manufacturing records found'
+                        }
+                    `, 'success');
+                } else {
+                    showResult(`
+                        <strong>⚠️ Get By Sector Error:</strong><br>
+                        Status: ${result.status}<br>
+                        Message: ${result.message}<br>
+                        ${result.error ? `Error: ${result.error}` : ''}
+                    `, 'error');
+                }
+            } catch (error) {
+                showResult(`
+                    <strong>❌ Network Error:</strong><br>
+                    ${error.message}
+                `, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Test Get By Sector';
+            }
+        }
+        
+        // Auto-test on page load
+        window.onload = function() {
+            testGetAll();
+        };
+    </script>
+</body>
+</html>

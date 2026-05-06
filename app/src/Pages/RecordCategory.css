@@ -1,0 +1,367 @@
+/* RecordCategory – Statutory-style layout, rc- prefix */
+.rc-page {
+  padding: 24px;
+  background-color: #FFEFD5;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 24px;
+}
+
+.rc-card-container {
+  background: #fff;
+  border-radius: 18px;
+  box-shadow: 0 4px 32px rgba(44, 62, 80, 0.10);
+  padding: 40px 36px 36px 36px;
+  margin: 40px auto 0 auto;
+  max-width: 95%;
+  width: 95%;
+  min-width: 320px;
+  position: relative;
+  overflow-x: auto;
+}
+
+.rc-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 32px;
+  width: 100%;
+}
+
+.rc-header-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.rc-title-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.rc-section-title {
+  font-size: 2.4rem;
+  font-weight: 700;
+  color: #8B4513;
+  margin: 0 0 0.5rem 0;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.rc-section-subtitle {
+  color: #6b7a90;
+  font-size: 1.15rem;
+  margin: 0;
+}
+
+.rc-actions-card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  flex-shrink: 0;
+}
+
+.rc-status-msg {
+  font-size: 0.85rem;
+  color: #059669;
+  margin-right: 8px;
+}
+
+.rc-action-btn {
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  background: #f9fafb;
+  color: #6b7280;
+}
+
+.rc-action-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+.rc-btn-add {
+  background: #e0f2fe;
+  color: #0284c7;
+}
+
+.rc-btn-add:hover {
+  background: #bae6fd;
+  color: #0369a1;
+}
+
+.rc-table-container {
+  width: 100% !important;
+  max-width: 100% !important;
+  margin: 0 auto !important;
+  overflow-x: auto !important;
+  overflow-y: auto !important;
+  max-height: 70vh !important;
+  background: #fff !important;
+  border-radius: 18px !important;
+  box-shadow: 0 4px 24px rgba(44, 62, 80, 0.07) !important;
+  padding: 0 0 18px 0 !important;
+  min-width: 0 !important;
+}
+
+.rc-table-container::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+
+.rc-table-container::-webkit-scrollbar-track {
+  background: #f8fafc;
+  border-radius: 8px;
+}
+
+.rc-table-container::-webkit-scrollbar-thumb {
+  background-color: #2196f3;
+  border-radius: 8px;
+  border: 2px solid #f8fafc;
+}
+
+.rc-table-container::-webkit-scrollbar-thumb:hover {
+  background-color: #1976d2;
+}
+
+.rc-loading {
+  margin: 24px 0;
+  color: #6b7280;
+  text-align: center;
+}
+
+.rc-table {
+  width: 100%;
+  min-width: 400px;
+  border-collapse: collapse;
+  font-size: var(--hcm-data-table-body-font-size);
+}
+
+.rc-table th,
+.rc-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.rc-table th {
+  background: #f9fafb;
+  font-weight: 600;
+  color: #374151;
+  font-size: var(--hcm-data-table-header-font-size);
+}
+
+.rc-table td {
+  color: #4b5563;
+  font-size: var(--hcm-data-table-body-font-size);
+}
+
+.rc-empty {
+  color: #9ca3af;
+  font-style: italic;
+  text-align: center;
+  padding: 40px;
+}
+
+.rc-row-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-right: 6px;
+}
+
+.rc-row-btn-edit {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.rc-row-btn-edit:hover {
+  background: #2563eb;
+  transform: scale(1.05);
+}
+
+.rc-row-btn-delete {
+  background: #dc2626;
+  color: #fff;
+}
+
+.rc-row-btn-delete:hover {
+  background: #b91c1c;
+  transform: scale(1.05);
+}
+
+.rc-table-footer {
+  padding: 12px 24px;
+  font-size: 0.875rem;
+  color: #6b7280;
+  border-top: 1px solid #e5e7eb;
+  background: #f9fafb;
+  border-radius: 0 0 18px 18px;
+}
+
+/* Modal */
+.rc-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  padding: 20px;
+}
+
+.rc-forms-wrap {
+  width: 100%;
+  max-width: 440px;
+}
+
+.rc-card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  width: 100%;
+  max-width: 440px;
+  padding-bottom: 24px;
+}
+
+.rc-card-header {
+  padding: 24px 32px;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.rc-card-header h2 {
+  margin: 0;
+  font-size: 24px;
+  color: #2C3E50;
+  font-weight: 700;
+}
+
+.rc-close-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  border-radius: 6px;
+  color: #6b7280;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.rc-close-btn:hover {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.rc-form {
+  padding: 32px;
+}
+
+.rc-row-full {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.rc-row-full label {
+  color: #2C3E50;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.rc-req {
+  color: #ef4444;
+  font-weight: 700;
+}
+
+.rc-input {
+  height: 44px;
+  padding: 12px 16px;
+  border: 2px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 16px;
+  background: #ffffff;
+  color: #2C3E50;
+}
+
+.rc-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.rc-actions {
+  display: flex;
+  gap: 16px;
+  margin-top: 24px;
+  justify-content: flex-end;
+}
+
+.rc-btn {
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.rc-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.rc-btn-primary {
+  background: #ef476f;
+  color: #ffffff;
+  border-color: #ef476f;
+}
+
+.rc-btn-primary:hover:not(:disabled) {
+  background: #d63c63;
+  transform: translateY(-1px);
+}
+
+.rc-btn-secondary {
+  background: #f8fafc;
+  color: #6b7280;
+  border-color: #d1d5db;
+}
+
+.rc-btn-secondary:hover:not(:disabled) {
+  background: #f3f4f6;
+  color: #374151;
+}

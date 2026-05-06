@@ -1,0 +1,11 @@
+{
+	"name": "recordcategory_function",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "afrindinusha.j@buildhr.co.in",
+	"dependencies": {
+		"express": "^5.1.0",
+		"xlsx": "^0.18.5",
+		"zcatalyst-sdk-node": "latest"
+	}
+}

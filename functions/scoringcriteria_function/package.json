@@ -1,0 +1,22 @@
+{
+  "name": "scoringcriteria_function",
+  "version": "1.0.0",
+  "description": "Scoring Criteria backend function for Zoho Catalyst",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "zcatalyst-sdk-node": "^1.0.0"
+  },
+  "keywords": [
+    "zoho",
+    "catalyst",
+    "scoring-criteria",
+    "backend"
+  ],
+  "author": "",
+  "license": "ISC"
+}

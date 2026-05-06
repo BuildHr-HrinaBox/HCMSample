@@ -1,0 +1,328 @@
+/* Audit Master Import – white card background, outer beige background */
+
+.audit-master-import-page {
+  padding: 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+  background: #FFEFD5;
+  min-height: 100%;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.audit-master-import-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 28px;
+}
+
+.audit-master-import-header-icon {
+  width: 48px;
+  height: 48px;
+  background: #3b82f6;
+  color: #fff;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.audit-master-import-title {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.audit-master-import-subtitle {
+  margin: 6px 0 0;
+  font-size: 0.95rem;
+  color: #6b7280;
+}
+
+.audit-master-import-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 28px;
+}
+
+@media (max-width: 768px) {
+  .audit-master-import-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+.audit-master-import-card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e7eb;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.audit-master-import-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+}
+
+.audit-master-import-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.audit-master-import-card-head h2 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #374151;
+  letter-spacing: 0.04em;
+}
+
+.audit-master-import-card-icon {
+  width: 44px;
+  height: 44px;
+  background: #f0f9ff;
+  color: #3b82f6;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.audit-master-import-icon-info {
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.audit-master-import-dropzone {
+  position: relative;
+  border: 2px dashed #d1d5db;
+  border-radius: 12px;
+  padding: 32px 20px;
+  text-align: center;
+  background: #fafafa;
+  margin-bottom: 18px;
+  transition: all 0.2s ease;
+}
+
+.audit-master-import-dropzone:hover,
+.audit-master-import-dropzone-active {
+  border-color: #3b82f6;
+  background: #f0f9ff;
+}
+
+.audit-master-import-dropzone-arrow {
+  display: block;
+  color: #9ca3af;
+  margin-bottom: 12px;
+}
+
+.audit-master-import-dropzone-arrow svg {
+  margin: 0 auto;
+}
+
+.audit-master-import-dropzone p {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+  color: #374151;
+}
+
+.audit-master-import-dropzone-or {
+  font-size: 0.9rem;
+  color: #6b7280;
+}
+
+.audit-master-import-dropzone-badge {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 6px 14px;
+  background: #f3f4f6;
+  color: #6b7280;
+  font-size: 0.8rem;
+  border-radius: 20px;
+}
+
+.audit-master-import-file-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.audit-master-import-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.audit-master-import-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.audit-master-import-btn-primary {
+  background: #6b7280;
+  color: #fff;
+}
+
+.audit-master-import-btn-primary:hover:not(:disabled) {
+  background: #4b5563;
+}
+
+.audit-master-import-btn-clear {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.audit-master-import-btn-clear:hover:not(:disabled) {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.audit-master-import-guidelines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.audit-master-import-guidelines li {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  font-size: 0.95rem;
+  color: #374151;
+  line-height: 1.5;
+}
+
+.audit-master-import-guideline-icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.audit-master-import-icon-doc {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.audit-master-import-icon-check {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.audit-master-import-icon-star {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* Imported Data section with table */
+.audit-master-import-data-card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e7eb;
+  margin-top: 0;
+}
+
+.audit-master-import-data-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.audit-master-import-data-head h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #374151;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.audit-master-import-data-icon {
+  color: #3b82f6;
+  display: flex;
+  align-items: center;
+}
+
+.audit-master-import-data-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.audit-master-import-status-msg {
+  font-size: 0.85rem;
+  color: #059669;
+}
+
+.audit-master-import-table-wrap {
+  overflow-x: auto;
+}
+
+.audit-master-import-loading {
+  margin: 24px 0;
+  color: #6b7280;
+  text-align: center;
+}
+
+.audit-master-import-table {
+  width: 100%;
+  min-width: 700px;
+  border-collapse: collapse;
+  font-size: var(--hcm-data-table-body-font-size);
+}
+
+.audit-master-import-table th,
+.audit-master-import-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.audit-master-import-table th {
+  background: #f9fafb;
+  font-weight: 600;
+  color: #374151;
+  font-size: var(--hcm-data-table-header-font-size);
+}
+
+.audit-master-import-table td {
+  color: #4b5563;
+  font-size: var(--hcm-data-table-body-font-size);
+}
+
+.audit-master-import-empty {
+  color: #9ca3af;
+  font-style: italic;
+  text-align: center;
+  padding: 40px 20px;
+}

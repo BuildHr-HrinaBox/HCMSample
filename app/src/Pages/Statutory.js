@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import './Statutory.css';
 import './SEMaster.css';
 import { fetchAllowedActCategoriesFromSites, industryLabelToActCategory } from '../utils/siteInchargeScope';
@@ -93,6 +94,18 @@ const FORM_U_FORMAT2_HEADERS = [
   'Period of service',
   'Bank A/c',
   'Photo'
+];
+
+const FORM_12_ALIGNMENT_HEADERS = [
+  'Serial Number',
+  'Name of the Worker',
+  'Worker Identity No',
+  'Gender',
+  'Father / Spouse Name',
+  'Date of Birth',
+  'Present Address',
+  'Permanent Address',
+  'Aadhaar'
 ];
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -2910,7 +2923,8 @@ const Statutory = ({ userEmail, userRole }) => {
       headerFormData,
       formTableData,
       hasSubColumns,
-      formFileName
+      formFileName,
+      allowTemplateFallback = true
     } = opts;
     const formHeader = parsedFormHeader || null;
     const tableHeaders = headersToUse || [];
@@ -2946,13 +2960,29 @@ const Statutory = ({ userEmail, userRole }) => {
       return '';
     };
     const useFormFileTemplate = templateWb && headerRowIndex >= 0 && dataStartIndex >= 0 && headersToUse.length > 0;
+    let effectiveDataStartIndex = dataStartIndex;
     let wb;
     if (useFormFileTemplate) {
-      const cloneBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
-      wb = XLSX.read(cloneBuffer, { type: 'array' });
+      wb = templateWb;
       const firstSheetName = wb.SheetNames[0];
       const ws = wb.Sheets[firstSheetName];
+      const writeCellPreserveStyle = (ref, rawValue) => {
+        const prev = ws[ref] || {};
+        if (rawValue == null || rawValue === '') {
+          ws[ref] = { ...prev, t: 's', v: '' };
+          return;
+        }
+        const isNum = typeof rawValue === 'number' || (typeof rawValue === 'string' && /^-?\d+(\.\d+)?$/.test(String(rawValue).trim()));
+        if (isNum) {
+          ws[ref] = { ...prev, t: 'n', v: Number(rawValue) };
+        } else {
+          ws[ref] = { ...prev, t: 's', v: String(rawValue) };
+        }
+      };
       const effectiveFormHeader = parsedFormHeader || formHeader;
+      const isFormA = isFormAMusterRollContext(effectiveFormHeader) ||
+        /\bform\s*[-"']?\s*a\b/i.test(String(currentItem?.formName || currentItem?.FormName || '')) ||
+        /\bma\b.*\bform\b.*\ba\b/i.test(String(formFileName || ''));
       if (effectiveFormHeader?.fields && effectiveFormHeader.fields.length > 0) {
         for (let r = 0; r < headerRowIndex; r++) {
           for (let c = 0; c < 20; c++) {
@@ -2972,7 +3002,7 @@ const Statutory = ({ userEmail, userRole }) => {
               if (cellStr === label || cellStr.startsWith(label) || label.startsWith(cellStr)) {
                 const value = headerFormData[field.key] ?? field.value ?? '';
                 const nextRef = XLSX.utils.encode_cell({ r, c: c + 1 });
-                ws[nextRef] = { t: 's', v: String(value) };
+                writeCellPreserveStyle(nextRef, String(value));
                 break;
               }
             }
@@ -2986,7 +3016,7 @@ const Statutory = ({ userEmail, userRole }) => {
         const vR = String(headerFormData.form12_header_registration ?? '').trim();
         const combined = `Name and Address of the Factory: ${vF}\nName and Address of the Contractor: ${vC}\nRegistration No: ${vR}`;
         const ref = XLSX.utils.encode_cell({ r, c });
-        ws[ref] = { t: 's', v: combined };
+        writeCellPreserveStyle(ref, combined);
       }
       if (effectiveFormHeader?.form10MergedHeaderCell) {
         const { r, c } = effectiveFormHeader.form10MergedHeaderCell;
@@ -2994,7 +3024,7 @@ const Statutory = ({ userEmail, userRole }) => {
         const vC = String(headerFormData.form10_header_contractor ?? '').trim();
         const combined = `Name and Address of the Factory: ${vF}\nName and Address of the Contractor: ${vC}`;
         const ref = XLSX.utils.encode_cell({ r, c });
-        ws[ref] = { t: 's', v: combined };
+        writeCellPreserveStyle(ref, combined);
       }
       if (effectiveFormHeader?.form10MonthEndingCell) {
         const me = effectiveFormHeader.form10MonthEndingCell;
@@ -3004,7 +3034,7 @@ const Statutory = ({ userEmail, userRole }) => {
           me.writeMode === 'full'
             ? (vM ? `Month ending: ${vM}` : 'Month ending: ')
             : vM;
-        ws[ref] = { t: 's', v: String(v) };
+        writeCellPreserveStyle(ref, String(v));
       }
       if (effectiveFormHeader?.festivalGrid?.approvalProceedings) {
         const ap = effectiveFormHeader.festivalGrid.approvalProceedings;
@@ -3014,7 +3044,7 @@ const Statutory = ({ userEmail, userRole }) => {
         const writeAt = (r, c) => {
           if (r == null || c == null || c < 0) return;
           const ref = XLSX.utils.encode_cell({ r, c });
-          ws[ref] = { t: 's', v: String(v) };
+          writeCellPreserveStyle(ref, String(v));
         };
         if (ap.labelRow != null && ap.valueCol != null) {
           writeAt(ap.labelRow, ap.valueCol);
@@ -3045,7 +3075,7 @@ const Statutory = ({ userEmail, userRole }) => {
               ? headerFormData[key]
               : (Array.isArray(initialValues) && initialValues[i] != null ? initialValues[i] : '');
           const ref = XLSX.utils.encode_cell({ r: dataRow, c });
-          ws[ref] = { t: 's', v: String(value) };
+          writeCellPreserveStyle(ref, String(value));
         });
       }
       const sheetArr = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
@@ -3089,43 +3119,68 @@ const Statutory = ({ userEmail, userRole }) => {
         }
         return '';
       };
+
+      // Form A (Maternity Benefit Rules) templates use rotated/merged headers; generic header text mapping misaligns.
+      // Anchor on the real "S.No" cell in the template and map headers sequentially across columns.
+      if (isFormA) {
+        let snoAnchor = null;
+        for (let r = 0; r < Math.min(60, sheetArr.length); r++) {
+          for (let c = 0; c < 120; c++) {
+            const t = normalizeHeader(getMergedAwareCellText(r, c));
+            if (t && (t === 's.no' || t === 's no' || t.includes('s.no') || t.includes('serial'))) {
+              snoAnchor = { r, c };
+              break;
+            }
+          }
+          if (snoAnchor) break;
+        }
+        const startCol = snoAnchor?.c != null ? snoAnchor.c : 0;
+        const forcedDataStart = snoAnchor?.r != null ? (snoAnchor.r + 1) : effectiveDataStartIndex;
+        effectiveDataStartIndex = forcedDataStart;
+        for (let j = 0; j < headersToUse.length; j++) {
+          headerToCol.set(headersToUse[j], startCol + j);
+        }
+      }
+
       const maxCols = Math.max(
         (sheetArr[headerRowIndex] || []).length,
         (sheetArr[headerRowIndex + 1] || []).length,
         headersToUse.length,
         20
       );
-      // Prefer exact mapping from (main header + sub header) so grouped headers (Form X) keep the original column alignment.
-      for (let c = 0; c < maxCols; c++) {
-        const mainHeader = normalizeHeader(getMergedAwareCellText(headerRowIndex, c));
-        const subHeader = normalizeHeader(getMergedAwareCellText(headerRowIndex + 1, c));
-        const combinedHeader = mainHeader && subHeader ? `${mainHeader}_${subHeader}` : '';
-        let bestHeader = null;
-        let bestScore = 0;
-        for (let j = 0; j < headersToUse.length; j++) {
-          const header = normalizeHeader(headersToUse[j] || '');
-          if (!header) continue;
-          const { main, sub } = splitHeader(header);
-          const isCombinedExact = combinedHeader && header === combinedHeader;
-          const isMainSubMatch = mainHeader && main === mainHeader && (!sub || (subHeader && sub === subHeader));
-          const isHeaderContains = (mainHeader && header.includes(mainHeader)) || (subHeader && header.includes(subHeader));
-          if (isCombinedExact || isMainSubMatch || isHeaderContains) {
-            const score = isCombinedExact ? 2000 : isMainSubMatch ? 1500 : Math.min(header.length, (combinedHeader || mainHeader || subHeader).length);
-            if (score > bestScore) {
-              bestScore = score;
-              bestHeader = headersToUse[j];
+      if (!isFormA) {
+        // Prefer exact mapping from (main header + sub header) so grouped headers (Form X) keep the original column alignment.
+        for (let c = 0; c < maxCols; c++) {
+          const mainHeader = normalizeHeader(getMergedAwareCellText(headerRowIndex, c));
+          const subHeader = normalizeHeader(getMergedAwareCellText(headerRowIndex + 1, c));
+          const combinedHeader = mainHeader && subHeader ? `${mainHeader}_${subHeader}` : '';
+          let bestHeader = null;
+          let bestScore = 0;
+          for (let j = 0; j < headersToUse.length; j++) {
+            const header = normalizeHeader(headersToUse[j] || '');
+            if (!header) continue;
+            const { main, sub } = splitHeader(header);
+            const isCombinedExact = combinedHeader && header === combinedHeader;
+            const isMainSubMatch = mainHeader && main === mainHeader && (!sub || (subHeader && sub === subHeader));
+            const isHeaderContains = (mainHeader && header.includes(mainHeader)) || (subHeader && header.includes(subHeader));
+            if (isCombinedExact || isMainSubMatch || isHeaderContains) {
+              const score = isCombinedExact ? 2000 : isMainSubMatch ? 1500 : Math.min(header.length, (combinedHeader || mainHeader || subHeader).length);
+              if (score > bestScore) {
+                bestScore = score;
+                bestHeader = headersToUse[j];
+              }
             }
           }
+          if (bestHeader != null && !headerToCol.has(bestHeader)) {
+            headerToCol.set(bestHeader, c);
+          }
         }
-        if (bestHeader != null && !headerToCol.has(bestHeader)) {
-          headerToCol.set(bestHeader, c);
+        const mappedCols = Array.from(headerToCol.values());
+        const fallbackStartCol = mappedCols.length > 0 ? Math.min(...mappedCols) : 0;
+        for (let j = 0; j < headersToUse.length; j++) {
+          const header = headersToUse[j];
+          if (!headerToCol.has(header)) headerToCol.set(header, fallbackStartCol + j);
         }
-      }
-      const mappedCols = Array.from(headerToCol.values());
-      const fallbackStartCol = mappedCols.length > 0 ? Math.min(...mappedCols) : 0;
-      for (let j = 0; j < headersToUse.length; j++) {
-        const header = headersToUse[j];
-        if (!headerToCol.has(header)) headerToCol.set(header, fallbackStartCol + j);
       }
       for (let i = 0; i < formTableData.length; i++) {
         const row = formTableData[i];
@@ -3133,17 +3188,15 @@ const Statutory = ({ userEmail, userRole }) => {
           const header = headersToUse[j];
           const value = getRowValueForHeader(row, header, j, headersToUse);
           const colIdx = headerToCol.has(header) ? headerToCol.get(header) : j;
-          const cellRef = XLSX.utils.encode_cell({ r: dataStartIndex + i, c: colIdx });
-          const isNum = typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim()));
-          ws[cellRef] = value == null || value === ''
-            ? { t: 's', v: '' }
-            : isNum
-              ? { t: 'n', v: Number(value) }
-              : { t: 's', v: String(value) };
+          const cellRef = XLSX.utils.encode_cell({ r: effectiveDataStartIndex + i, c: colIdx });
+          writeCellPreserveStyle(cellRef, value);
         }
       }
       // Do not overwrite the header row – keep the original formmaster template layout exactly. Only data rows are filled above.
     } else {
+      if (!allowTemplateFallback) {
+        throw new Error('Original form template is required to generate draft.');
+      }
       wb = XLSX.utils.book_new();
       const headerRows = [];
       if (formHeader?.title) headerRows.push([formHeader.title]);
@@ -3186,9 +3239,1379 @@ const Statutory = ({ userEmail, userRole }) => {
     return { blob, fileName };
   };
 
+  const extractMappedRowsFromSavedDraft = ({
+    draftWorkbook,
+    templateHeaders,
+    templateHeaderRowIndex,
+    templateDataStartIndex,
+    hasSubColumns
+  }) => {
+    if (!draftWorkbook || !Array.isArray(templateHeaders) || templateHeaders.length === 0) return [];
+    const parsedDraft = parseExcelForm(draftWorkbook);
+    const draftHeaders = Array.isArray(parsedDraft.headers) ? parsedDraft.headers : [];
+    if (!draftHeaders.length) return [];
+    const draftSheetName = draftWorkbook.SheetNames[0];
+    const draftWs = draftWorkbook.Sheets[draftSheetName];
+    if (!draftWs) return [];
+    const draftRowsRaw = XLSX.utils.sheet_to_json(draftWs, { header: 1, defval: '' });
+    const draftDataStart = parsedDraft.dataStartIndex != null && parsedDraft.dataStartIndex >= 0
+      ? parsedDraft.dataStartIndex
+      : 0;
+    const fallbackTargetStart = templateDataStartIndex != null && templateDataStartIndex >= 0
+      ? templateDataStartIndex
+      : (templateHeaderRowIndex >= 0 ? templateHeaderRowIndex + (hasSubColumns ? 2 : 1) : 0);
+    const startIndex = Math.max(0, Math.min(draftDataStart, fallbackTargetStart));
+    const draftDataRows = draftRowsRaw.slice(startIndex).filter((row) =>
+      Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== '')
+    );
+    if (!draftDataRows.length) return [];
+    const rows = draftDataRows.map((rowArr) => {
+      const rowObj = {};
+      for (let i = 0; i < draftHeaders.length; i++) {
+        rowObj[draftHeaders[i]] = rowArr[i] != null ? rowArr[i] : '';
+      }
+      return rowObj;
+    });
+    return rows;
+  };
+
+  const extractRowMatrixFromSavedDraft = ({
+    draftWorkbook,
+    templateHeaderRowIndex,
+    templateDataStartIndex,
+    hasSubColumns
+  }) => {
+    if (!draftWorkbook) return [];
+    const parsedDraft = parseExcelForm(draftWorkbook);
+    const draftSheetName = draftWorkbook.SheetNames[0];
+    const draftWs = draftWorkbook.Sheets[draftSheetName];
+    if (!draftWs) return [];
+    const draftRowsRaw = XLSX.utils.sheet_to_json(draftWs, { header: 1, defval: '' });
+    const draftDataStart = parsedDraft.dataStartIndex != null && parsedDraft.dataStartIndex >= 0
+      ? parsedDraft.dataStartIndex
+      : 0;
+    const fallbackTargetStart = templateDataStartIndex != null && templateDataStartIndex >= 0
+      ? templateDataStartIndex
+      : (templateHeaderRowIndex >= 0 ? templateHeaderRowIndex + (hasSubColumns ? 2 : 1) : 0);
+    const startIndex = Math.max(0, Math.min(draftDataStart, fallbackTargetStart));
+    return draftRowsRaw.slice(startIndex).filter((row) =>
+      Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== '')
+    );
+  };
+
+  const buildFormAWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    headersToUse,
+    mappedData,
+    mappedRowMatrix,
+    templateFileId,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) {
+      throw new Error('Template worksheet not found.');
+    }
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+        if (val.hyperlink != null && val.text != null) return String(val.text);
+        return '';
+      }
+      return '';
+    };
+    const getRowValueForHeader = (row, header) => {
+      if (!row || typeof row !== 'object') return '';
+      if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
+      const target = normalize(header);
+      if (!target) return '';
+      const rowKeys = Object.keys(row);
+      const exact = rowKeys.find((k) => normalize(k) === target);
+      if (exact) return row[exact];
+      const fuzzy = rowKeys.find((k) => {
+        const nk = normalize(k);
+        return nk && (nk.includes(target) || target.includes(nk));
+      });
+      return fuzzy ? row[fuzzy] : '';
+    };
+
+    let snoAnchor = null;
+    const maxScanRows = Math.max(60, worksheet.rowCount + 5);
+    const maxScanCols = 140;
+    for (let r = 1; r <= maxScanRows; r++) {
+      for (let c = 1; c <= maxScanCols; c++) {
+        const cell = worksheet.getCell(r, c);
+        const raw = excelCellValueToString(cell?.value);
+        const t = normalize(raw);
+        if (t && (t === 's.no' || t === 's no' || t.includes('s.no') || t.includes('serial'))) {
+          snoAnchor = { r, c };
+          break;
+        }
+      }
+      if (snoAnchor) break;
+    }
+    if (!snoAnchor) {
+      throw new Error('Could not locate Form A table anchor (S.No) in original template.');
+    }
+
+    const isStrictFormATemplate = String(templateFileId || '').trim() === '31459000000503547';
+    const startRow = isStrictFormATemplate ? (snoAnchor.r + 3) : (snoAnchor.r + 1);
+    const startCol = snoAnchor.c;
+    const useMatrix = Array.isArray(mappedRowMatrix) && mappedRowMatrix.length > 0;
+    const cleanedMatrixRows = useMatrix
+      ? mappedRowMatrix.filter((row) => {
+          if (!Array.isArray(row)) return false;
+          const cells = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+          if (cells.length === 0) return false;
+          if (!isStrictFormATemplate) return true;
+          const hasAlpha = cells.some((v) => /[a-z]/i.test(v));
+          return hasAlpha;
+        })
+      : [];
+    const cleanedObjectRows = !useMatrix && Array.isArray(mappedData)
+      ? mappedData.filter((row) => {
+          if (!row || typeof row !== 'object') return false;
+          const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+          if (vals.length === 0) return false;
+          if (!isStrictFormATemplate) return true;
+          const hasAlpha = vals.some((v) => /[a-z]/i.test(v));
+          return hasAlpha;
+        })
+      : [];
+    const totalRows = useMatrix ? cleanedMatrixRows.length : cleanedObjectRows.length;
+    for (let i = 0; i < totalRows; i++) {
+      const rowObj = cleanedObjectRows[i] || {};
+      const rowArr = useMatrix ? (cleanedMatrixRows[i] || []) : null;
+      const totalCols = useMatrix ? rowArr.length : headersToUse.length;
+      for (let j = 0; j < totalCols; j++) {
+        const header = headersToUse[j];
+        const value = useMatrix ? rowArr[j] : getRowValueForHeader(rowObj, header);
+        const cell = worksheet.getCell(startRow + i, startCol + j);
+        if (value == null || value === '') {
+          // For strict Form A template, never blank existing cells — keep original header text/layout untouched.
+          if (!isStrictFormATemplate) {
+            cell.value = '';
+          }
+        } else if (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim()))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormUWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    headersToUse,
+    mappedData,
+    mappedRowMatrix,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+        return '';
+      }
+      return '';
+    };
+    const getRowValueForHeader = (row, header) => {
+      if (!row || typeof row !== 'object') return '';
+      if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
+      const target = normalize(header);
+      if (!target) return '';
+      const rowKeys = Object.keys(row);
+      const exact = rowKeys.find((k) => normalize(k) === target);
+      if (exact) return row[exact];
+      const fuzzy = rowKeys.find((k) => {
+        const nk = normalize(k);
+        return nk && (nk.includes(target) || target.includes(nk));
+      });
+      return fuzzy ? row[fuzzy] : '';
+    };
+    const pickObjectValue = (row, patterns, fallbackIndex = null) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
+      const keys = Object.keys(row);
+      const norm = (s) => normalize(String(s || '').replace(/[^a-z0-9]/gi, ' '));
+      for (let pi = 0; pi < patterns.length; pi++) {
+        const p = patterns[pi];
+        const hit = keys.find((k) => p.test(norm(k)));
+        if (hit) {
+          const v = row[hit];
+          if (v != null && String(v).trim() !== '') return v;
+        }
+      }
+      if (fallbackIndex != null && fallbackIndex >= 0 && fallbackIndex < keys.length) {
+        return row[keys[fallbackIndex]];
+      }
+      return '';
+    };
+    const toFormUOrderedValues = (row, rowIndex) => {
+      if (Array.isArray(row)) return row;
+      const ordered = [
+        pickObjectValue(row, [/\bs\.?\s*no\b/, /serial/], 0),
+        pickObjectValue(row, [/name.*employee/, /employee.*name/, /name of the employee/], 1),
+        pickObjectValue(row, [/employee.*identification/, /employee.*id/, /emp.*id/], 2),
+        pickObjectValue(row, [/\bgender\b/, /\bsex\b/], 3),
+        pickObjectValue(row, [/father.*spouse/, /spouse.*father/, /father.*name/, /spouse.*name/], 4),
+        pickObjectValue(row, [/date.*birth/, /\bdob\b/], 5),
+        pickObjectValue(row, [/date.*joining/, /\bdoj\b/], 6),
+        pickObjectValue(row, [/designation/, /position/], 7),
+        pickObjectValue(row, [/present.*address/], 8),
+        pickObjectValue(row, [/permanent.*address/], 9),
+        pickObjectValue(row, [/employee.*aadha?r/, /aadha?r/], 10),
+        pickObjectValue(row, [/date.*notice.*pregnancy/, /notice.*pregnancy/], 11),
+        pickObjectValue(row, [/date.*notice.*delivery/, /notice.*delivery/], 12),
+        pickObjectValue(row, [/date.*proof.*birth/, /proof.*birth/], 13),
+        pickObjectValue(row, [/date.*proof.*death/, /proof.*death/], 14),
+        pickObjectValue(row, [/period.*wages/, /wages.*period/], 15),
+        pickObjectValue(row, [/bank.*a\/?c/, /bank.*account/], 16),
+        pickObjectValue(row, [/\bphoto\b/], 17)
+      ];
+      if (ordered[0] == null || String(ordered[0]).trim() === '') ordered[0] = rowIndex + 1;
+      return ordered;
+    };
+
+    let snoAnchor = null;
+    const maxScanRows = Math.max(80, worksheet.rowCount + 5);
+    for (let r = 1; r <= maxScanRows; r++) {
+      for (let c = 1; c <= 180; c++) {
+        const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
+        const t = normalize(raw);
+        if (t && (t === 's.no' || t === 's no' || t.includes('s.no') || t.includes('serial'))) {
+          snoAnchor = { r, c };
+          break;
+        }
+      }
+      if (snoAnchor) break;
+    }
+    if (!snoAnchor) throw new Error('Could not locate Form U table anchor (S.No) in original template.');
+
+    // Form U has one numbering row (1..n) below the main header, so actual data starts on next row.
+    const startRow = snoAnchor.r + 2;
+    const startCol = snoAnchor.c;
+    const headerRow = snoAnchor.r;
+    const headerColMap = new Map();
+    for (let c = Math.max(1, startCol - 1); c <= 220; c++) {
+      const txt = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (txt) headerColMap.set(c, txt);
+    }
+    const resolveFormUColForHeader = (header) => {
+      const h = normalize(header);
+      if (!h) return null;
+      const matchers = [
+        { key: 'sno', re: /\bs\.?\s*no\b|serial/ },
+        { key: 'name_employee', re: /name\s+of\s+the\s+employee|name\s+of\s+employee/ },
+        { key: 'employee_id', re: /employee\s+identification|employee\s+id/ },
+        { key: 'gender', re: /\bgender\b/ },
+        { key: 'father_spouse', re: /father.*spouse|spouse.*father/ },
+        { key: 'dob', re: /date\s+of\s+birth/ },
+        { key: 'doj', re: /date\s+of\s+joining/ },
+        { key: 'designation', re: /designation/ },
+        { key: 'present_address', re: /present\s+address/ },
+        { key: 'permanent_address', re: /permanent\s+address/ },
+        { key: 'aadhaar', re: /aadha?r/ },
+        { key: 'wages_period', re: /period\s+of\s+wages/ },
+        { key: 'bank', re: /bank\s*a\/?c/ },
+        { key: 'photo', re: /\bphoto\b/ }
+      ];
+      let targetMatcher = matchers.find((m) => m.re.test(h));
+      if (!targetMatcher) return null;
+      for (const [col, txt] of headerColMap.entries()) {
+        if (targetMatcher.re.test(txt)) return col;
+      }
+      return null;
+    };
+    const formUFieldMatchers = [
+      /\bs\.?\s*no\b|serial/,                              // 0
+      /name\s+of\s+the\s+employee|name\s+of\s+employee/,  // 1
+      /employee\s+identification|employee\s+id/,          // 2
+      /\bgender\b/,                                        // 3
+      /father.*spouse|spouse.*father/,                    // 4
+      /date\s+of\s+birth/,                                 // 5
+      /date\s+of\s+joining/,                               // 6
+      /designation/,                                       // 7
+      /present\s+address/,                                 // 8
+      /permanent\s+address/,                               // 9
+      /aadha?r/,                                           // 10
+      /notice.*pregnancy|pregnancy.*notice/,              // 11
+      /notice.*delivery|delivery.*notice/,                // 12
+      /proof.*birth|birth.*proof/,                        // 13
+      /proof.*death|death.*proof/,                        // 14
+      /period\s+of\s+wages|wages\s+period/,               // 15
+      /bank\s*a\/?c|bank\s+account/,                      // 16
+      /\bphoto\b/                                          // 17
+    ];
+    const formUFieldCols = formUFieldMatchers.map((re, idx) => {
+      for (const [col, txt] of headerColMap.entries()) {
+        if (re.test(txt)) return col;
+      }
+      return startCol + idx;
+    });
+    const hasMeaningfulRow = (row) => {
+      if (!Array.isArray(row)) return false;
+      const cells = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+      if (cells.length === 0) return false;
+      // Ignore pure serial/index-like rows (e.g. "1,2,3,4,5...").
+      const alphaCount = cells.filter((v) => /[a-z]/i.test(v)).length;
+      if (alphaCount > 0) return true;
+      const numericOnly = cells.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      return !numericOnly && cells.length >= 3;
+    };
+    const matrixRows = Array.isArray(mappedRowMatrix)
+      ? mappedRowMatrix.filter((row) => hasMeaningfulRow(row))
+      : [];
+    const mappedArrayRows = Array.isArray(mappedData)
+      ? mappedData
+          .map((row, idx) => toFormUOrderedValues(row, idx))
+          .filter((row) => hasMeaningfulRow(row))
+      : [];
+    const useMatrix = matrixRows.length > 0 || mappedArrayRows.length > 0;
+    const isMeaningfulObjectRow = (row) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+      const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+      if (vals.length === 0) return false;
+      const hasAlpha = vals.some((v) => /[a-z]/i.test(v));
+      if (hasAlpha) return true;
+      const numericOnly = vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      return !numericOnly;
+    };
+    const matrixSource = matrixRows.length > 0 ? matrixRows : mappedArrayRows;
+    const totalRows = matrixSource.length;
+
+    for (let i = 0; i < totalRows; i++) {
+      const rowArr = matrixSource[i] || [];
+      const totalCols = rowArr.length;
+      for (let j = 0; j < totalCols; j++) {
+        let value = rowArr[j];
+        if (value == null || value === '') continue; // keep template untouched for empty values
+        const targetCol = j < formUFieldCols.length ? formUFieldCols[j] : (startCol + j);
+        const cell = worksheet.getCell(startRow + i, targetCol);
+        // Keep Form U output stable with template formatting: write as text to avoid Excel auto-date (e.g. 6 -> 01/06/1900).
+        if ((targetCol === formUFieldCols[0] || j === 0) && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value); // S.No can stay numeric
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildForm12WorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    let snoAnchor = null;
+    const maxScanRows = Math.max(80, worksheet.rowCount + 5);
+    for (let r = 1; r <= maxScanRows; r++) {
+      for (let c = 1; c <= 220; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (t && (t === 's.no' || t === 's no' || t.includes('s.no') || t.includes('serial'))) {
+          snoAnchor = { r, c };
+          break;
+        }
+      }
+      if (snoAnchor) break;
+    }
+    if (!snoAnchor) throw new Error('Could not locate Form 12 table anchor (S.No).');
+
+    const headerRow = snoAnchor.r;
+    const startCol = snoAnchor.c;
+    const headerColMap = new Map();
+    for (let c = Math.max(1, startCol - 1); c <= 240; c++) {
+      const txt = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (txt) headerColMap.set(c, txt);
+    }
+    const nextRowValues = [];
+    for (let c = startCol; c <= startCol + 40; c++) {
+      nextRowValues.push(normalize(excelCellValueToString(worksheet.getCell(headerRow + 1, c)?.value)));
+    }
+    const numericMarkers = nextRowValues.filter((v) => /^\d+$/.test(v)).length;
+    const startRow = numericMarkers >= 4 ? (headerRow + 2) : (headerRow + 1);
+
+    const fieldMatchers = [
+      /\bs\.?\s*no\b|serial/,
+      /name.*employee|employee.*name|worker.*name/,
+      /father|husband|spouse/,
+      /\bage\b|date.*birth|\bdob\b/,
+      /sex|gender/,
+      /designation|nature.*work|occupation/,
+      /date.*joining|date.*employment/,
+      /wage|salary|rate.*wage/,
+      /attendance|days.*worked|days.*present/,
+      /overtime|ot/,
+      /remarks|signature/
+    ];
+    const fieldCols = fieldMatchers.map((re, idx) => {
+      for (const [col, txt] of headerColMap.entries()) {
+        if (re.test(txt)) return col;
+      }
+      return startCol + idx;
+    });
+    const pickObjectValue = (row, patterns, fallbackIndex = null) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
+      const keys = Object.keys(row);
+      const norm = (s) => normalize(String(s || '').replace(/[^a-z0-9]/gi, ' '));
+      for (let pi = 0; pi < patterns.length; pi++) {
+        const p = patterns[pi];
+        const hit = keys.find((k) => p.test(norm(k)));
+        if (hit) {
+          const v = row[hit];
+          if (v != null && String(v).trim() !== '') return v;
+        }
+      }
+      if (fallbackIndex != null && fallbackIndex >= 0 && fallbackIndex < keys.length) {
+        return row[keys[fallbackIndex]];
+      }
+      return '';
+    };
+    const pickValueFromHeaders = (row, headerList, patterns, fallbackIndex = null) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
+      const headers = Array.isArray(headerList) ? headerList : [];
+      for (let hi = 0; hi < headers.length; hi++) {
+        const h = headers[hi];
+        const nh = normalize(String(h || '').replace(/[^a-z0-9]/gi, ' '));
+        const matched = patterns.some((p) => p.test(nh));
+        if (!matched) continue;
+        if (Object.prototype.hasOwnProperty.call(row, h)) {
+          const v = row[h];
+          if (v != null && String(v).trim() !== '') return v;
+        }
+      }
+      return pickObjectValue(row, patterns, fallbackIndex);
+    };
+    const toForm12OrderedValues = (row, rowIndex) => {
+      if (Array.isArray(row)) {
+        const out = [...row];
+        // Common bad parse: "2 rathnakumar" in first cell; split into serial + name.
+        if (out[0] != null) {
+          const s0 = String(out[0]).trim();
+          const m = s0.match(/^(\d+)\s+(.+)$/);
+          if (m && (!out[1] || String(out[1]).trim() === '')) {
+            out[0] = m[1];
+            out[1] = m[2];
+          }
+        }
+        return [
+          out[0] ?? '',
+          out[1] ?? '',
+          out[2] ?? '',
+          out[3] ?? '',
+          out[4] ?? '',
+          out[5] ?? '',
+          out[6] ?? '',
+          out[7] ?? '',
+          out[8] ?? ''
+        ];
+      }
+      return [
+        pickValueFromHeaders(row, headersToUse, [/\bserial\b/, /\bs\.?\s*no\b/], 0),
+        pickValueFromHeaders(row, headersToUse, [/name.*worker/, /name.*employee/, /worker.*name/], 1),
+        pickValueFromHeaders(row, headersToUse, [/worker.*identity/, /employee.*identification/, /employee.*id/], 2),
+        pickValueFromHeaders(row, headersToUse, [/\bgender\b/, /\bsex\b/], 3),
+        pickValueFromHeaders(row, headersToUse, [/father.*spouse/, /spouse.*name/, /father.*name/], 4),
+        pickValueFromHeaders(row, headersToUse, [/date.*birth/, /\bdob\b/], 5),
+        pickValueFromHeaders(row, headersToUse, [/present.*address/], 6),
+        pickValueFromHeaders(row, headersToUse, [/permanent.*address/], 7),
+        pickValueFromHeaders(row, headersToUse, [/aadha?r/], 8)
+      ];
+    };
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) {
+        const cells = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (cells.length === 0) return false;
+        return cells.some((v) => /[a-z]/i.test(v)) || !cells.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      if (row && typeof row === 'object') {
+        const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      return false;
+    };
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0 ? mappedData : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        const out = toForm12OrderedValues(row, idx);
+        if (out[0] == null || String(out[0]).trim() === '') out[0] = idx + 1;
+        return out;
+      });
+
+    const writableCols = fieldCols.slice(0, 9);
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i];
+      // Clear existing template sample row values so every employee row follows the same model alignment.
+      for (let wc = 0; wc < writableCols.length; wc++) {
+        const clearCell = worksheet.getCell(startRow + i, writableCols[wc]);
+        clearCell.value = '';
+      }
+      for (let j = 0; j < row.length; j++) {
+        const value = row[j];
+        if (value == null || value === '') continue;
+        const targetCol = j < fieldCols.length ? fieldCols[j] : (startCol + j);
+        const cell = worksheet.getCell(startRow + i, targetCol);
+        if ((j === 0) && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildForm10WorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    // Find first table header anchor row (Form 10 often starts with "Number"/"Name"/"Date of work"...).
+    let headerRow = -1;
+    let startCol = 1;
+    const maxScanRows = Math.max(80, worksheet.rowCount + 5);
+    for (let r = 1; r <= maxScanRows; r++) {
+      let hits = 0;
+      let firstCol = null;
+      for (let c = 1; c <= 220; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (!t) continue;
+        const looksHeader =
+          /number|name|department|date\s+of\s+work|overtime|earnings|payments/.test(t);
+        if (looksHeader) {
+          hits++;
+          if (firstCol == null) firstCol = c;
+        }
+      }
+      if (hits >= 3) {
+        headerRow = r;
+        startCol = firstCol || 1;
+        break;
+      }
+    }
+    if (headerRow < 0) throw new Error('Could not locate Form 10 header row.');
+
+    // Prefer numeric marker row (1..N) near header for exact template column model.
+    let markerRow = -1;
+    let markerCols = [];
+    for (let r = headerRow; r <= Math.min(headerRow + 5, maxScanRows); r++) {
+      const cols = [];
+      for (let c = startCol; c <= 260; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (/^\d+$/.test(t)) cols.push(c);
+      }
+      if (cols.length > markerCols.length) {
+        markerCols = cols;
+        markerRow = r;
+      }
+    }
+    const dataStartRow = markerCols.length >= 5 && markerRow > 0 ? (markerRow + 1) : (headerRow + 1);
+    const orderedCols = markerCols.length >= 5
+      ? markerCols
+      : Array.from({ length: Math.max(12, Array.isArray(headersToUse) ? headersToUse.length : 12) }, (_, i) => startCol + i);
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) {
+        const vals = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      if (row && typeof row === 'object') {
+        const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      return false;
+    };
+
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) {
+          const out = [...row];
+          const first = String(out[0] ?? '').trim();
+          const m = first.match(/^(\d+)\s+(.+)$/);
+          if (m && (!out[1] || String(out[1]).trim() === '')) {
+            out[0] = m[1];
+            out[1] = m[2];
+          }
+          if (out[0] == null || String(out[0]).trim() === '') out[0] = idx + 1;
+          return out;
+        }
+        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
+        const arr = hdrs.map((h) => row?.[h] ?? '');
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        return arr;
+      });
+
+    // Remove stale sample data above/below model row while keeping header and numeric marker row intact.
+    const isNumericMarkerTemplateRow = (r) => {
+      if (!markerCols || markerCols.length < 5) return false;
+      let numericHits = 0;
+      for (let i = 0; i < markerCols.length; i++) {
+        const v = normalize(excelCellValueToString(worksheet.getCell(r, markerCols[i])?.value));
+        if (/^\d+$/.test(v)) numericHits++;
+      }
+      return numericHits >= Math.max(5, Math.floor(markerCols.length * 0.6));
+    };
+    const clearFromRow = Math.max(1, headerRow + 1);
+    const clearToRow = Math.min(maxScanRows, Math.max(dataStartRow + sourceRows.length + 30, clearFromRow + 30));
+    for (let r = clearFromRow; r <= clearToRow; r++) {
+      if (r === headerRow) continue;
+      if (isNumericMarkerTemplateRow(r)) continue;
+      for (let j = 0; j < orderedCols.length; j++) {
+        worksheet.getCell(r, orderedCols[j]).value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      // Clear model row cells first so previous sample values do not leak into next rows.
+      for (let j = 0; j < orderedCols.length; j++) {
+        worksheet.getCell(dataStartRow + i, orderedCols[j]).value = '';
+      }
+      for (let j = 0; j < orderedCols.length; j++) {
+        const value = row[j];
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(dataStartRow + i, orderedCols[j]);
+        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildForm25WorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    let headerRow = -1;
+    let startCol = 1;
+    const maxScanRows = Math.max(120, worksheet.rowCount + 10);
+    for (let r = 1; r <= maxScanRows; r++) {
+      let hits = 0;
+      let firstCol = null;
+      for (let c = 1; c <= 260; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (!t) continue;
+        const looksHeader =
+          /serial|name\s*of\s*worker|worker\s*id|time\s*at\s*which|overtime|rest\s*interval|dates/.test(t);
+        if (looksHeader) {
+          hits++;
+          if (firstCol == null) firstCol = c;
+        }
+      }
+      if (hits >= 3) {
+        headerRow = r;
+        startCol = firstCol || 1;
+        break;
+      }
+    }
+    if (headerRow < 0) throw new Error('Could not locate Form 25 header row.');
+
+    // Numeric row for dates (1..31) is common in Form 25; keep it intact and write below.
+    let markerRow = -1;
+    let markerCols = [];
+    for (let r = headerRow; r <= Math.min(headerRow + 4, maxScanRows); r++) {
+      const cols = [];
+      for (let c = startCol; c <= 300; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (/^\d+$/.test(t)) cols.push(c);
+      }
+      if (cols.length > markerCols.length) {
+        markerCols = cols;
+        markerRow = r;
+      }
+    }
+    const dataStartRow = markerCols.length >= 5 && markerRow > 0 ? (markerRow + 1) : (headerRow + 1);
+    const orderedCols = Array.from(
+      { length: Math.max(8, Array.isArray(headersToUse) ? headersToUse.length : 8) },
+      (_, i) => startCol + i
+    );
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) {
+        const vals = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      if (row && typeof row === 'object') {
+        const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      return false;
+    };
+
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) {
+          const out = [...row];
+          const first = String(out[0] ?? '').trim();
+          const m = first.match(/^(\d+)\s+(.+)$/);
+          if (m && (!out[1] || String(out[1]).trim() === '')) {
+            out[0] = m[1];
+            out[1] = m[2];
+          }
+          if (out[0] == null || String(out[0]).trim() === '') out[0] = idx + 1;
+          return out;
+        }
+        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
+        const arr = hdrs.map((h) => row?.[h] ?? '');
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        return arr;
+      });
+
+    // Clear stale rows but keep header/marker rows.
+    const clearFromRow = Math.max(1, headerRow + 1);
+    const clearToRow = Math.min(maxScanRows, Math.max(dataStartRow + sourceRows.length + 30, clearFromRow + 30));
+    for (let r = clearFromRow; r <= clearToRow; r++) {
+      if (r === headerRow || r === markerRow) continue;
+      for (let j = 0; j < orderedCols.length; j++) {
+        worksheet.getCell(r, orderedCols[j]).value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      for (let j = 0; j < orderedCols.length; j++) {
+        const value = row[j];
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(dataStartRow + i, orderedCols[j]);
+        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormBWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const maxScanRows = Math.max(120, worksheet.rowCount + 10);
+    const headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
+    const dataStartRow = parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? (parsedDataStartIndex + 1) : -1;
+    if (headerRow < 1 || dataStartRow < 1) throw new Error('Could not locate Form B table region from template parser.');
+
+    let startCol = 1;
+    for (let c = 1; c <= 280; c++) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (t) {
+        startCol = c;
+        break;
+      }
+    }
+    const orderedCols = Array.from(
+      { length: Math.max(12, Array.isArray(headersToUse) ? headersToUse.length : 12) },
+      (_, i) => startCol + i
+    );
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) {
+        const vals = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      if (row && typeof row === 'object') {
+        const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      return false;
+    };
+
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) return row;
+        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
+        const arr = hdrs.map((h) => row?.[h] ?? '');
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        return arr;
+      });
+
+    const clearFromRow = Math.max(1, dataStartRow);
+    const clearToRow = Math.min(maxScanRows, Math.max(dataStartRow + sourceRows.length + 30, clearFromRow + 30));
+    for (let r = clearFromRow; r <= clearToRow; r++) {
+      for (let j = 0; j < orderedCols.length; j++) {
+        worksheet.getCell(r, orderedCols[j]).value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      for (let j = 0; j < orderedCols.length; j++) {
+        const value = row[j];
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(dataStartRow + i, orderedCols[j]);
+        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormCWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
+    const dataStartRow = parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? (parsedDataStartIndex + 1) : -1;
+    if (headerRow < 1 || dataStartRow < 1) throw new Error('Could not locate Form C table region from template parser.');
+
+    let startCol = 1;
+    for (let c = 1; c <= 280; c++) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (t) {
+        startCol = c;
+        break;
+      }
+    }
+    const orderedCols = Array.from(
+      { length: Math.max(12, Array.isArray(headersToUse) ? headersToUse.length : 12) },
+      (_, i) => startCol + i
+    );
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
+      if (row && typeof row === 'object') return Object.values(row).some((v) => String(v ?? '').trim() !== '');
+      return false;
+    };
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) return row;
+        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
+        const arr = hdrs.map((h) => row?.[h] ?? '');
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        return arr;
+      });
+
+    const maxScanRows = Math.max(120, worksheet.rowCount + 10);
+    const clearToRow = Math.min(maxScanRows, Math.max(dataStartRow + sourceRows.length + 30, dataStartRow + 30));
+    for (let r = dataStartRow; r <= clearToRow; r++) {
+      for (let j = 0; j < orderedCols.length; j++) {
+        worksheet.getCell(r, orderedCols[j]).value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      for (let j = 0; j < orderedCols.length; j++) {
+        const value = row[j];
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(dataStartRow + i, orderedCols[j]);
+        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormDWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    let headerRow = -1;
+    let dataStartRow = -1;
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const maxScanRows = Math.max(180, worksheet.rowCount + 20);
+    const maxScanCols = 320;
+    // Form D hard anchor: table header row containing "Category of workers".
+    for (let r = 1; r <= maxScanRows; r++) {
+      for (let c = 1; c <= maxScanCols; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (!t) continue;
+        if (t.includes('category of workers')) {
+          headerRow = r;
+          break;
+        }
+      }
+      if (headerRow > 0) break;
+    }
+    if (headerRow < 1 && parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0) {
+      headerRow = parsedHeaderRowIndex + 1;
+    }
+    if (headerRow < 1) throw new Error('Could not locate Form D header row.');
+
+    let startCol = 1;
+    for (let c = 1; c <= maxScanCols; c++) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (t) {
+        startCol = c;
+        break;
+      }
+    }
+
+    // Data starts below numeric marker row (1..N) when present; otherwise below header.
+    let markerRow = -1;
+    for (let r = headerRow; r <= Math.min(headerRow + 3, maxScanRows); r++) {
+      let numericHits = 0;
+      for (let c = startCol; c <= Math.min(startCol + 20, maxScanCols); c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (/^\d+$/.test(t)) numericHits++;
+      }
+      if (numericHits >= 3) {
+        markerRow = r;
+        break;
+      }
+    }
+    dataStartRow = markerRow > 0 ? (markerRow + 1) : (headerRow + 1);
+    if (parsedDataStartIndex != null && parsedDataStartIndex >= 0) {
+      // Prefer deeper start row to avoid touching top template sections.
+      dataStartRow = Math.max(dataStartRow, parsedDataStartIndex + 1);
+    }
+    const orderedCols = Array.from(
+      { length: Math.max(14, Array.isArray(headersToUse) ? headersToUse.length : 14) },
+      (_, i) => startCol + i
+    );
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
+      if (row && typeof row === 'object') return Object.values(row).some((v) => String(v ?? '').trim() !== '');
+      return false;
+    };
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) return row;
+        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
+        const arr = hdrs.map((h) => row?.[h] ?? '');
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        return arr;
+      });
+
+    const clearToRow = Math.min(maxScanRows, Math.max(dataStartRow + sourceRows.length + 40, dataStartRow + 40));
+    for (let r = dataStartRow; r <= clearToRow; r++) {
+      for (let j = 0; j < orderedCols.length; j++) {
+        worksheet.getCell(r, orderedCols[j]).value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      for (let j = 0; j < orderedCols.length; j++) {
+        const value = row[j];
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(dataStartRow + i, orderedCols[j]);
+        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormIWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const maxScanRows = Math.max(220, worksheet.rowCount + 30);
+    const maxScanCols = 340;
+    let headerRow = -1;
+    let startCol = 1;
+    for (let r = 1; r <= maxScanRows; r++) {
+      for (let c = 1; c <= maxScanCols; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (!t) continue;
+        if (/\bs\.?\s*no\b|\bserial\b/.test(t)) {
+          headerRow = r;
+          startCol = c;
+          break;
+        }
+      }
+      if (headerRow > 0) break;
+    }
+    if (headerRow < 1) {
+      if (parsedHeaderRowIndex == null || parsedHeaderRowIndex < 0) {
+        throw new Error('Could not locate Form I header row.');
+      }
+      headerRow = parsedHeaderRowIndex + 1;
+      for (let c = 1; c <= maxScanCols; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+        if (t) { startCol = c; break; }
+      }
+    }
+
+    let dataStartRow = headerRow + 1;
+    for (let r = headerRow; r <= Math.min(headerRow + 3, maxScanRows); r++) {
+      let numericHits = 0;
+      for (let c = startCol; c <= Math.min(startCol + 20, maxScanCols); c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (/^\d+$/.test(t)) numericHits++;
+      }
+      if (numericHits >= 3) {
+        dataStartRow = r + 1;
+        break;
+      }
+    }
+    if (parsedDataStartIndex != null && parsedDataStartIndex >= 0) {
+      dataStartRow = Math.max(dataStartRow, parsedDataStartIndex + 1);
+    }
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
+      if (row && typeof row === 'object') return Object.values(row).some((v) => String(v ?? '').trim() !== '');
+      return false;
+    };
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) return row;
+        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
+        const arr = hdrs.map((h) => row?.[h] ?? '');
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        return arr;
+      });
+
+    // Write only row data cells; do not clear wide regions to avoid touching merged title layout.
+    const maxColsToWrite = Math.max(12, Array.isArray(headersToUse) ? headersToUse.length : 12);
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      for (let j = 0; j < maxColsToWrite; j++) {
+        const value = row[j];
+        const cell = worksheet.getCell(dataStartRow + i, startCol + j);
+        if (value == null || value === '') {
+          cell.value = '';
+          continue;
+        }
+        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
   // View Draft File: generate formmaster template + autofill (Zoho People) data and download (no modal, no save)
   const handleViewDraftFileGenerate = async (item, resolvedFormFileItem) => {
-    const hasFormFile = resolvedFormFileItem?.formFile && resolvedFormFileItem.formFile !== 'null' && String(resolvedFormFileItem.formFile).trim() !== '';
+    const rowFormNameKey = normalizeTemplateFormNameKey(
+      item?.formName || item?.FormName || resolvedFormFileItem?.formName || resolvedFormFileItem?.FormName || ''
+    );
+    const formmasterTemplateForRow = rowFormNameKey ? formmasterFormFileByFormName.get(rowFormNameKey) : null;
+    const templateMeta = formmasterTemplateForRow && formmasterTemplateForRow.formFile
+      ? formmasterTemplateForRow
+      : resolvedFormFileItem;
+    const hasFormFile = templateMeta?.formFile && templateMeta.formFile !== 'null' && String(templateMeta.formFile).trim() !== '';
     if (!hasFormFile) {
       setError('No form template available for this row. Use the draft link to open the saved file.');
       return;
@@ -3197,8 +4620,8 @@ const Statutory = ({ userEmail, userRole }) => {
       setFormFileLoading(true);
       setError('');
       setSuccess('Generating draft...');
-      const fn = (resolvedFormFileItem.formFileName || 'template.xlsx').replace(/[^a-zA-Z0-9._-]/g, '_');
-      const fileUrl = `/server/formmaster_function/templates/download/${resolvedFormFileItem.formFile}?fileName=${encodeURIComponent(fn)}`;
+      const fn = (templateMeta.formFileName || resolvedFormFileItem.formFileName || 'template.xlsx').replace(/[^a-zA-Z0-9._-]/g, '_');
+      const fileUrl = `/server/formmaster_function/templates/download/${templateMeta.formFile}?fileName=${encodeURIComponent(fn)}`;
       const res = await fetch(fileUrl);
       if (!res.ok) {
         setError('Could not load formmaster template.');
@@ -3207,25 +4630,330 @@ const Statutory = ({ userEmail, userRole }) => {
       const arrayBuffer = await res.arrayBuffer();
       const templateWb = XLSX.read(arrayBuffer, { type: 'array' });
       const parsed = parseExcelForm(templateWb);
-      const headersToUse = parsed.headers?.length ? parsed.headers : [];
+      let headersToUse = parsed.headers?.length ? [...parsed.headers] : [];
       if (!headersToUse.length) {
         setError('Could not read template headers.');
         return;
       }
       let mappedData = null;
+      let usedLiveModalGrid = false;
+      let usedSnapshot = false;
+      let usedSavedDraftFile = false;
+      let savedDraftRowMatrix = null;
+      const isFormADownload = isFormAMusterRollContext(parsed.formHeader) ||
+        /\bform\s*[-"']?\s*a\b/i.test(String(item?.formName || item?.FormName || ''));
+      const isFormUDownload =
+        /\bform\s*[-"']?\s*u\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*u\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isForm12Download =
+        /\bform\s*[-"']?\s*12\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*12\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isForm10Download =
+        /\bform\s*[-"']?\s*10\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*10\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isForm25Download =
+        /\bform\s*[-"']?\s*25\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*25\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormBDownload =
+        /\bform\s*[-"']?\s*b\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*b\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormCDownload =
+        /\bform\s*[-"']?\s*c\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*c\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormDDownload =
+        /\bform\s*[-"']?\s*d\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*d\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormIDownload =
+        /\bform\s*[-"']?\s*i\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*i\b/i.test(String(parsed?.formHeader?.title || ''));
+
+      const countFilledRowCells = (row, headers) => {
+        if (!row || typeof row !== 'object' || !Array.isArray(headers)) return 0;
+        let n = 0;
+        for (let hi = 0; hi < headers.length; hi++) {
+          const h = headers[hi];
+          const v = row[h];
+          if (v != null && String(v).trim() !== '') n++;
+        }
+        return n;
+      };
+
+      // If Autofill modal is open for this statutory line, export the same rows as on screen (avoids stale SampleData).
+      const modalRow = formFileModalData?.item || autofillItem;
+      const nidDownload =
+        resolveNumericStatutoryIdForProofRow(item) ||
+        resolveNumericStatutoryIdForProofRow(resolvedFormFileItem);
+      const nidModal = modalRow ? resolveNumericStatutoryIdForProofRow(modalRow) : null;
+      const dedupD = proofRowDedupKey(item);
+      const dedupM = modalRow ? proofRowDedupKey(modalRow) : '';
+      const sameStatutoryLineAsModal =
+        !!modalRow &&
+        !!isFormFileModalOpen &&
+        ((nidDownload && nidModal && String(nidDownload) === String(nidModal)) ||
+          !!(dedupD && dedupM && dedupD === dedupM));
+
+      if (
+        sameStatutoryLineAsModal &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        }
+      }
+
+      // Form U hard preference: if live Autofill grid has rows, use it directly.
+      // Row-id matching can fail for merged/statutory placeholders and then stale draft gets downloaded.
+      if (
+        isFormUDownload &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (Array.isArray(mappedData[0])) {
+          headersToUse = Array.from({ length: mappedData[0].length }, (_, idx) => `Column ${idx + 1}`);
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+
+      // Form 12 hard preference: use live Autofill grid rows directly when available
+      // so alignment matches the modal (avoid stale/shifted draft matrix rows).
+      if (
+        isForm12Download &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      // Form 10 hard preference: use live Autofill grid rows directly when available.
+      if (
+        isForm10Download &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
+        isForm25Download &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
+        isFormBDownload &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
+        isFormCDownload &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
+        isFormDDownload &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
+        isFormIDownload &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+
       // Prefer latest saved snapshot from SampleData for this statutory record (includes imported data).
-      if (item?.id != null && String(item.id).trim() !== '') {
+      // Must resolve real Catalyst ROWID: merged ChecklistBulk rows keep bulk_* id while draft lives on draftStatutoryRowIdForFile.
+      if (!usedLiveModalGrid) {
+        const sampleStatutoryId =
+          resolveNumericStatutoryIdForProofRow(item) ||
+          resolveNumericStatutoryIdForProofRow(resolvedFormFileItem);
+        if (sampleStatutoryId && isNumericStatutoryBackendId(sampleStatutoryId)) {
+          try {
+            const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleStatutoryId}/sampledata`);
+            if (sampleResp.ok) {
+              const sampleJson = await sampleResp.json().catch(() => null);
+              const sampleBlock = sampleJson?.data?.sampleData;
+              const sampleRows = sampleBlock?.rows;
+              const snapshotHeaders = Array.isArray(sampleBlock?.headers) ? sampleBlock.headers : null;
+              if (Array.isArray(sampleRows) && sampleRows.length > 0) {
+                usedSnapshot = true;
+                mappedData = sampleRows;
+                // Rows were persisted under these headers; prefer them so keys align with the modal / Autofill save.
+                if (snapshotHeaders && snapshotHeaders.length > 0) {
+                  headersToUse = [...snapshotHeaders];
+                }
+              }
+            }
+          } catch (sampleErr) {
+            console.warn('Could not fetch SampleData snapshot for draft generation:', sampleErr);
+          }
+        }
+      }
+
+      // Prefer saved Draft file rows when available (DraftFileName-backed data), then fit those rows into original template.
+      if (!usedLiveModalGrid && (isFormADownload || isFormUDownload || isForm12Download || isForm10Download || isForm25Download || isFormBDownload || isFormCDownload || isFormDDownload || isFormIDownload || !Array.isArray(mappedData) || mappedData.length === 0)) {
+        const draftStatutoryId =
+          resolveNumericStatutoryIdForProofRow(item) ||
+          resolveNumericStatutoryIdForProofRow(resolvedFormFileItem);
+        if (draftStatutoryId && isNumericStatutoryBackendId(draftStatutoryId)) {
+          try {
+            const draftFileResp = await fetch(`/server/statutoryreg_function/statutory/${draftStatutoryId}/file/Draft`);
+            if (draftFileResp.ok) {
+              const draftArrayBuffer = await draftFileResp.arrayBuffer();
+              const draftWb = XLSX.read(draftArrayBuffer, { type: 'array' });
+              const matrixRows = extractRowMatrixFromSavedDraft({
+                draftWorkbook: draftWb,
+                templateHeaderRowIndex: parsed.headerRowIndex,
+                templateDataStartIndex: parsed.dataStartIndex,
+                hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0
+              });
+              if (Array.isArray(matrixRows) && matrixRows.length > 0) {
+                savedDraftRowMatrix = matrixRows;
+              }
+              const draftRows = extractMappedRowsFromSavedDraft({
+                draftWorkbook: draftWb,
+                templateHeaders: headersToUse,
+                templateHeaderRowIndex: parsed.headerRowIndex,
+                templateDataStartIndex: parsed.dataStartIndex,
+                hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0
+              });
+              if (Array.isArray(draftRows) && draftRows.length > 0) {
+                mappedData = draftRows;
+                usedSavedDraftFile = true;
+              }
+            }
+          } catch (draftErr) {
+            console.warn('Could not read saved draft file data for template download:', draftErr);
+          }
+        }
+      }
+
+      // Form A requirement: include submitted rows from all matching Form A statutory submissions
+      // (same base form + site + month context), not only the current row.
+      if (isFormADownload && !usedLiveModalGrid && Array.isArray(statutoryData) && statutoryData.length > 0) {
         try {
-          const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${item.id}/sampledata`);
-          if (sampleResp.ok) {
-            const sampleJson = await sampleResp.json().catch(() => null);
-            const sampleRows = sampleJson?.data?.sampleData?.rows;
-            if (Array.isArray(sampleRows) && sampleRows.length > 0) {
-              mappedData = sampleRows;
+          const currentFormKey = baseFormNameKey(item?.formName || item?.FormName);
+          const currentSiteNorm = String(resolveSiteDisplayName(item, statutoryData) || item?.site || item?.Site || '')
+            .trim()
+            .toLowerCase();
+          const currentMonthNorm = statutoryDedupeMonthNorm(item, selectedMonth);
+          const candidateIds = statutoryData
+            .filter((row) => {
+              if (!isNumericStatutoryBackendId(row?.id)) return false;
+              if (baseFormNameKey(row?.formName || row?.FormName) !== currentFormKey) return false;
+              const rowSiteNorm = String(resolveSiteDisplayName(row, statutoryData) || row?.site || row?.Site || '')
+                .trim()
+                .toLowerCase();
+              if (currentSiteNorm && rowSiteNorm !== currentSiteNorm) return false;
+              const rowMonthNorm = statutoryDedupeMonthNorm(row, selectedMonth);
+              if (currentMonthNorm && currentMonthNorm !== 'nomonth' && rowMonthNorm !== currentMonthNorm) return false;
+              return true;
+            })
+            .map((row) => String(row.id).trim());
+
+          if (candidateIds.length > 0) {
+            const sampleBlocks = await Promise.all(
+              candidateIds.map(async (id) => {
+                try {
+                  const r = await fetch(`/server/statutoryreg_function/statutory/${id}/sampledata`);
+                  if (!r.ok) return null;
+                  const j = await r.json().catch(() => null);
+                  return j?.data?.sampleData || null;
+                } catch {
+                  return null;
+                }
+              })
+            );
+            const allRows = [];
+            sampleBlocks.forEach((block) => {
+              const rows = block?.rows;
+              if (Array.isArray(rows) && rows.length > 0) {
+                rows.forEach((rw) => allRows.push(rw));
+                if (Array.isArray(block?.headers) && block.headers.length > 0 && (!headersToUse || headersToUse.length === 0)) {
+                  headersToUse = [...block.headers];
+                }
+              }
+            });
+            if (allRows.length > 0) {
+              mappedData = allRows;
+              usedSnapshot = true;
             }
           }
-        } catch (sampleErr) {
-          console.warn('Could not fetch SampleData snapshot for draft generation:', sampleErr);
+        } catch (allRowsErr) {
+          console.warn('Could not aggregate all submitted Form A rows:', allRowsErr);
         }
       }
 
@@ -3237,22 +4965,319 @@ const Statutory = ({ userEmail, userRole }) => {
           mappedData = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
         }
       }
+
+      // Old saves sometimes left a single sparse SampleData row (e.g. one employee column) while Zoho Autofill has many rows.
+      // Refresh from Zoho only when the snapshot row is barely filled — avoids wiping intentional single-row drafts that filled many columns.
+      if (
+        usedSnapshot &&
+        !usedLiveModalGrid &&
+        Array.isArray(mappedData) &&
+        mappedData.length === 1 &&
+        !isFixedRowAggregateComplianceTable(headersToUse)
+      ) {
+        const filled = countFilledRowCells(mappedData[0], headersToUse);
+        try {
+          const zohoRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(zohoRows) && zohoRows.length > mappedData.length && filled <= 2) {
+            mappedData = zohoRows;
+          }
+        } catch (_) {
+          /* keep snapshot */
+        }
+      }
+
+      // Form U: snapshot/draft can contain placeholder numeric index row (1..17) without employee data.
+      // If rows look numeric-only, force refresh from live employee mapping so template gets actual values.
+      if (
+        isFormUDownload &&
+        Array.isArray(mappedData) &&
+        mappedData.length > 0
+      ) {
+        const rowLooksPlaceholder = (row) => {
+          if (Array.isArray(row)) {
+            const cells = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+            if (cells.length === 0) return true;
+            const hasAlpha = cells.some((v) => /[a-z]/i.test(v));
+            if (hasAlpha) return false;
+            return cells.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+          }
+          if (row && typeof row === 'object') {
+            const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+            if (vals.length === 0) return true;
+            const hasAlpha = vals.some((v) => /[a-z]/i.test(v));
+            if (hasAlpha) return false;
+            return vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+          }
+          return true;
+        };
+        const placeholderOnly = mappedData.every((row) => rowLooksPlaceholder(row));
+        if (placeholderOnly) {
+          try {
+            const zohoRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+            if (Array.isArray(zohoRows) && zohoRows.length > 0) {
+              mappedData = zohoRows;
+              savedDraftRowMatrix = null;
+              usedSnapshot = false;
+              usedSavedDraftFile = false;
+            }
+          } catch (_) {
+            // keep existing mappedData if refresh fails
+          }
+        }
+      }
+
+      // Form U hard fallback: if still blank/placeholder, remap with canonical full Form U headers.
+      if (
+        isFormUDownload &&
+        (!Array.isArray(mappedData) || mappedData.length === 0)
+      ) {
+        try {
+          const canonicalHeaders = Array.isArray(FORM_U_FORMAT2_HEADERS) && FORM_U_FORMAT2_HEADERS.length > 0
+            ? [...FORM_U_FORMAT2_HEADERS]
+            : headersToUse;
+          const zohoRowsStrict = await fetchAndPopulateEmployeeData(canonicalHeaders, { returnMappedData: true });
+          if (Array.isArray(zohoRowsStrict) && zohoRowsStrict.length > 0) {
+            headersToUse = canonicalHeaders;
+            mappedData = zohoRowsStrict;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep previous mappedData
+        }
+      }
+
+      // Form 12 strict alignment rule:
+      // Rebuild from fresh autofill mapping (same model row -> all rows) unless live modal rows are already in use.
+      if (isForm12Download && !usedLiveModalGrid) {
+        try {
+          const canonicalForm12Headers = [...FORM_12_ALIGNMENT_HEADERS];
+          const refreshedForm12Rows = await fetchAndPopulateEmployeeData(canonicalForm12Headers, { returnMappedData: true });
+          if (Array.isArray(refreshedForm12Rows) && refreshedForm12Rows.length > 0) {
+            headersToUse = canonicalForm12Headers;
+            mappedData = refreshedForm12Rows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
+      if (isForm10Download && !usedLiveModalGrid) {
+        try {
+          const refreshedForm10Rows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedForm10Rows) && refreshedForm10Rows.length > 0) {
+            mappedData = refreshedForm10Rows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
+      if (isForm25Download && !usedLiveModalGrid) {
+        try {
+          const refreshedForm25Rows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedForm25Rows) && refreshedForm25Rows.length > 0) {
+            mappedData = refreshedForm25Rows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
+      if (isFormBDownload && !usedLiveModalGrid) {
+        try {
+          const refreshedFormBRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedFormBRows) && refreshedFormBRows.length > 0) {
+            mappedData = refreshedFormBRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
+      if (isFormCDownload && !usedLiveModalGrid) {
+        try {
+          const refreshedFormCRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedFormCRows) && refreshedFormCRows.length > 0) {
+            mappedData = refreshedFormCRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
+      if (isFormDDownload && !usedLiveModalGrid) {
+        try {
+          const refreshedFormDRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedFormDRows) && refreshedFormDRows.length > 0) {
+            mappedData = refreshedFormDRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
+      if (isFormIDownload && !usedLiveModalGrid) {
+        try {
+          const refreshedFormIRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedFormIRows) && refreshedFormIRows.length > 0) {
+            mappedData = refreshedFormIRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
+
+      // Form U: if mapped rows are available from modal/sample/Zoho, do not let stale draft matrix override them.
+      if (isFormUDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      // Form 12: same protection against stale draft-matrix row shape.
+      if (isForm12Download && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isForm10Download && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isForm25Download && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isFormBDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isFormCDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isFormDDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isFormIDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+
       if (!mappedData || mappedData.length === 0) {
         setError('No data available to fill in the draft.');
         return;
       }
-      const { blob, fileName } = buildDraftWorkbook({
-        currentItem: item,
-        templateWb,
-        headersToUse,
-        headerRowIndex: parsed.headerRowIndex,
-        dataStartIndex: parsed.dataStartIndex,
-        parsedFormHeader: parsed.formHeader,
-        headerFormData: {},
-        formTableData: mappedData,
-        hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0,
-        formFileName: resolvedFormFileItem.formFileName || 'form-draft.xlsx'
-      });
+      const { blob, fileName } = isFormADownload
+        ? await buildFormAWorkbookWithTemplateStyles({
+            templateArrayBuffer: arrayBuffer,
+            headersToUse,
+            mappedData,
+            mappedRowMatrix: savedDraftRowMatrix,
+            templateFileId: templateMeta.formFile,
+            parsedFormHeader: parsed.formHeader,
+            formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+          })
+        : isFormUDownload
+          ? await buildFormUWorkbookWithTemplateStyles({
+              templateArrayBuffer: arrayBuffer,
+              headersToUse,
+              mappedData,
+              mappedRowMatrix: savedDraftRowMatrix,
+              parsedFormHeader: parsed.formHeader,
+              formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+            })
+          : isForm12Download
+            ? await buildForm12WorkbookWithTemplateStyles({
+                templateArrayBuffer: arrayBuffer,
+                mappedData,
+                mappedRowMatrix: savedDraftRowMatrix,
+                headersToUse,
+                parsedFormHeader: parsed.formHeader,
+                formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+              })
+            : isForm10Download
+              ? await buildForm10WorkbookWithTemplateStyles({
+                  templateArrayBuffer: arrayBuffer,
+                  mappedData,
+                  mappedRowMatrix: savedDraftRowMatrix,
+                  headersToUse,
+                  parsedFormHeader: parsed.formHeader,
+                  formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                })
+              : isForm25Download
+                ? await buildForm25WorkbookWithTemplateStyles({
+                    templateArrayBuffer: arrayBuffer,
+                    mappedData,
+                    mappedRowMatrix: savedDraftRowMatrix,
+                    headersToUse,
+                    parsedFormHeader: parsed.formHeader,
+                    formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                  })
+                : isFormBDownload
+                  ? await buildFormBWorkbookWithTemplateStyles({
+                      templateArrayBuffer: arrayBuffer,
+                      mappedData,
+                      mappedRowMatrix: savedDraftRowMatrix,
+                      headersToUse,
+                      parsedHeaderRowIndex: parsed.headerRowIndex,
+                      parsedDataStartIndex: parsed.dataStartIndex,
+                      parsedFormHeader: parsed.formHeader,
+                      formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                    })
+                  : isFormCDownload
+                    ? await buildFormCWorkbookWithTemplateStyles({
+                        templateArrayBuffer: arrayBuffer,
+                        mappedData,
+                        mappedRowMatrix: savedDraftRowMatrix,
+                        headersToUse,
+                        parsedHeaderRowIndex: parsed.headerRowIndex,
+                        parsedDataStartIndex: parsed.dataStartIndex,
+                        parsedFormHeader: parsed.formHeader,
+                        formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                      })
+                    : isFormDDownload
+                      ? await buildFormDWorkbookWithTemplateStyles({
+                          templateArrayBuffer: arrayBuffer,
+                          mappedData,
+                          mappedRowMatrix: savedDraftRowMatrix,
+                          headersToUse,
+                          parsedHeaderRowIndex: parsed.headerRowIndex,
+                          parsedDataStartIndex: parsed.dataStartIndex,
+                          parsedFormHeader: parsed.formHeader,
+                          formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                        })
+                      : isFormIDownload
+                        ? await buildFormIWorkbookWithTemplateStyles({
+                            templateArrayBuffer: arrayBuffer,
+                            mappedData,
+                            mappedRowMatrix: savedDraftRowMatrix,
+                            headersToUse,
+                            parsedHeaderRowIndex: parsed.headerRowIndex,
+                            parsedDataStartIndex: parsed.dataStartIndex,
+                            parsedFormHeader: parsed.formHeader,
+                            formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                          })
+        : buildDraftWorkbook({
+            currentItem: item,
+            templateWb,
+            headersToUse,
+            headerRowIndex: parsed.headerRowIndex,
+            dataStartIndex: parsed.dataStartIndex,
+            parsedFormHeader: parsed.formHeader,
+            headerFormData: {},
+            formTableData: mappedData,
+            hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0,
+            formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx',
+            allowTemplateFallback: false
+          });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -3261,7 +5286,13 @@ const Statutory = ({ userEmail, userRole }) => {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      setSuccess('Draft downloaded (includes saved/imported data).');
+      setSuccess(
+        usedLiveModalGrid
+          ? 'Draft downloaded from current Autofill grid.'
+          : usedSavedDraftFile
+            ? 'Template downloaded with saved draft data.'
+          : 'Draft downloaded (includes saved/imported data).'
+      );
       setTimeout(() => setSuccess(''), 4000);
     } catch (err) {
       console.error('View Draft File generate error:', err);
@@ -3349,6 +5380,11 @@ const Statutory = ({ userEmail, userRole }) => {
           if (headerRowIndex >= 0) break;
         }
       }
+      if (!templateWb) {
+        setError('Original statutory template not found. Save requires the existing form template.');
+        setSubmitting(false);
+        return;
+      }
       const draftFileNameForSave = formFileModalData?.formFileName ||
         formHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
         `Form_${Date.now()}.xlsx`;
@@ -3362,7 +5398,8 @@ const Statutory = ({ userEmail, userRole }) => {
         headerFormData,
         formTableData: tableDataForSave,
         hasSubColumns,
-        formFileName: draftFileNameForSave
+        formFileName: draftFileNameForSave,
+        allowTemplateFallback: false
       });
       const file = new File([blob], fileName, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 
@@ -6496,6 +8533,14 @@ const Statutory = ({ userEmail, userRole }) => {
     return `${base}.xlsx`;
   };
 
+  const normalizeTemplateFormNameKey = (name) =>
+    String(name || '')
+      .replace(/\.xlsx$/i, '')
+      .replace(/[^a-z0-9]+/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
   const parseContentDispositionFilename = (header) => {
     if (!header || typeof header !== 'string') return null;
     const m = /filename\*=UTF-8''([^;\n]+)|filename\*=([^;\n]+)|filename="([^"]+)"|filename=([^;\n]+)/i.exec(header);
@@ -6758,7 +8803,9 @@ const Statutory = ({ userEmail, userRole }) => {
           if (shouldPreferSavedDraftData) {
             let loadedSavedData = false;
             try {
-              const sampleRowId = resolveNumericStatutoryIdForProofRow(item) || (item?.id != null ? String(item.id).trim() : null);
+              const sampleRowId =
+                resolveNumericStatutoryIdForProofRow(item) ||
+                (isNumericStatutoryBackendId(item?.id) ? String(item.id).trim() : null);
               if (sampleRowId) {
                 const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleRowId}/sampledata`);
                 if (sampleResp.ok) {
@@ -7666,7 +9713,7 @@ const Statutory = ({ userEmail, userRole }) => {
     formmasterTemplates.forEach((t) => {
       const rawName = (t.name || t.file_name || t.fileName || '').trim();
       const formName = rawName.replace(/\.xlsx$/i, '').trim() || rawName;
-      const key = formName.toLowerCase().replace(/\s+/g, ' ').trim();
+      const key = normalizeTemplateFormNameKey(formName);
       if (!key || map.has(key)) return;
       map.set(key, {
         formFile: t.id != null ? String(t.id) : null,
@@ -7981,7 +10028,7 @@ const Statutory = ({ userEmail, userRole }) => {
                           const rowHasFormFile = rowFormFile && rowFormFile !== 'null' && rowFormFile !== null && String(rowFormFile).trim() !== '';
                           const rowFormKey = `${(item.formName || '').toLowerCase().trim()}|${(item.act || '').toLowerCase().trim()}|${secPart}|${statePart}`;
                           const rowLookup = formFileByFormKey.get(rowFormKey);
-                          const rowNormalizedFormName = (item.formName || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                          const rowNormalizedFormName = normalizeTemplateFormNameKey(item.formName || item.FormName || '');
                           const rowFormmasterFile = formmasterFormFileByFormName.get(rowNormalizedFormName);
                           let resolvedFormFileItem = rowHasFormFile
                             ? {

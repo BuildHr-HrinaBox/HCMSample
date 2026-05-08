@@ -1717,14 +1717,24 @@ const Statutory = ({ userEmail, userRole }) => {
           const formNameKey = baseFormNameKey(bulkRow.formName || bulkRow.FormName);
           const identityMatches = byIdentity.get(identityKey) || [];
           const formMatches = byFormName.get(formNameKey) || [];
-          const donorCandidates = [...identityMatches, ...formMatches];
+          // Keep draft/proof/approval metadata strict to the same statutory line.
+          // Allow a second-level fallback by (form + act + description) only, because
+          // bulk rows can have slight sector/state differences across sources.
+          const norm = (v) => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+          const bulkFormActDescKey = `${norm(bulkRow.formName || bulkRow.FormName)}|${norm(bulkRow.act || bulkRow.Act)}|${norm(bulkRow.description || bulkRow.Description)}`;
+          const formActDescMatches = formMatches.filter((row) => {
+            const rowKey = `${norm(row.formName || row.FormName)}|${norm(row.act || row.Act)}|${norm(row.description || row.Description)}`;
+            return rowKey === bulkFormActDescKey;
+          });
+          const strictDonorCandidates = [...identityMatches, ...formActDescMatches];
+          const formFileDonorCandidates = [...identityMatches, ...formMatches];
           const bulkMonthNorm = statutoryDedupeMonthNorm(bulkRow, selectedMonth);
-          const sameMonthDonors = donorCandidates.filter(
+          const sameMonthDonors = strictDonorCandidates.filter(
             (row) => statutoryDedupeMonthNorm(row, selectedMonth) === bulkMonthNorm
           );
           const scoredSameMonth = [...sameMonthDonors].sort((a, b) => donorScore(b) - donorScore(a));
           const monthDonor = scoredSameMonth[0] || null;
-          const scoredAll = [...donorCandidates].sort((a, b) => donorScore(b) - donorScore(a));
+          const scoredAllForFormFile = [...formFileDonorCandidates].sort((a, b) => donorScore(b) - donorScore(a));
           const hasFormRef = (r) => {
             const fid = r?.formFile ?? r?.FormFile;
             return fid != null && String(fid).trim() !== '' && String(fid).trim() !== 'null';
@@ -1733,7 +1743,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // Draft / proof / send-for-approval / stored MonthFilter must NEVER bleed across months.
           let formDonor = monthDonor;
           if (!formDonor || !hasFormRef(formDonor)) {
-            formDonor = scoredAll.find(hasFormRef) || formDonor;
+            formDonor = scoredAllForFormFile.find(hasFormRef) || formDonor;
           }
           const uiMonthOnlyLabel =
             resolveToFullMonthName(String(selectedMonth || '').trim()) ||
@@ -2713,7 +2723,11 @@ const Statutory = ({ userEmail, userRole }) => {
         body: JSON.stringify({
           ...buildMonthFilterPayload(rowItem),
           SendForApproval: 'Sent',
-          sendForApproval: 'Sent'
+          sendForApproval: 'Sent',
+          // Re-send flow: clear prior approver decision so site sees "Sent" after re-submit.
+          approval: null,
+          status: 'Pending',
+          remarks: null
         })
       });
       const data = await resp.json().catch(() => ({}));
@@ -2743,7 +2757,17 @@ const Statutory = ({ userEmail, userRole }) => {
                 // Site-view fallback: when visible row is bulk/checklist sibling, mirror Sent to same form in same site.
                 const sameSiteFormSibling = !!siteNorm && sameBaseForm && rowSiteNorm === siteNorm;
                 if (!sameId && !sameSiteFormSibling) return row;
-                return { ...row, sendForApproval: 'Sent', SendForApproval: 'Sent' };
+                return {
+                  ...row,
+                  sendForApproval: 'Sent',
+                  SendForApproval: 'Sent',
+                  approval: '',
+                  Approval: '',
+                  status: 'Pending',
+                  Status: 'Pending',
+                  remarks: '',
+                  Remarks: ''
+                };
               });
             })()
           : prev
@@ -2903,7 +2927,6 @@ const Statutory = ({ userEmail, userRole }) => {
       setProofUploadingRowId(null);
     }
   };
-
   const handleAutofill = async (item, options = {}) => {
     // Open editable Excel-style modal on Autofill click
     setIsAutofillMode(true);
@@ -3367,7 +3390,8 @@ const Statutory = ({ userEmail, userRole }) => {
       throw new Error('Could not locate Form A table anchor (S.No) in original template.');
     }
 
-    const isStrictFormATemplate = String(templateFileId || '').trim() === '31459000000503547';
+    // Apply strict safeguards for all Form A templates (template ID can change after re-upload).
+    const isStrictFormATemplate = true;
     const startRow = isStrictFormATemplate ? (snoAnchor.r + 3) : (snoAnchor.r + 1);
     const startCol = snoAnchor.c;
     const useMatrix = Array.isArray(mappedRowMatrix) && mappedRowMatrix.length > 0;
@@ -3828,6 +3852,9 @@ const Statutory = ({ userEmail, userRole }) => {
         } else {
           cell.value = String(value);
         }
+        // Keep Form 12 data rows normal-weight (template sample row can be bold).
+        cell.font = { ...(cell.font || {}), bold: false };
+        cell.alignment = { ...(cell.alignment || {}), horizontal: 'left' };
       }
     }
 
@@ -3844,6 +3871,8 @@ const Statutory = ({ userEmail, userRole }) => {
     mappedData,
     mappedRowMatrix,
     headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
     parsedFormHeader,
     formFileName
   }) => {
@@ -3870,37 +3899,25 @@ const Statutory = ({ userEmail, userRole }) => {
       return '';
     };
 
-    // Find first table header anchor row (Form 10 often starts with "Number"/"Name"/"Date of work"...).
-    let headerRow = -1;
+    const maxScanRows = Math.max(120, worksheet.rowCount + 10);
+    const maxScanCols = 260;
+    let headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
+    if (headerRow < 1) throw new Error('Could not locate Form 10 header row from parser.');
     let startCol = 1;
-    const maxScanRows = Math.max(80, worksheet.rowCount + 5);
-    for (let r = 1; r <= maxScanRows; r++) {
-      let hits = 0;
-      let firstCol = null;
-      for (let c = 1; c <= 220; c++) {
-        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
-        if (!t) continue;
-        const looksHeader =
-          /number|name|department|date\s+of\s+work|overtime|earnings|payments/.test(t);
-        if (looksHeader) {
-          hits++;
-          if (firstCol == null) firstCol = c;
-        }
-      }
-      if (hits >= 3) {
-        headerRow = r;
-        startCol = firstCol || 1;
+    for (let c = 1; c <= maxScanCols; c++) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (t) {
+        startCol = c;
         break;
       }
     }
-    if (headerRow < 0) throw new Error('Could not locate Form 10 header row.');
 
     // Prefer numeric marker row (1..N) near header for exact template column model.
-    let markerRow = -1;
+    let markerRow = (parsedDataStartIndex != null && parsedDataStartIndex > 0) ? parsedDataStartIndex : -1;
     let markerCols = [];
-    for (let r = headerRow; r <= Math.min(headerRow + 5, maxScanRows); r++) {
+    for (let r = Math.max(headerRow, markerRow > 0 ? markerRow - 1 : headerRow); r <= Math.min(headerRow + 5, maxScanRows); r++) {
       const cols = [];
-      for (let c = startCol; c <= 260; c++) {
+      for (let c = startCol; c <= maxScanCols; c++) {
         const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
         if (/^\d+$/.test(t)) cols.push(c);
       }
@@ -3909,7 +3926,10 @@ const Statutory = ({ userEmail, userRole }) => {
         markerRow = r;
       }
     }
-    const dataStartRow = markerCols.length >= 5 && markerRow > 0 ? (markerRow + 1) : (headerRow + 1);
+    const dataStartRow =
+      parsedDataStartIndex != null && parsedDataStartIndex >= 0
+        ? (parsedDataStartIndex + 1)
+        : (markerCols.length >= 5 && markerRow > 0 ? (markerRow + 1) : (headerRow + 1));
     const orderedCols = markerCols.length >= 5
       ? markerCols
       : Array.from({ length: Math.max(12, Array.isArray(headersToUse) ? headersToUse.length : 12) }, (_, i) => startCol + i);
@@ -3961,10 +3981,9 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       return numericHits >= Math.max(5, Math.floor(markerCols.length * 0.6));
     };
-    const clearFromRow = Math.max(1, headerRow + 1);
+    const clearFromRow = Math.max(1, dataStartRow);
     const clearToRow = Math.min(maxScanRows, Math.max(dataStartRow + sourceRows.length + 30, clearFromRow + 30));
     for (let r = clearFromRow; r <= clearToRow; r++) {
-      if (r === headerRow) continue;
       if (isNumericMarkerTemplateRow(r)) continue;
       for (let j = 0; j < orderedCols.length; j++) {
         worksheet.getCell(r, orderedCols[j]).value = '';
@@ -3973,6 +3992,7 @@ const Statutory = ({ userEmail, userRole }) => {
 
     for (let i = 0; i < sourceRows.length; i++) {
       const row = sourceRows[i] || [];
+      let maxVisualLines = 1;
       // Clear model row cells first so previous sample values do not leak into next rows.
       for (let j = 0; j < orderedCols.length; j++) {
         worksheet.getCell(dataStartRow + i, orderedCols[j]).value = '';
@@ -3984,9 +4004,18 @@ const Statutory = ({ userEmail, userRole }) => {
         if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
           cell.value = Number(value);
         } else {
-          cell.value = String(value);
+          const text = String(value);
+          cell.value = text;
+          cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'top' };
+          const approxCharsPerLine = 22;
+          const visualLines = Math.max(1, Math.ceil(text.length / approxCharsPerLine));
+          if (visualLines > maxVisualLines) maxVisualLines = visualLines;
         }
       }
+      // Auto-expand row height for long sentence cells so content is fully visible.
+      const targetRow = worksheet.getRow(dataStartRow + i);
+      const baseHeight = 18;
+      targetRow.height = Math.max(baseHeight, Math.min(120, baseHeight * maxVisualLines));
     }
 
     const out = await workbook.xlsx.writeBuffer();
@@ -4178,6 +4207,8 @@ const Statutory = ({ userEmail, userRole }) => {
     const headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
     const dataStartRow = parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? (parsedDataStartIndex + 1) : -1;
     if (headerRow < 1 || dataStartRow < 1) throw new Error('Could not locate Form B table region from template parser.');
+    // Form B has multi-band header rows; protect title/month/formula rows by starting lower.
+    const effectiveDataStartRow = Math.max(dataStartRow, headerRow + 3);
 
     let startCol = 1;
     for (let c = 1; c <= 280; c++) {
@@ -4219,11 +4250,15 @@ const Statutory = ({ userEmail, userRole }) => {
         return arr;
       });
 
-    const clearFromRow = Math.max(1, dataStartRow);
-    const clearToRow = Math.min(maxScanRows, Math.max(dataStartRow + sourceRows.length + 30, clearFromRow + 30));
+    const clearFromRow = Math.max(1, effectiveDataStartRow);
+    const clearToRow = Math.min(maxScanRows, Math.max(effectiveDataStartRow + sourceRows.length + 30, clearFromRow + 30));
     for (let r = clearFromRow; r <= clearToRow; r++) {
       for (let j = 0; j < orderedCols.length; j++) {
-        worksheet.getCell(r, orderedCols[j]).value = '';
+        const clearCell = worksheet.getCell(r, orderedCols[j]);
+        const current = clearCell?.value;
+        // Never remove formulas while clearing old data rows.
+        if (current && typeof current === 'object' && Object.prototype.hasOwnProperty.call(current, 'formula')) continue;
+        clearCell.value = '';
       }
     }
 
@@ -4232,7 +4267,232 @@ const Statutory = ({ userEmail, userRole }) => {
       for (let j = 0; j < orderedCols.length; j++) {
         const value = row[j];
         if (value == null || value === '') continue;
-        const cell = worksheet.getCell(dataStartRow + i, orderedCols[j]);
+        const cell = worksheet.getCell(effectiveDataStartRow + i, orderedCols[j]);
+        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormWWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const maxScanRows = Math.max(200, worksheet.rowCount + 20);
+    const headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
+    const dataStartRow = parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? (parsedDataStartIndex + 1) : -1;
+    if (headerRow < 1 || dataStartRow < 1) throw new Error('Could not locate Form W table region from template parser.');
+
+    let startCol = 1;
+    for (let c = 1; c <= 280; c++) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (t) {
+        startCol = c;
+        break;
+      }
+    }
+    const orderedCols = Array.from(
+      { length: Math.max(18, Array.isArray(headersToUse) ? headersToUse.length : 18) },
+      (_, i) => startCol + i
+    );
+    // Form W usually has multi-tier/merged headers; keep 2 rows below parser header before writing.
+    const effectiveDataStartRow = Math.max(dataStartRow, headerRow + 3);
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) {
+        const vals = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      if (row && typeof row === 'object') {
+        const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      return false;
+    };
+
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) return row;
+        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
+        const arr = hdrs.map((h) => row?.[h] ?? '');
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        return arr;
+      });
+
+    const clearFromRow = Math.max(1, effectiveDataStartRow);
+    const clearToRow = Math.min(maxScanRows, Math.max(effectiveDataStartRow + sourceRows.length + 40, clearFromRow + 40));
+    for (let r = clearFromRow; r <= clearToRow; r++) {
+      for (let j = 0; j < orderedCols.length; j++) {
+        const clearCell = worksheet.getCell(r, orderedCols[j]);
+        const current = clearCell?.value;
+        if (current && typeof current === 'object' && Object.prototype.hasOwnProperty.call(current, 'formula')) continue;
+        clearCell.value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      for (let j = 0; j < orderedCols.length; j++) {
+        const value = row[j];
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(effectiveDataStartRow + i, orderedCols[j]);
+        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormXWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const maxScanRows = Math.max(200, worksheet.rowCount + 20);
+    const headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
+    const dataStartRow = parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? (parsedDataStartIndex + 1) : -1;
+    if (headerRow < 1 || dataStartRow < 1) throw new Error('Could not locate Form X table region from template parser.');
+
+    let startCol = 1;
+    for (let c = 1; c <= 280; c++) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (t) {
+        startCol = c;
+        break;
+      }
+    }
+    const orderedCols = Array.from(
+      { length: Math.max(18, Array.isArray(headersToUse) ? headersToUse.length : 18) },
+      (_, i) => startCol + i
+    );
+    const effectiveDataStartRow = Math.max(dataStartRow, headerRow + 3);
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) {
+        const vals = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      if (row && typeof row === 'object') {
+        const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      return false;
+    };
+
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) return row;
+        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
+        const arr = hdrs.map((h) => row?.[h] ?? '');
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        return arr;
+      });
+
+    const clearFromRow = Math.max(1, effectiveDataStartRow);
+    const clearToRow = Math.min(maxScanRows, Math.max(effectiveDataStartRow + sourceRows.length + 40, clearFromRow + 40));
+    for (let r = clearFromRow; r <= clearToRow; r++) {
+      for (let j = 0; j < orderedCols.length; j++) {
+        const clearCell = worksheet.getCell(r, orderedCols[j]);
+        const current = clearCell?.value;
+        if (current && typeof current === 'object' && Object.prototype.hasOwnProperty.call(current, 'formula')) continue;
+        clearCell.value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      for (let j = 0; j < orderedCols.length; j++) {
+        const value = row[j];
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(effectiveDataStartRow + i, orderedCols[j]);
         if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
           cell.value = Number(value);
         } else {
@@ -4516,46 +4776,23 @@ const Statutory = ({ userEmail, userRole }) => {
 
     const maxScanRows = Math.max(220, worksheet.rowCount + 30);
     const maxScanCols = 340;
-    let headerRow = -1;
+    if (parsedHeaderRowIndex == null || parsedHeaderRowIndex < 0) {
+      throw new Error('Could not locate Form I header row.');
+    }
+    const headerRow = parsedHeaderRowIndex + 1;
     let startCol = 1;
-    for (let r = 1; r <= maxScanRows; r++) {
-      for (let c = 1; c <= maxScanCols; c++) {
-        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
-        if (!t) continue;
-        if (/\bs\.?\s*no\b|\bserial\b/.test(t)) {
-          headerRow = r;
-          startCol = c;
-          break;
-        }
-      }
-      if (headerRow > 0) break;
-    }
-    if (headerRow < 1) {
-      if (parsedHeaderRowIndex == null || parsedHeaderRowIndex < 0) {
-        throw new Error('Could not locate Form I header row.');
-      }
-      headerRow = parsedHeaderRowIndex + 1;
-      for (let c = 1; c <= maxScanCols; c++) {
-        const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
-        if (t) { startCol = c; break; }
-      }
-    }
-
-    let dataStartRow = headerRow + 1;
-    for (let r = headerRow; r <= Math.min(headerRow + 3, maxScanRows); r++) {
-      let numericHits = 0;
-      for (let c = startCol; c <= Math.min(startCol + 20, maxScanCols); c++) {
-        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
-        if (/^\d+$/.test(t)) numericHits++;
-      }
-      if (numericHits >= 3) {
-        dataStartRow = r + 1;
+    for (let c = 1; c <= maxScanCols; c++) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (t) {
+        startCol = c;
         break;
       }
     }
-    if (parsedDataStartIndex != null && parsedDataStartIndex >= 0) {
-      dataStartRow = Math.max(dataStartRow, parsedDataStartIndex + 1);
-    }
+
+    let dataStartRow =
+      parsedDataStartIndex != null && parsedDataStartIndex >= 0
+        ? (parsedDataStartIndex + 1)
+        : (headerRow + 1);
 
     const rowLooksMeaningful = (row) => {
       if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
@@ -4586,6 +4823,230 @@ const Statutory = ({ userEmail, userRole }) => {
           cell.value = '';
           continue;
         }
+        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormVWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const maxScanCols = 360;
+    const headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
+    const dataStartRow = parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? (parsedDataStartIndex + 1) : -1;
+    if (headerRow < 1 || dataStartRow < 1) {
+      throw new Error('Could not locate Form V table region from template parser.');
+    }
+
+    // Find the day-number row (1..31). Usually directly below header row in Form V.
+    let dayRow = -1;
+    let dayColsByNumber = new Map();
+    for (let r = headerRow; r <= headerRow + 3; r++) {
+      const cols = new Map();
+      for (let c = 1; c <= maxScanCols; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (/^\d{1,2}$/.test(t)) {
+          const n = parseInt(t, 10);
+          if (n >= 1 && n <= 31) cols.set(n, c);
+        }
+      }
+      if (cols.size > dayColsByNumber.size) {
+        dayColsByNumber = cols;
+        dayRow = r;
+      }
+    }
+
+    // Default left-start column is first non-empty header cell.
+    let startCol = 1;
+    for (let c = 1; c <= maxScanCols; c++) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (t) {
+        startCol = c;
+        break;
+      }
+    }
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
+      if (row && typeof row === 'object') return Object.values(row).some((v) => String(v ?? '').trim() !== '');
+      return false;
+    };
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) return row;
+        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
+        const arr = hdrs.map((h) => row?.[h] ?? '');
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        return arr;
+      });
+
+    // Clear only the data grid rows we will write (avoid touching header + merged layout).
+    const maxColsToWrite = Math.max(12, Array.isArray(headersToUse) ? headersToUse.length : 12);
+    for (let i = 0; i < Math.min(sourceRows.length + 30, 200); i++) {
+      for (let j = 0; j < maxColsToWrite; j++) {
+        worksheet.getCell(dataStartRow + i, startCol + j).value = '';
+      }
+    }
+
+    const headerIndex = new Map();
+    if (Array.isArray(headersToUse)) headersToUse.forEach((h, i) => headerIndex.set(h, i));
+    const dayHeaderIndices = [];
+    if (Array.isArray(headersToUse)) {
+      headersToUse.forEach((h, i) => {
+        const m = String(h || '').match(/_(\d{1,2})$/);
+        if (!m) return;
+        const n = parseInt(m[1], 10);
+        if (n >= 1 && n <= 31) dayHeaderIndices.push({ idx: i, day: n });
+      });
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+
+      // Write non-day columns sequentially into the left area.
+      for (let j = 0; j < maxColsToWrite; j++) {
+        // Skip day headers here; they'll be written by real day columns if we found them.
+        const h = Array.isArray(headersToUse) ? headersToUse[j] : null;
+        if (h && /_(\d{1,2})$/.test(String(h))) continue;
+        const value = row[j];
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(dataStartRow + i, startCol + j);
+        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+
+      // Write day-grid values into the exact day-number columns.
+      if (dayRow > 0 && dayColsByNumber.size >= 10 && dayHeaderIndices.length > 0) {
+        for (const { idx, day } of dayHeaderIndices) {
+          const targetCol = dayColsByNumber.get(day);
+          if (!targetCol) continue;
+          const value = row[idx];
+          if (value == null || value === '') continue;
+          const cell = worksheet.getCell(dataStartRow + i, targetCol);
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormVIWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
+    const dataStartRow = parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? (parsedDataStartIndex + 1) : -1;
+    if (headerRow < 1 || dataStartRow < 1) {
+      throw new Error('Could not locate Form VI table region from template parser.');
+    }
+
+    let startCol = 1;
+    const maxScanCols = 360;
+    for (let c = 1; c <= maxScanCols; c++) {
+      const v = worksheet.getCell(headerRow, c)?.value;
+      if (v != null && String(v).trim() !== '') {
+        startCol = c;
+        break;
+      }
+    }
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
+      if (row && typeof row === 'object') return Object.values(row).some((v) => String(v ?? '').trim() !== '');
+      return false;
+    };
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) return row;
+        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
+        const arr = hdrs.map((h) => row?.[h] ?? '');
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        return arr;
+      });
+
+    const maxColsToWrite = Math.max(12, Array.isArray(headersToUse) ? headersToUse.length : 12);
+    const clearToRow = Math.min(Math.max(200, worksheet.rowCount + 20), dataStartRow + sourceRows.length + 40);
+    for (let r = dataStartRow; r <= clearToRow; r++) {
+      for (let j = 0; j < maxColsToWrite; j++) {
+        worksheet.getCell(r, startCol + j).value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      for (let j = 0; j < maxColsToWrite; j++) {
+        const value = row[j];
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(dataStartRow + i, startCol + j);
         if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
           cell.value = Number(value);
         } else {
@@ -4640,6 +5101,7 @@ const Statutory = ({ userEmail, userRole }) => {
       let usedSnapshot = false;
       let usedSavedDraftFile = false;
       let savedDraftRowMatrix = null;
+      const downloadReqTs = Date.now();
       const isFormADownload = isFormAMusterRollContext(parsed.formHeader) ||
         /\bform\s*[-"']?\s*a\b/i.test(String(item?.formName || item?.FormName || ''));
       const isFormUDownload =
@@ -4657,6 +5119,14 @@ const Statutory = ({ userEmail, userRole }) => {
       const isFormBDownload =
         /\bform\s*[-"']?\s*b\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform\s*[-"']?\s*b\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormWDownload =
+        /\bform\s*[-"']?\s*w\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*w\b/i.test(String(parsed?.formHeader?.title || '')) ||
+        /register\s+of\s+wages/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormXDownload =
+        /\bform\s*[-"']?\s*x\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*x\b/i.test(String(parsed?.formHeader?.title || '')) ||
+        /leave\s+with\s+wages/i.test(String(parsed?.formHeader?.title || ''));
       const isFormCDownload =
         /\bform\s*[-"']?\s*c\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform\s*[-"']?\s*c\b/i.test(String(parsed?.formHeader?.title || ''));
@@ -4666,6 +5136,16 @@ const Statutory = ({ userEmail, userRole }) => {
       const isFormIDownload =
         /\bform\s*[-"']?\s*i\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform\s*[-"']?\s*i\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormVDownload =
+        /\bform\s*[-"']?\s*v\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*v\b/i.test(String(parsed?.formHeader?.title || '')) ||
+        /\bform\s*[-"']?\s*5\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*5\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormVIDownload =
+        /\bform\s*[-"']?\s*vi\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*6\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*vi\b/i.test(String(parsed?.formHeader?.title || '')) ||
+        /\bform\s*[-"']?\s*6\b/i.test(String(parsed?.formHeader?.title || ''));
 
       const countFilledRowCells = (row, headers) => {
         if (!row || typeof row !== 'object' || !Array.isArray(headers)) return 0;
@@ -4789,6 +5269,36 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
       if (
+        isFormWDownload &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
+        isFormXDownload &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
         isFormCDownload &&
         Array.isArray(formTableDataRef.current) &&
         formTableDataRef.current.length > 0
@@ -4833,6 +5343,36 @@ const Statutory = ({ userEmail, userRole }) => {
         }
         savedDraftRowMatrix = null;
       }
+      if (
+        isFormVDownload &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
+        isFormVIDownload &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
 
       // Prefer latest saved snapshot from SampleData for this statutory record (includes imported data).
       // Must resolve real Catalyst ROWID: merged ChecklistBulk rows keep bulk_* id while draft lives on draftStatutoryRowIdForFile.
@@ -4842,7 +5382,7 @@ const Statutory = ({ userEmail, userRole }) => {
           resolveNumericStatutoryIdForProofRow(resolvedFormFileItem);
         if (sampleStatutoryId && isNumericStatutoryBackendId(sampleStatutoryId)) {
           try {
-            const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleStatutoryId}/sampledata`);
+            const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleStatutoryId}/sampledata?_ts=${downloadReqTs}`);
             if (sampleResp.ok) {
               const sampleJson = await sampleResp.json().catch(() => null);
               const sampleBlock = sampleJson?.data?.sampleData;
@@ -4864,13 +5404,13 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       // Prefer saved Draft file rows when available (DraftFileName-backed data), then fit those rows into original template.
-      if (!usedLiveModalGrid && (isFormADownload || isFormUDownload || isForm12Download || isForm10Download || isForm25Download || isFormBDownload || isFormCDownload || isFormDDownload || isFormIDownload || !Array.isArray(mappedData) || mappedData.length === 0)) {
+      if (!usedLiveModalGrid && (isFormADownload || isFormUDownload || isForm12Download || isForm10Download || isForm25Download || isFormBDownload || isFormWDownload || isFormXDownload || isFormCDownload || isFormDDownload || isFormIDownload || isFormVDownload || isFormVIDownload || !Array.isArray(mappedData) || mappedData.length === 0)) {
         const draftStatutoryId =
           resolveNumericStatutoryIdForProofRow(item) ||
           resolveNumericStatutoryIdForProofRow(resolvedFormFileItem);
         if (draftStatutoryId && isNumericStatutoryBackendId(draftStatutoryId)) {
           try {
-            const draftFileResp = await fetch(`/server/statutoryreg_function/statutory/${draftStatutoryId}/file/Draft`);
+            const draftFileResp = await fetch(`/server/statutoryreg_function/statutory/${draftStatutoryId}/file/Draft?_ts=${downloadReqTs}`);
             if (draftFileResp.ok) {
               const draftArrayBuffer = await draftFileResp.arrayBuffer();
               const draftWb = XLSX.read(draftArrayBuffer, { type: 'array' });
@@ -4971,6 +5511,9 @@ const Statutory = ({ userEmail, userRole }) => {
       if (
         usedSnapshot &&
         !usedLiveModalGrid &&
+        !usedSavedDraftFile &&
+        !hasStatutoryDraftFileRef(item) &&
+        !hasStatutoryDraftFileRef(resolvedFormFileItem) &&
         Array.isArray(mappedData) &&
         mappedData.length === 1 &&
         !isFixedRowAggregateComplianceTable(headersToUse)
@@ -5104,6 +5647,32 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
+      if (isFormWDownload && !usedLiveModalGrid) {
+        try {
+          const refreshedFormWRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedFormWRows) && refreshedFormWRows.length > 0) {
+            mappedData = refreshedFormWRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
+      if (isFormXDownload && !usedLiveModalGrid) {
+        try {
+          const refreshedFormXRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedFormXRows) && refreshedFormXRows.length > 0) {
+            mappedData = refreshedFormXRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
       if (isFormCDownload && !usedLiveModalGrid) {
         try {
           const refreshedFormCRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
@@ -5143,6 +5712,32 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
+      if (isFormVDownload && !usedLiveModalGrid) {
+        try {
+          const refreshedFormVRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedFormVRows) && refreshedFormVRows.length > 0) {
+            mappedData = refreshedFormVRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
+      if (isFormVIDownload && !usedLiveModalGrid) {
+        try {
+          const refreshedFormVIRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedFormVIRows) && refreshedFormVIRows.length > 0) {
+            mappedData = refreshedFormVIRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
 
       // Form U: if mapped rows are available from modal/sample/Zoho, do not let stale draft matrix override them.
       if (isFormUDownload && Array.isArray(mappedData) && mappedData.length > 0) {
@@ -5161,6 +5756,12 @@ const Statutory = ({ userEmail, userRole }) => {
       if (isFormBDownload && Array.isArray(mappedData) && mappedData.length > 0) {
         savedDraftRowMatrix = null;
       }
+      if (isFormWDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isFormXDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
       if (isFormCDownload && Array.isArray(mappedData) && mappedData.length > 0) {
         savedDraftRowMatrix = null;
       }
@@ -5168,6 +5769,12 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
       if (isFormIDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isFormVDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isFormVIDownload && Array.isArray(mappedData) && mappedData.length > 0) {
         savedDraftRowMatrix = null;
       }
 
@@ -5209,6 +5816,8 @@ const Statutory = ({ userEmail, userRole }) => {
                   mappedData,
                   mappedRowMatrix: savedDraftRowMatrix,
                   headersToUse,
+                  parsedHeaderRowIndex: parsed.headerRowIndex,
+                  parsedDataStartIndex: parsed.dataStartIndex,
                   parsedFormHeader: parsed.formHeader,
                   formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
                 })
@@ -5232,6 +5841,28 @@ const Statutory = ({ userEmail, userRole }) => {
                       parsedFormHeader: parsed.formHeader,
                       formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
                     })
+                  : isFormWDownload
+                    ? await buildFormWWorkbookWithTemplateStyles({
+                        templateArrayBuffer: arrayBuffer,
+                        mappedData,
+                        mappedRowMatrix: savedDraftRowMatrix,
+                        headersToUse,
+                        parsedHeaderRowIndex: parsed.headerRowIndex,
+                        parsedDataStartIndex: parsed.dataStartIndex,
+                        parsedFormHeader: parsed.formHeader,
+                        formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                      })
+                  : isFormXDownload
+                    ? await buildFormXWorkbookWithTemplateStyles({
+                        templateArrayBuffer: arrayBuffer,
+                        mappedData,
+                        mappedRowMatrix: savedDraftRowMatrix,
+                        headersToUse,
+                        parsedHeaderRowIndex: parsed.headerRowIndex,
+                        parsedDataStartIndex: parsed.dataStartIndex,
+                        parsedFormHeader: parsed.formHeader,
+                        formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                      })
                   : isFormCDownload
                     ? await buildFormCWorkbookWithTemplateStyles({
                         templateArrayBuffer: arrayBuffer,
@@ -5265,6 +5896,28 @@ const Statutory = ({ userEmail, userRole }) => {
                             parsedFormHeader: parsed.formHeader,
                             formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
                           })
+                        : isFormVDownload
+                          ? await buildFormVWorkbookWithTemplateStyles({
+                              templateArrayBuffer: arrayBuffer,
+                              mappedData,
+                              mappedRowMatrix: savedDraftRowMatrix,
+                              headersToUse,
+                              parsedHeaderRowIndex: parsed.headerRowIndex,
+                              parsedDataStartIndex: parsed.dataStartIndex,
+                              parsedFormHeader: parsed.formHeader,
+                              formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                            })
+                          : isFormVIDownload
+                            ? await buildFormVIWorkbookWithTemplateStyles({
+                                templateArrayBuffer: arrayBuffer,
+                                mappedData,
+                                mappedRowMatrix: savedDraftRowMatrix,
+                                headersToUse,
+                                parsedHeaderRowIndex: parsed.headerRowIndex,
+                                parsedDataStartIndex: parsed.dataStartIndex,
+                                parsedFormHeader: parsed.formHeader,
+                                formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                              })
         : buildDraftWorkbook({
             currentItem: item,
             templateWb,
@@ -5536,23 +6189,25 @@ const Statutory = ({ userEmail, userRole }) => {
       };
 
       // Autofill → Save: UPDATE if this is an existing Statutory record; otherwise POST to create (e.g. when opened from form master row).
-      let response;
-      if (isUpdate) {
-        console.log('Updating existing record with draft file (no new record):', currentItem.id);
-        const { formFile: _f, formFileName: _n, ...putPayload } = payload;
-        response = await fetch(`/server/statutoryreg_function/statutory/${currentItem.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(putPayload)
-        });
-      } else {
+      const sendDraftSaveRequest = async (requestPayload) => {
+        if (isUpdate) {
+          console.log('Updating existing record with draft file (no new record):', currentItem.id);
+          const { formFile: _f, formFileName: _n, ...putPayload } = requestPayload;
+          return fetch(`/server/statutoryreg_function/statutory/${currentItem.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(putPayload)
+          });
+        }
         console.log('Creating new record with draft file (no existing statutory record)');
-        response = await fetch('/server/statutoryreg_function/statutory', {
+        return fetch('/server/statutoryreg_function/statutory', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(requestPayload)
         });
-      }
+      };
+
+      let response = await sendDraftSaveRequest(payload);
 
       let data;
       try {
@@ -5563,6 +6218,21 @@ const Statutory = ({ userEmail, userRole }) => {
         setError(`Failed to save draft: ${textResponse || 'Invalid server response'}`);
         setSubmitting(false);
         return;
+      }
+
+      // Backend can return 400 for very large SampleData payloads.
+      // Retry once without sampleData snapshot so Draft file save still succeeds.
+      if (!response.ok && Number(response.status) === 400) {
+        try {
+          const { sampleDataHeader: _h, sampleData: _d, ...payloadWithoutSample } = payload;
+          const retryResp = await sendDraftSaveRequest(payloadWithoutSample);
+          if (retryResp.ok) {
+            response = retryResp;
+            data = await retryResp.json().catch(() => ({}));
+          }
+        } catch (retryErr) {
+          console.warn('Retry without sampleData failed:', retryErr);
+        }
       }
 
       if (response.ok && data.status === 'success') {
@@ -5678,7 +6348,7 @@ const Statutory = ({ userEmail, userRole }) => {
           handleCloseFormFileModal();
         }, 500);
       } else {
-        const errorMessage = data?.message || data?.error || 'Failed to save draft';
+        const errorMessage = data?.message || data?.error || `Failed to save draft (HTTP ${response.status})`;
         console.error('Save draft error:', errorMessage, data);
         setError(errorMessage);
       }
@@ -8802,20 +9472,74 @@ const Statutory = ({ userEmail, userRole }) => {
           const shouldPreferSavedDraftData = !!options?.preferSavedDraftData;
           if (shouldPreferSavedDraftData) {
             let loadedSavedData = false;
+            const modalReqTs = Date.now();
             try {
               const sampleRowId =
                 resolveNumericStatutoryIdForProofRow(item) ||
                 (isNumericStatutoryBackendId(item?.id) ? String(item.id).trim() : null);
               if (sampleRowId) {
-                const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleRowId}/sampledata`);
-                if (sampleResp.ok) {
-                  const sampleJson = await sampleResp.json().catch(() => null);
-                  const sampleRows = sampleJson?.data?.sampleData?.rows;
-                  if (Array.isArray(sampleRows) && sampleRows.length > 0) {
-                    setFormTableData(sampleRows);
+                // Prefer the saved Draft Excel (same source as "Download form template")
+                // so View Draft modal shows exactly what user saved.
+                const draftResp = await fetch(`/server/statutoryreg_function/statutory/${sampleRowId}/file/Draft?_ts=${modalReqTs}`);
+                if (draftResp.ok) {
+                  const draftArrayBuffer = await draftResp.arrayBuffer();
+                  const draftWb = XLSX.read(draftArrayBuffer, { type: 'array' });
+                  const draftRows = extractMappedRowsFromSavedDraft({
+                    draftWorkbook: draftWb,
+                    templateHeaders: parsed.headers || [],
+                    templateHeaderRowIndex: parsed.headerRowIndex,
+                    templateDataStartIndex: parsed.dataStartIndex,
+                    hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0
+                  });
+                  if (Array.isArray(draftRows) && draftRows.length > 0) {
+                    setFormTableData(draftRows);
                     loadedSavedData = true;
-                    setSuccess('Loaded saved draft/imported data.');
+                    setSuccess('Loaded saved draft data.');
                     setTimeout(() => setSuccess(''), 2500);
+                  }
+                  // Some forms (like Form 25) are easier to recover via matrix rows.
+                  // If header-based extraction is empty, map matrix rows to current template headers.
+                  if (!loadedSavedData) {
+                    const matrixRows = extractRowMatrixFromSavedDraft({
+                      draftWorkbook: draftWb,
+                      templateHeaderRowIndex: parsed.headerRowIndex,
+                      templateDataStartIndex: parsed.dataStartIndex,
+                      hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0
+                    });
+                    if (Array.isArray(matrixRows) && matrixRows.length > 0) {
+                      const headersForMatrix =
+                        Array.isArray(parsed.headers) && parsed.headers.length > 0
+                          ? parsed.headers
+                          : Array.from({ length: matrixRows[0]?.length || 0 }, (_, idx) => `Column ${idx + 1}`);
+                      const matrixAsObjects = matrixRows.map((rowArr, rowIdx) => {
+                        const obj = {};
+                        headersForMatrix.forEach((h, colIdx) => {
+                          const v = Array.isArray(rowArr) ? rowArr[colIdx] : '';
+                          obj[h] = v != null ? v : '';
+                        });
+                        if ((obj[headersForMatrix[0]] == null || String(obj[headersForMatrix[0]]).trim() === '') && headersForMatrix.length > 0) {
+                          obj[headersForMatrix[0]] = rowIdx + 1;
+                        }
+                        return obj;
+                      });
+                      setFormTableData(matrixAsObjects);
+                      loadedSavedData = true;
+                      setSuccess('Loaded saved draft data.');
+                      setTimeout(() => setSuccess(''), 2500);
+                    }
+                  }
+                }
+                if (!loadedSavedData) {
+                  const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleRowId}/sampledata?_ts=${modalReqTs}`);
+                  if (sampleResp.ok) {
+                    const sampleJson = await sampleResp.json().catch(() => null);
+                    const sampleRows = sampleJson?.data?.sampleData?.rows;
+                    if (Array.isArray(sampleRows) && sampleRows.length > 0) {
+                      setFormTableData(sampleRows);
+                      loadedSavedData = true;
+                      setSuccess('Loaded saved draft/imported data.');
+                      setTimeout(() => setSuccess(''), 2500);
+                    }
                   }
                 }
               }
@@ -9278,7 +10002,8 @@ const Statutory = ({ userEmail, userRole }) => {
     return map;
   }, [statutoryData]);
 
-  // Draft file lookup for site/month views: if current rendered row has no draft, reuse best matching row (same form + act + month).
+  // Draft file lookup for site/month views: if current rendered row has no draft, reuse only strict matching row
+  // (same form + act + description + month + sector + state) to avoid cross-row bleed.
   const draftRowByFormActMonthKey = useMemo(() => {
     const map = new Map();
     if (!Array.isArray(statutoryData) || statutoryData.length === 0) return map;
@@ -9287,9 +10012,10 @@ const Statutory = ({ userEmail, userRole }) => {
       const hasDraft = draftFile && draftFile !== 'null' && String(draftFile).trim() !== '';
       if (!hasDraft) return;
       const monthNorm = String(row?.monthFilter || row?.MonthFilter || row?.monthfilter || '').trim().toLowerCase().substring(0, 3);
+      const descNorm = String(row?.description || row?.Description || '').trim().toLowerCase();
       const secNorm = String(row?.sector || row?.Sector || '').trim().toLowerCase();
       const stateNorm = String(row?.state || row?.State || '').trim().toLowerCase();
-      const key = `${String(row?.formName || '').toLowerCase().trim()}|${String(row?.act || '').toLowerCase().trim()}|${monthNorm || 'nomonth'}|${secNorm}|${stateNorm}`;
+      const key = `${String(row?.formName || '').toLowerCase().trim()}|${String(row?.act || '').toLowerCase().trim()}|${descNorm}|${monthNorm || 'nomonth'}|${secNorm}|${stateNorm}`;
       if (!map.has(key)) {
         map.set(key, row);
         return;
@@ -9710,16 +10436,28 @@ const Statutory = ({ userEmail, userRole }) => {
   const formmasterFormFileByFormName = useMemo(() => {
     const map = new Map();
     if (!formmasterTemplates || !Array.isArray(formmasterTemplates)) return map;
+    const templateRecencyScore = (t) => {
+      const createdRaw = t?.createdTime || t?.created_time || t?.createdAt || t?.created_at || '';
+      const createdMs = createdRaw ? Date.parse(String(createdRaw)) : NaN;
+      if (Number.isFinite(createdMs)) return createdMs;
+      const idNum = Number.parseInt(String(t?.id ?? ''), 10);
+      return Number.isFinite(idNum) ? idNum : 0;
+    };
     formmasterTemplates.forEach((t) => {
       const rawName = (t.name || t.file_name || t.fileName || '').trim();
       const formName = rawName.replace(/\.xlsx$/i, '').trim() || rawName;
       const key = normalizeTemplateFormNameKey(formName);
-      if (!key || map.has(key)) return;
-      map.set(key, {
+      if (!key) return;
+      const candidate = {
         formFile: t.id != null ? String(t.id) : null,
         formFileName: rawName || 'template.xlsx',
-        isFromFormmaster: true
-      });
+        isFromFormmaster: true,
+        _score: templateRecencyScore(t)
+      };
+      const current = map.get(key);
+      if (!current || candidate._score >= (current._score || 0)) {
+        map.set(key, candidate);
+      }
     });
     return map;
   }, [formmasterTemplates]);
@@ -9906,7 +10644,8 @@ const Statutory = ({ userEmail, userRole }) => {
                           const rowHasDraft = rowDraftFile && rowDraftFile !== 'null' && String(rowDraftFile).trim() !== '';
                           const secPart = String(item.sector || item.Sector || '').trim().toLowerCase();
                           const statePart = String(item.state || item.State || '').trim().toLowerCase();
-                          const draftLookupKey = `${String(item.formName || '').toLowerCase().trim()}|${String(item.act || '').toLowerCase().trim()}|${(rowMonthNorm || selectedMonthNorm || 'nomonth')}|${secPart}|${statePart}`;
+                          const descPart = String(item.description || item.Description || '').trim().toLowerCase();
+                          const draftLookupKey = `${String(item.formName || '').toLowerCase().trim()}|${String(item.act || '').toLowerCase().trim()}|${descPart}|${(rowMonthNorm || selectedMonthNorm || 'nomonth')}|${secPart}|${statePart}`;
                           let fallbackDraftRow = draftRowByFormActMonthKey.get(draftLookupKey) || null;
                           // Autofill → Save POST creates a numeric statutory row with DraftFile while the grid row may still be bulk_* / checklist_* — pick sibling by line identity.
                           if (!fallbackDraftRow && !rowHasDraft && Array.isArray(statutoryData)) {
@@ -10015,9 +10754,8 @@ const Statutory = ({ userEmail, userRole }) => {
                             }
                             return '';
                           })();
-                          // Site incharge flow: hide draft from approver-facing view until marked Sent. App Administrator always sees drafts (month gate still applies).
+                          // Approval-flow gating: in approver view, show draft only after site marks Send for Approval as Sent.
                           const hideDraftUntilSiteSent =
-                            !isAppAdministrator &&
                             showApprovalColumn &&
                             !/^sent$/i.test(sendForApprovalEffective);
                           const showDraftForRow =
@@ -10180,7 +10918,17 @@ const Statutory = ({ userEmail, userRole }) => {
                               })()}
                             </td>
                             <td>
-                              {showDraftForRow ? (
+                              {(() => {
+                                const draftTextValue = String(item?.draft ?? item?.Draft ?? '').trim();
+                                const hasDraftTextMarker =
+                                  draftTextValue !== '' &&
+                                  draftTextValue !== '-' &&
+                                  draftTextValue.toLowerCase() !== 'null';
+                                const showDraftActions =
+                                  !hideDraftUntilSiteSent &&
+                                  !hideDraftByStoredMonth &&
+                                  (showDraftForRow || (hasDraftTextMarker && isNumericStatutoryBackendId(item?.id)));
+                                return showDraftActions ? (
                                 (() => {
                                   const formNameNorm = (item.formName || '').trim().toUpperCase().replace(/\s+/g, ' ');
                                   const draftNameNorm = String(draftSourceItem?.draftFileName || draftSourceItem?.DraftFileName || '').trim().toUpperCase().replace(/\s+/g, ' ');
@@ -10231,7 +10979,8 @@ const Statutory = ({ userEmail, userRole }) => {
                                 })()
                               ) : (
                                 hideDraftUntilSiteSent || hideDraftByStoredMonth ? '-' : item.draft || '-'
-                              )}
+                              );
+                              })()}
                             </td>
                             {showSendForApprovalColumn ? (
                               <td className="statutory-col-send-for-approval" style={{ textAlign: 'center' }}>
@@ -10241,30 +10990,39 @@ const Statutory = ({ userEmail, userRole }) => {
                                       ? String(sendForApprovalEffective).trim()
                                       : '';
                                   const looksSent = /^sent$/i.test(sfaStr);
+                                  // Rejected rows in site view must allow re-send for approval.
+                                  const approvalNorm = String(item?.approval ?? item?.Approval ?? '').trim().toLowerCase();
+                                  const statusNorm = String(item?.status ?? item?.Status ?? '').trim().toLowerCase();
+                                  const rejectedByApprover =
+                                    approvalNorm === 'rejected' ||
+                                    approvalNorm === 'reject' ||
+                                    statusNorm === 'rejected' ||
+                                    statusNorm === 'reject';
+                                  const showAsSent = looksSent && !rejectedByApprover;
                                   const numericId = resolveNumericStatutoryIdForProofRow(item);
                                   const sfaBusy = numericId && sendForApprovalUpdatingRowId === numericId;
                                   return (
                                     <div onClick={(e) => e.stopPropagation()}>
                                       <button
                                         type="button"
-                                        className={`statutory-send-for-approval-btn${looksSent ? ' statutory-send-for-approval-btn--done' : ''}`}
-                                        disabled={!numericId || !!sfaBusy || loading || looksSent || rowLocked}
+                                        className={`statutory-send-for-approval-btn${showAsSent ? ' statutory-send-for-approval-btn--done' : ''}`}
+                                        disabled={!numericId || !!sfaBusy || loading || showAsSent || rowLocked}
                                         title={
                                           !numericId
                                             ? 'Only for rows stored in Statutory (numeric ID)'
                                             : rowLocked
                                               ? 'Approved row is locked for editing'
-                                            : looksSent
+                                            : showAsSent
                                               ? 'Already sent for approval'
                                               : 'Set Send for approval to Sent'
                                         }
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          if (!numericId || sfaBusy || looksSent || rowLocked) return;
+                                          if (!numericId || sfaBusy || showAsSent || rowLocked) return;
                                           handleSendForApprovalColumnAction(item);
                                         }}
                                       >
-                                        {sfaBusy ? '…' : looksSent ? 'Sent' : 'Send for approval'}
+                                        {sfaBusy ? '…' : showAsSent ? 'Sent' : 'Send for approval'}
                                       </button>
                                       {sfaStr && !looksSent ? (
                                         <div

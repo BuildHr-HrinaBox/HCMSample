@@ -157,29 +157,88 @@ function getFileColumns(docType) {
   };
 }
 
+/** Datastore getRow may use table column names (PascalCase) or the same keys as the REST list (camelCase). */
+function pickFileIdFromCompanyRow(company, docType) {
+  if (!company || !docType) return null;
+  const camel = DOC_TYPE_TO_COMPANY_KEY[docType];
+  const keys = [docType, camel].filter((k, i, a) => k != null && k !== '' && a.indexOf(k) === i);
+  for (const k of keys) {
+    const v = company[k];
+    if (v != null && String(v).trim() !== '') return v;
+  }
+  return null;
+}
+
+function pickDisplayNameFromFileDetails(raw, depth = 0) {
+  if (raw == null || depth > 5) return '';
+  const details = Array.isArray(raw) ? raw[0] : raw;
+  if (!details || typeof details !== 'object') return '';
+
+  const keyVariants = [
+    'file_name',
+    'fileName',
+    'File_Name',
+    'name',
+    'Name',
+    'filename',
+    'original_file_name',
+    'originalFileName'
+  ];
+
+  const sources = [
+    details,
+    details.file && typeof details.file === 'object' ? details.file : null,
+    details.data && typeof details.data === 'object' ? details.data : null,
+    Array.isArray(details.file_details) && details.file_details[0] ? details.file_details[0] : null,
+    Array.isArray(details.files) && details.files[0] ? details.files[0] : null
+  ].filter(Boolean);
+
+  for (const src of sources) {
+    for (const k of keyVariants) {
+      const s = String(src[k] || '').trim();
+      if (s) return s;
+    }
+  }
+
+  const recurseKeys = ['data', 'file', 'file_details', 'result'];
+  for (const rk of recurseKeys) {
+    const child = details[rk];
+    if (child == null) continue;
+    const nested = pickDisplayNameFromFileDetails(child, depth + 1);
+    if (nested) return nested;
+  }
+  return '';
+}
+
 async function resolveUploadedFileName(catalyst, docType, fileId) {
   const folderId = DOC_TYPE_TO_FOLDER_ID[docType];
   if (!folderId || !fileId) return '';
   try {
     const folder = catalyst.filestore().folder(folderId);
-    const targetId = String(fileId);
+    const targetId = String(fileId).trim();
+    if (!targetId) return '';
 
-    // Primary path
     try {
       const details = await folder.getFileDetails(fileId);
-      const byDetails = String(details?.file_name || details?.name || details?.fileName || '').trim();
+      const byDetails = pickDisplayNameFromFileDetails(details);
       if (byDetails) return byDetails;
     } catch (_) {
-      // Fallback below
+      // Optional list fallback below
     }
 
-    // Compatibility fallback: list files and match by id
-    const files = await folder.getAllFiles();
-    if (Array.isArray(files)) {
-      const hit = files.find((f) => String(f?.id ?? f?.ID ?? f?.file_id ?? '') === targetId);
-      if (hit) {
-        const byList = String(hit?.file_name || hit?.name || hit?.fileName || '').trim();
-        if (byList) return byList;
+    // Older code called getAllFiles(); the stock Node SDK Folder has no such method — calling it threw and hid real names.
+    if (typeof folder.getAllFiles === 'function') {
+      try {
+        const files = await folder.getAllFiles();
+        if (Array.isArray(files)) {
+          const hit = files.find((f) => String(f?.id ?? f?.ID ?? f?.file_id ?? '').trim() === targetId);
+          if (hit) {
+            const byList = pickDisplayNameFromFileDetails(hit);
+            if (byList) return byList;
+          }
+        }
+      } catch (_) {
+        // ignore
       }
     }
     return '';
@@ -683,8 +742,8 @@ app.get('/company/:id/file/:docType', async (req, res) => {
     
     const table = catalyst.datastore().table('Company');
     const company = await table.getRow(id);
-    const fileId = company[docType]; // Get file ID from the appropriate column
-    const fileName = `${docType}_file`; // Default filename since we don't store it separately
+    const fileId = pickFileIdFromCompanyRow(company, docType);
+    let fileName = `${docType}_file`;
     
     console.log('File info:', { fileId, fileName });
     
@@ -692,6 +751,9 @@ app.get('/company/:id/file/:docType', async (req, res) => {
       console.error('No file ID found for company:', id, 'docType:', docType);
       return res.status(404).send({ status: 'failure', message: 'File not found for this company.' });
     }
+
+    const resolvedName = await resolveUploadedFileName(catalyst, docType, fileId);
+    if (resolvedName) fileName = resolvedName;
     
     const fileBuffer = await catalyst.filestore().folder(folderId).downloadFile(fileId);
     
@@ -742,7 +804,7 @@ app.get('/company/:id/file-meta/:docType', async (req, res) => {
 
     const table = catalyst.datastore().table('Company');
     const company = await table.getRow(id);
-    const fileId = company[docType];
+    const fileId = pickFileIdFromCompanyRow(company, docType);
     if (!fileId) {
       return res.status(200).send({ status: 'success', data: { fileId: null, fileName: '' } });
     }
@@ -767,7 +829,7 @@ app.delete('/company/:id/file/:docType', async (req, res) => {
     
     const table = catalyst.datastore().table('Company');
     const company = await table.getRow(id);
-    const fileId = company[docType]; // Get file ID from the appropriate column
+    const fileId = pickFileIdFromCompanyRow(company, docType);
     
     if (!fileId) {
       return res.status(404).send({ status: 'failure', message: 'File not found for this company.' });

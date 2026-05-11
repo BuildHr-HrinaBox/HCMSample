@@ -213,28 +213,74 @@ function filterRowsByActCategoryScope(rows, allowedActCategories) {
   return rows.filter((r) => allow.has(getActCategoryFromStatutoryRow(r)));
 }
 
+/** Month filter as stored on Statutory / Catalyst rows (field names vary by table mapping). */
+function getStatutoryStoredMonthRaw(stRow) {
+  if (!stRow) return '';
+  const v =
+    stRow.MonthFilter ??
+    stRow.monthfilter ??
+    stRow.Monthfilter ??
+    stRow.monthFilter ??
+    stRow.MONTHFILTER ??
+    stRow.OriginalMonthFilter ??
+    stRow.originalMonthFilter ??
+    '';
+  return String(v ?? '').trim();
+}
+
+/** Same field as Statutory "Month Filter" column (`monthFilter` / `MonthFilter`). */
+function getStatutoryMonthFilterDisplay(stRow, reportMonthFallback) {
+  const raw = getStatutoryStoredMonthRaw(stRow);
+  if (raw !== '') {
+    const n = normalizeMonth(raw);
+    return n || raw;
+  }
+  const fb = normalizeMonth(reportMonthFallback);
+  return fb || String(reportMonthFallback || '').trim();
+}
+
 function statutoryRowMatchesMonth(stRow, selectedMonth) {
   const selectedNorm = normalizeMonth(selectedMonth);
   if (!selectedNorm) return false;
   const selectedPrefix = selectedNorm.toLowerCase().substring(0, 3);
-  const storedMonth = stRow.MonthFilter || stRow.monthfilter || '';
-  const storedNorm = String(storedMonth)
-    .trim()
-    .toLowerCase()
-    .substring(0, 3);
+  const storedNorm = getStatutoryStoredMonthRaw(stRow).toLowerCase().substring(0, 3);
   if (storedNorm) return storedNorm === selectedPrefix;
-  const dueDate = String(stRow.DueDate || '')
+  const dueDate = String(stRow.DueDate || stRow.dueDate || '')
     .toLowerCase()
     .trim();
   if (!dueDate) return false;
-  if (dueDate.includes('monthly basis')) return true;
   const monthNames = MONTH_ORDER.map((m) => m.toLowerCase());
   const monthAbbr = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
   const idx = MONTH_ORDER.indexOf(selectedNorm);
   if (idx === -1) return false;
   const fullMonthName = monthNames[idx];
   const monthAbbrName = monthAbbr[idx];
+  /** Never treat "Monthly Basis" alone as matching every month — that showed May-only drafts under January Reports. */
   return dueDate.includes(fullMonthName) || dueDate.includes(monthAbbrName);
+}
+
+function getStatutoryRowStatusRaw(stRow) {
+  if (!stRow) return '';
+  const direct =
+    stRow.Status ??
+    stRow.status ??
+    stRow.STATUS ??
+    stRow.TransactionStatus ??
+    stRow.transactionStatus;
+  if (direct != null && String(direct).trim() !== '') return String(direct).trim();
+  for (const k of Object.keys(stRow)) {
+    if (String(k).toLowerCase() === 'status') {
+      const v = stRow[k];
+      if (v != null && String(v).trim() !== '') return String(v).trim();
+    }
+  }
+  return '';
+}
+
+/** Match Statutory.js STATUS column: only transaction `Status` is Approved (not Pending / Yet to Complete). */
+function isStatutoryTransactionApproved(stRow) {
+  const st = getStatutoryRowStatusRaw(stRow).toLowerCase();
+  return st === 'approved' || st === 'approve';
 }
 
 function pickBestStatutoryRow(matches) {
@@ -268,26 +314,35 @@ function buildStatutoryDraftRow(stRow) {
   const formName = String(stRow.FormName || '').trim();
   const act = getActFromAnyRow(stRow);
   const description = getDescriptionFromAnyRow(stRow);
-  const draftFile =
-    stRow.DraftFile != null && String(stRow.DraftFile).trim() !== '' && String(stRow.DraftFile).toLowerCase() !== 'null'
-      ? String(stRow.DraftFile).trim()
-      : null;
+  const approved = isStatutoryTransactionApproved(stRow);
+  const hasDraftStored =
+    stRow.DraftFile != null && String(stRow.DraftFile).trim() !== '' && String(stRow.DraftFile).toLowerCase() !== 'null';
+  const draftFile = hasDraftStored ? String(stRow.DraftFile).trim() : null;
   const draftFileName =
     stRow.DraftFileName != null && String(stRow.DraftFileName).trim() !== ''
       ? String(stRow.DraftFileName).trim()
       : 'draft';
-  const draftFileUrl = draftFile
-    ? `/server/statutoryreg_function/statutory/${id}/file/Draft?name=${encodeURIComponent(draftFileName)}`
-    : null;
+  /** Reports: draft download only after transaction approval (same gate as statutory workflow). */
+  const draftFileUrl =
+    draftFile && approved
+      ? `/server/statutoryreg_function/statutory/${id}/file/Draft?name=${encodeURIComponent(draftFileName)}`
+      : null;
+  const approval = String(stRow.Approval || stRow.approval || '').trim();
+  const statutoryStatus = getStatutoryRowStatusRaw(stRow);
+  const monthFilter = getStatutoryMonthFilterDisplay(stRow, '');
   return {
     rowId: id,
     statutoryRowId: id,
     formName,
     act,
     description,
-    draftFile,
-    draftFileName,
-    draftFileUrl
+    monthFilter,
+    draftFile: approved ? draftFile : null,
+    draftFileName: approved ? draftFileName : '',
+    draftFileUrl,
+    approval,
+    statutoryStatus,
+    hasStatutoryDraftStored: hasDraftStored
   };
 }
 
@@ -317,16 +372,21 @@ function getMasterKeyFromAnyRow(row) {
   return `${formKey}|${actKey}|${descKey}`;
 }
 
-function buildEmptyFormRow(formKey, formName, act, description) {
+function buildEmptyFormRow(formKey, formName, act, description, reportMonthNorm) {
+  const mf = normalizeMonth(reportMonthNorm) || String(reportMonthNorm || '').trim();
   return {
     rowId: `master_${formKey}`,
     statutoryRowId: null,
     formName: formName || '',
     act: act || '',
     description: description || '',
+    monthFilter: mf,
     draftFile: null,
     draftFileName: '',
-    draftFileUrl: null
+    draftFileUrl: null,
+    approval: '',
+    statutoryStatus: '',
+    hasStatutoryDraftStored: false
   };
 }
 
@@ -504,18 +564,21 @@ app.get('/mainreport/entries', async (req, res) => {
       }
     }
 
+    const reportMonthNorm = normalizeMonth(month);
     const out = [];
     for (const [formKey, meta] of formsMap.entries()) {
       const candidates = statutoryForUser.filter((r) => getMasterKeyFromAnyRow(r) === formKey);
       const monthCandidates = candidates.filter((r) => statutoryRowMatchesMonth(r, month));
-      const picked = pickBestStatutoryRow(monthCandidates.length > 0 ? monthCandidates : candidates);
+      /** Do not fall back to other months' statutory rows — e.g. May submission must not show under January Reports. */
+      const picked = monthCandidates.length > 0 ? pickBestStatutoryRow(monthCandidates) : null;
       if (picked) {
         const built = buildStatutoryDraftRow(picked);
         if (!built.act && meta?.act) built.act = meta.act;
         if (!built.description && meta?.description) built.description = meta.description;
+        built.monthFilter = getStatutoryMonthFilterDisplay(picked, reportMonthNorm) || reportMonthNorm;
         out.push(built);
       } else {
-        out.push(buildEmptyFormRow(formKey, meta?.formName, meta?.act, meta?.description));
+        out.push(buildEmptyFormRow(formKey, meta?.formName, meta?.act, meta?.description, reportMonthNorm));
       }
     }
 

@@ -179,13 +179,19 @@ const ActDescription = ({ userRole, userEmail }) => {
   const [tableSortKey, setTableSortKey] = useState(null);
   const [tableSortDir, setTableSortDir] = useState('asc');
   const [allowedActCategoryList, setAllowedActCategoryList] = useState(null);
+  const [allowedActCategoriesReady, setAllowedActCategoriesReady] = useState(false);
   const hasSiteBasedScope = Array.isArray(allowedActCategoryList) && allowedActCategoryList.length > 0;
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const cats = await fetchAllowedActCategoriesFromSites(userEmail);
-      if (!cancelled) setAllowedActCategoryList(cats);
+      setAllowedActCategoriesReady(false);
+      try {
+        const cats = await fetchAllowedActCategoriesFromSites(userEmail);
+        if (!cancelled) setAllowedActCategoryList(cats);
+      } finally {
+        if (!cancelled) setAllowedActCategoriesReady(true);
+      }
     })();
     return () => {
       cancelled = true;
@@ -369,6 +375,7 @@ const ActDescription = ({ userRole, userEmail }) => {
   const isLibrarySelected = (id) => selectedLibraryIds.has(id);
 
   const displayActsBulkList = useMemo(() => {
+    if (!allowedActCategoriesReady) return [];
     if (!hasSiteBasedScope) return actsBulkList;
     const allow = new Set(allowedActCategoryList);
     return actsBulkList.filter((row) => {
@@ -376,7 +383,9 @@ const ActDescription = ({ userRole, userEmail }) => {
       const sector = row.sector || row.Sector || '';
       return allow.has(getActCategoryFromActSector(act, sector));
     });
-  }, [actsBulkList, hasSiteBasedScope, allowedActCategoryList]);
+  }, [actsBulkList, hasSiteBasedScope, allowedActCategoryList, allowedActCategoriesReady]);
+
+  const libraryListPending = actsBulkLoading || !allowedActCategoriesReady;
 
   const completedCount = displayActsBulkList.filter((row) => getStatus(row.id) === 'Completed').length;
   const pendingCount = displayActsBulkList.filter((row) => getStatus(row.id) === 'Pending').length;
@@ -824,9 +833,11 @@ const ActDescription = ({ userRole, userEmail }) => {
                     <div>
                       <h2 className="ad-lib-hero-title">Applicable Acts Library</h2>
                       <p className="ad-lib-hero-sub">
-                        {hasSiteBasedScope
-                          ? `Showing Site Management industry scope: ${allowedActCategoryList.join(', ')}.`
-                          : 'Manage and track all imported Acts from bulk import.'}
+                        {!allowedActCategoriesReady
+                          ? 'Loading your site scope and applicable acts…'
+                          : hasSiteBasedScope
+                            ? `Showing Site Management industry scope: ${allowedActCategoryList.join(', ')}.`
+                            : 'Manage and track all imported Acts from bulk import.'}
                       </p>
                     </div>
                   </div>
@@ -994,7 +1005,7 @@ const ActDescription = ({ userRole, userEmail }) => {
               </div>
 
               <div className="ad-lib-main">
-                {actsBulkLoading ? (
+                {libraryListPending ? (
                   <p className="ad-lib-loading">Loading applicable acts...</p>
                 ) : sortedLibraryList.length === 0 ? (
                   <p className="ad-lib-empty">No acts match the current filters.</p>
@@ -1261,7 +1272,7 @@ const ActDescription = ({ userRole, userEmail }) => {
                 )}
               </div>
 
-              {!actsBulkLoading && sortedLibraryList.length > 0 ? (
+              {!libraryListPending && sortedLibraryList.length > 0 ? (
                 <div className="ad-lib-pagination ad-lib-pagination--company-model">
                   <p className="ad-lib-pagination__info">
                     Showing{' '}

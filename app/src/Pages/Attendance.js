@@ -3,17 +3,35 @@ import './People.css';
 
 const API_BASE = '/server/attendance_function';
 
+const formatDate = (d) => d.toISOString().slice(0, 10);
+const getMonthStart = () => {
+  const now = new Date();
+  return formatDate(new Date(now.getFullYear(), now.getMonth(), 1));
+};
+
 const Attendance = ({ userRole, userEmail }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [sdate, setSdate] = useState(getMonthStart());
+  const [edate, setEdate] = useState(formatDate(new Date()));
 
   const fetchData = async () => {
+    if (sdate && edate && sdate > edate) {
+      setError('From date cannot be after To date.');
+      return;
+    }
+
     setLoading(true);
     setError('');
     setData(null);
     try {
-      const res = await fetch(`${API_BASE}?limit=50`);
+      const qs = new URLSearchParams({
+        limit: '200',
+        sdate,
+        edate,
+      });
+      const res = await fetch(`${API_BASE}?${qs.toString()}`);
       const json = await res.json();
       if (!res.ok) {
         throw new Error(json.error || json.message || 'Request failed');
@@ -56,6 +74,26 @@ const Attendance = ({ userRole, userEmail }) => {
       </header>
 
       <div className="people-actions">
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+          <label className="people-subtitle" style={{ margin: 0 }}>
+            From
+            <input
+              type="date"
+              value={sdate}
+              onChange={(e) => setSdate(e.target.value)}
+              style={{ marginLeft: 8, padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db' }}
+            />
+          </label>
+          <label className="people-subtitle" style={{ margin: 0 }}>
+            To
+            <input
+              type="date"
+              value={edate}
+              onChange={(e) => setEdate(e.target.value)}
+              style={{ marginLeft: 8, padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db' }}
+            />
+          </label>
+        </div>
         <button
           type="button"
           className="people-fetch-btn"

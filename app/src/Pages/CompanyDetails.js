@@ -63,6 +63,16 @@ const DOC_TYPES = [
   { docType: 'HeadHRSeal', label: 'Head HR Seal' }
 ];
 
+/** Same mapping as company_function DOC_TYPE_TO_COMPANY_KEY — list rows use camelCase file id fields. */
+const DOC_TYPE_TO_COMPANY_KEY_UI = {
+  SafetyOfficerAppoitnmentorder: 'safetyOfficerAppoitnmentorder',
+  SafetyOfficerApporvalcopy: 'safetyOfficerApporvalcopy',
+  DoctroAppoitnmentorder: 'doctroAppoitnmentorder',
+  DoctroApporvalcopy: 'doctroApporvalcopy',
+  HeadHRSign: 'headHRSign',
+  HeadHRSeal: 'headHRSeal'
+};
+
 const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]$/i;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
 /** PF establishment id e.g. MH/BAN/1234567/000/1234567 */
@@ -408,7 +418,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
 
     if (useCacheFirst) {
       try {
-        const cached = localStorage.getItem('companyDetailsData');
+        const cached = localStorage.getItem('companyDetailsData_v2');
         if (cached) {
           const parsed = JSON.parse(cached);
           if (Array.isArray(parsed) && parsed.length > 0) {
@@ -434,7 +444,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
           }
         }
         setCompanies(list);
-        localStorage.setItem('companyDetailsData', JSON.stringify(list));
+        localStorage.setItem('companyDetailsData_v2', JSON.stringify(list));
       } else {
         setCompanies([]);
       }
@@ -475,7 +485,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
 
   const openView = (company) => {
     setViewOnly(true);
-    setEditingId(company.id);
+    setEditingId(companyRowId(company) || company.id);
     setEditingCompany(company);
     setForm({
       companyName: company.companyName || '',
@@ -508,8 +518,9 @@ const CompanyDetails = ({ userRole, userEmail }) => {
 
   const openEdit = (company) => {
     setViewOnly(false);
-    setEditingId(company.id);
+    setEditingId(companyRowId(company) || company.id);
     setEditingCompany(company);
+    setPendingDocFiles({});
     setForm({
       companyName: company.companyName || '',
       companyAddress: company.companyAddress || '',
@@ -555,57 +566,72 @@ const CompanyDetails = ({ userRole, userEmail }) => {
     return () => window.removeEventListener(COMPANY_DETAILS_CLOSE_MODAL_EVENT, onCloseModal);
   }, [closeForm]);
 
-  const docTypeToKey = {
-    SafetyOfficerAppoitnmentorder: 'safetyOfficerAppoitnmentorder',
-    SafetyOfficerApporvalcopy: 'safetyOfficerApporvalcopy',
-    DoctroAppoitnmentorder: 'doctroAppoitnmentorder',
-    DoctroApporvalcopy: 'doctroApporvalcopy',
-    HeadHRSign: 'headHRSign',
-    HeadHRSeal: 'headHRSeal'
-  };
   const getFileIdForDocType = (docType) => {
     if (!editingCompany) return null;
-    const key = docTypeToKey[docType] || docType;
+    const key = DOC_TYPE_TO_COMPANY_KEY_UI[docType] || docType;
     return editingCompany[key] || editingCompany[docType] || null;
   };
 
   const loadDocNamesForCompany = useCallback(async (company) => {
-    const id = String(company?.id || '').trim();
+    const id = companyRowId(company);
     if (!id) return;
 
     const namesFromList =
       company?.documentFileNames && typeof company.documentFileNames === 'object'
-        ? company.documentFileNames
+        ? { ...company.documentFileNames }
         : {};
-    if (Object.keys(namesFromList).length > 0) {
-      setUploadedDocNames(namesFromList);
-    }
 
-    const entries = await Promise.all(
+    const metaByDoc = {};
+    await Promise.all(
       DOC_TYPES.map(async ({ docType }) => {
-        const key = docTypeToKey[docType] || docType;
-        const hasFile = Boolean(company?.[key] || company?.[docType]);
-        if (!hasFile) return null;
         try {
-          const res = await fetch(`${API_BASE}/company/${id}/file-meta/${docType}`, { cache: 'no-store' });
-          const data = await res.json();
-          if (data?.status === 'success') {
-            const fileName = String(data?.data?.fileName || '').trim();
-            if (fileName) return [docType, fileName];
+          const res = await fetch(
+            `${API_BASE}/company/${encodeURIComponent(id)}/file-meta/${encodeURIComponent(docType)}`,
+            { cache: 'no-store' }
+          );
+          const data = await res.json().catch(() => null);
+          if (data?.status === 'success' && data.data) {
+            const fid = data.data.fileId;
+            const hasId = fid != null && String(fid).trim() !== '';
+            metaByDoc[docType] = {
+              fileId: hasId ? fid : null,
+              fileName: String(data.data.fileName || '').trim()
+            };
           }
         } catch (_) {
-          // Ignore per-doc failures; keep existing values.
+          // Ignore per-doc failures.
         }
-        return null;
       })
     );
 
-    const fromMeta = {};
-    entries.forEach((pair) => {
-      if (pair) fromMeta[pair[0]] = pair[1];
+    const idsPatch = {};
+    for (const { docType } of DOC_TYPES) {
+      const m = metaByDoc[docType];
+      if (m?.fileId) {
+        const k = DOC_TYPE_TO_COMPANY_KEY_UI[docType];
+        if (k) idsPatch[k] = m.fileId;
+      }
+    }
+
+    setUploadedDocNames((prev) => {
+      const next = { ...namesFromList, ...prev };
+      for (const { docType } of DOC_TYPES) {
+        const m = metaByDoc[docType];
+        if (!m) continue;
+        if (m.fileName) {
+          next[docType] = m.fileName;
+        } else if (m.fileId && !next[docType]) {
+          next[docType] = 'File attached';
+        }
+      }
+      return next;
     });
-    if (Object.keys(fromMeta).length > 0) {
-      setUploadedDocNames((prev) => ({ ...prev, ...fromMeta }));
+
+    if (Object.keys(idsPatch).length > 0) {
+      setEditingCompany((prev) => {
+        if (!prev || companyRowId(prev) !== id) return prev;
+        return { ...prev, ...idsPatch };
+      });
     }
   }, []);
 
@@ -1607,6 +1633,9 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                           )}
                           {isEdit && uploadedText && (
                             <span className="company-details-doc-pending">Uploaded: {uploadedText}</span>
+                          )}
+                          {isEdit && !uploadedText && fileId && (
+                            <span className="company-details-doc-pending">File attached{uploadingDoc === docType ? ' — loading name…' : ''}</span>
                           )}
                           <p className="company-details-doc-hint-line">Max 5MB · PDF, DOC, DOCX, JPG, PNG</p>
                           {isUploading && <span className="company-details-doc-uploading">Uploading…</span>}

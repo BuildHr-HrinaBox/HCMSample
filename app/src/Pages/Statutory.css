@@ -807,6 +807,29 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
   .statutory-table tbody tr.bulk-imported.selected {
     background: #eff6ff !important;
   }
+
+  /* Full row muted when statutory status / approval is Approved */
+  .statutory-table tbody tr.statutory-row-approved {
+    background: #eceff3 !important;
+  }
+
+  .statutory-table tbody tr.statutory-row-approved:hover {
+    background: #e2e6eb !important;
+  }
+
+  .statutory-table tbody tr.statutory-row-approved.selected {
+    background: #e5edf8 !important;
+  }
+
+  .statutory-table tbody tr.statutory-row-approved td {
+    color: #6b7280 !important;
+  }
+
+  .statutory-table tbody tr.statutory-row-approved .statutory-status-btn,
+  .statutory-table tbody tr.statutory-row-approved .statutory-pill,
+  .statutory-table tbody tr.statutory-row-approved .statutory-approval-btn {
+    opacity: 0.88;
+  }
   
   .statutory-table td {
     color: #232323 !important;

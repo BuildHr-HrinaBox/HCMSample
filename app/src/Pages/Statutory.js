@@ -975,8 +975,393 @@ const buildRegisterOfWagesHeaderRows = (worksheet, r0, r1, numCols) => {
 const PROOF_SUBMISSION_DOC_EXT = /\.(pdf|png|jpe?g|gif|webp|bmp|tiff?|heic)$/i;
 const isProofSubmissionDocumentFileName = (name) => PROOF_SUBMISSION_DOC_EXT.test(String(name || '').trim());
 const isRowStatusApproved = (row) => {
-  const raw = row?.status != null && row.status !== '' ? row.status : row?.Status;
-  return String(raw || '').trim().toLowerCase() === 'approved';
+  const rawStatus = row?.status != null && row.status !== '' ? row.status : row?.Status;
+  if (String(rawStatus || '').trim().toLowerCase() === 'approved') return true;
+  const rawApproval = row?.approval != null && row.approval !== '' ? row.approval : row?.Approval;
+  const aNorm = String(rawApproval || '').trim().toLowerCase();
+  return aNorm === 'approved' || aNorm === 'approve';
+};
+
+const AUTH_SIGNATORY_LABEL_RE =
+  /\b(authorised|authorized)\s+signator(y|ies)\b/i;
+
+function statutoryExcelCellText(val) {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'object') {
+    if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+    if (val.text != null) return String(val.text);
+    if (val.result != null) return String(val.result);
+  }
+  return '';
+}
+
+function detectImageExtensionFromArrayBuffer(ab) {
+  const u = new Uint8Array(ab.byteLength ? ab.slice(0, 12) : []);
+  if (u.length >= 4 && u[0] === 0x89 && u[1] === 0x50 && u[2] === 0x4e && u[3] === 0x47) return 'png';
+  if (u.length >= 3 && u[0] === 0xff && u[1] === 0xd8 && u[2] === 0xff) return 'jpeg';
+  if (u.length >= 6 && u[0] === 0x47 && u[1] === 0x49 && u[2] === 0x46) return 'gif';
+  if (u.length >= 12 && u[8] === 0x57 && u[9] === 0x45 && u[10] === 0x42 && u[11] === 0x50) return 'webp';
+  return 'png';
+}
+
+function looksLikeJsonErrorArrayBuffer(ab) {
+  if (!ab || !ab.byteLength) return true;
+  const head = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(ab.slice(0, 120))).trim();
+  return head.startsWith('{') && (head.includes('"failure"') || head.includes('"status"'));
+}
+
+function normalizeFooterSearchText(txt) {
+  return String(txt || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function getFooterScanCellText(worksheet, r, c) {
+  let cell;
+  try {
+    cell = worksheet.getCell(r, c);
+  } catch {
+    return '';
+  }
+  const fromValue = statutoryExcelCellText(cell.value).replace(/\u00a0/g, ' ').trim();
+  if (fromValue) return fromValue;
+  try {
+    const t = String(cell.text || '').replace(/\u00a0/g, ' ').trim();
+    if (t) return t;
+  } catch {
+    /* ignore */
+  }
+  return '';
+}
+
+function footerRowMatchesAuthorisedSignatory(normRow) {
+  if (!normRow) return false;
+  if (AUTH_SIGNATORY_LABEL_RE.test(normRow)) return true;
+  if (normRow.includes('authorised signatory') || normRow.includes('authorized signatory')) return true;
+  if (normRow.includes('authorised') && normRow.includes('signatory')) return true;
+  if (normRow.includes('authorized') && normRow.includes('signatory')) return true;
+  return false;
+}
+
+function excelColumnLetterFrom1Based(col1Based) {
+  let n = Math.max(1, Math.floor(col1Based));
+  let s = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s || 'A';
+}
+
+function findAuthorisedSignatoryCell(worksheet) {
+  const maxRow = 520;
+  const maxCol = 120;
+  for (let r = 1; r <= maxRow; r += 1) {
+    const rowChunks = [];
+    for (let c = 1; c <= maxCol; c += 1) {
+      const raw = getFooterScanCellText(worksheet, r, c);
+      if (!raw) continue;
+      rowChunks.push(normalizeFooterSearchText(raw));
+    }
+    const normRow = rowChunks.join(' ').trim();
+    if (!footerRowMatchesAuthorisedSignatory(normRow)) continue;
+    for (let c = 1; c <= maxCol; c += 1) {
+      const raw = getFooterScanCellText(worksheet, r, c);
+      const norm = normalizeFooterSearchText(raw);
+      if (!norm) continue;
+      if (
+        AUTH_SIGNATORY_LABEL_RE.test(norm) ||
+        norm.includes('authorised signatory') ||
+        norm.includes('authorized signatory') ||
+        (norm.includes('signatory') && (norm.includes('authorised') || norm.includes('authorized')))
+      ) {
+        return { row: r, col: c };
+      }
+    }
+    for (let c = 1; c <= maxCol; c += 1) {
+      if (String(getFooterScanCellText(worksheet, r, c) || '').trim()) return { row: r, col: c };
+    }
+    return { row: r, col: 21 };
+  }
+  return null;
+}
+
+async function resolveCompanyIdForStatutoryTemplateDownload(item) {
+  let listResp;
+  try {
+    listResp = await fetch('/server/company_function/company');
+  } catch {
+    return null;
+  }
+  if (!listResp || !listResp.ok) return null;
+  const j = await listResp.json().catch(() => null);
+  const list = j?.data?.companyDetails;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const target = String(item?.companyName || item?.CompanyName || '')
+    .trim()
+    .toLowerCase();
+  if (target) {
+    const match = list.find((co) => String(co.companyName || '').trim().toLowerCase() === target);
+    if (match?.id != null) return match.id;
+  }
+  return list[0]?.id ?? null;
+}
+
+async function fetchCompanyHeadHrImageArrayBuffers(companyId) {
+  if (companyId == null || companyId === '') return { sign: null, seal: null };
+  const base = `/server/company_function/company/${encodeURIComponent(String(companyId))}/file/`;
+  const fetchOne = async (docType) => {
+    try {
+      const r = await fetch(`${base}${docType}`);
+      if (!r.ok) return null;
+      const buf = await r.arrayBuffer();
+      if (!buf || !buf.byteLength || looksLikeJsonErrorArrayBuffer(buf)) return null;
+      return buf;
+    } catch {
+      return null;
+    }
+  };
+  const [sign, seal] = await Promise.all([fetchOne('HeadHRSign'), fetchOne('HeadHRSeal')]);
+  return { sign, seal };
+}
+
+const STATUTORY_SIGNATORY_FOOTER_FONT = { name: 'Palatino Linotype', size: 12, bold: true, color: { argb: 'FF000000' } };
+
+function clearWorksheetCellRect(worksheet, r1, r2, c1, c2) {
+  const rStart = Math.min(r1, r2);
+  const rEnd = Math.max(r1, r2);
+  const cStart = Math.min(c1, c2);
+  const cEnd = Math.max(c1, c2);
+  for (let r = rStart; r <= rEnd; r += 1) {
+    for (let c = cStart; c <= cEnd; c += 1) {
+      try {
+        worksheet.getCell(r, c).value = null;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/** Template often leaves "Signature of Employer / ..." on rows that overlap seal images — remove all but `keepRow1Based`. */
+function removeGhostSignatureEmployerFooterText(worksheet, keepRow1Based, scanR1, scanR2, maxCol = 70) {
+  const rLo = Math.max(1, Math.min(scanR1, scanR2));
+  const rHi = Math.min(520, Math.max(scanR1, scanR2));
+  const needle = /signature\s+of\s+employer/i;
+  for (let r = rLo; r <= rHi; r += 1) {
+    if (r === keepRow1Based) continue;
+    for (let c = 1; c <= maxCol; c += 1) {
+      try {
+        const raw = getFooterScanCellText(worksheet, r, c);
+        if (!raw || !needle.test(String(raw))) continue;
+        worksheet.getCell(r, c).value = null;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+function applyMergedFooterTextLine(worksheet, row1Based, centerCol1Based, text, mergeHalfSpanCols) {
+  const l = Math.max(1, centerCol1Based - mergeHalfSpanCols);
+  const r = Math.min(90, centerCol1Based + mergeHalfSpanCols);
+  const leftL = excelColumnLetterFrom1Based(l);
+  const rightL = excelColumnLetterFrom1Based(r);
+  const rangeAddr = `${leftL}${row1Based}:${rightL}${row1Based}`;
+  try {
+    worksheet.unMergeCells(rangeAddr);
+  } catch {
+    /* no existing merge for this exact range */
+  }
+  try {
+    worksheet.mergeCells(rangeAddr);
+  } catch {
+    const cell = worksheet.getCell(row1Based, centerCol1Based);
+    cell.value = text;
+    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: false };
+    cell.font = { ...STATUTORY_SIGNATORY_FOOTER_FONT };
+    return;
+  }
+  const cell = worksheet.getCell(row1Based, l);
+  cell.value = text;
+  cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: false };
+  cell.font = { ...STATUTORY_SIGNATORY_FOOTER_FONT };
+}
+
+function writeStatutoryAuthorisedSignatoryFooterBlock(worksheet, sigRow1Based, sigCol1Based, footerCompanyName) {
+  const companyPart =
+    footerCompanyName && String(footerCompanyName).trim() ? String(footerCompanyName).trim() : 'Company Name';
+  const lineForCompany = `For (${companyPart})`;
+  const lineAuthorised = 'Authorised Signatory';
+  const lineSignature = 'Signature of Employer / Manager / Authorised Person';
+  /** Layout: For (row-3) → HeadHRSign (rows-2..-1) → Authorised (row) → HeadHRSeal (rows+1..+2) → Signature (row+3). */
+  const forRow = Math.max(1, sigRow1Based - 3);
+  const signatureLineRow = sigRow1Based + 3;
+  applyMergedFooterTextLine(worksheet, forRow, sigCol1Based, lineForCompany, 5);
+  applyMergedFooterTextLine(worksheet, sigRow1Based, sigCol1Based, lineAuthorised, 5);
+  applyMergedFooterTextLine(worksheet, signatureLineRow, sigCol1Based, lineSignature, 7);
+}
+
+async function injectHeadHrSignSealAboveAuthorisedSignatoryInBlob(blob, { signBuffer, sealBuffer, footerCompanyName }) {
+  const validSign = signBuffer && signBuffer.byteLength && !looksLikeJsonErrorArrayBuffer(signBuffer);
+  const validSeal = sealBuffer && sealBuffer.byteLength && !looksLikeJsonErrorArrayBuffer(sealBuffer);
+  if (!validSign && !validSeal) return blob;
+  const arrayBuffer = await blob.arrayBuffer();
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(arrayBuffer);
+  let anchorWs = null;
+  let anchor = null;
+  const sheets = Array.from(workbook.worksheets || []).sort((a, b) => {
+    const score = (name) => (/form\s*u\b/i.test(String(name || '')) ? 0 : 1);
+    return score(a.name) - score(b.name);
+  });
+  for (let i = 0; i < sheets.length; i += 1) {
+    const ws = sheets[i];
+    const found = findAuthorisedSignatoryCell(ws);
+    if (found) {
+      anchorWs = ws;
+      anchor = found;
+      break;
+    }
+  }
+  if (!anchorWs || !anchor) return blob;
+
+  const { row: sigRow, col: sigCol } = anchor;
+  const sigCol0 = sigCol - 1;
+  const signImageTop1Based = Math.max(1, sigRow - 2);
+  const signImageBot1Based = signImageTop1Based + 1;
+  const sealImageTop1Based = sigRow + 1;
+  const sealImageBot1Based = sealImageTop1Based + 1;
+  /** ~half prior width: anchor across two columns centered on sigCol (was five). */
+  const imgBandLeft1 = Math.max(1, sigCol - 1);
+  const imgBandRight1 = Math.min(90, imgBandLeft1 + 1);
+  [signImageTop1Based, signImageBot1Based, sealImageTop1Based, sealImageBot1Based].forEach((rn) => {
+    const row = anchorWs.getRow(rn);
+    row.height = Math.max(Number(row.height) || 0, 56);
+  });
+
+  const forRow = Math.max(1, sigRow - 3);
+  const signatureLineRow = sigRow + 3;
+  const clearC1 = Math.max(1, sigCol - 14);
+  const clearC2 = Math.min(90, sigCol + 14);
+  clearWorksheetCellRect(anchorWs, signImageTop1Based, signImageBot1Based, clearC1, clearC2);
+  clearWorksheetCellRect(anchorWs, sealImageTop1Based, sealImageBot1Based, clearC1, clearC2);
+  removeGhostSignatureEmployerFooterText(anchorWs, signatureLineRow, forRow - 2, signatureLineRow + 4, clearC2);
+
+  const pushImage = (buf, rangeStr, tlFallback) => {
+    if (!buf || !buf.byteLength || looksLikeJsonErrorArrayBuffer(buf)) return;
+    const ext = detectImageExtensionFromArrayBuffer(buf);
+    if (ext === 'webp') {
+      console.warn('Statutory template: WebP Head HR image is not supported for Excel embedding; skip.');
+      return;
+    }
+    const uint = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    let imageId;
+    try {
+      imageId = workbook.addImage({ buffer: uint, extension: ext });
+    } catch (e) {
+      console.warn('Statutory template: addImage buffer rejected:', e);
+      return;
+    }
+    try {
+      if (rangeStr) {
+        anchorWs.addImage(imageId, rangeStr);
+        return;
+      }
+    } catch (e) {
+      console.warn('Statutory template: addImage range anchor failed, trying tl/ext:', e);
+    }
+    if (tlFallback) {
+      try {
+        anchorWs.addImage(imageId, tlFallback);
+      } catch (e2) {
+        console.warn('Statutory template: addImage tl/ext anchor failed:', e2);
+      }
+    }
+  };
+
+  const signRange = `${excelColumnLetterFrom1Based(imgBandLeft1)}${signImageTop1Based}:${excelColumnLetterFrom1Based(imgBandRight1)}${signImageBot1Based}`;
+  const sealRange = `${excelColumnLetterFrom1Based(imgBandLeft1)}${sealImageTop1Based}:${excelColumnLetterFrom1Based(imgBandRight1)}${sealImageBot1Based}`;
+  const signTlRow0 = signImageTop1Based - 1;
+  const sealTlRow0 = sealImageTop1Based - 1;
+  const signTl = {
+    tl: { col: Math.max(0, sigCol0 - 1) + 0.05, row: signTlRow0 + 0.04 },
+    ext: { width: 90, height: 56 }
+  };
+  const sealTl = {
+    tl: { col: Math.max(0, sigCol0 - 1) + 0.05, row: sealTlRow0 + 0.04 },
+    ext: { width: 90, height: 56 }
+  };
+
+  pushImage(validSign ? signBuffer : null, signRange, signTl);
+  pushImage(validSeal ? sealBuffer : null, sealRange, sealTl);
+
+  try {
+    writeStatutoryAuthorisedSignatoryFooterBlock(anchorWs, sigRow, sigCol, footerCompanyName);
+  } catch (e) {
+    console.warn('Statutory template: signatory footer text write failed:', e);
+  }
+  removeGhostSignatureEmployerFooterText(anchorWs, signatureLineRow, forRow - 2, signatureLineRow + 4, clearC2);
+
+  const outBuf = await workbook.xlsx.writeBuffer();
+  return new Blob([outBuf], { type: blob.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+async function appendApprovedStatutoryHeadHrSignSealToDownloadBlob(blob, item) {
+  if (!isRowStatusApproved(item)) return blob;
+  try {
+    const companyId = await resolveCompanyIdForStatutoryTemplateDownload(item);
+    const { sign, seal } = await fetchCompanyHeadHrImageArrayBuffers(companyId);
+    const footerCompanyName =
+      String(item?.companyName || item?.CompanyName || '').trim() || null;
+    return await injectHeadHrSignSealAboveAuthorisedSignatoryInBlob(blob, {
+      signBuffer: sign,
+      sealBuffer: seal,
+      footerCompanyName
+    });
+  } catch (err) {
+    console.warn('Statutory template: Head HR sign/seal injection failed:', err);
+    return blob;
+  }
+}
+
+/** Latest activity time for table ordering (new saves/submissions surface first). */
+const getStatutoryRowActivityTimeMs = (row) => {
+  const raw =
+    row?.modifiedTime ??
+    row?.ModifiedTime ??
+    row?.modified_time ??
+    row?.createdTime ??
+    row?.CreatedTime ??
+    row?.created_time ??
+    '';
+  const parsed = Date.parse(String(raw || '').trim());
+  if (Number.isFinite(parsed)) return parsed;
+  const idStr = String(row?.id ?? '').trim();
+  if (/^\d+$/.test(idStr)) {
+    const n = Number.parseInt(idStr, 10);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+};
+
+/** Draft saved (Autofill → Save) or workflow sent — surface these rows before lines still empty. */
+const hasStatutoryDraftSubmittedForSort = (row) => {
+  const draftVal = row?.draftFile ?? row?.DraftFile ?? null;
+  const hasDraftFile =
+    draftVal != null &&
+    String(draftVal).trim() !== '' &&
+    String(draftVal).trim().toLowerCase() !== 'null' &&
+    String(draftVal).trim().toLowerCase() !== 'undefined';
+  if (hasDraftFile) return true;
+  const sfa = String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim();
+  return /^sent$/i.test(sfa);
 };
 
 const initialForm = {
@@ -1021,6 +1406,8 @@ const Statutory = ({ userEmail, userRole }) => {
   const [allowedActCategoryList, setAllowedActCategoryList] = useState(null);
   const [siteNamesByActCategory, setSiteNamesByActCategory] = useState({});
   const [allowedSiteNameList, setAllowedSiteNameList] = useState(null);
+  /** After first `fetchStatutoryData` run finishes (incl. silent mount refresh), Site column visibility can use scope lists — avoids cache-first paint before Site Management meta arrives. */
+  const [transactionSiteMetaReady, setTransactionSiteMetaReady] = useState(false);
   const hasSiteBasedActScope = Array.isArray(allowedActCategoryList) && allowedActCategoryList.length > 0;
 
   const [form, setForm] = useState(initialForm);
@@ -1983,6 +2370,7 @@ const Statutory = ({ userEmail, userRole }) => {
     } finally {
       if (!silentRefresh) setLoading(false);
       isFetchingStatutoryRef.current = false;
+      setTransactionSiteMetaReady(true);
     }
   };
 
@@ -5502,7 +5890,10 @@ const Statutory = ({ userEmail, userRole }) => {
         if (isFixedRowAggregateComplianceTable(headersToUse)) {
           mappedData = parsed.tableData || [];
         } else {
-          mappedData = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          mappedData = await fetchAndPopulateEmployeeData(headersToUse, {
+            returnMappedData: true,
+            ...(isFormADownload ? { formAPeopleSkipManualColumns: true } : {})
+          });
         }
       }
 
@@ -5520,7 +5911,10 @@ const Statutory = ({ userEmail, userRole }) => {
       ) {
         const filled = countFilledRowCells(mappedData[0], headersToUse);
         try {
-          const zohoRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          const zohoRows = await fetchAndPopulateEmployeeData(headersToUse, {
+            returnMappedData: true,
+            ...(isFormADownload ? { formAPeopleSkipManualColumns: true } : {})
+          });
           if (Array.isArray(zohoRows) && zohoRows.length > mappedData.length && filled <= 2) {
             mappedData = zohoRows;
           }
@@ -5623,7 +6017,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (isForm25Download && !usedLiveModalGrid) {
         try {
-          const refreshedForm25Rows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          const refreshedForm25Rows = await fetchAndPopulateEmployeeData(headersToUse, {
+            returnMappedData: true,
+            form25PeopleSkipManualColumns: true
+          });
           if (Array.isArray(refreshedForm25Rows) && refreshedForm25Rows.length > 0) {
             mappedData = refreshedForm25Rows;
             savedDraftRowMatrix = null;
@@ -5636,7 +6033,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (isFormBDownload && !usedLiveModalGrid) {
         try {
-          const refreshedFormBRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          const refreshedFormBRows = await fetchAndPopulateEmployeeData(headersToUse, {
+            returnMappedData: true,
+            formBLabourWelfareAutofill: true
+          });
           if (Array.isArray(refreshedFormBRows) && refreshedFormBRows.length > 0) {
             mappedData = refreshedFormBRows;
             savedDraftRowMatrix = null;
@@ -5782,7 +6182,7 @@ const Statutory = ({ userEmail, userRole }) => {
         setError('No data available to fill in the draft.');
         return;
       }
-      const { blob, fileName } = isFormADownload
+      let { blob, fileName } = isFormADownload
         ? await buildFormAWorkbookWithTemplateStyles({
             templateArrayBuffer: arrayBuffer,
             headersToUse,
@@ -5931,6 +6331,7 @@ const Statutory = ({ userEmail, userRole }) => {
             formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx',
             allowTemplateFallback: false
           });
+      blob = await appendApprovedStatutoryHeadHrSignSealToDownloadBlob(blob, item);
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -6473,7 +6874,84 @@ const Statutory = ({ userEmail, userRole }) => {
         console.error('No employees found. Full response:', JSON.stringify(result, null, 2));
         throw new Error('No employee data found in response. Please check the API response structure.');
       }
-     
+
+      /** Form B table: infer from column titles when modal title/act is incomplete (merged TN LWF headers). */
+      const looksLikeFormBLabourWelfareEmployeeTable = () => {
+        const joined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+        if (/labour\s*welfare|tamil\s*nadu.*lwf|\blwf\b/i.test(joined) && /register\s+of\s+wages/i.test(joined)) {
+          return true;
+        }
+        if (/\btotal\s+emoluments\b/.test(joined)) return true;
+        if (/\bamounts?\s+deducted\b/.test(joined) && /\bother\s+deductions?\b/.test(joined)) return true;
+        if (/total\s+number\s+of\s+empl/.test(joined)) return true;
+        return false;
+      };
+
+      const formBAutofillContext =
+        options.formBLabourWelfareAutofill === true ||
+        looksLikeFormBLabourWelfareEmployeeTable() ||
+        (isFormFileModalOpen &&
+          isFormBLabourWelfareContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            currentHeaders
+          ));
+
+      const unwrapEmp = (empItem) => empItem.Employee || empItem.employee || empItem;
+
+      const getFormBEmployeeFullName = (em) => {
+        const fn = String(em.FirstName || em['FirstName'] || em.firstName || em['First Name'] || '').trim();
+        const ln = String(em.LastName || em['LastName'] || em.lastName || em['Last Name'] || '').trim();
+        if (fn && ln) return `${fn} ${ln}`;
+        return fn || ln || '';
+      };
+
+      const isFormBTotalEmployeeCountHeader = (h) => {
+        const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        if (/total\s+number\s+of\s+empl/.test(s)) return true;
+        if (/total\s+number\s+of\s+employees?/.test(s)) return true;
+        if (s.includes('total') && s.includes('number') && (s.includes('employee') || s.includes('empl'))) return true;
+        return false;
+      };
+
+      /** Form B: TN LWF total emoluments column — fill from payroll earning "Basic Earnings". */
+      const isFormBTotalEmolumentsBasicEarningsHeader = (h) => {
+        const s = String(h || '').toLowerCase().replace(/\s+/g, ' ');
+        if (!s.includes('emolument')) return false;
+        return s.includes('payable') || s.includes('including') || s.includes('basic wage');
+      };
+
+      /** Form B: "Other deductions" sub-column — per product mapping, use payroll "Other Allowance" amount. */
+      const isFormBOtherDeductionsOtherAllowanceHeader = (h) => {
+        const s = String(h || '').toLowerCase().replace(/\s+/g, ' ');
+        return /other\s+deductions?/.test(s) || /deducted.*other\s+deductions?/.test(s);
+      };
+
+      /** Form B: avoid mapping People `employee_status` ("Active") into wage/balance columns. */
+      const isFormBBalanceDueHeader = (h) => {
+        const s = String(h || '').toLowerCase().replace(/\s+/g, ' ');
+        return /balance\s+due\s+to\s+the\s+employees?/.test(s) || (s.includes('balance') && s.includes('due') && s.includes('employee'));
+      };
+
+      let formBTotalEmployeeCount = 0;
+      if (formBAutofillContext) {
+        formBTotalEmployeeCount = employees.filter((empItem) => {
+          const em = unwrapEmp(empItem);
+          const id = String(
+            em.EmployeeID ||
+              em['EmployeeID'] ||
+              em['Employee ID'] ||
+              em['Role.ID'] ||
+              (em.Role && typeof em.Role === 'object' && em.Role.ID ? em.Role.ID : '') ||
+              ''
+          ).trim();
+          const fn = String(em.FirstName || em['FirstName'] || '').trim();
+          const ln = String(em.LastName || em['LastName'] || '').trim();
+          return Boolean(id && fn && ln);
+        }).length;
+      }
+
       // Map employee data to form table structure
       // Helper function to sanitize values - ensure null/undefined/false become empty strings
       const sanitizeValue = (value) => {
@@ -6488,6 +6966,113 @@ const Statutory = ({ userEmail, userRole }) => {
       const genericHeadersCount = currentHeaders.filter((h) => genericHeaderRegex.test(String(h || '').trim())).length;
       const shouldUseGenericColumnFallback =
         currentHeaders.length > 0 && genericHeadersCount >= Math.max(3, Math.ceil(currentHeaders.length * 0.5));
+
+      /** Headers like `17` or `DATES_17` — calendar day columns only attendance should fill. */
+      const isLikelyDayOfMonthColumnHeader = (h) => {
+        const t = String(h || '').trim();
+        const direct = t.match(/^(\d{1,2})$/);
+        if (direct) {
+          const n = Number(direct[1]);
+          return n >= 1 && n <= 31;
+        }
+        const suffixed = t.match(/(?:^|_)(\d{1,2})$/);
+        if (suffixed) {
+          const n = Number(suffixed[1]);
+          return n >= 1 && n <= 31;
+        }
+        return false;
+      };
+
+      /** Form 25: these columns must stay manual / blank — People autofill mis-maps them via the generic header matcher. */
+      const looksLikeForm25EmployeeTable = () => {
+        const joined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+        let score = 0;
+        if (/name\s+of\s+the\s+worker/.test(joined)) score++;
+        if (/worker\s+identity/.test(joined)) score++;
+        if (/register\s+of\s+adult/.test(joined)) score++;
+        if (/scheme\s+of\s+shifts/.test(joined)) score++;
+        if (/time\s+at\s+which\s+work\s+commence/.test(joined)) score++;
+        if (/rest\s+interval/.test(joined)) score++;
+        if (/time\s+at\s+which\s+work\s+end/.test(joined)) score++;
+        return score >= 2;
+      };
+      const isForm25LossOfPayDaysHeader = (h) => {
+        const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const n = s.replace(/[^a-z0-9]/g, '');
+        if (!n.includes('lossofpay')) return false;
+        return /\bday\b|\bdays\b|no\.?\s*of|number\s+of/.test(s) || n.includes('day') || n.includes('number');
+      };
+      const isForm25NationalHolidayBenefitHeader = (h) => {
+        const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        if (!s.includes('national') || !s.includes('holiday')) return false;
+        return s.includes('benefit') || s.includes('availed') || s.includes('working');
+      };
+      const form25SkipLossPayAndNationalHolidayBenefit =
+        looksLikeForm25EmployeeTable() ||
+        options.form25PeopleSkipManualColumns === true ||
+        (isFormFileModalOpen &&
+          /\bform\s*[-"']?\s*25\b/i.test(
+            String(formFileModalData?.item?.formName || formFileModalData?.item?.FormName || '')
+          ));
+
+      /** Form A (Maternity Benefit muster): leave calendar / employment-day columns manual; fill name + age from People. */
+      const looksLikeFormAMusterEmployeeTable = () => {
+        const joined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+        if (
+          currentHeaders.some((h) => {
+            const s = String(h || '').toLowerCase();
+            return s.includes('woman') && /\bage\b/.test(s);
+          })
+        ) {
+          return true;
+        }
+        if (/name\s+of\s+the\s+woman/.test(joined)) return true;
+        if (/no\.?\s*of\s+days?\s+not\s+employed/.test(joined)) return true;
+        if (/no\.?\s*of\s+days?\s+laid\s+off/.test(joined)) return true;
+        if (/no\.?\s*of\s+days?\s+employed/.test(joined) && /(^|\n)month(\n|$)/.test(`\n${joined}\n`)) return true;
+        return false;
+      };
+      const formAAutofillContext =
+        looksLikeFormAMusterEmployeeTable() ||
+        options.formAPeopleSkipManualColumns === true ||
+        (isFormFileModalOpen &&
+          (/\bform\s*[-"']?\s*a\b/i.test(String(formFileModalData?.item?.formName || formFileModalData?.item?.FormName || '')) ||
+            /maternity\s+benefit/i.test(
+              String(
+                formFileModalData?.item?.Act ||
+                  formFileModalData?.item?.act ||
+                  formFileModalData?.parsedFormHeader?.title ||
+                  formFileModalData?.parsedFormHeader?.reference ||
+                  ''
+              )
+            )));
+      const isFormAMonthOnlyColumn = (h) => {
+        const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const n = s.replace(/[^a-z0-9]/g, '');
+        if (n === 'month') return true;
+        return /^\(?\s*\d*\s*\)?\s*month\s*$/.test(s);
+      };
+      const isFormADaysEmployedColumn = (h) => {
+        const s = String(h || '').toLowerCase();
+        if (/not\s+employed/.test(s)) return false;
+        return /no\.?\s*of\s+days?\s+employed/.test(s) || (/days?\s+of\s+employment/.test(s) && !/not\s+/.test(s));
+      };
+      const isFormALaidOffColumn = (h) => /no\.?\s*of\s+days?\s+laid\s+off/.test(String(h || '').toLowerCase()) ||
+        (/\blaid\s+off\b/.test(String(h || '').toLowerCase()) && /\bday/.test(String(h || '').toLowerCase()));
+      const isFormANotEmployedColumn = (h) => /no\.?\s*of\s+days?\s+not\s+employed/.test(String(h || '').toLowerCase()) ||
+        (/\bnot\s+employed\b/.test(String(h || '').toLowerCase()) && /\bday/.test(String(h || '').toLowerCase()));
+      /** Form A: one cell for both name and age (e.g. "(1) Name of the woman and age"). */
+      const isFormACombinedWomanNameAndAgeHeader = (h) => {
+        const s = String(h || '').toLowerCase();
+        return s.includes('woman') && /\bage\b/.test(s);
+      };
+
+      /** Leave register / Form X style: statutory leave-wage columns are manual, not Zoho People. */
+      const isLeaveWagesPerSection9Or10Header = (h) => {
+        const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        if (!s.includes('leave') || !/wage/.test(s)) return false;
+        return /section\s*9\b/.test(s) || /section\s*10\b/.test(s);
+      };
 
       const getFallbackName = (emp) =>
         emp.FirstName ||
@@ -6550,6 +7135,9 @@ const Statutory = ({ userEmail, userRole }) => {
       const isLikelyFormW = currentHeaders.some((h) => /basic\s*wage/i.test(String(h || ''))) &&
         currentHeaders.some((h) => /dearness/i.test(String(h || ''))) &&
         currentHeaders.some((h) => /overtime/i.test(String(h || '')));
+      const isLikelyForm10 =
+        currentHeaders.some((h) => /number\s+in\s+register|register\s+number/i.test(String(h || ''))) &&
+        currentHeaders.some((h) => /overtime/i.test(String(h || '')));
 
       const toNumber = (val) => {
         const n = Number(val);
@@ -6557,12 +7145,31 @@ const Statutory = ({ userEmail, userRole }) => {
       };
 
       const getPayrollPayloadObject = (data) => {
+        const parseMaybeJson = (v) => {
+          if (!v) return {};
+          if (typeof v === 'object') return v;
+          if (typeof v === 'string') {
+            try {
+              const parsed = JSON.parse(v);
+              return parsed && typeof parsed === 'object' ? parsed : {};
+            } catch (_) {
+              return {};
+            }
+          }
+          return {};
+        };
+
         if (!data) return {};
-        if (Array.isArray(data)) return data[0] || {};
+        if (Array.isArray(data)) {
+          const first = data[0];
+          if (!first) return {};
+          if (typeof first === 'string') return parseMaybeJson(first);
+          return first;
+        }
         if (typeof data !== 'object') return {};
-        if (data.salary) return data.salary;
-        if (data.data && typeof data.data === 'object') return data.data;
-        if (data.employee_salary) return data.employee_salary;
+        if (data.salary) return parseMaybeJson(data.salary);
+        if (data.data) return parseMaybeJson(data.data);
+        if (data.employee_salary) return parseMaybeJson(data.employee_salary);
         return data;
       };
 
@@ -6585,6 +7192,26 @@ const Statutory = ({ userEmail, userRole }) => {
         if (!hit) return '';
         const amount = toNumber(hit.amount);
         return amount > 0 ? amount : '';
+      };
+
+      const pickFormBBasicEarningsAmount = (earnings) => {
+        const list = Array.isArray(earnings) ? earnings : [];
+        const exact = list.find((it) => String(it?.name || '').trim().toLowerCase() === 'basic earnings');
+        if (exact) {
+          const a = toNumber(exact.amount);
+          if (a > 0) return a;
+        }
+        return findEarningAmount(list, (type, name) => name.includes('basic earnings') || type === 'basic');
+      };
+
+      const pickFormBOtherAllowanceAmount = (earnings) => {
+        const list = Array.isArray(earnings) ? earnings : [];
+        const exact = list.find((it) => String(it?.name || '').trim().toLowerCase() === 'other allowance');
+        if (exact) {
+          const a = toNumber(exact.amount);
+          if (a > 0) return a;
+        }
+        return findEarningAmount(list, (type, name) => name.includes('other allowance'));
       };
 
       const buildFormWPayrollMap = (payrollData) => {
@@ -6621,6 +7248,233 @@ const Statutory = ({ userEmail, userRole }) => {
           otherAllowances: otherAllowanceTotal > 0 ? otherAllowanceTotal : '',
           overtimeWages: overtime,
           grossWages: grossWage
+        };
+      };
+
+      const parseTimeToMinutes = (raw) => {
+        const value = String(raw || '').trim();
+        if (!value) return null;
+        const m12 = value.match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
+        if (m12) {
+          let hh = Number(m12[1]);
+          const mm = Number(m12[2]);
+          const meridiem = m12[3].toLowerCase();
+          if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+          if (meridiem === 'pm' && hh < 12) hh += 12;
+          if (meridiem === 'am' && hh === 12) hh = 0;
+          return (hh * 60) + mm;
+        }
+        const m24 = value.match(/^(\d{1,2}):(\d{2})$/);
+        if (m24) {
+          const hh = Number(m24[1]);
+          const mm = Number(m24[2]);
+          if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+          return (hh * 60) + mm;
+        }
+        return null;
+      };
+
+      const parseFlexibleDate = (raw) => {
+        const value = String(raw || '').trim();
+        if (!value) return null;
+
+        const direct = new Date(value);
+        if (!Number.isNaN(direct.getTime())) return direct;
+
+        let m = value.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/);
+        if (m) {
+          const dd = Number(m[1]);
+          const mm = Number(m[2]) - 1;
+          const yyyy = Number(m[3].length === 2 ? `20${m[3]}` : m[3]);
+          const d = new Date(yyyy, mm, dd);
+          if (!Number.isNaN(d.getTime())) return d;
+        }
+
+        m = value.match(/^(\d{1,2})[-/\s]([A-Za-z]{3,})[-/\s](\d{2,4})$/);
+        if (m) {
+          const dd = Number(m[1]);
+          const mon = String(m[2]).slice(0, 3).toLowerCase();
+          const yyyy = Number(m[3].length === 2 ? `20${m[3]}` : m[3]);
+          const months = {
+            jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+            jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+          };
+          if (Object.prototype.hasOwnProperty.call(months, mon)) {
+            const d = new Date(yyyy, months[mon], dd);
+            if (!Number.isNaN(d.getTime())) return d;
+          }
+        }
+        return null;
+      };
+
+      const computeAgeFromDobForStatutory = (emp) => {
+        const dobRaw =
+          emp.Date_of_birth ||
+          emp['Date_of_birth'] ||
+          emp.DateofBirth ||
+          emp['Date of Birth'] ||
+          emp['DateofBirth'] ||
+          '';
+        const dob = parseFlexibleDate(dobRaw);
+        if (dob && !Number.isNaN(dob.getTime())) {
+          const today = new Date();
+          let age = today.getFullYear() - dob.getFullYear();
+          const md = today.getMonth() - dob.getMonth();
+          if (md < 0 || (md === 0 && today.getDate() < dob.getDate())) age -= 1;
+          if (age >= 0 && age < 120) return String(age);
+        }
+        const direct =
+          emp.Age ||
+          emp['Age'] ||
+          emp.age ||
+          emp['Employee Age'] ||
+          '';
+        return direct !== '' && direct != null ? String(direct).trim() : '';
+      };
+
+      const formatLocalDateYYYYMMDD = (dateObj) => {
+        if (!(dateObj instanceof Date) || Number.isNaN(dateObj.getTime())) return '';
+        const y = dateObj.getFullYear();
+        const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+        const d = String(dateObj.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+      };
+
+      const findValueByNormalizedKey = (obj, targetNormalizedKey, depth = 0) => {
+        if (!obj || typeof obj !== 'object' || depth > 5) return '';
+        const entries = Object.entries(obj);
+        for (let i = 0; i < entries.length; i++) {
+          const [k, v] = entries[i];
+          const nk = String(k || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (nk === targetNormalizedKey && v != null && String(v).trim() !== '') {
+            return v;
+          }
+        }
+        for (let i = 0; i < entries.length; i++) {
+          const [, v] = entries[i];
+          if (v && typeof v === 'object') {
+            const nested = findValueByNormalizedKey(v, targetNormalizedKey, depth + 1);
+            if (nested !== '') return nested;
+          }
+        }
+        return '';
+      };
+
+      const computeNormalHoursFromShift = (emp) => {
+        const shiftStart =
+          emp.ShiftStartTime ||
+          emp['ShiftStartTime'] ||
+          emp.shiftStartTime ||
+          emp['Shift Start Time'] ||
+          '';
+        const shiftEnd =
+          emp.ShiftEndTime ||
+          emp['ShiftEndTime'] ||
+          emp.shiftEndTime ||
+          emp['Shift End Time'] ||
+          '';
+        const startMin = parseTimeToMinutes(shiftStart);
+        const endMin = parseTimeToMinutes(shiftEnd);
+        if (startMin == null || endMin == null) return '';
+        let diff = endMin - startMin;
+        if (diff < 0) diff += 24 * 60;
+        const hours = Math.floor(diff / 60);
+        const mins = diff % 60;
+        return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+      };
+
+      const computeNormalHoursFromAttendanceRecord = (record) => {
+        if (!record || typeof record !== 'object') return '';
+        const shiftStart =
+          record.ShiftStartTime ||
+          record['ShiftStartTime'] ||
+          record.shiftStartTime ||
+          record['Shift Start Time'] ||
+          findValueByNormalizedKey(record, 'shiftstarttime') ||
+          '';
+        const shiftEnd =
+          record.ShiftEndTime ||
+          record['ShiftEndTime'] ||
+          record.shiftEndTime ||
+          record['Shift End Time'] ||
+          findValueByNormalizedKey(record, 'shiftendtime') ||
+          '';
+        const startMin = parseTimeToMinutes(shiftStart);
+        const endMin = parseTimeToMinutes(shiftEnd);
+        if (startMin == null || endMin == null) return '';
+        let diff = endMin - startMin;
+        if (diff < 0) diff += 24 * 60;
+        const hours = Math.floor(diff / 60);
+        const mins = diff % 60;
+        return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+      };
+
+      const getOvertimeWorkedValue = (emp) => {
+        const raw =
+          emp.OverTime ||
+          emp['OverTime'] ||
+          emp.overtime ||
+          emp['overtime'] ||
+          emp.OTHours ||
+          emp['OTHours'] ||
+          emp.OvertimeHours ||
+          emp['OvertimeHours'] ||
+          emp['Total overtime worked or production in case of piece workers'] ||
+          '';
+        const n = Number(raw);
+        if (Number.isFinite(n) && n > 0) return n;
+        const s = String(raw || '').trim();
+        return s || '';
+      };
+
+      const getOvertimeDateValue = (emp, hasOvertime) => {
+        if (!hasOvertime) return '';
+        return (
+          emp.OvertimeDate ||
+          emp['OvertimeDate'] ||
+          emp.OverTimeDate ||
+          emp['OverTimeDate'] ||
+          emp.overtime_date ||
+          emp['overtime_date'] ||
+          emp.Date ||
+          emp['Date'] ||
+          new Date().toISOString().slice(0, 10)
+        );
+      };
+
+      const buildForm10PayrollMap = (payrollData) => {
+        const p = getPayrollPayloadObject(payrollData);
+        const earnings = getEarningsArray(p);
+        const firstPresent = (...vals) => {
+          for (let i = 0; i < vals.length; i++) {
+            const v = vals[i];
+            if (v === null || v === undefined) continue;
+            if (typeof v === 'string' && v.trim() === '') continue;
+            return v;
+          }
+          return '';
+        };
+        const overtimeAmount = findEarningAmount(
+          earnings,
+          (type, name) => type === 'overtime' || type === 'ot' || name.includes('overtime')
+        );
+        const monthlySalaryRaw = firstPresent(
+          p.monthly_salary,
+          p['monthly_salary'],
+          p.MonthlySalary,
+          p['MonthlySalary']
+        );
+        const totalEarnings = monthlySalaryRaw !== ''
+          ? monthlySalaryRaw
+          : (
+            toNumber(p.monthly_gross_amount) ||
+            toNumber(p.gross_amount) ||
+            ''
+          );
+        return {
+          totalEarnings,
+          normalEarnings: totalEarnings,
+          totalOvertimeWorked: overtimeAmount
         };
       };
 
@@ -6690,6 +7544,51 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
+          // Day-of-month grid (Form 25 / Form V): never fuzzy-map People fields; attendance fills these later (if any).
+          if (isLikelyDayOfMonthColumnHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (
+            form25SkipLossPayAndNationalHolidayBenefit &&
+            (isForm25LossOfPayDaysHeader(header) || isForm25NationalHolidayBenefitHeader(header))
+          ) {
+            row[header] = '';
+            return;
+          }
+
+          if (
+            formAAutofillContext &&
+            (isFormAMonthOnlyColumn(header) ||
+              isFormADaysEmployedColumn(header) ||
+              isFormALaidOffColumn(header) ||
+              isFormANotEmployedColumn(header))
+          ) {
+            row[header] = '';
+            return;
+          }
+
+          if (formBAutofillContext && isFormBBalanceDueHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (formBAutofillContext && isFormBTotalEmolumentsBasicEarningsHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (formBAutofillContext && isFormBOtherDeductionsOtherAllowanceHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (isLeaveWagesPerSection9Or10Header(header)) {
+            row[header] = '';
+            return;
+          }
+
           // S.No mapping
           if (
             headerLower.includes('serial') ||
@@ -6700,8 +7599,45 @@ const Statutory = ({ userEmail, userRole }) => {
           ) {
             row[header] = String(index + 1);
           }
+          // Form B (TN LWF Register of Wages): total employees = count with Employee ID + First + Last name in Zoho.
+          else if (formBAutofillContext && isFormBTotalEmployeeCountHeader(header)) {
+            row[header] = String(formBTotalEmployeeCount);
+          }
+          // Form A: "(1) Name of the woman and age" — single column; append computed age after name.
+          else if (formAAutofillContext && isFormACombinedWomanNameAndAgeHeader(header)) {
+            const namePart =
+              emp.FirstName ||
+              emp['FirstName'] ||
+              emp.firstName ||
+              emp['First Name'] ||
+              emp.First_Name ||
+              emp.Name1 ||
+              emp['Name1'] ||
+              emp.Nameoftheemployee ||
+              emp['Name of the employee'] ||
+              emp['Nameoftheemployee'] ||
+              emp.name ||
+              emp.employeeName ||
+              emp.Name ||
+              emp['Employee Name'] ||
+              emp.Full_Name ||
+              emp['Full Name'] ||
+              emp.Employee_Name ||
+              emp['Employee_Name'] ||
+              '';
+            const agePart = computeAgeFromDobForStatutory(emp);
+            const nm = namePart != null ? String(namePart).trim() : '';
+            row[header] = sanitizeValue(nm && agePart ? `${nm}, ${agePart}` : nm || agePart || '');
+          }
           // Name of the employee/worker - try multiple field name variations
-          else if (headerLower.includes('name') && (headerLower.includes('employee') || headerLower.includes('emp') || headerLower.includes('worker'))) {
+          else if (
+            headerLower.includes('name') &&
+            (headerLower.includes('employee') ||
+              headerLower.includes('emp') ||
+              headerLower.includes('worker') ||
+              headerLower.includes('woman')) &&
+            !(headerLower.includes('woman') && /\bage\b/.test(headerLower))
+          ) {
             // Prioritize FirstName as it's the actual field in Zoho People
             const nameValue = emp.FirstName ||
                          emp['FirstName'] ||
@@ -6765,13 +7701,35 @@ const Statutory = ({ userEmail, userRole }) => {
                          })() ||
                          '';
            
-            row[header] = nameValue;
-            if (nameValue) {
-              const sourceField = Object.keys(emp).find(k => emp[k] === nameValue) || 'unknown';
-              console.log(`✓ Mapped name for employee ${index + 1}: ${nameValue} (from field: ${sourceField})`);
+            let displayName = nameValue;
+            if (
+              formBAutofillContext &&
+              (headerLower.includes('employee') || headerLower.includes('emp')) &&
+              !headerLower.includes('identification') &&
+              !headerLower.includes('id number') &&
+              !(headerLower.includes('emp') && headerLower.includes('id') && !headerLower.includes('name'))
+            ) {
+              const full = getFormBEmployeeFullName(emp);
+              if (full) displayName = full;
+            }
+            row[header] = displayName;
+            if (displayName) {
+              const sourceField = Object.keys(emp).find(k => emp[k] === displayName) || 'unknown';
+              console.log(`✓ Mapped name for employee ${index + 1}: ${displayName} (from field: ${sourceField})`);
             } else {
               console.warn(`✗ Could not find name field for employee ${index + 1}. Available name fields:`, Object.keys(emp).filter(k => k.toLowerCase().includes('name')));
             }
+          }
+          // Form A: Age from date of birth (or explicit Age field)
+          else if (
+            formAAutofillContext &&
+            (normalizedHeader === 'age' || /^age\b/i.test(headerLower)) &&
+            !headerLower.includes('wage') &&
+            !headerLower.includes('average') &&
+            !headerLower.includes('image') &&
+            !headerLower.includes('language')
+          ) {
+            row[header] = sanitizeValue(computeAgeFromDobForStatutory(emp));
           }
           // Employee Identification No. - fetch from EmployeeID from People API (e.g. "EmployeeID":"10193")
           else if (headerLower.includes('identification') ||
@@ -6827,26 +7785,25 @@ const Statutory = ({ userEmail, userRole }) => {
               console.log(`✓ Mapped Employee Identification No. for employee ${index + 1}: ${idValue}`);
             }
           }
-          // Worker Identity No. - fetch from Zoho_ID
+          // Worker Identity No. - fetch from EmployeeID
           else if ((headerLower.includes('worker') && headerLower.includes('identity')) ||
                    headerLower === 'worker identity no.' ||
                    headerLower === 'worker identity no') {
-            // Prioritize Zoho_ID as the source field
-            const workerIdValue = emp.Zoho_ID ||
-                         emp['Zoho_ID'] ||
-                         emp.zoho_id ||
-                         emp['zoho_id'] ||
-                         emp.ZohoID ||
-                         emp['ZohoID'] ||
-                         emp.zohoId ||
+            // Form 12 rule: Worker Identity No <- EmployeeID
+            const workerIdValue = emp.EmployeeID ||
+                         emp['EmployeeID'] ||
+                         emp['Employee ID'] ||
+                         emp.employeeId ||
+                         emp.Employee_ID ||
+                         emp['Role.ID'] ||
                          '';
            
             row[header] = workerIdValue;
             if (workerIdValue) {
-              console.log(`✓ Mapped Worker Identity No. for employee ${index + 1}: ${workerIdValue} (from Zoho_ID)`);
+              console.log(`✓ Mapped Worker Identity No. for employee ${index + 1}: ${workerIdValue} (from EmployeeID)`);
             } else {
-              console.warn(`✗ Could not find Zoho_ID field for employee ${index + 1}. Available ID fields:`,
-                Object.keys(emp).filter(k => k.toLowerCase().includes('zoho') || k.toLowerCase().includes('id')));
+              console.warn(`✗ Could not find EmployeeID field for employee ${index + 1}. Available ID fields:`,
+                Object.keys(emp).filter(k => k.toLowerCase().includes('employee') || k.toLowerCase().includes('id')));
             }
           }
           // Emp ID - fetch from EmployeeID (fallback to Zoho_ID)
@@ -6939,6 +7896,24 @@ const Statutory = ({ userEmail, userRole }) => {
               console.log(`✓ Mapped Date of Birth for employee ${index + 1}: ${birthDate}`);
             }
           }
+          // Date of Entry into Service (Form 12) -> Dateofjoining
+          else if (headerLower.includes('date') && headerLower.includes('entry') && headerLower.includes('service')) {
+            const entryDate = emp.Dateofjoining ||
+                         emp['Dateofjoining'] ||
+                         emp.DateofJoining ||
+                         emp['Date of Joining'] ||
+                         emp['DateofJoining'] ||
+                         emp.dateOfJoining ||
+                         emp['Date of joining'] ||
+                         emp.Date_of_Joining ||
+                         emp['Date_of_Joining'] ||
+                         '';
+
+            row[header] = entryDate;
+            if (entryDate) {
+              console.log(`✓ Mapped Date of Entry into Service for employee ${index + 1}: ${entryDate} (from Dateofjoining)`);
+            }
+          }
           // Date of Joining
           else if (headerLower.includes('date') && headerLower.includes('join')) {
             // Prioritize Dateofjoining as it's the actual field in Zoho People
@@ -6958,26 +7933,81 @@ const Statutory = ({ userEmail, userRole }) => {
               console.log(`✓ Mapped Date of Joining for employee ${index + 1}: ${joiningDate}`);
             }
           }
-          // Date on which made permanent - fetch from Dateofjoining
+          // Date on which made permanent - fetch from DateofConfirmation
           else if (headerLower.includes('date') && headerLower.includes('permanent') && headerLower.includes('made')) {
-            // Fetch from Dateofjoining as specified
-            const permanentDate = emp.Dateofjoining ||
-                         emp['Dateofjoining'] ||
-                         emp.DateofJoining ||
-                         emp['Date of Joining'] ||
-                         emp['DateofJoining'] ||
-                         emp.dateOfJoining ||
-                         emp['Date of joining'] ||
-                         emp.Date_of_Joining ||
-                         emp['Date_of_Joining'] ||
+            // Form 12 rule: Date on which made Permanent <- DateofConfirmation
+            const permanentDate = emp.DateofConfirmation ||
+                         emp['DateofConfirmation'] ||
+                         emp['Date of Confirmation'] ||
+                         emp.dateOfConfirmation ||
                          '';
            
             row[header] = permanentDate;
             if (permanentDate) {
-              console.log(`✓ Mapped Date on which made permanent for employee ${index + 1}: ${permanentDate} (from Dateofjoining)`);
+              console.log(`✓ Mapped Date on which made permanent for employee ${index + 1}: ${permanentDate} (from DateofConfirmation)`);
             } else {
-              console.warn(`✗ Could not find Dateofjoining field for employee ${index + 1} to populate "Date on which made permanent"`);
+              console.warn(`✗ Could not find DateofConfirmation field for employee ${index + 1} to populate "Date on which made permanent"`);
             }
+          }
+          // Form 12: Date on which completion of 480 days of Service
+          else if (headerLower.includes('480') && headerLower.includes('service')) {
+            // Keep blank as requested.
+            row[header] = '';
+          }
+          // Date of Exit - fetch from Dateofexit
+          else if (headerLower.includes('date') && headerLower.includes('exit')) {
+            row[header] = emp.Dateofexit ||
+                         emp['Dateofexit'] ||
+                         emp['Date of Exit'] ||
+                         emp.dateOfExit ||
+                         emp.Date_of_Exit ||
+                         emp['Date_of_Exit'] ||
+                         '';
+          }
+          // Form 10: Number in Register
+          else if (headerLower.includes('number in register') || (headerLower.includes('register') && headerLower.includes('number'))) {
+            row[header] =
+              emp.EmployeeID ||
+              emp['EmployeeID'] ||
+              emp['Employee ID'] ||
+              emp.Zoho_ID ||
+              emp['Zoho_ID'] ||
+              String(index + 1);
+          }
+          // Form 10: Date of which overtime has been worked
+          else if (headerLower.includes('date of which overtime') || (headerLower.includes('date') && headerLower.includes('overtime'))) {
+            const overtimeWorked = getOvertimeWorkedValue(emp);
+            const hasOvertime = Number(overtimeWorked) > 0 || String(overtimeWorked || '').trim() !== '';
+            row[header] = getOvertimeDateValue(emp, hasOvertime);
+          }
+          // Form 10: Total overtime worked or production in case of piece workers
+          else if (
+            (headerLower.includes('total') && headerLower.includes('overtime') && headerLower.includes('worked')) ||
+            (headerLower.includes('overtime') && headerLower.includes('production'))
+          ) {
+            row[header] = getOvertimeWorkedValue(emp);
+          }
+          // Form 10: Normal hours from ShiftStartTime and ShiftEndTime
+          else if (headerLower.includes('normal hours')) {
+            row[header] =
+              computeNormalHoursFromShift(emp) ||
+              emp.NormalHours ||
+              emp['NormalHours'] ||
+              emp['Normal hours'] ||
+              '';
+          }
+          // Form 10: Total earnings from monthly_salary
+          else if (
+            (headerLower.includes('total') && headerLower.includes('earning')) ||
+            headerLower.includes('total earnings') ||
+            (headerLower.includes('normal') && headerLower.includes('earning'))
+          ) {
+            row[header] =
+              emp.monthly_salary ||
+              emp['monthly_salary'] ||
+              emp.MonthlySalary ||
+              emp['MonthlySalary'] ||
+              '';
           }
           // Designation
           else if (headerLower.includes('designation')) {
@@ -7088,32 +8118,23 @@ const Statutory = ({ userEmail, userRole }) => {
               console.log(`✓ Mapped Permanent address for employee ${index + 1}: ${combinedAddress} (from: Address_Line_1=${addressLine1}, Address_Line_2=${addressLine2}, City=${city}, City2=${city2}, Country1=${country1})`);
             }
           }
-          // Provident Fund No. - explicitly only use Provident Fund fields, never fallback to Zoho_ID or other ID fields
-          // If not found in Zoho People data, leave blank
+          // EPF No / UAN No - fetch from UAN_Number
           else if (headerLower.includes('provident') || headerLower.includes('pf')) {
-            // Only check for Provident Fund specific fields, do not use any ID fields as fallback
-            // Since Provident Fund No. is not in Zoho People, this will always be blank
-            const pfValue = emp['Employee\'s Provident Fund No.'] ||
-                         emp['Employees Provident Fund No.'] ||
-                         emp['Employee\'s Provident Fund No'] ||
-                         emp['Employees Provident Fund No'] ||
-                         emp.ProvidentFundNo ||
-                         emp['ProvidentFundNo'] ||
-                         emp.Provident_Fund_No ||
-                         emp['Provident_Fund_No'] ||
-                         emp.pfNo ||
-                         emp['pfNo'] ||
-                         emp.PF_No ||
-                         emp['PF_No'] ||
+            const pfValue = emp.UAN_Number ||
+                         emp['UAN_Number'] ||
+                         emp.UANNumber ||
+                         emp['UAN Number'] ||
+                         emp.uanNumber ||
+                         emp.UAN ||
+                         emp['UAN'] ||
                          '';
-           
-            // Explicitly set to empty string if no Provident Fund data found (which is expected since it's not in Zoho People)
-            row[header] = pfValue && pfValue.toString().trim() && !pfValue.toString().toLowerCase().includes('zoho') ? pfValue.toString().trim() : '';
-           
+
+            row[header] = pfValue && pfValue.toString().trim() ? pfValue.toString().trim() : '';
+
             if (row[header]) {
-              console.log(`✓ Mapped Provident Fund No. for employee ${index + 1}: ${row[header]}`);
+              console.log(`✓ Mapped EPF/UAN for employee ${index + 1}: ${row[header]} (from UAN_Number)`);
             } else {
-              console.log(`ℹ Provident Fund No. left blank for employee ${index + 1} (not available in Zoho People data)`);
+              console.log(`ℹ EPF/UAN left blank for employee ${index + 1} (UAN_Number not available in Zoho People data)`);
             }
           }
           // ESIC No.
@@ -7125,7 +8146,10 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           // Aadhaar No.
           else if (headerLower.includes('aadhaar') || headerLower.includes('aadhar')) {
-            row[header] = emp.AadhaarNo ||
+            row[header] = emp.Aadhaar_Number ||
+                         emp['Aadhaar_Number'] ||
+                         emp['Aadhaar Number'] ||
+                         emp.AadhaarNo ||
                          emp['Aadhaar No.'] ||
                          emp['AadhaarNo'] ||
                          emp.aadhaarNo ||
@@ -7375,7 +8399,12 @@ const Statutory = ({ userEmail, userRole }) => {
           // Reason for Exit - explicitly only use exit-related fields, never use Dateofjoining or other date fields
           else if (headerLower.includes('reason') && headerLower.includes('exit')) {
             // Only check for exit-related fields, do not use any date fields as fallback
-            const exitReason = emp.Reason_for_Exit ||
+            const exitReason = emp.Reason_for_Leaving ||
+                         emp['Reason_for_Leaving'] ||
+                         emp['Reason for Leaving'] ||
+                         emp.ReasonForLeaving ||
+                         emp.reasonForLeaving ||
+                         emp.Reason_for_Exit ||
                          emp['Reason_for_Exit'] ||
                          emp.ReasonForExit ||
                          emp['ReasonForExit'] ||
@@ -7509,35 +8538,86 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         });
        
-        if (isLikelyFormW) {
+        if (isLikelyFormW || isLikelyForm10 || formBAutofillContext) {
           try {
             const payrollEmployeeId = getPayrollEmployeeId(emp);
             if (payrollEmployeeId) {
               const payrollRes = await fetch(`/server/payroll_function?employee_id=${encodeURIComponent(String(payrollEmployeeId))}`);
               const payrollJson = await payrollRes.json();
               if (payrollRes.ok && payrollJson && payrollJson.success) {
-                const formWPayrollMap = buildFormWPayrollMap(payrollJson.data || {});
-                currentHeaders.forEach((header) => {
-                  const headerLower = String(header || '').toLowerCase();
-                  let payrollVal = '';
-                  if (headerLower.includes('basic') && headerLower.includes('wage')) {
-                    payrollVal = formWPayrollMap.basicWage;
-                  } else if (headerLower.includes('dearness')) {
-                    payrollVal = formWPayrollMap.dearnessAllowance;
-                  } else if (headerLower.includes('house') && headerLower.includes('rent')) {
-                    payrollVal = formWPayrollMap.houseRentAllowance;
-                  } else if (headerLower.includes('other') && headerLower.includes('allowance')) {
-                    payrollVal = formWPayrollMap.otherAllowances;
-                  } else if (headerLower.includes('overtime')) {
-                    payrollVal = formWPayrollMap.overtimeWages;
-                  } else if (headerLower.includes('gross') && headerLower.includes('wage')) {
-                    payrollVal = formWPayrollMap.grossWages;
-                  }
+                if (isLikelyFormW) {
+                  const formWPayrollMap = buildFormWPayrollMap(payrollJson.data || {});
+                  currentHeaders.forEach((header) => {
+                    const headerLower = String(header || '').toLowerCase();
+                    let payrollVal = '';
+                    if (headerLower.includes('basic') && headerLower.includes('wage')) {
+                      payrollVal = formWPayrollMap.basicWage;
+                    } else if (headerLower.includes('dearness')) {
+                      payrollVal = formWPayrollMap.dearnessAllowance;
+                    } else if (headerLower.includes('house') && headerLower.includes('rent')) {
+                      payrollVal = formWPayrollMap.houseRentAllowance;
+                    } else if (headerLower.includes('other') && headerLower.includes('allowance')) {
+                      payrollVal = formWPayrollMap.otherAllowances;
+                    } else if (headerLower.includes('overtime')) {
+                      payrollVal = formWPayrollMap.overtimeWages;
+                    } else if (headerLower.includes('gross') && headerLower.includes('wage')) {
+                      payrollVal = formWPayrollMap.grossWages;
+                    }
 
-                  if (payrollVal !== '' && payrollVal !== null && payrollVal !== undefined) {
-                    row[header] = sanitizeValue(payrollVal);
-                  }
-                });
+                    if (payrollVal !== '' && payrollVal !== null && payrollVal !== undefined) {
+                      row[header] = sanitizeValue(payrollVal);
+                    }
+                  });
+                }
+
+                if (formBAutofillContext) {
+                  const p = getPayrollPayloadObject(payrollJson.data || {});
+                  const earnings = getEarningsArray(p);
+                  const basicEarningsAmt = pickFormBBasicEarningsAmount(earnings);
+                  const otherAllowanceAmt = pickFormBOtherAllowanceAmount(earnings);
+                  currentHeaders.forEach((header) => {
+                    if (isFormBTotalEmolumentsBasicEarningsHeader(header)) {
+                      if (basicEarningsAmt !== '' && basicEarningsAmt !== null && basicEarningsAmt !== undefined) {
+                        row[header] = sanitizeValue(basicEarningsAmt);
+                      }
+                    }
+                    if (isFormBOtherDeductionsOtherAllowanceHeader(header)) {
+                      if (otherAllowanceAmt !== '' && otherAllowanceAmt !== null && otherAllowanceAmt !== undefined) {
+                        row[header] = sanitizeValue(otherAllowanceAmt);
+                      }
+                    }
+                  });
+                }
+
+                if (isLikelyForm10) {
+                  const form10PayrollMap = buildForm10PayrollMap(payrollJson.data || {});
+                  currentHeaders.forEach((header) => {
+                    const headerLower = String(header || '').toLowerCase();
+                    let payrollVal = '';
+                    if (
+                      (headerLower.includes('total') && headerLower.includes('earning')) ||
+                      headerLower.includes('total earnings')
+                    ) {
+                      payrollVal = form10PayrollMap.totalEarnings;
+                    } else if (headerLower.includes('normal') && headerLower.includes('earning')) {
+                      payrollVal = form10PayrollMap.normalEarnings;
+                    } else if (
+                      (headerLower.includes('total') && headerLower.includes('overtime') && headerLower.includes('worked')) ||
+                      (headerLower.includes('overtime') && headerLower.includes('production'))
+                    ) {
+                      payrollVal = form10PayrollMap.totalOvertimeWorked;
+                    } else if (headerLower.includes('date of which overtime') || (headerLower.includes('date') && headerLower.includes('overtime'))) {
+                      const hasOvertime = toNumber(form10PayrollMap.totalOvertimeWorked) > 0;
+                      if (hasOvertime && !row[header]) {
+                        payrollVal = new Date().toISOString().slice(0, 10);
+                      }
+                    }
+
+                    if (payrollVal !== '' && payrollVal !== null && payrollVal !== undefined) {
+                      row[header] = sanitizeValue(payrollVal);
+                    }
+                  });
+                }
               }
             }
           } catch (payErr) {
@@ -7547,6 +8627,165 @@ const Statutory = ({ userEmail, userRole }) => {
 
         return row;
       }));
+
+      // Form B: Zoho Payroll `employee_id` often differs from People `EmployeeID` — merge earnings from all_salaries by mail/name.
+      if (formBAutofillContext) {
+        try {
+          const allPayrollRes = await fetch('/server/payroll_function?all_salaries=1');
+          const allPayrollJson = await allPayrollRes.json();
+          if (allPayrollRes.ok && allPayrollJson && allPayrollJson.success && Array.isArray(allPayrollJson.data)) {
+            const payrollRows = allPayrollJson.data;
+            const emolHeader = currentHeaders.find((h) => isFormBTotalEmolumentsBasicEarningsHeader(h));
+            const otherDedHeader = currentHeaders.find((h) => isFormBOtherDeductionsOtherAllowanceHeader(h));
+            if ((emolHeader || otherDedHeader) && payrollRows.length > 0) {
+              const resolvePayrollRowForPeople = (em) => {
+                if (!em) return null;
+                const zid = String(em.Zoho_ID || em['Zoho_ID'] || em.ZohoID || '').trim();
+                const eid = String(em.EmployeeID || em['EmployeeID'] || em['Employee ID'] || '').trim();
+                const email = String(em.EmailID || em.Email || em.email || em['Email ID'] || '').trim().toLowerCase();
+                const fn = String(em.FirstName || em['FirstName'] || '').trim().toLowerCase();
+                const ln = String(em.LastName || em['LastName'] || '').trim().toLowerCase();
+                const combo = `${fn} ${ln}`.trim();
+                let hit = payrollRows.find((r) => zid && String(r.employee_id || '') === zid);
+                if (hit) return hit;
+                hit = payrollRows.find((r) => eid && String(r.employee_id || '') === eid);
+                if (hit) return hit;
+                hit = payrollRows.find(
+                  (r) => email && String(r.work_mail || r.email || r.work_email || '').trim().toLowerCase() === email
+                );
+                if (hit) return hit;
+                return (
+                  payrollRows.find((r) => {
+                    const rfn = String(r.first_name || '').trim().toLowerCase();
+                    const rln = String(r.last_name || '').trim().toLowerCase();
+                    return combo && `${rfn} ${rln}`.trim() === combo;
+                  }) || null
+                );
+              };
+              mappedData.forEach((row, rowIndex) => {
+                const empItem = employees[rowIndex];
+                const em = unwrapEmp(empItem);
+                const pr = resolvePayrollRowForPeople(em);
+                if (!pr || pr.fetch_error) return;
+                const earnings = getEarningsArray(getPayrollPayloadObject(pr));
+                const basicAmt = pickFormBBasicEarningsAmount(earnings);
+                const otherAmt = pickFormBOtherAllowanceAmount(earnings);
+                if (emolHeader && basicAmt !== '' && basicAmt != null) {
+                  row[emolHeader] = sanitizeValue(basicAmt);
+                }
+                if (otherDedHeader && otherAmt !== '' && otherAmt != null) {
+                  row[otherDedHeader] = sanitizeValue(otherAmt);
+                }
+              });
+            }
+          }
+        } catch (formBPayErr) {
+          console.warn('Form B all_salaries payroll enrich skipped:', formBPayErr?.message || formBPayErr);
+        }
+      }
+
+      // Form-10 Normal earnings fallback:
+      // If per-employee payroll fetch misses (ID mismatch), use payroll all_salaries and match by email/name.
+      if (isLikelyForm10) {
+        try {
+          const allPayrollRes = await fetch('/server/payroll_function?all_salaries=1');
+          const allPayrollJson = await allPayrollRes.json();
+          if (allPayrollRes.ok && allPayrollJson && allPayrollJson.success && Array.isArray(allPayrollJson.data)) {
+            const payrollRows = allPayrollJson.data;
+            const byPayrollEmployeeId = new Map();
+            const byEmail = new Map();
+            const byName = new Map();
+            const byFirstName = new Map();
+            payrollRows.forEach((it) => {
+              if (!it || typeof it !== 'object') return;
+              const payload = getPayrollPayloadObject(it);
+              const salaryVal =
+                payload.monthly_salary ??
+                payload['monthly_salary'] ??
+                payload.MonthlySalary ??
+                payload['MonthlySalary'] ??
+                '';
+              if (salaryVal === '' || salaryVal == null) return;
+              const payrollEmployeeId = String(
+                it.employee_id ||
+                payload.employee_id ||
+                payload.employeeId ||
+                ''
+              ).trim();
+              const email = String(it.work_mail || it.email || '').trim().toLowerCase();
+              const firstName = String(it.first_name || '').trim().toLowerCase();
+              const name = String(`${it.first_name || ''} ${it.last_name || ''}`.trim()).toLowerCase();
+              if (payrollEmployeeId && !byPayrollEmployeeId.has(payrollEmployeeId)) {
+                byPayrollEmployeeId.set(payrollEmployeeId, salaryVal);
+              }
+              if (email && !byEmail.has(email)) byEmail.set(email, salaryVal);
+              if (name && !byName.has(name)) byName.set(name, salaryVal);
+              if (firstName && !byFirstName.has(firstName)) byFirstName.set(firstName, salaryVal);
+            });
+
+            const normalEarningsHeader = currentHeaders.find((h) => {
+              const t = String(h || '').toLowerCase();
+              return t.includes('normal') && t.includes('earning');
+            });
+            const totalEarningsHeader = currentHeaders.find((h) => {
+              const t = String(h || '').toLowerCase();
+              return t.includes('total') && t.includes('earning');
+            });
+
+            if (normalEarningsHeader || totalEarningsHeader) {
+              mappedData.forEach((row, rowIndex) => {
+                const empItem = employees[rowIndex];
+                const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+                const payrollEmpId = String(getPayrollEmployeeId(emp || {}) || '').trim();
+                const empEmail = String(
+                  (emp && (emp.EmailID || emp.Email || emp.email || emp['Email ID'])) || ''
+                ).trim().toLowerCase();
+                const empFirstName = String(
+                  (emp && (emp.FirstName || emp['FirstName'] || '')) || ''
+                ).trim().toLowerCase();
+                const empName = String(
+                  (emp && (
+                    emp.Full_Name ||
+                    emp['Full Name'] ||
+                    emp.FirstName ||
+                    emp['FirstName'] ||
+                    emp.Name1 ||
+                    emp['Name1'] ||
+                    emp.Name ||
+                    emp['Name'] ||
+                    empFirstName ||
+                    ''
+                  )) || ''
+                ).trim().toLowerCase();
+                const matchedSalary =
+                  (payrollEmpId && byPayrollEmployeeId.get(payrollEmpId)) ||
+                  (empEmail && byEmail.get(empEmail)) ||
+                  (empName && byName.get(empName)) ||
+                  (empFirstName && byFirstName.get(empFirstName)) ||
+                  '';
+                if (matchedSalary !== '' && matchedSalary != null) {
+                  if (normalEarningsHeader && !String(row[normalEarningsHeader] || '').trim()) {
+                    row[normalEarningsHeader] = sanitizeValue(matchedSalary);
+                  }
+                  if (totalEarningsHeader && !String(row[totalEarningsHeader] || '').trim()) {
+                    row[totalEarningsHeader] = sanitizeValue(matchedSalary);
+                  }
+                }
+                if (
+                  totalEarningsHeader &&
+                  !String(row[totalEarningsHeader] || '').trim() &&
+                  normalEarningsHeader &&
+                  String(row[normalEarningsHeader] || '').trim()
+                ) {
+                  row[totalEarningsHeader] = String(row[normalEarningsHeader]);
+                }
+              });
+            }
+          }
+        } catch (allPayrollErr) {
+          console.warn('Form-10 all_salaries fallback skipped:', allPayrollErr?.message || allPayrollErr);
+        }
+      }
      
       console.log('Mapped data:', mappedData);
       console.log('Sample mapped row:', mappedData[0]);
@@ -7568,54 +8807,173 @@ const Statutory = ({ userEmail, userRole }) => {
         const targetYear = now.getFullYear();
         const startDate = new Date(targetYear, targetMonthIndex, 1);
         const endDate = new Date(targetYear, targetMonthIndex + 1, 0);
-        const sdate = startDate.toISOString().slice(0, 10);
-        const edate = endDate.toISOString().slice(0, 10);
+        const sdate = formatLocalDateYYYYMMDD(startDate);
+        const edate = formatLocalDateYYYYMMDD(endDate);
 
-        const attendanceRes = await fetch(`/server/attendance_function?limit=200&sdate=${encodeURIComponent(sdate)}&edate=${encodeURIComponent(edate)}`);
-        const attendanceJson = await attendanceRes.json();
+        const todayCalendarStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const attendanceMonthNotYetStarted = startDate > todayCalendarStart;
+
+        if (attendanceMonthNotYetStarted) {
+          console.log(
+            `Skipping attendance merge: wage period ${sdate}..${edate} has not started yet (today=${formatLocalDateYYYYMMDD(todayCalendarStart)}).`
+          );
+        }
+
+        const attendanceRes =
+          attendanceMonthNotYetStarted
+            ? { ok: false }
+            : await fetch(`/server/attendance_function?limit=200&sdate=${encodeURIComponent(sdate)}&edate=${encodeURIComponent(edate)}`);
+        const attendanceJson = attendanceMonthNotYetStarted ? {} : await attendanceRes.json();
 
         if (attendanceRes.ok && attendanceJson.success && attendanceJson.data) {
+          const tryParseJson = (val) => {
+            if (!val) return null;
+            if (typeof val === 'object') return val;
+            if (typeof val !== 'string') return null;
+            const s = String(val).trim();
+            if (!s) return null;
+            try {
+              return JSON.parse(s);
+            } catch (_) {
+              return null;
+            }
+          };
+
+          const mergeEmployeeMeta = (attendanceRow, employeeMeta) => {
+            if (!employeeMeta || typeof employeeMeta !== 'object') return attendanceRow;
+            return { ...attendanceRow, ...employeeMeta };
+          };
+
           const normalizeAttendance = (rawData) => {
             if (!rawData) return [];
+            const rows = [];
 
             // Common shape from attendance API: { "yyyy-mm-dd": { ...attendance fields... } }
             const dateKeyRegex = /^\d{4}-\d{2}-\d{2}$/;
-            const directDateMap = Object.keys(rawData).filter((k) => dateKeyRegex.test(k));
-            if (directDateMap.length > 0) {
-              return directDateMap.map((date) => ({ date, ...(rawData[date] || {}) }));
-            }
+            const collectDateMapRows = (obj, employeeMeta) => {
+              if (!obj || typeof obj !== 'object') return;
+              const directDateMap = Object.keys(obj).filter((k) => dateKeyRegex.test(k));
+              if (directDateMap.length === 0) return;
+              directDateMap.forEach((date) => {
+                const val = obj[date];
+                if (Array.isArray(val)) {
+                  val.forEach((item) => {
+                    if (item && typeof item === 'object') rows.push(mergeEmployeeMeta({ date, ...item }, employeeMeta));
+                  });
+                  return;
+                }
+                if (val && typeof val === 'object') {
+                  const nestedKeys = Object.keys(val);
+                  const looksLikeSingleRecord =
+                    ('ShiftStartTime' in val) ||
+                    ('ShiftEndTime' in val) ||
+                    ('TotalHours' in val) ||
+                    ('WorkingHours' in val);
+                  if (looksLikeSingleRecord) {
+                    rows.push(mergeEmployeeMeta({ date, ...val }, employeeMeta));
+                    return;
+                  }
+                  nestedKeys.forEach((k) => {
+                    const nestedVal = val[k];
+                    if (nestedVal && typeof nestedVal === 'object') {
+                      rows.push(mergeEmployeeMeta({ date, ...nestedVal }, employeeMeta));
+                    }
+                  });
+                }
+              });
+            };
 
-            // Fallback for nested structures
-            const candidate = rawData.response || rawData.result || rawData.data || rawData.records || rawData.record || rawData;
-            if (Array.isArray(candidate)) return candidate;
-            if (candidate && typeof candidate === 'object') {
-              const nestedDateKeys = Object.keys(candidate).filter((k) => dateKeyRegex.test(k));
-              if (nestedDateKeys.length > 0) {
-                return nestedDateKeys.map((date) => ({ date, ...(candidate[date] || {}) }));
+            const visit = (node, employeeMeta = null) => {
+              if (!node) return;
+              if (Array.isArray(node)) {
+                node.forEach((it) => visit(it, employeeMeta));
+                return;
               }
-              return [candidate];
-            }
+              if (typeof node === 'string') {
+                const parsed = tryParseJson(node);
+                if (parsed) visit(parsed, employeeMeta);
+                return;
+              }
+              if (typeof node !== 'object') return;
+
+              // Handle row format: { attendanceDetails: "...", employeeDetails: "..." }
+              const empMeta = tryParseJson(node.employeeDetails) || node.employeeDetails || employeeMeta;
+              const attDetails = tryParseJson(node.attendanceDetails) || node.attendanceDetails;
+              if (attDetails) {
+                collectDateMapRows(attDetails, empMeta);
+                visit(attDetails, empMeta);
+              }
+
+              collectDateMapRows(node, empMeta);
+
+              Object.values(node).forEach((child) => {
+                if (child && (typeof child === 'object' || typeof child === 'string')) {
+                  visit(child, empMeta);
+                }
+              });
+            };
+
+            const candidate = rawData.response || rawData.result || rawData.data || rawData.records || rawData.record || rawData;
+            visit(candidate, null);
+            if (rows.length > 0) return rows;
+
+            if (Array.isArray(candidate)) return candidate;
+            if (candidate && typeof candidate === 'object') return [candidate];
             return [];
           };
 
-          const attendanceRecords = normalizeAttendance(attendanceJson.data);
+          const recordDateKeyStable = (obj) => {
+            const dRaw = obj?.date || obj?.Date || '';
+            if (!dRaw) return '';
+            const s = String(dRaw).trim();
+            const isoPrefix = s.match(/^(\d{4}-\d{2}-\d{2})/);
+            if (isoPrefix) return isoPrefix[1];
+            const d = new Date(s);
+            if (!Number.isNaN(d.getTime())) return formatLocalDateYYYYMMDD(d);
+            return '';
+          };
+
+          let attendanceRecords = normalizeAttendance(attendanceJson.data).filter((rec) => {
+            const k = recordDateKeyStable(rec);
+            return Boolean(k && k >= sdate && k <= edate);
+          });
           if (attendanceRecords.length > 0) {
-            // Prefer latest date in the response month
-            const sortedRecords = [...attendanceRecords].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-            const latestRecord = sortedRecords[0] || {};
-            const totalHoursValue = String(latestRecord.TotalHours || latestRecord.totalHours || '00:00');
-            const dailyWorkedHoursValue = String(
-              latestRecord.WorkingHours ||
-              latestRecord.workingHours ||
-              latestRecord.DailyWorkedHours ||
-              latestRecord.dailyWorkedHours ||
-              totalHoursValue ||
-              '00:00'
+            const sortedRecords = [...attendanceRecords].sort((a, b) =>
+              String(recordDateKeyStable(b) || b.date || '').localeCompare(String(recordDateKeyStable(a) || a.date || ''))
             );
 
+            const totalWorkedDaysHeader = currentHeaders.find((header) => {
+              const h = String(header || '').toLowerCase().trim();
+              if (h.includes('overtime') || h.includes('loss') || h.includes('lop') || h.includes('holiday')) return false;
+              if (isLikelyDayOfMonthColumnHeader(header)) return false;
+              return (
+                (h.includes('total') && (h.includes('day') || h.includes('days')) && h.includes('work')) ||
+                /total\s*days?\s*worked/i.test(String(header || '')) ||
+                /^totaldaysworked$/i.test(h.replace(/\s/g, ''))
+              );
+            });
+
+            const totalHoursWorkedAggHeader = currentHeaders.find((header) => {
+              const h = String(header || '').toLowerCase().trim();
+              if (h.includes('overtime') || h.includes('normal') || h.includes('daily')) return false;
+              if (isLikelyDayOfMonthColumnHeader(header)) return false;
+              return (
+                (h.includes('total') && h.includes('hour') && h.includes('work')) ||
+                /total\s*hours?\s*worked/i.test(String(header || '')) ||
+                /^totalhoursworked$/i.test(h.replace(/\s/g, ''))
+              );
+            });
+
             const totalHoursHeader = currentHeaders.find((header) => {
-              const h = header.toLowerCase().trim();
+              const h = String(header || '').toLowerCase().trim();
+              if (header === totalHoursWorkedAggHeader || header === totalWorkedDaysHeader) return false;
+              if (h.includes('overtime') || h.includes('normal') || h.includes('daily')) return false;
+              if (isLikelyDayOfMonthColumnHeader(header)) return false;
               return h.includes('total') && h.includes('hour');
+            });
+            const normalHoursHeader = currentHeaders.find((header) => {
+              const h = header.toLowerCase().trim();
+              return h.includes('normal') && h.includes('hour');
             });
 
             const dailyWorkedHoursHeader = currentHeaders.find((header) => {
@@ -7624,21 +8982,381 @@ const Statutory = ({ userEmail, userRole }) => {
                 h.includes('hour') &&
                 (h.includes('work') || h.includes('worked'));
             });
+            const dateDayHeaders = currentHeaders
+              .map((header) => {
+                const t = String(header || '').trim();
+                const direct = t.match(/^(\d{1,2})$/);
+                if (direct) {
+                  const day = Number(direct[1]);
+                  if (day >= 1 && day <= 31) return { header, day };
+                }
+                const suffixed = t.match(/(?:^|_)(\d{1,2})$/);
+                if (suffixed) {
+                  const day = Number(suffixed[1]);
+                  if (day >= 1 && day <= 31) return { header, day };
+                }
+                return null;
+              })
+              .filter(Boolean);
 
-            if (totalHoursHeader) {
+            if (totalHoursHeader || totalHoursWorkedAggHeader || totalWorkedDaysHeader) {
+              hasTotalHoursColumn = true;
+            }
+            if (normalHoursHeader) {
               hasTotalHoursColumn = true;
             }
             if (dailyWorkedHoursHeader) {
               hasDailyHoursColumn = true;
             }
 
-            if (totalHoursHeader || dailyWorkedHoursHeader) {
-              mappedData.forEach((row) => {
-                if (totalHoursHeader) row[totalHoursHeader] = totalHoursValue;
-                if (dailyWorkedHoursHeader) row[dailyWorkedHoursHeader] = dailyWorkedHoursValue;
+            if (
+              totalHoursHeader ||
+              totalHoursWorkedAggHeader ||
+              totalWorkedDaysHeader ||
+              dailyWorkedHoursHeader ||
+              normalHoursHeader ||
+              dateDayHeaders.length > 0
+            ) {
+              const getAttendanceCandidateIds = (obj) => {
+                if (!obj || typeof obj !== 'object') return [];
+                const vals = [
+                  obj.EmployeeID,
+                  obj['EmployeeID'],
+                  obj['Employee ID'],
+                  obj.employee_id,
+                  obj['employee_id'],
+                  obj.Zoho_ID,
+                  obj['Zoho_ID'],
+                  obj.zoho_id,
+                  obj['zoho_id'],
+                  obj.ZohoID,
+                  obj['ZohoID'],
+                  obj.userId,
+                  obj.UserID,
+                  obj.UserId,
+                  obj.employeeId,
+                  obj.EmpID,
+                  obj.EmpId,
+                  findValueByNormalizedKey(obj, 'employeeid'),
+                  findValueByNormalizedKey(obj, 'zohoid'),
+                  findValueByNormalizedKey(obj, 'userid')
+                ];
+                return vals.map((v) => String(v || '').trim()).filter(Boolean);
+              };
+
+              const getAttendanceDisplayName = (obj) => {
+                if (!obj || typeof obj !== 'object') return '';
+                const first = String(
+                  obj.firstName ||
+                  obj.FirstName ||
+                  obj.First_Name ||
+                  obj['First_Name'] ||
+                  obj['First Name'] ||
+                  findValueByNormalizedKey(obj, 'firstname') ||
+                  ''
+                ).trim();
+                const last = String(
+                  obj.lastName ||
+                  obj.LastName ||
+                  obj.Last_Name ||
+                  obj['Last_Name'] ||
+                  obj['Last Name'] ||
+                  findValueByNormalizedKey(obj, 'lastname') ||
+                  ''
+                ).trim();
+                const full = `${first} ${last}`.trim();
+                return String(
+                  full ||
+                  obj.EmployeeName ||
+                  obj['Employee Name'] ||
+                  obj.EmployeeName ||
+                  obj['EmployeeName'] ||
+                  obj.Name ||
+                  obj['Name'] ||
+                  obj.firstName ||
+                  obj.FirstName ||
+                  findValueByNormalizedKey(obj, 'name') ||
+                  ''
+                ).trim().toLowerCase();
+              };
+              /** Daily punch hours only — do not use TotalHours (often monthly / misleading per day). */
+              const getExplicitDailyHoursRaw = (obj) =>
+                String(
+                  obj?.WorkingHours ||
+                    obj?.workingHours ||
+                    obj?.DailyWorkedHours ||
+                    obj?.dailyWorkedHours ||
+                    ''
+                ).trim();
+
+              const hasParsableShiftPair = (rec) => {
+                if (!rec || typeof rec !== 'object') return false;
+                const ss =
+                  rec.ShiftStartTime ||
+                  rec['ShiftStartTime'] ||
+                  rec.shiftStartTime ||
+                  findValueByNormalizedKey(rec, 'shiftstarttime') ||
+                  '';
+                const se =
+                  rec.ShiftEndTime ||
+                  rec['ShiftEndTime'] ||
+                  rec.shiftEndTime ||
+                  findValueByNormalizedKey(rec, 'shiftendtime') ||
+                  '';
+                const st = String(ss).trim();
+                const et = String(se).trim();
+                if (!st || !et) return false;
+                return parseTimeToMinutes(st) != null && parseTimeToMinutes(et) != null;
+              };
+
+              const minutesFromExplicitDailyOrShift = (rec) => {
+                if (!rec || typeof rec !== 'object') return null;
+                const daily = getExplicitDailyHoursRaw(rec);
+                if (daily) {
+                  if (/^0{1,2}:0{2}$/.test(daily)) return null;
+                  const m = parseTimeToMinutes(daily);
+                  if (m != null && m > 0) return m;
+                  const n = Number(String(daily).replace(/,/g, '').trim());
+                  if (Number.isFinite(n) && n > 0 && n <= 24 && !daily.includes(':')) {
+                    return Math.round(n * 60);
+                  }
+                }
+                if (hasParsableShiftPair(rec)) {
+                  const nh = computeNormalHoursFromAttendanceRecord(rec);
+                  if (nh) {
+                    const m = parseTimeToMinutes(nh);
+                    if (m != null && m > 0) return m;
+                  }
+                }
+                return null;
+              };
+
+              /** True only when explicit daily hours exist OR both shift ends are present (times required). */
+              const hasValidAttendanceTime = (rec) => minutesFromExplicitDailyOrShift(rec) != null;
+
+              const formatHoursForDayCell = (rec) => {
+                const daily = getExplicitDailyHoursRaw(rec);
+                if (daily) {
+                  const dm = parseTimeToMinutes(daily);
+                  if (dm != null && dm > 0) return daily;
+                  const n = Number(String(daily).replace(/,/g, '').trim());
+                  if (Number.isFinite(n) && n > 0 && n <= 24 && !daily.includes(':')) return daily;
+                }
+                if (hasParsableShiftPair(rec)) {
+                  const nh = computeNormalHoursFromAttendanceRecord(rec);
+                  return nh || '';
+                }
+                return '';
+              };
+
+              const recordDateKey = recordDateKeyStable;
+
+              const attendanceById = new Map();
+              const attendanceByName = new Map();
+              const attendanceByFirstName = new Map();
+              const attendanceByIdDate = new Map();
+              const attendanceByNameDate = new Map();
+              const attendanceByFirstNameDate = new Map();
+              const workedMinutesFromAttendanceRecord = (rec) => minutesFromExplicitDailyOrShift(rec);
+
+              const isCountableWorkedDay = (rec) => hasValidAttendanceTime(rec);
+
+              const formatCumulativeHoursMM = (totalMins) => {
+                if (!Number.isFinite(totalMins) || totalMins <= 0) return '';
+                const h = Math.floor(totalMins / 60);
+                const m = Math.round(totalMins % 60);
+                return `${h}:${String(m).padStart(2, '0')}`;
+              };
+
+              const aggregateWorkedDaysAndMinutesForEmployee = (idCands, nameCand, firstCand) => {
+                const byDate = new Map();
+                sortedRecords.forEach((rec) => {
+                  const dk = recordDateKeyStable(rec);
+                  if (!dk || dk < sdate || dk > edate) return;
+                  let match = false;
+                  const idsRec = getAttendanceCandidateIds(rec);
+                  if (idCands.some((id) => idsRec.includes(id))) match = true;
+                  else if (nameCand && getAttendanceDisplayName(rec) === nameCand) match = true;
+                  else if (
+                    firstCand &&
+                    String(
+                      rec?.firstName ||
+                        rec?.FirstName ||
+                        rec?.First_Name ||
+                        findValueByNormalizedKey(rec, 'firstname') ||
+                        ''
+                    )
+                      .trim()
+                      .toLowerCase() === firstCand
+                  ) {
+                    match = true;
+                  }
+                  if (!match) return;
+                  const prev = byDate.get(dk);
+                  if (!prev || (hasValidAttendanceTime(rec) && !hasValidAttendanceTime(prev))) byDate.set(dk, rec);
+                });
+                let days = 0;
+                let totalMins = 0;
+                byDate.forEach((rec) => {
+                  if (!isCountableWorkedDay(rec)) return;
+                  days += 1;
+                  const m = workedMinutesFromAttendanceRecord(rec);
+                  if (m != null) totalMins += m;
+                });
+                return { days, totalMins };
+              };
+
+              sortedRecords.forEach((rec) => {
+                getAttendanceCandidateIds(rec).forEach((id) => {
+                  if (!attendanceById.has(id)) attendanceById.set(id, rec);
+                });
+                const nm = getAttendanceDisplayName(rec);
+                if (nm && !attendanceByName.has(nm)) attendanceByName.set(nm, rec);
+                const firstNm = String(
+                  rec?.firstName ||
+                  rec?.FirstName ||
+                  rec?.First_Name ||
+                  rec?.['First_Name'] ||
+                  findValueByNormalizedKey(rec, 'firstname') ||
+                  ''
+                ).trim().toLowerCase();
+                if (firstNm && !attendanceByFirstName.has(firstNm)) attendanceByFirstName.set(firstNm, rec);
+                const rDate = recordDateKey(rec);
+                if (rDate && hasValidAttendanceTime(rec)) {
+                  getAttendanceCandidateIds(rec).forEach((id) => {
+                    const key = `${id}::${rDate}`;
+                    if (!attendanceByIdDate.has(key)) attendanceByIdDate.set(key, rec);
+                  });
+                  if (nm) {
+                    const nKey = `${nm}::${rDate}`;
+                    if (!attendanceByNameDate.has(nKey)) attendanceByNameDate.set(nKey, rec);
+                  }
+                  if (firstNm) {
+                    const fKey = `${firstNm}::${rDate}`;
+                    if (!attendanceByFirstNameDate.has(fKey)) attendanceByFirstNameDate.set(fKey, rec);
+                  }
+                }
+              });
+
+              mappedData.forEach((row, rowIndex) => {
+                const empItem = employees[rowIndex];
+                const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+                const idCandidates = [
+                  ...getAttendanceCandidateIds(emp || {}),
+                  String(getPayrollEmployeeId(emp || {}) || '').trim()
+                ].filter(Boolean);
+                const nameCandidate = String(
+                  (emp && (emp.FirstName || emp['FirstName'] || emp.Name || emp['Name'])) || ''
+                ).trim().toLowerCase();
+                const firstNameCandidate = String(
+                  (emp && (
+                    emp.FirstName ||
+                    emp['FirstName'] ||
+                    emp.First_Name ||
+                    emp['First_Name'] ||
+                    ''
+                  )) || ''
+                ).trim().toLowerCase();
+
+                let matchedAttendance = null;
+                for (let i = 0; i < idCandidates.length; i++) {
+                  const rec = attendanceById.get(idCandidates[i]);
+                  if (rec) {
+                    matchedAttendance = rec;
+                    break;
+                  }
+                }
+                if (!matchedAttendance && nameCandidate) {
+                  matchedAttendance = attendanceByName.get(nameCandidate) || null;
+                }
+                if (!matchedAttendance && firstNameCandidate) {
+                  matchedAttendance = attendanceByFirstName.get(firstNameCandidate) || null;
+                }
+
+                const agg = aggregateWorkedDaysAndMinutesForEmployee(
+                  idCandidates,
+                  nameCandidate,
+                  firstNameCandidate
+                );
+                if (totalWorkedDaysHeader) {
+                  row[totalWorkedDaysHeader] = String(agg.days);
+                }
+                if (totalHoursWorkedAggHeader) {
+                  row[totalHoursWorkedAggHeader] = formatCumulativeHoursMM(agg.totalMins);
+                }
+
+                const totalHoursValue = matchedAttendance
+                  ? String(matchedAttendance.TotalHours || matchedAttendance.totalHours || '')
+                  : '';
+                const dailyWorkedHoursValue = matchedAttendance
+                  ? String(
+                      matchedAttendance.WorkingHours ||
+                        matchedAttendance.workingHours ||
+                        matchedAttendance.DailyWorkedHours ||
+                        matchedAttendance.dailyWorkedHours ||
+                        ''
+                    )
+                  : '';
+
+                if (totalHoursHeader && totalHoursValue) row[totalHoursHeader] = totalHoursValue;
+                if (dailyWorkedHoursHeader && dailyWorkedHoursValue) row[dailyWorkedHoursHeader] = dailyWorkedHoursValue;
+                if (normalHoursHeader) {
+                  let normalFromAttendance = computeNormalHoursFromAttendanceRecord(matchedAttendance);
+                  if (!normalFromAttendance && matchedAttendance) {
+                    const idsEmp = new Set(getAttendanceCandidateIds(matchedAttendance));
+                    const nmEmp = getAttendanceDisplayName(matchedAttendance);
+                    const sameEmpShiftRec = sortedRecords.find((rec) => {
+                      const sameEmp =
+                        (idsEmp.size && getAttendanceCandidateIds(rec).some((id) => idsEmp.has(id))) ||
+                        Boolean(nmEmp && getAttendanceDisplayName(rec) === nmEmp);
+                      return sameEmp && computeNormalHoursFromAttendanceRecord(rec);
+                    });
+                    normalFromAttendance = computeNormalHoursFromAttendanceRecord(sameEmpShiftRec);
+                  }
+                  if (normalFromAttendance) {
+                    row[normalHoursHeader] = normalFromAttendance;
+                  } else if (!String(row[normalHoursHeader] || '').trim() && (dailyWorkedHoursValue || totalHoursValue)) {
+                    row[normalHoursHeader] = dailyWorkedHoursValue || totalHoursValue;
+                  }
+                }
+                if (dateDayHeaders.length > 0) {
+                  const today = new Date();
+                  const isCurrentSelectedMonth =
+                    targetYear === today.getFullYear() && targetMonthIndex === today.getMonth();
+                  const isWeekendCalendarDay = (d) => {
+                    const dow = d.getDay();
+                    return dow === 0 || dow === 6;
+                  };
+                  dateDayHeaders.forEach(({ header, day }) => {
+                    const dayDate = new Date(targetYear, targetMonthIndex, day);
+                    if (dayDate.getMonth() !== targetMonthIndex) return; // skip impossible days for selected month
+                    if (isCurrentSelectedMonth && day > today.getDate()) {
+                      row[header] = '';
+                      return;
+                    }
+                    const iso = formatLocalDateYYYYMMDD(dayDate);
+                    const byId = idCandidates
+                      .map((id) => attendanceByIdDate.get(`${id}::${iso}`))
+                      .find(Boolean);
+                    const byName = !byId && nameCandidate ? attendanceByNameDate.get(`${nameCandidate}::${iso}`) : null;
+                    const byFirstName = !byId && !byName && firstNameCandidate
+                      ? attendanceByFirstNameDate.get(`${firstNameCandidate}::${iso}`)
+                      : null;
+                    const rec = byId || byName || byFirstName;
+                    if (rec && hasValidAttendanceTime(rec)) {
+                      row[header] = formatHoursForDayCell(rec);
+                    } else if (isWeekendCalendarDay(dayDate)) {
+                      // Saturday/Sunday: prefer any formatted hours from attendance row, else shift from People
+                      const fromAtt = rec ? formatHoursForDayCell(rec) : '';
+                      row[header] = fromAtt || computeNormalHoursFromShift(emp || {}) || '';
+                    } else {
+                      row[header] = '';
+                    }
+                  });
+                }
                 attendanceHoursPopulated++;
               });
-              console.log(`Attendance hours populated from date ${latestRecord.date || 'latest'}: total=${totalHoursValue}, daily=${dailyWorkedHoursValue}`);
+              console.log(`Attendance hours populated for ${sdate}..${edate}; rows=${mappedData.length}`);
             }
           }
         }
@@ -9863,7 +11581,7 @@ const Statutory = ({ userEmail, userRole }) => {
       const formMatch = selectedFormFilter === 'all' || formName === selectedFormFilter;
       return searchMatch && formMatch;
     });
-    // Group site-wise: show all rows of one site together.
+    // Group site-wise; within a site: non-approved with draft/sent first, then other non-approved, then approved last.
     return [...filtered].sort((a, b) => {
       const siteA = String(resolveSiteDisplayName(a, filteredStatutoryData) || '').trim().toLowerCase();
       const siteB = String(resolveSiteDisplayName(b, filteredStatutoryData) || '').trim().toLowerCase();
@@ -9872,6 +11590,15 @@ const Statutory = ({ userEmail, userRole }) => {
         if (!siteB) return -1;
         return siteA.localeCompare(siteB);
       }
+      const tierA = isRowStatusApproved(a) ? 1 : 0;
+      const tierB = isRowStatusApproved(b) ? 1 : 0;
+      if (tierA !== tierB) return tierA - tierB;
+      const draftRankA = !isRowStatusApproved(a) && hasStatutoryDraftSubmittedForSort(a) ? 0 : 1;
+      const draftRankB = !isRowStatusApproved(b) && hasStatutoryDraftSubmittedForSort(b) ? 0 : 1;
+      if (draftRankA !== draftRankB) return draftRankA - draftRankB;
+      const timeA = getStatutoryRowActivityTimeMs(a);
+      const timeB = getStatutoryRowActivityTimeMs(b);
+      if (timeB !== timeA) return timeB - timeA;
       const formA = String(a.formName || a.FormName || '').trim().toLowerCase();
       const formB = String(b.formName || b.FormName || '').trim().toLowerCase();
       if (formA !== formB) return formA.localeCompare(formB);
@@ -9926,12 +11653,26 @@ const Statutory = ({ userEmail, userRole }) => {
     hasSiteBasedActScope ||
     isNonDefaultRoleLogin;
   const showApprovalColumn = !showSendForApprovalColumn;
-  /** Single-site contexts (?site= or Site Management lists one site): Site column is redundant — hide it. */
+  /** Single-site contexts (?site= or Site Management lists one site): Site column is redundant — hide it.
+   *  Until the first statutory fetch completes, hide the Site column so `useCacheFirst` + `silentRefresh` cannot paint
+   *  cached rows before `allowedSiteNameList` / `allowedActCategoryList` exist (that mismatch caused the column to flash).
+   *  For site-scoped logins, also hide while `allowedSiteNameList` is still unknown (`null`). */
   const showSiteColumn = useMemo(() => {
+    if (!transactionSiteMetaReady) return false;
     if (String(siteFromUrl || '').trim() !== '') return false;
     if (Array.isArray(allowedSiteNameList) && allowedSiteNameList.length === 1) return false;
+    const siteScopedLogin =
+      hasSiteBasedActScope || isSiteLoginRole || isSiteWiseStatutoryUser;
+    if (allowedSiteNameList == null && siteScopedLogin) return false;
     return true;
-  }, [siteFromUrl, allowedSiteNameList]);
+  }, [
+    transactionSiteMetaReady,
+    siteFromUrl,
+    allowedSiteNameList,
+    hasSiteBasedActScope,
+    isSiteLoginRole,
+    isSiteWiseStatutoryUser
+  ]);
   const tableColSpan =
     2 +
     (showSiteColumn ? 1 : 0) +
@@ -10467,9 +12208,7 @@ const Statutory = ({ userEmail, userRole }) => {
       {!isFormOpen ? (
         <>
           <header className="statutory-page-heading">
-            <h1 className="statutory-page-title">
-              {siteFromUrl ? `Statutory - ${siteFromUrl}` : 'Statutory'}
-            </h1>
+            <h1 className="statutory-page-title">Statutory</h1>
             <nav className="statutory-breadcrumb" aria-label="Breadcrumb">
               <Link to="/hcm-dashboard" className="statutory-bc-link">
                 Dashboard
@@ -10481,9 +12220,7 @@ const Statutory = ({ userEmail, userRole }) => {
               <span className="statutory-bc-sep" aria-hidden>
                 &gt;
               </span>
-              <span className="statutory-bc-current">
-                {siteFromUrl ? `Statutory - ${siteFromUrl}` : 'Statutory'}
-              </span>
+              <span className="statutory-bc-current">Statutory</span>
             </nav>
           </header>
           {/* Card Container */}
@@ -10814,7 +12551,7 @@ const Statutory = ({ userEmail, userRole }) => {
                             };
                           }
                           return (
-                            <tr key={item.id || index}>
+                            <tr key={item.id || index} className={rowLocked ? 'statutory-row-approved' : undefined}>
                               <td className="statutory-col-checkbox" style={{ textAlign: 'center', padding: '4px' }}>
                                 <input
                                   type="checkbox"

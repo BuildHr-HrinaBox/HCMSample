@@ -11,11 +11,18 @@ const { IncomingMessage, ServerResponse } = require('http');
  *   - Else use refresh_token to get access_token (ZOHO_ATTENDANCE_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET).
  * Query: ?limit=50
  */
+function formatLocalYYYYMMDD(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function getDefaultDateRange() {
   const now = new Date();
-  const edate = now.toISOString().slice(0, 10); // yyyy-MM-dd today
+  const edate = formatLocalYYYYMMDD(now);
   const start = new Date(now.getFullYear(), now.getMonth(), 1);
-  const sdate = start.toISOString().slice(0, 10); // first day of current month
+  const sdate = formatLocalYYYYMMDD(start);
   return { sdate, edate };
 }
 
@@ -49,7 +56,7 @@ async function getAccessToken() {
   const refreshToken =
     process.env.ZOHO_ATTENDANCE_REFRESH_TOKEN ||
     process.env.ZOHO_REFRESH_TOKEN ||
-    '1000.ec0250cd0667c5c571e7d3dcc4ebb8ec.780f67bfa06fb538cc77c3e63223f775';
+    '1000.db72181fab16544cc0191e72ea170f2f.2fc9ad015ed34c34410cf469815a894a';
   const clientId = process.env.ZOHO_CLIENT_ID || '1000.ABC3VBH4REB9DC28WYZS3EY5AJD73B';
   const clientSecret = process.env.ZOHO_CLIENT_SECRET || 'f2fca57c9b0436dcc6fe68d0f922015569bba642a8';
 
@@ -83,7 +90,7 @@ async function getAccessToken() {
   }
   // Refresh returned no access_token (e.g. wrong client/scope). Use known token so UI works.
   // For production, set ZOHO_ATTENDANCE_ACCESS_TOKEN (tokens expire in ~1h).
-  const fallback = '1000.6deed54bfd728f4c1f5f061c6b60d02b.e062fe079b40ff02b1a496788710a020';
+  const fallback = '1000.d559b1107c02ef4e6775941850c9d572.e44bedaebfb866b8db84899d663f2ebc';
   console.warn('Zoho refresh did not return access_token. Using fallback.', data ? JSON.stringify(data) : '');
   return fallback;
 }

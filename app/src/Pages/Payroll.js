@@ -1,24 +1,39 @@
-import React, { useState } from 'react';
-import './Payroll.css';
+import React, { useState, useMemo } from 'react';
+import './People.css';
 
 const API_BASE = '/server/payroll_function';
+
+const PREFERRED_KEYS = ['employee_id', 'first_name', 'last_name', 'work_mail', 'fetch_error'];
+
+function computeColumns(rows) {
+  const keySet = new Set();
+  for (const row of rows) {
+    if (row && typeof row === 'object') {
+      Object.keys(row).forEach((k) => {
+        if (!/^_|^\./.test(k)) keySet.add(k);
+      });
+    }
+  }
+  const front = PREFERRED_KEYS.filter((k) => keySet.has(k));
+  const rest = [...keySet].filter((k) => !PREFERRED_KEYS.includes(k)).sort();
+  return [...front, ...rest];
+}
 
 const Payroll = () => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const fetchData = async () => {
+  const orgId = process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
+
+  const fetchAllSalaries = async () => {
     setLoading(true);
     setError('');
     setData(null);
     try {
-      const orgId = process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60019599791';
-      const employeeId =
-        process.env.REACT_APP_ZOHO_PAYROLL_EMPLOYEE_ID || '1190846000000109001';
       const qs = new URLSearchParams({
-        employee_id: employeeId,
         organization_id: orgId,
+        all_salaries: '1',
       });
 
       const res = await fetch(`${API_BASE}?${qs.toString()}`);
@@ -40,7 +55,7 @@ const Payroll = () => {
     }
   };
 
-  const records = (() => {
+  const records = useMemo(() => {
     if (!data) return [];
     if (Array.isArray(data)) return data;
     if (data.employee && typeof data.employee === 'object') return [data.employee];
@@ -52,40 +67,42 @@ const Payroll = () => {
     if (Array.isArray(res)) return res;
     if (res && typeof res === 'object') return [res];
     return [];
-  })();
+  }, [data]);
 
-  const firstRecord = records[0];
-  const keys =
-    firstRecord && typeof firstRecord === 'object'
-      ? Object.keys(firstRecord).filter((k) => !/^_|^\./.test(k))
-      : [];
+  const keys = useMemo(() => {
+    if (records.length === 0) return [];
+    return computeColumns(records);
+  }, [records]);
 
   return (
     <div className="people-page">
       <header className="people-header">
         <h1 className="people-title">Payroll</h1>
-        <p className="people-subtitle">Fetch and view payroll data from Zoho Payroll API</p>
+        <p className="people-subtitle">
+          Loads every Payroll employee in your organisation (all pages), then fetches salary for each. One click —
+          results appear in the table below.
+        </p>
       </header>
 
       <div className="people-actions">
         <button
           type="button"
           className="people-fetch-btn"
-          onClick={fetchData}
+          onClick={fetchAllSalaries}
           disabled={loading}
         >
-          {loading ? 'Fetching...' : 'Fetch Data'}
+          {loading ? 'Fetching…' : 'Fetch all salaries'}
         </button>
       </div>
 
       {error && <div className="people-error">{error}</div>}
 
-      {loading && <div className="people-loading">Loading payroll data...</div>}
+      {loading && <div className="people-loading">Loading salaries for all employees…</div>}
 
       {!loading && data !== null && (
         <div className="people-content">
           {records.length === 0 ? (
-            <p className="people-empty">No records in response. Raw data structure may differ.</p>
+            <p className="people-empty">No employees or salary rows returned.</p>
           ) : (
             <div className="people-table-wrap">
               <table className="people-table">
@@ -99,7 +116,7 @@ const Payroll = () => {
                 </thead>
                 <tbody>
                   {records.map((row, i) => (
-                    <tr key={i}>
+                    <tr key={row.employee_id != null ? String(row.employee_id) : i}>
                       <td>{i + 1}</td>
                       {keys.map((k) => (
                         <td key={k}>
@@ -114,7 +131,7 @@ const Payroll = () => {
               </table>
             </div>
           )}
-          <p className="people-meta">Fetched {records.length} record(s).</p>
+          <p className="people-meta">Fetched {records.length} employee salary row(s).</p>
         </div>
       )}
     </div>

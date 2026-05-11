@@ -15,6 +15,19 @@
   box-sizing: border-box;
 }
 
+/* Static Reports UI: no keyframe motion; flat surfaces (avoids “pulsing” glow from deep shadows). */
+.mainreport-page *,
+.mainreport-page *::before,
+.mainreport-page *::after {
+  animation: none !important;
+}
+
+.mainreport-page .mr-btn,
+.mainreport-page .mr-select,
+.mainreport-page .mr-seg {
+  transition: none;
+}
+
 .nd-content--mainreport {
   background: #ffffff;
   padding-left: 0;
@@ -34,9 +47,9 @@
 
 .mr-shell {
   background: #ffffff;
-  border: 1px solid rgba(148, 163, 184, 0.35);
+  border: 1px solid rgba(148, 163, 184, 0.45);
   border-radius: 18px;
-  box-shadow: 0 10px 40px rgba(15, 23, 42, 0.06);
+  box-shadow: none;
   padding: 10px 10px 14px;
 }
 
@@ -110,8 +123,8 @@
 .mr-card {
   background: #fff;
   border-radius: 16px;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  box-shadow: 0 6px 30px rgba(15, 23, 42, 0.06);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  box-shadow: none;
 }
 
 .mr-card + .mr-card {
@@ -181,6 +194,8 @@
 
 .mr-select {
   width: 100%;
+  min-height: 44px;
+  box-sizing: border-box;
   border: 1px solid rgba(148, 163, 184, 0.6);
   border-radius: 12px;
   padding: 10px 12px;
@@ -273,7 +288,7 @@
   background: #fff;
   color: #4b5563;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  transition: none;
   font-family: inherit;
 }
 
@@ -307,7 +322,7 @@
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: none;
   font-family: inherit;
 }
 
@@ -341,10 +356,10 @@
 
 .mr-kpi {
   background: #fff;
-  border: 1px solid rgba(148, 163, 184, 0.35);
+  border: 1px solid rgba(148, 163, 184, 0.45);
   border-radius: 14px;
   padding: 14px 14px;
-  box-shadow: 0 4px 22px rgba(15, 23, 42, 0.05);
+  box-shadow: none;
 }
 
 .mr-kpi-label {
@@ -358,16 +373,20 @@
   font-size: 1.55rem;
   font-weight: 900;
   color: #0f172a;
+  font-variant-numeric: tabular-nums;
+  min-width: 2.25em;
+  display: inline-block;
+  line-height: 1.15;
 }
 
 .mr-kpi--forms {
-  background: linear-gradient(180deg, rgba(34, 197, 94, 0.12), rgba(34, 197, 94, 0.03));
+  background: rgba(34, 197, 94, 0.08);
 }
 .mr-kpi--yet {
-  background: linear-gradient(180deg, rgba(234, 179, 8, 0.14), rgba(234, 179, 8, 0.03));
+  background: rgba(234, 179, 8, 0.1);
 }
 .mr-kpi--drafts {
-  background: linear-gradient(180deg, rgba(99, 102, 241, 0.12), rgba(99, 102, 241, 0.03));
+  background: rgba(99, 102, 241, 0.08);
 }
 
 .mr-grid {
@@ -457,11 +476,52 @@
   background: #fff;
 }
 
+.mainreport-page .mr-table-placeholder {
+  height: 96px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  background: #fafafa;
+  vertical-align: middle;
+}
+
 .mr-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 1100px;
+  min-width: 1220px;
   font-size: var(--hcm-data-table-body-font-size);
+}
+
+.mainreport-page .mr-month-filter-cell {
+  vertical-align: middle;
+}
+
+.mainreport-page .mr-month-filter-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.mainreport-page .mr-month-filter-value {
+  font-weight: 700;
+  color: #334155;
+  font-size: 0.9em;
+  white-space: nowrap;
+  max-width: 108px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mainreport-page .mr-statutory-tx-link {
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.mainreport-page .mr-statutory-tx-link:hover {
+  text-decoration: underline;
 }
 
 .mr-table th,

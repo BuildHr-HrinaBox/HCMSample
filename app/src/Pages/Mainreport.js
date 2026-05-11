@@ -1,9 +1,12 @@
-import React, { useMemo, useState, useEffect, useCallback } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { jsPDF } from 'jspdf';
 import './Mainreport.css';
 
 const API = '/server/mainreport_function/mainreport';
+
+/** Same key as Statutory.js — Reports "Statutory" link primes Transaction month filter. */
+const STATUTORY_MONTH_FILTER_KEY = 'statutory_month_filter';
 
 /** Full month names - must match backend `normalizeMonth` / MainReport `Months` values */
 const ALL_MONTHS = [
@@ -42,12 +45,53 @@ function buildPaginationItems(currentPage, totalPages) {
   return out;
 }
 
+/** Same rule as Statutory STATUS + `mainreport_function`: only explicit transaction status Approved may expose drafts. */
+const getStatutoryTransactionStatusNorm = (row) =>
+  String(row?.statutoryStatus ?? row?.status ?? '')
+    .trim()
+    .toLowerCase();
+
+const isStatutoryTransactionStatusApproved = (row) => {
+  const s = getStatutoryTransactionStatusNorm(row);
+  return s === 'approved' || s === 'approve';
+};
+
+/** Strip draft URL/name if API is stale or fields disagree (prevents Pending + Excel link). */
+const sanitizeMainReportApiRow = (row) => {
+  if (!row || typeof row !== 'object') return row;
+  if (isStatutoryTransactionStatusApproved(row)) return row;
+  return { ...row, draftFileUrl: null, draftFile: null, draftFileName: '' };
+};
+
+const canShowDraftFileLink = (row) => isStatutoryTransactionStatusApproved(row) && !!row?.draftFileUrl;
+
+const isYetToCompleteStatusText = (stLower) =>
+  stLower.includes('yet to complete') ||
+  (stLower.includes('yet') && stLower.includes('complete')) ||
+  stLower.includes('not started') ||
+  stLower.includes('nostart') ||
+  stLower.includes('incomplete') ||
+  stLower.includes('not complete');
+
 const getStatusLabel = (row) => {
-  const raw = String(row?.status || '').trim().toLowerCase();
-  if (raw.includes('complete')) return 'Completed';
-  if (raw.includes('pending')) return 'Pending';
-  if (raw.includes('yet') || raw.includes('start')) return 'Yet to Complete';
-  return row?.draftFileUrl ? 'Completed' : 'Yet to Complete';
+  const st = String(row?.statutoryStatus || row?.status || '').trim();
+  const stLower = st.toLowerCase();
+  const appr = String(row?.approval || '').trim().toLowerCase();
+  const hasDraftStored = row?.hasStatutoryDraftStored === true;
+
+  if (appr === 'rejected' || appr === 'reject' || stLower.includes('reject')) return 'Rejected';
+
+  if (stLower === 'approved' || stLower === 'approve') return 'Approved';
+
+  if (hasDraftStored && (st === '' || st === '-' || st === '—')) return 'Pending';
+  if (hasDraftStored && stLower === 'pending') return 'Pending';
+
+  if (isYetToCompleteStatusText(stLower)) return 'Yet to Complete';
+
+  if (!hasDraftStored) return 'Yet to Complete';
+
+  /** Never surface raw DB typos / stray values (e.g. "change") in Reports — bucket as Yet to Complete. */
+  return 'Yet to Complete';
 };
 
 const toIntOrNull = (v) => {
@@ -75,9 +119,9 @@ const getRowUpdatedAt = (row) =>
 const Mainreport = ({ userEmail: userEmailProp }) => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const siteFromUrl = searchParams.get('site') || '';
-  const yearFromUrl = searchParams.get('year');
-  const monthFromUrl = searchParams.get('month');
+  const siteFromUrl = (searchParams.get('site') || '').trim();
+  const yearFromUrl = (searchParams.get('year') || '').trim();
+  const monthFromUrl = (searchParams.get('month') || '').trim();
 
   const effectiveUserEmail = useMemo(
     () =>
@@ -95,18 +139,56 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
   const [tableRows, setTableRows] = useState([]);
   const [siteNames, setSiteNames] = useState([]);
   const [tableLoading, setTableLoading] = useState(false);
-  const selectedYear = yearFromUrl ? String(yearFromUrl) : '';
-  const selectedMonth = monthFromUrl ? String(monthFromUrl) : '';
-  const selectedSite = siteFromUrl ? String(siteFromUrl) : '';
+  const selectedYear = yearFromUrl ? String(yearFromUrl).trim() : '';
+  const selectedMonth = monthFromUrl ? String(monthFromUrl).trim() : '';
+  const selectedSite = siteFromUrl ? String(siteFromUrl).trim() : '';
 
   // Filter UI state (Apply/Reset like screenshot)
   const [draftYear, setDraftYear] = useState(selectedYear);
   const [draftMonth, setDraftMonth] = useState(selectedMonth);
   const [draftSite, setDraftSite] = useState(selectedSite);
   const [showDraftOnly, setShowDraftOnly] = useState(false);
+
+  const reportSiteForStatutory = (selectedSite || draftSite || '').trim();
+  const reportMonthForStatutory = (selectedMonth || draftMonth || '').trim();
+
+  const statutoryTransactionHref = useMemo(() => {
+    if (!reportSiteForStatutory) return '/rule-book/statutory';
+    return `/rule-book/statutory?site=${encodeURIComponent(reportSiteForStatutory)}`;
+  }, [reportSiteForStatutory]);
+
+  const primeStatutoryMonthFilter = useCallback((fullMonthName) => {
+    const m = String(fullMonthName || '').trim();
+    if (m && typeof localStorage !== 'undefined') {
+      localStorage.setItem(STATUTORY_MONTH_FILTER_KEY, m);
+    }
+  }, []);
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 10;
+
+  const calendarYearStr = useMemo(() => String(new Date().getFullYear()), []);
+
+  /** Always include URL/draft year + current calendar year so the <select> value matches an <option> before /summary returns (avoids year “jumping”). */
+  const yearSelectOptions = useMemo(() => {
+    const uniq = new Set();
+    (Array.isArray(years) ? years : []).forEach((y) => {
+      const s = String(y != null ? y : '').trim();
+      if (s) uniq.add(s);
+    });
+    [calendarYearStr, selectedYear, draftYear].forEach((y) => {
+      const s = String(y != null ? y : '').trim();
+      if (s) uniq.add(s);
+    });
+    return [...uniq].sort((a, b) => {
+      const na = Number.parseInt(a, 10);
+      const nb = Number.parseInt(b, 10);
+      if (Number.isFinite(na) && Number.isFinite(nb)) return nb - na;
+      return String(b).localeCompare(String(a), undefined, { sensitivity: 'base' });
+    });
+  }, [years, calendarYearStr, selectedYear, draftYear]);
+
+  const lastUrlFilterKeyRef = useRef('');
 
   const loadSummary = useCallback(async () => {
     setError('');
@@ -146,7 +228,8 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
       if (json.status !== 'success' || !json.data) {
         throw new Error(json.message || 'Invalid response');
       }
-      setTableRows(Array.isArray(json.data.rows) ? json.data.rows : []);
+      const rawRows = Array.isArray(json.data.rows) ? json.data.rows : [];
+      setTableRows(rawRows.map(sanitizeMainReportApiRow));
       setSiteNames(Array.isArray(json.data.siteNames) ? json.data.siteNames : []);
     } catch (e) {
       setError(e.message || 'Failed to load rows');
@@ -172,6 +255,9 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
 
   // Keep filter controls synced when URL changes (sidebar nav, back/forward, month pills).
   useEffect(() => {
+    const key = `${selectedYear}|${selectedMonth}|${selectedSite}`;
+    if (lastUrlFilterKeyRef.current === key) return;
+    lastUrlFilterKeyRef.current = key;
     setDraftYear(selectedYear);
     setDraftMonth(selectedMonth);
     setDraftSite(selectedSite);
@@ -213,7 +299,6 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
     q.set('year', String(draftYear));
     q.set('month', String(monthName));
     navigate(`/mainreport?${q.toString()}`);
-    setTableRows([]);
     setSiteNames([]);
   };
 
@@ -221,26 +306,22 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
     const doc = new jsPDF({ unit: 'pt', format: 'a4' });
     const pageWidth = doc.internal.pageSize.getWidth();
 
-    const title = `Consolidated Report - ${selectedMonth || ''} ${selectedYear || ''}${selectedSite ? ` (${selectedSite})` : ''}`;
+    const title = `Consolidated Report - ${selectedMonth || draftMonth || ''} ${selectedYear || draftYear || ''}${(selectedSite || draftSite) ? ` (${selectedSite || draftSite})` : ''}`;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(16);
     doc.text(title, 32, 36);
 
-    const classified = tableRows.reduce(
-      (acc, row) => {
-        const status = getStatusLabel(row);
-        if (status === 'Completed') acc.completed.push(row);
-        else if (status === 'Pending') acc.pending.push(row);
-        else acc.yetToStart.push(row);
-        return acc;
-      },
-      { completed: [], pending: [], yetToStart: [] }
-    );
+    const totalForms = tableRows.length;
+    let approvedPdf = 0;
+    for (const row of tableRows) {
+      if (isStatutoryTransactionStatusApproved(row) && getStatusLabel(row) === 'Approved') approvedPdf += 1;
+    }
+    const pendingPdf = Math.max(0, totalForms - approvedPdf);
 
     const boxes = [
-      { label: 'Completed', count: classified.completed.length, color: [22, 163, 74] },
-      { label: 'Pending', count: classified.pending.length, color: [217, 119, 6] },
-      { label: 'Yet to Complete', count: classified.yetToStart.length, color: [234, 179, 8] }
+      { label: 'Total Forms', count: totalForms, color: [34, 197, 94] },
+      { label: 'Approved', count: approvedPdf, color: [99, 102, 241] },
+      { label: 'Pending', count: pendingPdf, color: [234, 179, 8] }
     ];
 
     const startX = 32;
@@ -268,11 +349,11 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(12);
     doc.setTextColor(31, 41, 55);
-    doc.text(`Month Data: ${selectedMonth || ''} ${selectedYear || ''}`, 32, y);
+    doc.text(`Month Data: ${selectedMonth || draftMonth || ''} ${selectedYear || draftYear || ''}`, 32, y);
     y += 16;
 
-    const header = ['S.NO', 'Form Name', 'DraftFile', 'Status'];
-    const colW = [55, 245, 130, 90];
+    const header = ['S.NO', 'Form Name', 'Month Filter', 'DraftFile', 'Status'];
+    const colW = [40, 168, 72, 100, 90];
     const rowH = 18;
     const tableX = 32;
     let tableY = y;
@@ -306,10 +387,11 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
       ? tableRows.map((row, idx) => [
           String(idx + 1),
           String(row.formName || '-'),
-          String(row.draftFileName || '-'),
+          String(row.monthFilter || row.MonthFilter || selectedMonth || draftMonth || '—'),
+          String(canShowDraftFileLink(row) && row.draftFileName ? row.draftFileName : '-'),
           getStatusLabel(row)
         ])
-      : [['', 'No rows for this month.', '', '']];
+      : [['', '', 'No rows for this month.', '', '']];
 
     rows.forEach((r) => {
       if (tableY > 770) {
@@ -330,10 +412,11 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
       r.forEach((cell, i) => {
-        if (i === 3) {
+        if (i === 4) {
           const statusLower = String(cell || '').toLowerCase();
-          if (statusLower.includes('complete') && !statusLower.includes('yet')) doc.setTextColor(22, 163, 74);
-          else if (statusLower.includes('yet')) doc.setTextColor(234, 179, 8);
+          if (statusLower.includes('approved')) {
+            doc.setTextColor(22, 163, 74);
+          } else if (statusLower.includes('yet')) doc.setTextColor(234, 179, 8);
           else if (statusLower.includes('pending')) doc.setTextColor(217, 119, 6);
           else doc.setTextColor(75, 85, 99);
         } else {
@@ -345,27 +428,30 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
       tableY += rowH;
     });
 
-    const fname = `Consolidated_Report_${selectedYear || ''}_${selectedMonth || ''}_${selectedSite || 'All'}.pdf`;
+    const fname = `Consolidated_Report_${selectedYear || draftYear || ''}_${selectedMonth || draftMonth || ''}_${(selectedSite || draftSite) || 'All'}.pdf`;
     doc.save(fname.replace(/\s+/g, '_'));
   };
 
+  /**
+   * KPIs match the Forms Summary STATUS column (`getStatusLabel`).
+   * Approved only when transaction status is explicitly Approved (same gate as draft links).
+   * Pending = all other rows so Total = Approved + Pending.
+   */
   const statusCounts = useMemo(() => {
-    const base = { total: 0, yet: 0, pending: 0, drafts: 0 };
-    if (!Array.isArray(tableRows) || tableRows.length === 0) return base;
-    const counts = tableRows.reduce((acc, row) => {
-      acc.total += 1;
-      const st = getStatusLabel(row);
-      if (st === 'Pending') acc.pending += 1;
-      else if (st !== 'Completed') acc.yet += 1;
-      if (row?.draftFileUrl) acc.drafts += 1;
-      return acc;
-    }, base);
-    return counts;
+    if (!Array.isArray(tableRows) || tableRows.length === 0) {
+      return { total: 0, approved: 0, pending: 0 };
+    }
+    let approved = 0;
+    for (const row of tableRows) {
+      if (isStatutoryTransactionStatusApproved(row) && getStatusLabel(row) === 'Approved') approved += 1;
+    }
+    const total = tableRows.length;
+    return { total, approved, pending: Math.max(0, total - approved) };
   }, [tableRows]);
 
   const filteredRows = useMemo(() => {
     if (!showDraftOnly) return tableRows;
-    return (Array.isArray(tableRows) ? tableRows : []).filter((r) => !!r?.draftFileUrl);
+    return (Array.isArray(tableRows) ? tableRows : []).filter((r) => canShowDraftFileLink(r));
   }, [tableRows, showDraftOnly]);
 
   // Pagination: slice filteredRows for current page
@@ -385,6 +471,8 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
   useEffect(() => {
     setCurrentPage((p) => Math.min(p, totalPages));
   }, [totalPages]);
+
+  const draftHasYearMonth = Boolean(draftYear && draftMonth);
 
   return (
     <div className="mainreport-page">
@@ -440,8 +528,10 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                 }}
               >
                 <option value="">Select year</option>
-                {(Array.isArray(years) ? years : []).map((y) => (
-                  <option key={y} value={String(y)}>{y}</option>
+                {yearSelectOptions.map((y) => (
+                  <option key={y} value={String(y)}>
+                    {y}
+                  </option>
                 ))}
               </select>
             </label>
@@ -501,9 +591,7 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
             </div>
           </div>
           </form>
-          <div className="mr-filter-hint">
-            {loading ? <span className="mr-muted">Loading years…</span> : null}
-          </div>
+          <div className="mr-filter-hint" />
           </section>
 
           <section className="mr-kpis" aria-label="Summary">
@@ -512,12 +600,15 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
             <div className="mr-kpi-value">{statusCounts.total}</div>
           </div>
           <div className="mr-kpi mr-kpi--drafts">
-            <div className="mr-kpi-label">Completed</div>
-            <div className="mr-kpi-value">{statusCounts.drafts}</div>
+            <div className="mr-kpi-label">Approved</div>
+            <div className="mr-kpi-value">{statusCounts.approved}</div>
           </div>
-          <div className="mr-kpi mr-kpi--yet">
+          <div
+            className="mr-kpi mr-kpi--yet"
+            title="All forms that are not Approved in the table (includes Yet to Complete, workflow Pending, and Rejected)."
+          >
             <div className="mr-kpi-label">Pending</div>
-            <div className="mr-kpi-value">{statusCounts.yet}</div>
+            <div className="mr-kpi-value">{statusCounts.pending}</div>
           </div>
           </section>
 
@@ -528,14 +619,14 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
               <div className="mr-table-head">
                 <div>
                   <div className="mr-table-title">Forms Summary</div>
-                  <div className="mr-muted">List of forms with status and draft file availability for the selected period</div>
+                  <div className="mr-muted">List of forms with status and draft file availability for the selected period.</div>
                 </div>
                 <div className="mr-table-actions">
                   <button
                     type="button"
                     className={`mr-seg${!showDraftOnly ? ' mr-seg--active' : ''}`}
                     onClick={() => setShowDraftOnly(false)}
-                    disabled={!selectedYear || !selectedMonth}
+                    disabled={!draftHasYearMonth}
                   >
                     Consolidated Report
                   </button>
@@ -543,7 +634,7 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                     type="button"
                     className={`mr-seg${showDraftOnly ? ' mr-seg--active' : ''}`}
                     onClick={() => setShowDraftOnly(true)}
-                    disabled={!selectedYear || !selectedMonth}
+                    disabled={!draftHasYearMonth}
                   >
                     Draft Files Only
                   </button>
@@ -551,8 +642,8 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                     type="button"
                     className="mr-btn mr-btn-primary"
                     onClick={downloadConsolidatedPdf}
-                    disabled={!selectedYear || !selectedMonth}
-                    title={!selectedYear || !selectedMonth ? 'Select Year/Month first' : 'Download PDF'}
+                    disabled={!draftHasYearMonth}
+                    title={!draftHasYearMonth ? 'Select Year/Month first' : 'Download PDF'}
                   >
                     Download Report
                   </button>
@@ -567,38 +658,42 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                       <th style={{ maxWidth: 190, width: 190 }}>Form Name</th>
                       <th style={{ maxWidth: 260, width: 260 }}>Act</th>
                       <th style={{ maxWidth: 360, width: 360 }}>Description</th>
+                      <th style={{ width: 120, minWidth: 120 }}>Month Filter</th>
                       <th style={{ width: 180 }}>Status</th>
                       <th>Draft File</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {!selectedYear || !selectedMonth ? (
+                    {!draftHasYearMonth ? (
                       <tr>
-                        <td colSpan={6} className="mr-empty">
-                          Select Year and Month, then click <strong>Apply Filters</strong>.
+                        <td colSpan={7} className="mr-empty">
+                          Select year and month to load the table. Click <strong>Apply Filters</strong> to save this selection in the link (for sharing or bookmarks).
                         </td>
                       </tr>
-                    ) : tableLoading ? (
-                      <tr>
-                        <td colSpan={6} className="mr-empty">Loading…</td>
+                    ) : tableLoading && filteredRows.length === 0 ? (
+                      <tr aria-hidden="true">
+                        <td colSpan={7} className="mr-table-placeholder" />
                       </tr>
                     ) : filteredRows.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="mr-empty">No rows for this selection.</td>
+                        <td colSpan={7} className="mr-empty">No rows for this selection.</td>
                       </tr>
                     ) : (
                       pagedRows.map((row, idx) => {
                         const status = getStatusLabel(row);
                         const statusClass =
-                          status === 'Completed'
+                          status === 'Approved'
                             ? 'mr-status--ok'
                             : status === 'Yet to Complete'
                               ? 'mr-status--yet'
                               : 'mr-status--pending';
-                        const draftName = row?.draftFileName || '';
+                        const draftName = canShowDraftFileLink(row) ? row?.draftFileName || '' : '';
+                        const monthCell =
+                          String(row?.monthFilter || row?.MonthFilter || reportMonthForStatutory || '').trim() || '—';
+                        const monthToPrime = monthCell !== '—' ? monthCell : reportMonthForStatutory;
                         return (
-                          <tr key={row?.rowId != null ? String(row.rowId) : `${(currentPage - 1) * PAGE_SIZE + idx}-${draftName}`}>
-                            <td>{(currentPage - 1) * PAGE_SIZE + idx + 1}</td>
+                          <tr key={row?.rowId != null ? String(row.rowId) : `${(effectivePage - 1) * PAGE_SIZE + idx}-${draftName}`}>
+                            <td>{(effectivePage - 1) * PAGE_SIZE + idx + 1}</td>
                             <td
                               className="mr-strong"
                               style={{ maxWidth: 190, width: 190, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
@@ -624,16 +719,30 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                             >
                               {row?.description || ''}
                             </td>
+                            <td className="mr-month-filter-cell">
+                              <div className="mr-month-filter-stack">
+                                <span className="mr-month-filter-value" title={monthCell}>
+                                  {monthCell}
+                                </span>
+                                <Link
+                                  className="mr-statutory-tx-link"
+                                  to={statutoryTransactionHref}
+                                  onClick={() => primeStatutoryMonthFilter(monthToPrime)}
+                                >
+                                  Statutory
+                                </Link>
+                              </div>
+                            </td>
                             <td>
                               <span className={`mr-status ${statusClass}`}>{status}</span>
                             </td>
                             <td>
-                              {row?.draftFileUrl ? (
+                              {canShowDraftFileLink(row) ? (
                                 <a className="mr-link" href={row.draftFileUrl} target="_blank" rel="noopener noreferrer">
                                   {draftName || 'Open draft'}
                                 </a>
                               ) : (
-                                <span className="mr-muted">{draftName}</span>
+                                <span className="mr-muted">—</span>
                               )}
                             </td>
                           </tr>

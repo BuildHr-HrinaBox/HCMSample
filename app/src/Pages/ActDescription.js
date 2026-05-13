@@ -24,7 +24,12 @@ import {
 } from 'lucide-react';
 import './CompanyDetails.css';
 import './ActDescription.css';
-import { fetchAllowedActCategoriesFromSites, getActCategoryFromActSector } from '../utils/siteInchargeScope';
+import {
+  fetchInchargeDisplayScopeFromSites,
+  getActCategoryFromActSector,
+  sectorMatchesInchargeSiteIndustries,
+  statesFieldMatchesInchargeSiteStates,
+} from '../utils/siteInchargeScope';
 
 const API_BASE = '/server/actdescriptions_function';
 const ACTSBULK_API_BASE = '/server/actsbulk_function';
@@ -178,19 +183,33 @@ const ActDescription = ({ userRole, userEmail }) => {
   const [tableSearch, setTableSearch] = useState('');
   const [tableSortKey, setTableSortKey] = useState(null);
   const [tableSortDir, setTableSortDir] = useState('asc');
-  const [allowedActCategoryList, setAllowedActCategoryList] = useState(null);
-  const [allowedActCategoriesReady, setAllowedActCategoriesReady] = useState(false);
+  const [inchargeDisplayScope, setInchargeDisplayScope] = useState({
+    ready: false,
+    actCategories: null,
+    industryLabels: null,
+    stateLabels: null,
+  });
+  const allowedActCategoryList = inchargeDisplayScope.actCategories;
   const hasSiteBasedScope = Array.isArray(allowedActCategoryList) && allowedActCategoryList.length > 0;
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      setAllowedActCategoriesReady(false);
+      setInchargeDisplayScope({ ready: false, actCategories: null, industryLabels: null, stateLabels: null });
       try {
-        const cats = await fetchAllowedActCategoriesFromSites(userEmail);
-        if (!cancelled) setAllowedActCategoryList(cats);
-      } finally {
-        if (!cancelled) setAllowedActCategoriesReady(true);
+        const scope = await fetchInchargeDisplayScopeFromSites(userEmail);
+        if (!cancelled) {
+          setInchargeDisplayScope({
+            ready: true,
+            actCategories: scope.actCategories,
+            industryLabels: scope.industryLabels,
+            stateLabels: scope.stateLabels,
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setInchargeDisplayScope({ ready: true, actCategories: null, industryLabels: null, stateLabels: null });
+        }
       }
     })();
     return () => {
@@ -375,17 +394,28 @@ const ActDescription = ({ userRole, userEmail }) => {
   const isLibrarySelected = (id) => selectedLibraryIds.has(id);
 
   const displayActsBulkList = useMemo(() => {
-    if (!allowedActCategoriesReady) return [];
+    if (!inchargeDisplayScope.ready) return [];
     if (!hasSiteBasedScope) return actsBulkList;
     const allow = new Set(allowedActCategoryList);
-    return actsBulkList.filter((row) => {
+    let rows = actsBulkList.filter((row) => {
       const act = row.acts || row.actName || row.Act || '';
       const sector = row.sector || row.Sector || '';
       return allow.has(getActCategoryFromActSector(act, sector));
     });
-  }, [actsBulkList, hasSiteBasedScope, allowedActCategoryList, allowedActCategoriesReady]);
+    const inds = inchargeDisplayScope.industryLabels;
+    if (inds && inds.length > 0) {
+      rows = rows.filter((row) => sectorMatchesInchargeSiteIndustries(row.sector || row.Sector || '', inds));
+    }
+    const sts = inchargeDisplayScope.stateLabels;
+    if (sts && sts.length > 0) {
+      rows = rows.filter((row) =>
+        statesFieldMatchesInchargeSiteStates(row.states || row.state || row.State || '', sts)
+      );
+    }
+    return rows;
+  }, [actsBulkList, hasSiteBasedScope, allowedActCategoryList, inchargeDisplayScope]);
 
-  const libraryListPending = actsBulkLoading || !allowedActCategoriesReady;
+  const libraryListPending = actsBulkLoading || !inchargeDisplayScope.ready;
 
   const completedCount = displayActsBulkList.filter((row) => getStatus(row.id) === 'Completed').length;
   const pendingCount = displayActsBulkList.filter((row) => getStatus(row.id) === 'Pending').length;
@@ -833,10 +863,18 @@ const ActDescription = ({ userRole, userEmail }) => {
                     <div>
                       <h2 className="ad-lib-hero-title">Applicable Acts Library</h2>
                       <p className="ad-lib-hero-sub">
-                        {!allowedActCategoriesReady
+                        {!inchargeDisplayScope.ready
                           ? 'Loading your site scope and applicable acts…'
                           : hasSiteBasedScope
-                            ? `Showing Site Management industry scope: ${allowedActCategoryList.join(', ')}.`
+                            ? (() => {
+                                const parts = [];
+                                if (inchargeDisplayScope.stateLabels?.length)
+                                  parts.push(`State: ${inchargeDisplayScope.stateLabels.join(', ')}`);
+                                if (inchargeDisplayScope.industryLabels?.length)
+                                  parts.push(`Industry: ${inchargeDisplayScope.industryLabels.join(', ')}`);
+                                parts.push(`Act categories: ${allowedActCategoryList.join(', ')}`);
+                                return `Filtered by your Site Management assignment (${parts.join(' · ')}).`;
+                              })()
                             : 'Manage and track all imported Acts from bulk import.'}
                       </p>
                     </div>

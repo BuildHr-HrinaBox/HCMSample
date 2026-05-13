@@ -443,7 +443,7 @@
 /* ---------- Table ---------- */
 .actsbulk-table {
   width: 100%;
-  min-width: 1420px;       /* forces horizontal scroll — never crushes columns */
+  min-width: 1600px;       /* forces horizontal scroll — never crushes columns */
   table-layout: fixed;     /* honour explicit column widths */
   border-collapse: collapse;
   font-size: var(--hcm-data-table-body-font-size);
@@ -594,12 +594,20 @@
   vertical-align: top;
 }
 
-/* Penalty — 140px */
+/* Penalty for Non-Compliance — wide enough for full header + wrapped body text */
 .actsbulk-table th:nth-child(10),
 .actsbulk-table td:nth-child(10) {
-  width: 140px;
-  min-width: 140px;
-  max-width: 140px;
+  width: 220px;
+  min-width: 220px;
+  max-width: 220px;
+}
+
+.actsbulk-table th:nth-child(10) {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.25;
+  hyphens: auto;
 }
 
 /* Registers — 184px */

@@ -4,7 +4,8 @@ import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import './Statutory.css';
 import './SEMaster.css';
-import { fetchAllowedActCategoriesFromSites, industryLabelToActCategory } from '../utils/siteInchargeScope';
+import { fetchAllowedActCategoriesFromSites, industryLabelToActCategory, normalizeEmail, statesFieldMatchesInchargeSiteStates } from '../utils/siteInchargeScope';
+import { resolveLoginEmailString } from '../utils/resolveLoginEmail';
 
 /** @returns {(number | 'ellipsis')[]} */
 function buildPaginationItems(currentPage, totalPages) {
@@ -710,6 +711,28 @@ const isFixedRowAggregateComplianceTable = (headers) => {
   return hasQuarterCols && hasFinesDetailsCol && !looksLikeEmployeeRegister;
 };
 
+/**
+ * Vertically merged body cells (common on TN LWF Form C) repeat the same merged values for each
+ * physical sheet row; the parser then emits duplicate logical rows. Keep one row per consecutive run.
+ */
+const dedupeConsecutiveFixedAggregateBodyRows = (rows) => {
+  if (!Array.isArray(rows) || rows.length < 2) return rows;
+  const signature = (row) => {
+    if (Array.isArray(row)) return row.map((v) => String(v ?? '').trim()).join('\x1f');
+    if (row && typeof row === 'object') return Object.values(row).map((v) => String(v ?? '').trim()).join('\x1f');
+    return String(row ?? '').trim();
+  };
+  const out = [];
+  let prevSig = null;
+  for (const row of rows) {
+    const sig = signature(row);
+    if (sig === prevSig) continue;
+    prevSig = sig;
+    out.push(row);
+  }
+  return out;
+};
+
 /** LWF Form-C: “[See rule … Labour Welfare …]” is rendered on its own line under the title (not the generic reference block). */
 const shouldAppendReferenceToFormCTitle = (formHeader) => {
   const title = String(formHeader?.title || '').trim();
@@ -1406,6 +1429,8 @@ const Statutory = ({ userEmail, userRole }) => {
   const [allowedActCategoryList, setAllowedActCategoryList] = useState(null);
   const [siteNamesByActCategory, setSiteNamesByActCategory] = useState({});
   const [allowedSiteNameList, setAllowedSiteNameList] = useState(null);
+  /** Site `SiteState` values from Site Management for rows where Incharge = login (filter Statutory `state`). */
+  const [allowedInchargeStateLabels, setAllowedInchargeStateLabels] = useState(null);
   /** After first `fetchStatutoryData` run finishes (incl. silent mount refresh), Site column visibility can use scope lists — avoids cache-first paint before Site Management meta arrives. */
   const [transactionSiteMetaReady, setTransactionSiteMetaReady] = useState(false);
   const hasSiteBasedActScope = Array.isArray(allowedActCategoryList) && allowedActCategoryList.length > 0;
@@ -1674,9 +1699,11 @@ const Statutory = ({ userEmail, userRole }) => {
           console.warn('Could not load statutory scope from Site Management:', scopeErr);
           return null;
         });
-      const siteNamesPromise = fetch('/server/sitemanagement_function/sitemanagement', { cache: 'no-store' })
-        .then(async (resp) => {
-          if (!resp.ok) return { byCategory: {}, allowedNames: null };
+      const siteNamesPromise = (async () => {
+        const loginResolved = normalizeEmail(await resolveLoginEmailString(userEmail));
+        try {
+          const resp = await fetch('/server/sitemanagement_function/sitemanagement', { cache: 'no-store' });
+          if (!resp.ok) return { byCategory: {}, allowedNames: null, inchargeStates: null };
           const json = await resp.json().catch(() => ({}));
           const details = Array.isArray(json?.data?.siteDetails) ? json.data.siteDetails : [];
           const buckets = {
@@ -1685,17 +1712,21 @@ const Statutory = ({ userEmail, userRole }) => {
             clra: new Set()
           };
           const allowedNames = new Set();
+          const inchargeStates = new Set();
           details.forEach((s) => {
             const industry = String(s?.industry ?? s?.Industry ?? '').trim();
             const siteName = String(s?.siteName ?? s?.SiteName ?? '').trim();
+            const inchargeEmail = normalizeEmail(
+              String(s?.inchargeEmail ?? s?.InchargeEmail ?? s?.incharge_email ?? '')
+            );
+            if (!inchargeEmail || inchargeEmail !== loginResolved) return;
+            if (siteName) allowedNames.add(siteName);
+            const st = String(s?.siteState ?? s?.SiteState ?? s?.state ?? s?.State ?? '').trim();
+            if (st) inchargeStates.add(st);
             if (!industry || !siteName) return;
             const cat = industryLabelToActCategory(industry);
             if (!cat || !buckets[cat]) return;
             buckets[cat].add(siteName);
-            const inchargeEmail = String(s?.inchargeEmail ?? s?.InchargeEmail ?? s?.incharge_email ?? '').trim().toLowerCase();
-            if (inchargeEmail && inchargeEmail === effectiveUserEmail) {
-              allowedNames.add(siteName);
-            }
           });
           return {
             byCategory: {
@@ -1703,10 +1734,13 @@ const Statutory = ({ userEmail, userRole }) => {
               shops_and_establishment: Array.from(buckets.shops_and_establishment),
               clra: Array.from(buckets.clra)
             },
-            allowedNames: allowedNames.size > 0 ? Array.from(allowedNames) : null
+            allowedNames: allowedNames.size > 0 ? Array.from(allowedNames) : null,
+            inchargeStates: inchargeStates.size > 0 ? Array.from(inchargeStates) : null
           };
-        })
-        .catch(() => ({ byCategory: {}, allowedNames: null }));
+        } catch {
+          return { byCategory: {}, allowedNames: null, inchargeStates: null };
+        }
+      })();
 
       const response = await fetch('/server/statutoryreg_function/statutory', {
         cache: 'no-store'
@@ -1720,6 +1754,7 @@ const Statutory = ({ userEmail, userRole }) => {
         const siteMeta = await siteNamesPromise;
         setSiteNamesByActCategory(siteMeta?.byCategory || {});
         setAllowedSiteNameList(siteMeta?.allowedNames || null);
+        setAllowedInchargeStateLabels(siteMeta?.inchargeStates ?? null);
         if (data.status === 'success' && data.data && data.data.statutoryData) {
           baseStatutoryData = data.data.statutoryData;
           // Normalize field names to handle both camelCase and PascalCase
@@ -6898,6 +6933,10 @@ const Statutory = ({ userEmail, userRole }) => {
             currentHeaders
           ));
 
+      const formDAutofillContext =
+        currentHeaders.some((h) => String(h || '').toLowerCase().includes('category of workers')) &&
+        currentHeaders.some((h) => String(h || '').toLowerCase().includes('components of remuneration'));
+
       const unwrapEmp = (empItem) => empItem.Employee || empItem.employee || empItem;
 
       const getFormBEmployeeFullName = (em) => {
@@ -7142,6 +7181,16 @@ const Statutory = ({ userEmail, userRole }) => {
       const toNumber = (val) => {
         const n = Number(val);
         return Number.isFinite(n) ? n : 0;
+      };
+
+      const firstPresent = (...vals) => {
+        for (let i = 0; i < vals.length; i++) {
+          const v = vals[i];
+          if (v === null || v === undefined) continue;
+          if (typeof v === 'string' && v.trim() === '') continue;
+          return v;
+        }
+        return '';
       };
 
       const getPayrollPayloadObject = (data) => {
@@ -7445,15 +7494,6 @@ const Statutory = ({ userEmail, userRole }) => {
       const buildForm10PayrollMap = (payrollData) => {
         const p = getPayrollPayloadObject(payrollData);
         const earnings = getEarningsArray(p);
-        const firstPresent = (...vals) => {
-          for (let i = 0; i < vals.length; i++) {
-            const v = vals[i];
-            if (v === null || v === undefined) continue;
-            if (typeof v === 'string' && v.trim() === '') continue;
-            return v;
-          }
-          return '';
-        };
         const overtimeAmount = findEarningAmount(
           earnings,
           (type, name) => type === 'overtime' || type === 'ot' || name.includes('overtime')
@@ -7475,6 +7515,27 @@ const Statutory = ({ userEmail, userRole }) => {
           totalEarnings,
           normalEarnings: totalEarnings,
           totalOvertimeWorked: overtimeAmount
+        };
+      };
+
+      const buildFormDPayrollMap = (payrollData) => {
+        const p = getPayrollPayloadObject(payrollData);
+        const earnings = getEarningsArray(p);
+        return {
+          basicSalary: firstPresent(
+            p.monthly_salary,
+            p['monthly_salary'],
+            p.MonthlySalary,
+            p['MonthlySalary']
+          ),
+          houseRentAllowance: findEarningAmount(
+            earnings,
+            (type, name) => type === 'hra' || name.includes('house rent') || name.includes('hra')
+          ),
+          otherAllowance: findEarningAmount(
+            earnings,
+            (type, name) => name.includes('other allowance')
+          )
         };
       };
 
@@ -7581,6 +7642,49 @@ const Statutory = ({ userEmail, userRole }) => {
 
           if (formBAutofillContext && isFormBOtherDeductionsOtherAllowanceHeader(header)) {
             row[header] = '';
+            return;
+          }
+
+          if (formDAutofillContext && headerLower.includes('components of remuneration')) {
+            row[header] = '';
+            return;
+          }
+
+          if (formDAutofillContext && headerLower.includes('category of workers')) {
+            row[header] =
+              emp.Designation ||
+              emp.designation ||
+              emp['Designation.displayValue'] ||
+              findValueByNormalizedKey(emp, 'designation') ||
+              '';
+            return;
+          }
+
+          if (formDAutofillContext && (normalizedHeader.includes('noofmenemployed') || normalizedHeader.includes('numberofmenemployed'))) {
+            const gender = String(
+              emp.Sex ||
+              emp.Gender ||
+              emp.gender ||
+              emp['Sex'] ||
+              emp['Gender.displayValue'] ||
+              findValueByNormalizedKey(emp, 'gender') ||
+              ''
+            ).trim().toLowerCase();
+            row[header] = gender === 'male' ? '1' : '';
+            return;
+          }
+
+          if (formDAutofillContext && (normalizedHeader.includes('noofwomenemployed') || normalizedHeader.includes('numberofwomenemployed'))) {
+            const gender = String(
+              emp.Sex ||
+              emp.Gender ||
+              emp.gender ||
+              emp['Sex'] ||
+              emp['Gender.displayValue'] ||
+              findValueByNormalizedKey(emp, 'gender') ||
+              ''
+            ).trim().toLowerCase();
+            row[header] = gender === 'female' ? '1' : '';
             return;
           }
 
@@ -8014,6 +8118,27 @@ const Statutory = ({ userEmail, userRole }) => {
             row[header] = emp.Designation ||
                          emp.designation ||
                          '';
+          }
+          // Form I: Name and Address of the workman -> include employee name + address
+          else if (headerLower.includes('name and address of the workman')) {
+            const employeeName =
+              emp.Name ||
+              emp['Name'] ||
+              emp.Name1 ||
+              emp['Name1'] ||
+              emp.EmployeeName ||
+              emp['Employee Name'] ||
+              `${emp.FirstName || emp['FirstName'] || ''} ${emp.LastName || emp['LastName'] || ''}`.trim() ||
+              '';
+            const addressLine1 = emp.Address_Line_1 || emp['Address_Line_1'] || emp.AddressLine1 || '';
+            const addressLine2 = emp.Address_Line_2 || emp['Address_Line_2'] || emp.AddressLine2 || '';
+            const city = emp.City || emp['City'] || emp.City1 || emp['City1'] || '';
+            const country = emp.Country || emp['Country'] || emp.Country1 || emp['Country1'] || '';
+            const addressParts = [addressLine1, addressLine2, city, country]
+              .map((value) => String(value || '').trim())
+              .filter(Boolean);
+            const combinedAddress = addressParts.join(', ');
+            row[header] = [String(employeeName || '').trim(), combinedAddress].filter(Boolean).join(', ');
           }
           // Present Address - combine Address_Line_1, Country, City1, and City
           else if (headerLower.includes('present') && headerLower.includes('address')) {
@@ -8538,7 +8663,7 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         });
        
-        if (isLikelyFormW || isLikelyForm10 || formBAutofillContext) {
+        if (isLikelyFormW || isLikelyForm10 || formBAutofillContext || formDAutofillContext) {
           try {
             const payrollEmployeeId = getPayrollEmployeeId(emp);
             if (payrollEmployeeId) {
@@ -8584,6 +8709,26 @@ const Statutory = ({ userEmail, userRole }) => {
                     if (isFormBOtherDeductionsOtherAllowanceHeader(header)) {
                       if (otherAllowanceAmt !== '' && otherAllowanceAmt !== null && otherAllowanceAmt !== undefined) {
                         row[header] = sanitizeValue(otherAllowanceAmt);
+                      }
+                    }
+                  });
+                }
+
+                if (formDAutofillContext) {
+                  const formDPayrollMap = buildFormDPayrollMap(payrollJson.data || {});
+                  currentHeaders.forEach((header) => {
+                    const headerLower = String(header || '').toLowerCase();
+                    if (headerLower.includes('components of remuneration') && headerLower.includes('basic wages')) {
+                      if (formDPayrollMap.basicSalary !== '' && formDPayrollMap.basicSalary != null) {
+                        row[header] = sanitizeValue(formDPayrollMap.basicSalary);
+                      }
+                    } else if (headerLower.includes('components of remuneration') && headerLower.includes('house rent allowance')) {
+                      if (formDPayrollMap.houseRentAllowance !== '' && formDPayrollMap.houseRentAllowance != null) {
+                        row[header] = sanitizeValue(formDPayrollMap.houseRentAllowance);
+                      }
+                    } else if (headerLower.includes('components of remuneration') && headerLower.includes('other allowance')) {
+                      if (formDPayrollMap.otherAllowance !== '' && formDPayrollMap.otherAllowance != null) {
+                        row[header] = sanitizeValue(formDPayrollMap.otherAllowance);
                       }
                     }
                   });
@@ -10644,6 +10789,12 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
 
+    if (isFixedRowAggregateComplianceTable(headersToUse) && tableData.length > 1) {
+      const deduped = dedupeConsecutiveFixedAggregateBodyRows(tableData);
+      tableData.length = 0;
+      deduped.forEach((r) => tableData.push(r));
+    }
+
     /** Form X: merged row above detail headers (Earned Leave, Medical Leave, …) — not employer meta like Registration Certificate. */
     let columnGroupLabels = null;
     if (!hasSubColumns && headerRowIndex > 0 && headersToUse.length > 0) {
@@ -10869,7 +11020,7 @@ const Statutory = ({ userEmail, userRole }) => {
         return;
       }
 
-      const importedRows = candidateRows.map((row, rowIndex) => {
+      let importedRows = candidateRows.map((row, rowIndex) => {
         const obj = {};
         normalizedHeaders.forEach((header, idx) => {
           const sourceIdx = sourceColumnIndexForTarget[idx];
@@ -10883,6 +11034,10 @@ const Statutory = ({ userEmail, userRole }) => {
         });
         return obj;
       });
+
+      if (isFixedRowAggregateComplianceTable(normalizedHeaders) && importedRows.length > 1) {
+        importedRows = dedupeConsecutiveFixedAggregateBodyRows(importedRows);
+      }
 
       const existingRows = Array.isArray(formTableData) ? formTableData : [];
       const totalRows = Math.max(existingRows.length, importedRows.length);
@@ -11461,6 +11616,12 @@ const Statutory = ({ userEmail, userRole }) => {
       });
     }
 
+    if (Array.isArray(allowedInchargeStateLabels) && allowedInchargeStateLabels.length > 0 && data && data.length > 0) {
+      data = data.filter((item) =>
+        statesFieldMatchesInchargeSiteStates(item.state || item.State || '', allowedInchargeStateLabels)
+      );
+    }
+
     // Show all form names in every month: for selected month show matching record or placeholder (so "10 of 13" becomes 13 rows).
     // But when Statutory is already aligned 1:1 to ChecklistBulk, do not collapse by form/month.
     const effectiveSelectedMonth = resolveToFullMonthName(selectedMonth) || getCurrentMonth();
@@ -11547,7 +11708,7 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     return data;
-  }, [statutoryData, selectedMonth, getActCategoryWithFormFallback, hasComplianceFiles, resolveSiteDisplayName, siteWiseCategory, siteFromUrl, allowedSiteNameList, hasSiteBasedActScope, allowedActCategoryList]);
+  }, [statutoryData, selectedMonth, getActCategoryWithFormFallback, hasComplianceFiles, resolveSiteDisplayName, siteWiseCategory, siteFromUrl, allowedSiteNameList, allowedInchargeStateLabels, hasSiteBasedActScope, allowedActCategoryList]);
 
   const tableFormOptions = useMemo(() => {
     return Array.from(

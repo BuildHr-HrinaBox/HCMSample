@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Bell,
   CircleHelp,
@@ -6,116 +6,49 @@ import {
   ClipboardList,
   AlertTriangle,
   BookMarked,
-  Upload,
   CheckCircle2,
   ShieldCheck,
-  Building2,
 } from 'lucide-react';
 import HcmDashboardSidebar from '../components/HcmDashboardSidebar';
 import HcmHeaderProfileMenu from '../components/HcmHeaderProfileMenu';
+import { Link } from 'react-router-dom';
 import './newdashboard.css';
 
-const METRICS = [
+const DEFAULT_METRICS = [
   {
     key: 'companies',
     label: 'Active Companies',
-    value: '24',
-    trend: '↑ 8% vs last month',
-    trendUp: true,
+    value: 0,
     icon: Building,
     tone: 'green',
   },
   {
     key: 'approvals',
     label: 'Pending Approvals',
-    value: '12',
-    trend: '↓ 2% vs last week',
-    trendUp: false,
+    value: 0,
     icon: ClipboardList,
     tone: 'blue',
   },
   {
     key: 'due',
     label: 'Compliance Due',
-    value: '5',
-    trend: '↑ 3 vs last week',
-    trendUp: true,
+    value: 5,
     icon: AlertTriangle,
     tone: 'orange',
   },
   {
     key: 'policies',
     label: 'Policies & Documents',
-    value: '156',
-    trend: '↑ 12 added this month',
-    trendUp: true,
+    value: 0,
     icon: BookMarked,
     tone: 'purple',
   },
 ];
 
-const TASKS = [
-  {
-    name: 'PF Return Filing',
-    due: '18 Jun 2025',
-    dueClass: 'nd-due-urgent',
-    company: 'Vayona Solar Pvt Ltd',
-    status: 'High Priority',
-    statusClass: 'nd-badge-high',
-    iconTone: 'orange',
-  },
-  {
-    name: 'ESI Contribution',
-    due: '22 Jun 2025',
-    dueClass: 'nd-due-soon',
-    company: 'GreenWind Energy',
-    status: 'In Progress',
-    statusClass: 'nd-badge-progress',
-    iconTone: 'blue',
-  },
-  {
-    name: 'Factory License Renewal',
-    due: '28 Jun 2025',
-    dueClass: 'nd-due-normal',
-    company: 'Vayona Manufacturing',
-    status: 'Pending',
-    statusClass: 'nd-badge-pending',
-    iconTone: 'grey',
-  },
-  {
-    name: 'Annual Safety Audit',
-    due: '05 Jul 2025',
-    dueClass: 'nd-due-normal',
-    company: 'Vayona Logistics',
-    status: 'Upcoming',
-    statusClass: 'nd-badge-upcoming',
-    iconTone: 'green',
-  },
-];
+const COMPANY_API = '/server/company_function/company';
+const STATUTORY_API = '/server/statutoryreg_function/statutory';
+const CHECKLIST_BULK_API = '/server/checklistbulk_function/checklistbulk?action=getAll';
 
-const ACTIVITY = [
-  {
-    title: 'Policy Document Uploaded',
-    meta: 'By Priya Singh • 2 hours ago',
-    icon: Upload,
-    tone: 'blue',
-  },
-  {
-    title: 'Compliance checklist completed',
-    meta: 'By Amit Verma • Yesterday',
-    icon: CheckCircle2,
-    tone: 'green',
-  },
-  {
-    title: 'New subsidiary onboarded',
-    meta: 'By System • 3 days ago',
-    icon: Building2,
-    tone: 'purple',
-  },
-];
-
-/** June 2025: 1 = Sunday; highlight 17; markers for legend */
-const CAL_MONTH = { year: 2025, month: 5, label: 'June 2025' };
 const CAL_WEEKDAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
 
 function buildCalendarGrid(year, monthIndex) {
@@ -132,14 +65,136 @@ function buildCalendarGrid(year, monthIndex) {
   return rows;
 }
 
-const dueDates = new Set([3, 10, 18]);
-const eventDates = new Set([12, 22]);
-const holidayDates = new Set([15]);
+const TRANSACTION_PAGE = '/rule-book/statutory';
+
+const hasValue = (value) => {
+  if (value == null) return false;
+  const text = String(value).trim().toLowerCase();
+  return text !== '' && text !== 'null' && text !== 'undefined';
+};
+
+const parseDateValue = (value) => {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const parsed = Date.parse(text);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+const formatDueDate = (value) => {
+  const timestamp = parseDateValue(value);
+  if (timestamp == null) return String(value || '-').trim() || '-';
+  return new Date(timestamp).toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+};
+
+const isMonthlyBasis = (value) => String(value || '').trim().toLowerCase() === 'monthly basis';
+
+const buildMonthlyBasisDate = (calendarMonth) =>
+  new Date(calendarMonth.year, calendarMonth.month, 15);
+
+const getDueDateInfo = (value, calendarMonth) => {
+  const raw = String(value || '').trim();
+  if (isMonthlyBasis(raw)) {
+    const date = buildMonthlyBasisDate(calendarMonth);
+    return {
+      timestamp: date.getTime(),
+      display: date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }),
+      day: 15,
+      isDerived: true,
+    };
+  }
+
+  const timestamp = parseDateValue(raw);
+  if (timestamp == null) {
+    return {
+      timestamp: null,
+      display: raw || '-',
+      day: null,
+      isDerived: false,
+    };
+  }
+
+  const date = new Date(timestamp);
+  return {
+    timestamp,
+    display: date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }),
+    day: date.getDate(),
+    isDerived: false,
+  };
+};
+
+const getStatusMeta = (value) => {
+  const rawLabel = String(value || '').trim();
+  const normalized = rawLabel.toLowerCase();
+  if (normalized === 'approved') {
+    return { label: 'Approved', statusClass: 'nd-badge-upcoming', iconTone: 'green' };
+  }
+  if (normalized === 'pending') {
+    return { label: 'Pending', statusClass: 'nd-badge-pending', iconTone: 'grey' };
+  }
+  if (normalized === 'yet to complete') {
+    return { label: 'Yet to Complete', statusClass: 'nd-badge-pending', iconTone: 'grey' };
+  }
+  if (normalized === 'rejected' || normalized === 'reject') {
+    return { label: 'Rejected', statusClass: 'nd-badge-high', iconTone: 'orange' };
+  }
+  if (normalized === 'in progress') {
+    return { label: 'In Progress', statusClass: 'nd-badge-progress', iconTone: 'blue' };
+  }
+  return {
+    label: rawLabel || 'Pending',
+    statusClass: rawLabel ? 'nd-badge-upcoming' : 'nd-badge-pending',
+    iconTone: rawLabel ? 'green' : 'grey',
+  };
+};
+
+const hasSubmittedFile = (item) =>
+  hasValue(item?.formFile ?? item?.FormFile) ||
+  hasValue(item?.proofSubmissionFile ?? item?.ProofSubmissionFile) ||
+  hasValue(item?.draftFile ?? item?.DraftFile);
+
+const buildTaskKey = (item) =>
+  `${String(item?.name ?? '').toLowerCase()}|${String(item?.due ?? '').toLowerCase()}|${String(item?.company ?? '').toLowerCase()}`;
+
+const limitUpcomingTasks = (items, limit = 4) => {
+  const submitted = [];
+  const remaining = [];
+  const seen = new Set();
+
+  items.forEach((item) => {
+    const key = buildTaskKey(item);
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (item?.hasFile) submitted.push(item);
+    else remaining.push(item);
+  });
+
+  return [...submitted, ...remaining].slice(0, limit);
+};
 
 function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInitials = 'RA', userEmail }) {
-  const calendarRows = useMemo(() => buildCalendarGrid(CAL_MONTH.year, CAL_MONTH.month), []);
+  const [metrics, setMetrics] = useState(DEFAULT_METRICS);
+  const [tasks, setTasks] = useState([]);
+  const [calendarDueDates, setCalendarDueDates] = useState(new Set());
+  const [selectedCalendarDay, setSelectedCalendarDay] = useState(new Date().getDate());
 
   const now = new Date();
+  const calendarMonth = useMemo(
+    () => ({
+      year: now.getFullYear(),
+      month: now.getMonth(),
+      label: now.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }),
+    }),
+    [now]
+  );
+  const calendarRows = useMemo(() => buildCalendarGrid(calendarMonth.year, calendarMonth.month), [calendarMonth]);
+  const todayDateOnly = useMemo(
+    () => new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(),
+    [now]
+  );
   const welcomeDate = now.toLocaleDateString('en-IN', {
     weekday: 'long',
     day: 'numeric',
@@ -152,6 +207,196 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
     hour12: true,
     timeZoneName: 'short',
   });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadMetrics = async () => {
+      try {
+        const [companyRes, statutoryRes, bulkRes] = await Promise.all([
+          fetch(COMPANY_API, { cache: 'no-store' }),
+          fetch(STATUTORY_API, { cache: 'no-store' }),
+          fetch(CHECKLIST_BULK_API, { cache: 'no-store' }),
+        ]);
+
+        let activeCompanies = 0;
+        let companyNames = [];
+        if (companyRes.ok) {
+          const companyJson = await companyRes.json();
+          const companyDetails = companyJson?.data?.companyDetails;
+          activeCompanies = Array.isArray(companyDetails) ? companyDetails.length : 0;
+          companyNames = Array.isArray(companyDetails)
+            ? companyDetails
+                .map((item) => String(item?.companyName ?? item?.CompanyName ?? '').trim())
+                .filter(Boolean)
+            : [];
+        }
+
+        let pendingApprovals = 0;
+        let policiesDocuments = 0;
+        let upcomingTasks = [];
+        const dueDateCandidates = [];
+        const statutoryStatusByAct = new Map();
+        if (statutoryRes.ok) {
+          const statutoryJson = await statutoryRes.json();
+          const statutoryData = Array.isArray(statutoryJson?.data?.statutoryData)
+            ? statutoryJson.data.statutoryData
+            : [];
+
+          pendingApprovals = statutoryData.filter((item) => {
+            const status = String(item?.status ?? item?.Status ?? '').trim().toLowerCase();
+            return status === 'pending';
+          }).length;
+
+          policiesDocuments = statutoryData.filter((item) => {
+            const status = String(item?.status ?? item?.Status ?? '').trim().toLowerCase();
+            return status === 'approved';
+          }).length;
+
+          statutoryData.forEach((item) => {
+            const actName = String(item?.act ?? item?.Act ?? item?.formName ?? item?.FormName ?? '').trim().toLowerCase();
+            const rawStatus = String(item?.status ?? item?.Status ?? '').trim();
+            if (actName && rawStatus && !statutoryStatusByAct.has(actName)) {
+              statutoryStatusByAct.set(actName, rawStatus);
+            }
+          });
+
+          upcomingTasks = statutoryData
+            .filter((item) => hasValue(item?.act ?? item?.Act) || hasValue(item?.formName ?? item?.FormName))
+            .slice(0, 4)
+            .map((item, index) => {
+              const dueDateInfo = getDueDateInfo(item?.dueDate ?? item?.DueDate, calendarMonth);
+              if (dueDateInfo.day != null) dueDateCandidates.push(dueDateInfo.day);
+              const statusMeta = getStatusMeta(item?.status ?? item?.Status);
+              return {
+                id: item?.id ?? item?.ROWID ?? `${item?.act ?? item?.Act}-${item?.dueDate ?? item?.DueDate}`,
+                name: String(item?.act ?? item?.Act ?? item?.formName ?? item?.FormName ?? '-').trim() || '-',
+                due: dueDateInfo.display,
+                dueClass: 'nd-due-normal',
+                company: String(
+                  item?.companyName ??
+                  item?.CompanyName ??
+                  companyNames[index % Math.max(companyNames.length, 1)] ??
+                  item?.site ??
+                  item?.Site ??
+                  item?.company ??
+                  item?.Company ??
+                  '-'
+                ).trim() || '-',
+                status: statusMeta.label,
+                statusClass: statusMeta.statusClass,
+                iconTone: statusMeta.iconTone,
+                hasFile: hasSubmittedFile(item),
+                sortDate: dueDateInfo.timestamp,
+                calendarDay: dueDateInfo.day,
+              };
+            });
+        }
+
+        if (bulkRes.ok) {
+          const bulkJson = await bulkRes.json();
+          const bulkData = Array.isArray(bulkJson?.data) ? bulkJson.data : [];
+          const existingKeys = new Set(
+            upcomingTasks.map(
+              (item) =>
+                `${String(item.name).toLowerCase()}|${String(item.due).toLowerCase()}|${String(item.company).toLowerCase()}`
+            )
+          );
+
+          bulkData.forEach((item, index) => {
+            const dueDateInfo = getDueDateInfo(item?.dueDate ?? item?.DueDate, calendarMonth);
+            if (dueDateInfo.day != null) dueDateCandidates.push(dueDateInfo.day);
+            const actName = String(item?.act ?? item?.Act ?? item?.formName ?? item?.FormName ?? '').trim().toLowerCase();
+            const matchedStatus = statutoryStatusByAct.get(actName) || 'Yet to Complete';
+            const statusMeta = getStatusMeta(matchedStatus);
+            const task = {
+              id: item?.id ?? item?.ROWID ?? `bulk-${index}`,
+              name: String(item?.act ?? item?.Act ?? item?.formName ?? item?.FormName ?? '-').trim() || '-',
+              due: dueDateInfo.timestamp != null ? dueDateInfo.display : '-',
+              dueClass: 'nd-due-normal',
+              company: String(
+                companyNames[index % Math.max(companyNames.length, 1)] ??
+                item?.companyName ??
+                item?.CompanyName ??
+                item?.site ??
+                item?.Site ??
+                item?.company ??
+                item?.Company ??
+                '-'
+              ).trim() || '-',
+              status: statusMeta.label,
+              statusClass: statusMeta.statusClass,
+              iconTone: statusMeta.iconTone,
+              hasFile: hasSubmittedFile(item),
+              sortDate: dueDateInfo.timestamp,
+              calendarDay: dueDateInfo.day,
+            };
+
+            const key = buildTaskKey(task);
+            if (!existingKeys.has(key)) {
+              existingKeys.add(key);
+              upcomingTasks.push(task);
+            }
+          });
+        }
+
+        const sortedUpcomingTasks = upcomingTasks
+          .sort((a, b) => {
+            const aTime = a?.sortDate ?? null;
+            const bTime = b?.sortDate ?? null;
+            if (aTime == null && bTime == null) return 0;
+            if (aTime == null) return 1;
+            if (bTime == null) return -1;
+            const aDistance = Math.abs(aTime - todayDateOnly);
+            const bDistance = Math.abs(bTime - todayDateOnly);
+            if (aDistance !== bDistance) return aDistance - bDistance;
+            return aTime - bTime;
+          })
+          .map(({ sortDate, ...item }) => item);
+
+        const filteredUpcomingTasks =
+          selectedCalendarDay == null
+            ? sortedUpcomingTasks
+            : sortedUpcomingTasks.filter((item) => item.calendarDay === selectedCalendarDay);
+
+        upcomingTasks = limitUpcomingTasks(filteredUpcomingTasks, 4);
+
+        if (!cancelled) {
+          setCalendarDueDates(
+            new Set(dueDateCandidates.filter((day) => day != null))
+          );
+          setTasks(upcomingTasks);
+          setMetrics((prev) =>
+            prev.map((metric) => {
+              if (metric.key === 'companies') return { ...metric, value: activeCompanies };
+              if (metric.key === 'approvals') return { ...metric, value: pendingApprovals };
+              if (metric.key === 'policies') return { ...metric, value: policiesDocuments };
+              return metric;
+            })
+          );
+        }
+      } catch (_) {
+        if (!cancelled) {
+          setCalendarDueDates(new Set());
+          setTasks([]);
+          setMetrics((prev) =>
+            prev.map((metric) => {
+              if (metric.key === 'companies' || metric.key === 'approvals' || metric.key === 'policies') {
+                return { ...metric, value: 0 };
+              }
+              return metric;
+            })
+          );
+        }
+      }
+    };
+
+    loadMetrics();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [calendarMonth.month, calendarMonth.year, selectedCalendarDay, todayDateOnly]);
 
   return (
     <div className="nd-root">
@@ -209,7 +454,7 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
           </section>
 
           <section className="nd-metrics">
-            {METRICS.map((m) => {
+            {metrics.map((m) => {
               const Icon = m.icon;
               return (
                 <article key={m.key} className={`nd-metric nd-metric--${m.tone}`}>
@@ -219,9 +464,6 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
                   <div className="nd-metric-body">
                     <span className="nd-metric-label">{m.label}</span>
                     <span className="nd-metric-value">{m.value}</span>
-                    <span className={`nd-metric-trend${m.trendUp ? ' nd-metric-trend--up' : ' nd-metric-trend--down'}`}>
-                      {m.trend}
-                    </span>
                   </div>
                 </article>
               );
@@ -232,23 +474,23 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
             <section className="nd-card nd-card--table">
               <div className="nd-card-head">
                 <h3 className="nd-card-title">Upcoming Compliance &amp; Tasks</h3>
-                <button type="button" className="nd-link-btn">
+                <Link to={TRANSACTION_PAGE} className="nd-link-btn">
                   View All
-                </button>
+                </Link>
               </div>
               <div className="nd-table-wrap">
                 <table className="nd-table">
                   <thead>
                     <tr>
-                      <th>Task / Compliance</th>
+                      <th>Act</th>
                       <th>Due Date</th>
                       <th>Company</th>
                       <th>Status</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {TASKS.map((row) => (
-                      <tr key={row.name}>
+                    {tasks.map((row) => (
+                      <tr key={row.id}>
                         <td>
                           <div className="nd-task-cell">
                             <span className={`nd-task-dot nd-task-dot--${row.iconTone}`} />
@@ -264,6 +506,11 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
                         </td>
                       </tr>
                     ))}
+                    {tasks.length === 0 && (
+                      <tr>
+                        <td colSpan={4}>No transaction data available.</td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -271,7 +518,7 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
 
             <section className="nd-card nd-card--calendar">
               <div className="nd-card-head">
-                <h3 className="nd-card-title">{CAL_MONTH.label}</h3>
+                <h3 className="nd-card-title">{calendarMonth.label}</h3>
               </div>
               <div className="nd-cal">
                 <div className="nd-cal-weekdays">
@@ -288,15 +535,20 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
                         if (day === null) {
                           return <span key={`e-${wi}-${di}`} className="nd-cal-day nd-cal-day--empty" />;
                         }
-                        const isToday = day === 17;
+                        const isToday =
+                          day === now.getDate() &&
+                          calendarMonth.month === now.getMonth() &&
+                          calendarMonth.year === now.getFullYear();
                         const marks = [];
-                        if (dueDates.has(day)) marks.push('due');
-                        if (eventDates.has(day)) marks.push('event');
-                        if (holidayDates.has(day)) marks.push('holiday');
+                        if (calendarDueDates.has(day)) marks.push('due');
                         return (
-                          <span
+                          <button
+                            type="button"
                             key={day}
-                            className={`nd-cal-day${isToday ? ' nd-cal-day--today' : ''}`}
+                            className={`nd-cal-day${isToday ? ' nd-cal-day--today' : ''}${selectedCalendarDay === day ? ' nd-cal-day--today' : ''}`}
+                            onClick={() =>
+                              setSelectedCalendarDay((current) => (current === day ? null : day))
+                            }
                           >
                             <span className="nd-cal-num">{day}</span>
                             {marks.length > 0 && (
@@ -306,51 +558,15 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
                                 ))}
                               </span>
                             )}
-                          </span>
+                          </button>
                         );
                       })}
                     </React.Fragment>
                   ))}
                 </div>
               </div>
-              <div className="nd-cal-legend">
-                <span className="nd-cal-legend-item">
-                  <span className="nd-cal-mark nd-cal-mark--due" /> 3 Due Dates
-                </span>
-                <span className="nd-cal-legend-item">
-                  <span className="nd-cal-mark nd-cal-mark--event" /> 2 Events
-                </span>
-                <span className="nd-cal-legend-item">
-                  <span className="nd-cal-mark nd-cal-mark--holiday" /> 1 Holiday
-                </span>
-              </div>
             </section>
           </div>
-
-          <section className="nd-card nd-card--activity">
-            <div className="nd-card-head">
-              <h3 className="nd-card-title">Recent Activity</h3>
-              <button type="button" className="nd-link-btn">
-                View All Activity
-              </button>
-            </div>
-            <ul className="nd-activity-list">
-              {ACTIVITY.map((a) => {
-                const Icon = a.icon;
-                return (
-                  <li key={a.title} className="nd-activity-item">
-                    <div className={`nd-activity-icon nd-activity-icon--${a.tone}`}>
-                      <Icon size={20} strokeWidth={2} />
-                    </div>
-                    <div className="nd-activity-text">
-                      <span className="nd-activity-title">{a.title}</span>
-                      <span className="nd-activity-meta">{a.meta}</span>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
         </main>
       </div>
     </div>

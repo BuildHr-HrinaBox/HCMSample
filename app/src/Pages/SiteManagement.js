@@ -37,11 +37,6 @@ function normalizeEmail(value) {
     .toLowerCase();
 }
 
-/** Case-insensitive industry match key (aligned with checklist / site Industry text). */
-function normalizeIndustryKey(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
 function siteInchargeEmail(s) {
   if (!s || typeof s !== 'object') return '';
   return String(s.inchargeEmail ?? s.InchargeEmail ?? s.incharge_email ?? '').trim();
@@ -221,32 +216,21 @@ const SiteManagement = ({ userEmail }) => {
   const loginEmailNorm = normalizeEmail(sessionLoginEmail || stringifyUserEmail(userEmail));
 
   /**
-   * From Site records: where Incharge email = login, collect Industry values.
-   * List view shows every site whose Industry matches any of those (not hardcoded by login email).
+   * When the login email is Incharge on at least one site, the table lists only those rows.
+   * Same industry with a different Incharge email does not appear (each site stays with its own email).
+   * If the login is not Incharge on any site, the full list is shown (e.g. org admin).
    */
   const inchargeIndustryScope = useMemo(() => {
-    if (!loginEmailNorm) return { allowedKeys: null, labels: [] };
-    const keys = new Set();
-    const labels = [];
-    sites.forEach((s) => {
-      if (normalizeEmail(siteInchargeEmail(s)) !== loginEmailNorm) return;
-      const raw = siteIndustry(s);
-      if (!raw) return;
-      const k = normalizeIndustryKey(raw);
-      if (keys.has(k)) return;
-      keys.add(k);
-      labels.push(raw);
-    });
-    if (keys.size === 0) return { allowedKeys: null, labels: [] };
-    return { allowedKeys: keys, labels };
+    if (!loginEmailNorm) return { restrictToLoginIncharge: false };
+    const isInchargeOnAny = sites.some((s) => normalizeEmail(siteInchargeEmail(s)) === loginEmailNorm);
+    return { restrictToLoginIncharge: isInchargeOnAny };
   }, [sites, loginEmailNorm]);
 
-  const hasInchargeIndustryScope = inchargeIndustryScope.allowedKeys != null;
+  const hasInchargeIndustryScope = inchargeIndustryScope.restrictToLoginIncharge;
 
   const displaySites = useMemo(() => {
-    const { allowedKeys } = inchargeIndustryScope;
-    if (!allowedKeys) return sites;
-    return sites.filter((s) => allowedKeys.has(normalizeIndustryKey(siteIndustry(s))));
+    if (!inchargeIndustryScope.restrictToLoginIncharge) return sites;
+    return sites.filter((s) => normalizeEmail(siteInchargeEmail(s)) === loginEmailNorm);
   }, [sites, inchargeIndustryScope]);
 
   const filteredSites = useMemo(() => {
@@ -423,7 +407,7 @@ const SiteManagement = ({ userEmail }) => {
   };
 
   const emptyListMessage = hasInchargeIndustryScope
-    ? 'No sites match the industry on your Incharge assignment.'
+    ? 'No sites are assigned to your login as Incharge.'
     : 'No sites. Click Add to create one.';
 
   const fetchSites = useCallback(async (options = {}) => {

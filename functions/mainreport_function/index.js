@@ -169,6 +169,78 @@ function getActCategoryForSiteRow(siteRow, siteNameParam) {
   return fallback || cat || 'other';
 }
 
+function normStateToken(v) {
+  return String(v || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+/** Same rules as app `statesFieldMatchesInchargeSiteStates` (strict state when Incharge sites have SiteState). */
+function rowStatesMatchInchargeScope(rowStateField, stateLabels) {
+  if (!stateLabels || stateLabels.length === 0) return true;
+  const raw = String(rowStateField ?? '').trim();
+  if (!raw) return false;
+  const blob = normStateToken(raw);
+  if (/\b(all india|pan india|pan-india|national|central|all states|all state)\b/.test(blob)) {
+    return false;
+  }
+  const tokens = String(raw)
+    .split(/[,;/|]/)
+    .map((t) => normStateToken(t))
+    .filter((t) => t.length > 0);
+  if (tokens.length === 0) return false;
+  const allowed = stateLabels.map(normStateToken).filter(Boolean);
+  return tokens.some((tok) => allowed.some((a) => a === tok || tok.includes(a) || a.includes(tok)));
+}
+
+function filterRowsForInchargeLocation(rows, stateLabels, siteNamesLower) {
+  if ((!stateLabels || stateLabels.length === 0) && (!siteNamesLower || siteNamesLower.size === 0)) {
+    return rows;
+  }
+  if (!Array.isArray(rows)) return rows;
+  return rows.filter((r) => {
+    const site = String(r.Site || r.site || '').trim().toLowerCase();
+    if (siteNamesLower && siteNamesLower.size > 0 && site && !siteNamesLower.has(site)) return false;
+    return rowStatesMatchInchargeScope(r.State || r.state || '', stateLabels);
+  });
+}
+
+/**
+ * Site rows where Incharge email matches user: act categories, state labels, site names (lowercase).
+ */
+async function getInchargeReportScope(catalyst, userEmail) {
+  const email = normalizeEmail(userEmail);
+  const empty = { actCategories: null, stateLabels: null, siteNamesLower: null };
+  if (!email) return empty;
+  try {
+    const siteRows = await catalyst.datastore().table('Site').getAllRows();
+    const mine = siteRows.filter(
+      (row) => normalizeEmail(row.InchargeEmail || row.inchargeEmail || row.incharge_email) === email
+    );
+    if (mine.length === 0) return empty;
+    const cats = new Set();
+    const states = new Set();
+    const sites = new Set();
+    mine.forEach((row) => {
+      const sn = String(row.SiteName || row.siteName || '').trim();
+      if (sn) sites.add(sn.toLowerCase());
+      const st = String(row.SiteState || row.siteState || row.State || row.state || '').trim();
+      if (st) states.add(st);
+      const cat = getActCategoryFromIndustryLabel(row.Industry || row.industry || '');
+      if (cat && cat !== 'other') cats.add(cat);
+    });
+    return {
+      actCategories: cats.size ? [...cats] : null,
+      stateLabels: states.size ? [...states] : null,
+      siteNamesLower: sites.size ? sites : null
+    };
+  } catch (err) {
+    console.warn('getInchargeReportScope:', err?.message || err);
+    return empty;
+  }
+}
+
 async function findSiteRowByName(catalyst, siteName) {
   const want = String(siteName || '')
     .trim()
@@ -186,25 +258,6 @@ async function findSiteRowByName(catalyst, siteName) {
     console.warn('findSiteRowByName:', err?.message || err);
   }
   return null;
-}
-
-async function getSiteActCategoryScope(catalyst, userEmail) {
-  const email = normalizeEmail(userEmail);
-  if (!email) return null;
-  try {
-    const siteRows = await catalyst.datastore().table('Site').getAllRows();
-    const set = new Set();
-    siteRows.forEach((row) => {
-      const inchargeEmail = normalizeEmail(row.InchargeEmail || row.inchargeEmail || row.incharge_email || '');
-      if (inchargeEmail !== email) return;
-      const category = getActCategoryFromIndustryLabel(row.Industry || row.industry || '');
-      if (category && category !== 'other') set.add(category);
-    });
-    return set.size ? [...set] : null;
-  } catch (err) {
-    console.warn('Could not build site industry scope for main report:', err?.message || err);
-    return null;
-  }
 }
 
 function filterRowsByActCategoryScope(rows, allowedActCategories) {
@@ -390,13 +443,18 @@ function buildEmptyFormRow(formKey, formName, act, description, reportMonthNorm)
   };
 }
 
-async function getAllSiteNames(catalyst, allowedActCategories, siteParam) {
+async function getAllSiteNames(catalyst, allowedActCategories, siteParam, inchargeSiteNamesLower) {
   try {
     const rows = await catalyst.datastore().table('Site').getAllRows();
     let scopedRows = rows;
     if (Array.isArray(allowedActCategories) && allowedActCategories.length > 0) {
       const allow = new Set(allowedActCategories);
       scopedRows = rows.filter((r) => allow.has(getActCategoryFromIndustryLabel(r.Industry || r.industry || '')));
+    }
+    if (inchargeSiteNamesLower && inchargeSiteNamesLower.size > 0) {
+      scopedRows = scopedRows.filter((r) =>
+        inchargeSiteNamesLower.has(String(r.SiteName || r.siteName || '').trim().toLowerCase())
+      );
     }
     let names = scopedRows
       .map((r) => String(r.SiteName || r.siteName || '').trim())
@@ -492,7 +550,8 @@ app.get('/mainreport/entries', async (req, res) => {
     }
 
     const { catalyst } = res.locals;
-    const allowedActCategories = await getSiteActCategoryScope(catalyst, userEmail);
+    const inchargeScope = await getInchargeReportScope(catalyst, userEmail);
+    const allowedActCategories = inchargeScope.actCategories;
 
     const siteParamRaw = req.query.site != null ? String(req.query.site) : '';
     const siteParam = siteParamRaw.trim();
@@ -502,7 +561,7 @@ app.get('/mainreport/entries', async (req, res) => {
     if (siteParam) {
       const siteRow = await findSiteRowByName(catalyst, siteParam);
       if (!siteRow) {
-        const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '');
+        const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
         return res.status(200).json({
           status: 'success',
           data: { rows: [], siteNames }
@@ -513,7 +572,7 @@ app.get('/mainreport/entries', async (req, res) => {
       if (Array.isArray(allowedActCategories) && allowedActCategories.length > 0) {
         const intersection = siteCats.filter((c) => allowedActCategories.includes(c));
         if (intersection.length === 0) {
-          const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '');
+          const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
           return res.status(200).json({
             status: 'success',
             data: { rows: [], siteNames }
@@ -528,12 +587,22 @@ app.get('/mainreport/entries', async (req, res) => {
     // Submitted rows (with draft linkage) come from Statutory.
     const statutoryTable = catalyst.datastore().table('Statutory');
     const statutoryAll = await statutoryTable.getAllRows();
-    const statutoryForUser = filterRowsByActCategoryScope(statutoryAll, narrowActCategories);
+    let statutoryForUser = filterRowsByActCategoryScope(statutoryAll, narrowActCategories);
+    statutoryForUser = filterRowsForInchargeLocation(
+      statutoryForUser,
+      inchargeScope.stateLabels,
+      inchargeScope.siteNamesLower
+    );
 
     // Master form list comes from checklistbulk (same source used by Statutory page merge).
     const bulkTable = catalyst.datastore().table('checklistbulk');
     const bulkAll = await bulkTable.getAllRows();
-    const bulkForUser = filterRowsByActCategoryScope(bulkAll, narrowActCategories);
+    let bulkForUser = filterRowsByActCategoryScope(bulkAll, narrowActCategories);
+    bulkForUser = filterRowsForInchargeLocation(
+      bulkForUser,
+      inchargeScope.stateLabels,
+      inchargeScope.siteNamesLower
+    );
 
     // Keep duplicates by form when act/description differs (same behavior user expects from Statutory list).
     const formsMap = new Map();
@@ -585,7 +654,7 @@ app.get('/mainreport/entries', async (req, res) => {
     out.sort((a, b) => String(a.formName || '').localeCompare(String(b.formName || ''), undefined, { sensitivity: 'base' }));
 
     // Full site list for the dropdown; do not filter by `site` query (that hid all other sites).
-    const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '');
+    const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
 
     res.status(200).json({
       status: 'success',

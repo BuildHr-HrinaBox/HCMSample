@@ -25,19 +25,126 @@ function buildPaginationItems(currentPage, totalPages) {
   return out;
 }
 
-// Map Excel row to datastore format
-const mapRowToRecord = (row) => ({
-  sector: row.Sector ?? row.sector ?? '',
-  acts: row.Acts ?? row.Act ?? row.acts ?? '',
-  type: row.Type ?? row.type ?? '',
-  states: row.States ?? row.states ?? '',
-  description: row.Description ?? row.description ?? '',
-  applicability: row.Applicability ?? row.applicability ?? '',
-  keyComplianceRequirements: row['Key Compliance Requirements'] ?? row.KeyComplianceRequirements ?? row.keyComplianceRequirements ?? '',
-  dueDate: row['Due Date'] ?? row.DueDate ?? row.dueDate ?? '',
-  penaltyforNonCompliance: row['Penalty for Non-Compliance'] ?? row.PenaltyforNonCompliance ?? row.penaltyforNonCompliance ?? '',
-  registers: row.Registers ?? row.registers ?? ''
-});
+/** Trim, fix NBSP, collapse spaces, strip trailing dots — Excel headers vary by template/state. */
+const normalizeHeaderKey = (key) =>
+  String(key ?? '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\.+$/g, '')
+    .trim()
+    .toLowerCase();
+
+const buildNormRow = (row) => {
+  const norm = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (k === '__rowNum__') continue;
+    norm[normalizeHeaderKey(k)] = v;
+  }
+  return norm;
+};
+
+const coalesceCell = (...vals) => {
+  for (const v of vals) {
+    if (v === undefined || v === null) continue;
+    const s = typeof v === 'string' ? v : String(v);
+    if (s.trim() !== '') return v;
+  }
+  return '';
+};
+
+const cellByAliases = (normRow, aliases) => {
+  for (const a of aliases) {
+    const nk = normalizeHeaderKey(a);
+    if (!Object.prototype.hasOwnProperty.call(normRow, nk)) continue;
+    const v = normRow[nk];
+    if (v === undefined || v === null) continue;
+    if (String(v).trim() === '') continue;
+    return v;
+  }
+  return undefined;
+};
+
+/** When header text differs (state templates) but clearly means applicability. */
+const fuzzyApplicability = (normRow) => {
+  for (const [nk, v] of Object.entries(normRow)) {
+    if (v === undefined || v === null || String(v).trim() === '') continue;
+    const compact = nk.replace(/[^a-z0-9]/g, '');
+    if (compact.includes('applicability')) return v;
+    if (nk.includes('applicable to') || nk === 'applicable' || compact === 'applicable') return v;
+  }
+  return undefined;
+};
+
+/** Match key-compliance column but not penalty / non-compliance / registers. */
+const fuzzyKeyCompliance = (normRow) => {
+  for (const [nk, v] of Object.entries(normRow)) {
+    if (v === undefined || v === null || String(v).trim() === '') continue;
+    if (/penalty|non[-\s]?compliance|register/i.test(nk)) continue;
+    const compact = nk.replace(/[^a-z0-9]/g, '');
+    if (/^keycompliance/.test(compact) || (compact.includes('key') && compact.includes('compliance'))) return v;
+  }
+  return undefined;
+};
+
+// Map Excel row to datastore format (headers may differ across state Excel templates)
+const mapRowToRecord = (row) => {
+  const norm = buildNormRow(row);
+  return {
+    sector: coalesceCell(cellByAliases(norm, ['Sector', 'sector']), row.Sector, row.sector),
+    acts: coalesceCell(cellByAliases(norm, ['Acts', 'Act', 'acts']), row.Acts, row.Act, row.acts),
+    type: coalesceCell(cellByAliases(norm, ['Type', 'type']), row.Type, row.type),
+    states: coalesceCell(cellByAliases(norm, ['States', 'State', 'states', 'state']), row.States, row.states),
+    description: coalesceCell(cellByAliases(norm, ['Description', 'description']), row.Description, row.description),
+    applicability: coalesceCell(
+      cellByAliases(norm, [
+        'Applicability',
+        'Applicable',
+        'Applicable To',
+        'Scope of Applicability',
+        'Application',
+        'Act Applicability'
+      ]),
+      fuzzyApplicability(norm),
+      row.Applicability,
+      row.applicability
+    ),
+    keyComplianceRequirements: coalesceCell(
+      cellByAliases(norm, [
+        'Key Compliance Requirements',
+        'Key Compliance Requirement',
+        'Key Compliance',
+        'Key Compliance Req',
+        'Key compliances',
+        'Key Statutory Compliances',
+        'Compliance Requirements (Key)',
+        'KeyComplianceRequirements',
+        'Key compliance requirements'
+      ]),
+      fuzzyKeyCompliance(norm),
+      row['Key Compliance Requirements'],
+      row.KeyComplianceRequirements,
+      row.keyComplianceRequirements
+    ),
+    dueDate: coalesceCell(
+      cellByAliases(norm, ['Due Date', 'DueDate', 'due date', 'duedate']),
+      row['Due Date'],
+      row.DueDate,
+      row.dueDate
+    ),
+    penaltyforNonCompliance: coalesceCell(
+      cellByAliases(norm, [
+        'Penalty for Non-Compliance',
+        'Penalty for Non Compliance',
+        'PenaltyforNonCompliance',
+        'Penalty'
+      ]),
+      row['Penalty for Non-Compliance'],
+      row.PenaltyforNonCompliance,
+      row.penaltyforNonCompliance
+    ),
+    registers: coalesceCell(cellByAliases(norm, ['Registers', 'Register', 'registers']), row.Registers, row.registers)
+  };
+};
 
 const ActsBulk = () => {
   const [file, setFile] = useState(null);

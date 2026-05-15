@@ -37,11 +37,12 @@ module.exports = async (req, res) => {
     console.log('Access token obtained, length:', accessToken ? accessToken.length : 0);
     
     const rawData = await fetchLeaveData({ accessToken, fromDate, toDate, unit });
-    const leaveRecords = normalizeLeaveResponse(rawData);
+    const leaveTypeLabels = extractLeaveTypeLabels(rawData);
+    const leaveRecords = renameLeaveRecordKeys(normalizeLeaveResponse(rawData), leaveTypeLabels);
     const records = toRecordsMap(rawData, leaveRecords);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ records }));
+    res.end(JSON.stringify({ records, leaveTypeLabels, leaveRecords }));
   } catch (error) {
     console.error('leavedata_function error:', error);
     const errorMessage = error.response?.data?.message || 
@@ -210,6 +211,80 @@ function normalizeLeaveResponse(raw) {
   }
 
   return [];
+}
+
+function extractLeaveTypeLabels(raw) {
+  const out = {};
+  const seen = new Set();
+
+  const maybeStore = (id, label) => {
+    const key = String(id || '').trim();
+    const value = String(label || '').trim();
+    if (!/^\d{6,}$/.test(key) || !value) return;
+    if (!out[key]) out[key] = value;
+  };
+
+  const visit = (node, depth = 0) => {
+    if (!node || depth > 6) return;
+    if (Array.isArray(node)) {
+      node.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    if (typeof node !== 'object') return;
+    if (seen.has(node)) return;
+    seen.add(node);
+
+    Object.entries(node).forEach(([key, value]) => {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const label =
+          value.leaveTypeName ||
+          value.leave_type_name ||
+          value.leavetype ||
+          value.leaveType ||
+          value.name ||
+          value.label ||
+          value.displayName;
+        if (label) maybeStore(key, label);
+      }
+      if (Array.isArray(value)) {
+        value.forEach((item) => {
+          if (!item || typeof item !== 'object') return;
+          const id =
+            item.id ||
+            item.leaveTypeId ||
+            item.leave_type_id ||
+            item.typeId ||
+            item.TypeId;
+          const label =
+            item.leaveTypeName ||
+            item.leave_type_name ||
+            item.leavetype ||
+            item.leaveType ||
+            item.name ||
+            item.label ||
+            item.displayName;
+          if (id && label) maybeStore(id, label);
+        });
+      }
+      visit(value, depth + 1);
+    });
+  };
+
+  visit(raw, 0);
+  return out;
+}
+
+function renameLeaveRecordKeys(records, leaveTypeLabels) {
+  const list = Array.isArray(records) ? records : [];
+  return list.map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+    const next = {};
+    Object.entries(row).forEach(([key, value]) => {
+      const mappedKey = leaveTypeLabels && leaveTypeLabels[key] ? leaveTypeLabels[key] : key;
+      next[mappedKey] = value;
+    });
+    return next;
+  });
 }
 
 function toRecordsMap(raw, leaveRecords) {

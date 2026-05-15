@@ -83,23 +83,60 @@ module.exports = async (req, res) => {
     const zohoMsg =
       (zoho && typeof zoho === 'object' && (zoho.message || zoho.error)) ||
       (typeof zoho === 'string' ? zoho : null);
+    const status = error.response?.status;
+    const detailedError = buildPayrollErrorMessage({
+      status,
+      zohoMsg,
+      organizationId:
+        (() => {
+          try {
+            const url = new URL(req.url, 'http://localhost');
+            return (
+              url.searchParams.get('organization_id') ||
+              process.env.ZOHO_PAYROLL_ORGANIZATION_ID ||
+              '60006183023'
+            );
+          } catch (_) {
+            return process.env.ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
+          }
+        })(),
+    });
     console.error('payroll_function error:', {
-      status: error.response?.status,
+      status,
       data: zoho,
       message: error.message,
     });
-    res.writeHead(error.response?.status && error.response.status < 600 ? error.response.status : 500, {
+    res.writeHead(status && status < 600 ? status : 500, {
       'Content-Type': 'application/json',
     });
     res.end(
       JSON.stringify({
         success: false,
-        error: zohoMsg || error.message,
+        error: detailedError || zohoMsg || error.message,
         zohoCode: zoho && typeof zoho === 'object' ? zoho.code : undefined,
       })
     );
   }
 };
+
+function buildPayrollErrorMessage({ status, zohoMsg, organizationId }) {
+  const normalized = String(zohoMsg || '').toLowerCase().trim();
+  const looksAccessDenied =
+    status === 400 &&
+    (normalized.includes('access denied') ||
+      normalized.includes('permission') ||
+      normalized.includes('unauthorized'));
+
+  if (looksAccessDenied) {
+    return `Zoho Payroll rejected this request with "Access Denied". Check that the OAuth token/refresh token has Payroll scopes, the account has access to Payroll organisation ${organizationId}, and the organisation ID belongs to the same Zoho Payroll account.`;
+  }
+
+  if (status === 400 && normalized) {
+    return `Zoho Payroll request failed (${zohoMsg}). Verify payroll permissions and organisation ID ${organizationId}.`;
+  }
+
+  return zohoMsg || '';
+}
 
 async function getAccessToken() {
   const direct = process.env.ZOHO_ACCESS_TOKEN;

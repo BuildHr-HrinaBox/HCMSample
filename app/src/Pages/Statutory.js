@@ -4,7 +4,15 @@ import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import './Statutory.css';
 import './SEMaster.css';
-import { fetchAllowedActCategoriesFromSites, industryLabelToActCategory, normalizeEmail, statesFieldMatchesInchargeSiteStates } from '../utils/siteInchargeScope';
+import {
+  checklistStateMatchesSiteState,
+  fetchAllowedActCategoriesFromSites,
+  getActCategoryFromActSector,
+  industryLabelToActCategory,
+  normalizeEmail,
+  sectorMatchesInchargeSiteIndustries,
+  statesFieldMatchesInchargeSiteStates
+} from '../utils/siteInchargeScope';
 import { resolveLoginEmailString } from '../utils/resolveLoginEmail';
 
 /** @returns {(number | 'ellipsis')[]} */
@@ -52,6 +60,34 @@ function checklistBulkRowIdentityKey(row) {
     norm(row?.act ?? row?.Act),
     norm(row?.description ?? row?.Description)
   ].join('\x1f');
+}
+
+/** Split comma-joined Statutory Site column values for comparisons (multi-site per state). */
+function parseResolvedSiteTokens(resolved) {
+  return String(resolved || '')
+    .trim()
+    .toLowerCase()
+    .split(/\s*,\s*/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+}
+
+function resolvedSitesOverlap(resolvedA, resolvedB) {
+  const a = parseResolvedSiteTokens(resolvedA);
+  const b = parseResolvedSiteTokens(resolvedB);
+  if (a.length === 0 || b.length === 0) return false;
+  const setA = new Set(a);
+  return b.some((x) => setA.has(x));
+}
+
+function resolvedSiteMatchesSingleTarget(resolved, targetSiteSingle) {
+  const t = String(targetSiteSingle || '').trim().toLowerCase();
+  if (!t) return false;
+  return parseResolvedSiteTokens(resolved).includes(t);
+}
+
+function resolvedSiteAnyAllowed(resolved, allowedSitesLowerSet) {
+  return parseResolvedSiteTokens(resolved).some((x) => allowedSitesLowerSet.has(x));
 }
 
 function hasStatutoryDraftFileRef(row) {
@@ -111,6 +147,181 @@ const FORM_12_ALIGNMENT_HEADERS = [
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** Zoho People `bookedAndBalance` expects `from` / `to` as DD-Mon-YYYY (aligned with Statutory month picker). */
+function zohoBookedBalanceRangeForUiMonth(selectedMonthStr) {
+  const now = new Date();
+  let monthIdx = now.getMonth();
+  const idx = MONTH_NAMES.findIndex((m) =>
+    m.toLowerCase().startsWith(String(selectedMonthStr || '').toLowerCase().trim())
+  );
+  if (idx >= 0) monthIdx = idx;
+  const year = now.getFullYear();
+  const first = new Date(year, monthIdx, 1);
+  const last = new Date(year, monthIdx + 1, 0);
+  const dd = (n) => String(n).padStart(2, '0');
+  const fromDate = `${dd(first.getDate())}-${MONTH_ABBR[first.getMonth()]}-${first.getFullYear()}`;
+  const toDate = `${dd(last.getDate())}-${MONTH_ABBR[last.getMonth()]}-${last.getFullYear()}`;
+  return { fromDate, toDate };
+}
+
+function normalizeLooseHeaderText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Metric type for Form X leave register sub-columns */
+function getLeaveColumnMetricType(header) {
+  const headerLower = normalizeLooseHeaderText(header);
+  if (!headerLower.includes('leave')) return null;
+  if (headerLower.includes('earned') && (headerLower.includes('period') || headerLower.includes('during'))) {
+    return 'earned';
+  }
+  if (headerLower.includes('beginning') && headerLower.includes('month')) return 'beginning';
+  if (headerLower.includes('availed') && headerLower.includes('month')) return 'availed';
+  if (headerLower.includes('balance') && headerLower.includes('end') && headerLower.includes('month')) {
+    return 'balance';
+  }
+  return null;
+}
+
+const OTHER_LEAVE_ZOHO_ALIASES = {
+  privilegeleave: ['privilege leave', 'privilegeleave', 'privilege', 'pl'],
+  leavewithoutpay: ['leave without pay', 'leavewithoutpay', 'loss of pay', 'lop', 'lwp'],
+  sickleave: ['sick leave', 'sickleave', 'sick', 'sl'],
+  weddingleave: ['wedding leave', 'weddingleave', 'marriage leave', 'wedding'],
+};
+
+function leaveLabelMatchesOtherType(label, aliases) {
+  const normalized = normalizeLooseHeaderText(label);
+  if (!normalized) return false;
+  return aliases.some(
+    (alias) =>
+      normalized === alias ||
+      normalized.includes(alias) ||
+      alias.includes(normalized)
+  );
+}
+
+function getOtherLeaveTypeCell(leaveRecord, aliases, leaveTypeLabels = {}) {
+  if (!leaveRecord || typeof leaveRecord !== 'object') return null;
+  const skipKeys = new Set(['employee', 'employeeid', 'totals', 's.no', 'sno']);
+  for (const key of Object.keys(leaveRecord)) {
+    if (skipKeys.has(normalizeLooseHeaderText(key))) continue;
+    const labelsToCheck = [key, leaveTypeLabels[key]].filter(Boolean);
+    const matched = labelsToCheck.some((label) => leaveLabelMatchesOtherType(label, aliases));
+    if (matched) return leaveRecord[key];
+  }
+  return null;
+}
+
+function parseLeaveCellObject(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'object') return value;
+  const raw = String(value).trim();
+  if (!raw || raw === '{}') return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function getOtherLeaveTypeMetrics(leaveRecord, aliases, leaveTypeLabels = {}) {
+  const raw = getOtherLeaveTypeCell(leaveRecord, aliases, leaveTypeLabels);
+  const parsed = parseLeaveCellObject(raw);
+  if (!parsed || typeof parsed !== 'object') {
+    return { beginning: 0, availed: 0, balance: 0, hasData: false };
+  }
+  const balanceRaw = parsed.paidBalance ?? parsed.balance ?? parsed.Balance;
+  const availedRaw = parsed.paidBooked ?? parsed.booked ?? parsed.Booked;
+  const hasBalance = balanceRaw != null && balanceRaw !== '';
+  const hasAvailed = availedRaw != null && availedRaw !== '';
+  const balanceNum = hasBalance ? Number(balanceRaw) : NaN;
+  const availedNum = hasAvailed ? Number(availedRaw) : NaN;
+  const beginningRaw =
+    parsed.beginningBalance ??
+    parsed.openingBalance ??
+    parsed.opening ??
+    parsed.beginning ??
+    (Number.isFinite(balanceNum) && Number.isFinite(availedNum) ? balanceNum + availedNum : balanceNum);
+  const beginningNum = beginningRaw != null && beginningRaw !== '' ? Number(beginningRaw) : NaN;
+  return {
+    beginning: Number.isFinite(beginningNum) ? beginningNum : 0,
+    availed: Number.isFinite(availedNum) ? availedNum : 0,
+    balance: Number.isFinite(balanceNum) ? balanceNum : 0,
+    hasData: Number.isFinite(beginningNum) || Number.isFinite(availedNum) || Number.isFinite(balanceNum),
+  };
+}
+
+function getCombinedOtherLeaveMetrics(leaveRecord, leaveTypeLabels = {}) {
+  const totals = { beginning: 0, availed: 0, balance: 0 };
+  let hasAnyValue = false;
+  Object.values(OTHER_LEAVE_ZOHO_ALIASES).forEach((aliases) => {
+    const metrics = getOtherLeaveTypeMetrics(leaveRecord, aliases, leaveTypeLabels);
+    if (!metrics.hasData) return;
+    totals.beginning += metrics.beginning;
+    totals.availed += metrics.availed;
+    totals.balance += metrics.balance;
+    hasAnyValue = true;
+  });
+  if (!hasAnyValue) return { beginning: '', availed: '', balance: '' };
+  return {
+    beginning: String(totals.beginning),
+    availed: String(totals.availed),
+    balance: String(totals.balance),
+  };
+}
+
+/**
+ * Form X: map detail headers to Earned Leave vs Other Leave bands (merged row above headers).
+ */
+function resolveFormXLeaveSectionHeaders(headers, groupLabels) {
+  const headersArr = Array.isArray(headers) ? headers : [];
+  const groups =
+    Array.isArray(groupLabels) && groupLabels.length === headersArr.length ? groupLabels : null;
+  const result = {
+    earnedEarned: null,
+    earnedAvailed: null,
+    otherBeginning: null,
+    otherAvailed: null,
+    otherBalance: null,
+  };
+  const lists = { beginning: [], availed: [], balance: [], earned: [] };
+
+  headersArr.forEach((header, index) => {
+    const metric = getLeaveColumnMetricType(header);
+    if (!metric) return;
+    if (metric === 'earned') lists.earned.push(header);
+    if (metric === 'beginning') lists.beginning.push(header);
+    if (metric === 'availed') lists.availed.push(header);
+    if (metric === 'balance') lists.balance.push(header);
+
+    if (!groups) return;
+    const group = normalizeLooseHeaderText(groups[index]);
+    if (group.includes('earned leave')) {
+      if (metric === 'earned' && !result.earnedEarned) result.earnedEarned = header;
+      if (metric === 'availed' && !result.earnedAvailed) result.earnedAvailed = header;
+    }
+    if (group.includes('other leave')) {
+      if (metric === 'beginning' && !result.otherBeginning) result.otherBeginning = header;
+      if (metric === 'availed' && !result.otherAvailed) result.otherAvailed = header;
+      if (metric === 'balance' && !result.otherBalance) result.otherBalance = header;
+    }
+  });
+
+  if (!result.earnedEarned && lists.earned.length > 0) result.earnedEarned = lists.earned[0];
+  if (!result.earnedAvailed && lists.availed.length > 0) result.earnedAvailed = lists.availed[0];
+  if (!result.otherBeginning && lists.beginning.length >= 3) result.otherBeginning = lists.beginning[2];
+  if (!result.otherAvailed && lists.availed.length >= 3) result.otherAvailed = lists.availed[2];
+  if (!result.otherBalance && lists.balance.length >= 3) result.otherBalance = lists.balance[2];
+
+  return result;
+}
 
 /** Extract full month name from a due date string (e.g. "15-Mar", "March 2024", "15-03-2024") for saving into month filter */
 const getMonthFromDueDate = (dueDateStr) => {
@@ -799,12 +1010,11 @@ const isFormVIFestivalContext = (formHeader, rowItem, fileName, tableHeaders) =>
   ]
     .join(' ')
     .toLowerCase();
-  return (
-    /\bform\s*[-–]?\s*vi\b|\bform\s*6\b/.test(parts) &&
-    /national/.test(parts) &&
-    /festival/.test(parts) &&
-    /holidays?/.test(parts)
-  );
+  const isFormVI = /\bform\s*[-–]?\s*vi\b|\bform\s*6\b/.test(parts);
+  if (!isFormVI) return false;
+  if (/national/.test(parts) && /festival/.test(parts) && /holidays?/.test(parts)) return true;
+  if (/(enter\s+days\s+date|enter\s+days\s+dates|days?\s+dates?\s+and\s+months?|festival\s+holidays?)/.test(parts)) return true;
+  return false;
 };
 
 const isFormVILegendLine = (text) => {
@@ -1429,6 +1639,10 @@ const Statutory = ({ userEmail, userRole }) => {
   const [allowedActCategoryList, setAllowedActCategoryList] = useState(null);
   const [siteNamesByActCategory, setSiteNamesByActCategory] = useState({});
   const [allowedSiteNameList, setAllowedSiteNameList] = useState(null);
+  /** Incharge sites with SiteState + industry bucket — drives Statutory Site column when row has `state`. */
+  const [inchargeSitesMeta, setInchargeSitesMeta] = useState([]);
+  /** All org sites (Site Management) with SiteState — used for Site column when user has no Incharge rows. */
+  const [organizationSitesMeta, setOrganizationSitesMeta] = useState([]);
   /** Site `SiteState` values from Site Management for rows where Incharge = login (filter Statutory `state`). */
   const [allowedInchargeStateLabels, setAllowedInchargeStateLabels] = useState(null);
   /** After first `fetchStatutoryData` run finishes (incl. silent mount refresh), Site column visibility can use scope lists — avoids cache-first paint before Site Management meta arrives. */
@@ -1606,8 +1820,8 @@ const Statutory = ({ userEmail, userRole }) => {
     const convertedBulkData = bulkData.map((bulkItem, index) => ({
       id: `bulk_${bulkItem.id ?? timestamp}_${index}`,
       formName: bulkItem.formName || '',
-      sector: bulkItem.sector || '',
-      state: bulkItem.state || '',
+      sector: bulkItem.sector || bulkItem.Sector || '',
+      state: bulkItem.state || bulkItem.State || '',
       act: bulkItem.act || '',
       dueDate: bulkItem.dueDate || '',
       description: bulkItem.description || '',
@@ -1661,8 +1875,8 @@ const Statutory = ({ userEmail, userRole }) => {
         act: pick(item.act ?? item.Act, bulkItem.act),
         description: pick(item.description ?? item.Description, bulkItem.description),
         dueDate: pick(item.dueDate ?? item.DueDate, bulkItem.dueDate),
-        sector: pick(item.sector ?? item.Sector, bulkItem.sector),
-        state: pick(item.state ?? item.State, bulkItem.state)
+        sector: pick(item.sector ?? item.Sector, bulkItem.sector ?? bulkItem.Sector),
+        state: pick(item.state ?? item.State, bulkItem.state ?? bulkItem.State)
       };
     });
   };
@@ -1703,7 +1917,14 @@ const Statutory = ({ userEmail, userRole }) => {
         const loginResolved = normalizeEmail(await resolveLoginEmailString(userEmail));
         try {
           const resp = await fetch('/server/sitemanagement_function/sitemanagement', { cache: 'no-store' });
-          if (!resp.ok) return { byCategory: {}, allowedNames: null, inchargeStates: null };
+          if (!resp.ok)
+            return {
+              byCategory: {},
+              allowedNames: null,
+              inchargeStates: null,
+              inchargeSites: [],
+              organizationSites: []
+            };
           const json = await resp.json().catch(() => ({}));
           const details = Array.isArray(json?.data?.siteDetails) ? json.data.siteDetails : [];
           const buckets = {
@@ -1713,16 +1934,34 @@ const Statutory = ({ userEmail, userRole }) => {
           };
           const allowedNames = new Set();
           const inchargeStates = new Set();
+          const inchargeSites = [];
+          const organizationSites = [];
           details.forEach((s) => {
             const industry = String(s?.industry ?? s?.Industry ?? '').trim();
             const siteName = String(s?.siteName ?? s?.SiteName ?? '').trim();
+            const st = String(s?.siteState ?? s?.SiteState ?? s?.state ?? s?.State ?? '').trim();
+            if (siteName && st) {
+              organizationSites.push({
+                siteName,
+                siteState: st,
+                industry,
+                actCategory: industryLabelToActCategory(industry)
+              });
+            }
             const inchargeEmail = normalizeEmail(
               String(s?.inchargeEmail ?? s?.InchargeEmail ?? s?.incharge_email ?? '')
             );
             if (!inchargeEmail || inchargeEmail !== loginResolved) return;
             if (siteName) allowedNames.add(siteName);
-            const st = String(s?.siteState ?? s?.SiteState ?? s?.state ?? s?.State ?? '').trim();
             if (st) inchargeStates.add(st);
+            if (siteName) {
+              inchargeSites.push({
+                siteName,
+                siteState: st,
+                industry,
+                actCategory: industryLabelToActCategory(industry)
+              });
+            }
             if (!industry || !siteName) return;
             const cat = industryLabelToActCategory(industry);
             if (!cat || !buckets[cat]) return;
@@ -1735,10 +1974,12 @@ const Statutory = ({ userEmail, userRole }) => {
               clra: Array.from(buckets.clra)
             },
             allowedNames: allowedNames.size > 0 ? Array.from(allowedNames) : null,
-            inchargeStates: inchargeStates.size > 0 ? Array.from(inchargeStates) : null
+            inchargeStates: inchargeStates.size > 0 ? Array.from(inchargeStates) : null,
+            inchargeSites,
+            organizationSites
           };
         } catch {
-          return { byCategory: {}, allowedNames: null, inchargeStates: null };
+          return { byCategory: {}, allowedNames: null, inchargeStates: null, inchargeSites: [], organizationSites: [] };
         }
       })();
 
@@ -1754,6 +1995,8 @@ const Statutory = ({ userEmail, userRole }) => {
         const siteMeta = await siteNamesPromise;
         setSiteNamesByActCategory(siteMeta?.byCategory || {});
         setAllowedSiteNameList(siteMeta?.allowedNames || null);
+        setInchargeSitesMeta(Array.isArray(siteMeta?.inchargeSites) ? siteMeta.inchargeSites : []);
+        setOrganizationSitesMeta(Array.isArray(siteMeta?.organizationSites) ? siteMeta.organizationSites : []);
         setAllowedInchargeStateLabels(siteMeta?.inchargeStates ?? null);
         if (data.status === 'success' && data.data && data.data.statutoryData) {
           baseStatutoryData = data.data.statutoryData;
@@ -1768,7 +2011,7 @@ const Statutory = ({ userEmail, userRole }) => {
             act: item.act || item.Act || '',
             sector: item.sector || item.Sector || '',
             state: item.state || item.State || '',
-            site: item.site || item.Site || '',
+            site: item.site || item.Site || item.siteName || item.SiteName || '',
             description: item.description || item.Description || '',
             dueDate: item.dueDate || item.DueDate || '',
             monthFilter: item.monthFilter || item.MonthFilter || item.monthfilter || null,
@@ -2883,7 +3126,7 @@ const Statutory = ({ userEmail, userRole }) => {
         description: source.description || '',
         sector: source.sector || '',
         state: source.state || '',
-        site: source.site || source.Site || '',
+        site: source.site || source.Site || source.siteName || source.SiteName || '',
         formFile: source.formFile ?? source.FormFile ?? null,
         formFileName: source.formFileName ?? source.FormFileName ?? null,
         formName: source.formName ?? source.FormName ?? '',
@@ -3178,7 +3421,8 @@ const Statutory = ({ userEmail, userRole }) => {
                   .trim()
                   .toLowerCase();
                 // Site-view fallback: when visible row is bulk/checklist sibling, mirror Sent to same form in same site.
-                const sameSiteFormSibling = !!siteNorm && sameBaseForm && rowSiteNorm === siteNorm;
+                const sameSiteFormSibling =
+                  !!siteNorm && sameBaseForm && resolvedSitesOverlap(siteNorm, rowSiteNorm);
                 if (!sameId && !sameSiteFormSibling) return row;
                 return {
                   ...row,
@@ -3304,7 +3548,7 @@ const Statutory = ({ userEmail, userRole }) => {
           description: rowItem.description || rowItem.Description || null,
           sector: rowItem.sector || rowItem.Sector || null,
           state: rowItem.state || rowItem.State || null,
-          site: rowItem.site || rowItem.Site || null,
+          site: rowItem.site || rowItem.Site || rowItem.siteName || rowItem.SiteName || null,
           formFile: formFileId != null && String(formFileId).trim() !== '' && String(formFileId).trim() !== 'null' ? String(formFileId).trim() : null,
           formFileName: formFileNameVal || null,
           formName: formNameTrim,
@@ -5880,7 +6124,7 @@ const Statutory = ({ userEmail, userRole }) => {
               const rowSiteNorm = String(resolveSiteDisplayName(row, statutoryData) || row?.site || row?.Site || '')
                 .trim()
                 .toLowerCase();
-              if (currentSiteNorm && rowSiteNorm !== currentSiteNorm) return false;
+              if (currentSiteNorm && rowSiteNorm && !resolvedSitesOverlap(currentSiteNorm, rowSiteNorm)) return false;
               const rowMonthNorm = statutoryDedupeMonthNorm(row, selectedMonth);
               if (currentMonthNorm && currentMonthNorm !== 'nomonth' && rowMonthNorm !== currentMonthNorm) return false;
               return true;
@@ -6801,6 +7045,7 @@ const Statutory = ({ userEmail, userRole }) => {
   // When options.returnMappedData is true, returns the mapped rows (for use by View Draft File generate-and-download)
   const fetchAndPopulateEmployeeData = async (headersToUse = null, options = {}) => {
     const returnMappedData = options.returnMappedData === true;
+    const modalData = options.formFileModalData || formFileModalData;
     try {
       if (!returnMappedData) {
         setFormFileLoading(true);
@@ -6809,7 +7054,7 @@ const Statutory = ({ userEmail, userRole }) => {
       }
      
       // Use provided headers or fall back to state
-      const currentHeaders = headersToUse || tableHeaders;
+      const currentHeaders = headersToUse || (modalData?.parsedTableHeaders?.length ? modalData.parsedTableHeaders : tableHeaders);
      
       if (!currentHeaders || currentHeaders.length === 0) {
         console.error('⚠️ Table headers not available');
@@ -6933,9 +7178,63 @@ const Statutory = ({ userEmail, userRole }) => {
             currentHeaders
           ));
 
-      const formDAutofillContext =
-        currentHeaders.some((h) => String(h || '').toLowerCase().includes('category of workers')) &&
-        currentHeaders.some((h) => String(h || '').toLowerCase().includes('components of remuneration'));
+      const isFormDRemunerationHeader = (h) => {
+        const s = normalizeLooseHeaderText(h);
+        return (
+          s.includes('components of remuneration') ||
+          s.includes('rate of remuneration') ||
+          s.includes('basic wages') ||
+          s.includes('basic wage') ||
+          s.includes('wages or salary') ||
+          (s.includes('basic') && s.includes('salary')) ||
+          s.includes('dearness') ||
+          /\bda\b/.test(s) ||
+          s.includes('house rent allowance') ||
+          s.includes('hra') ||
+          (s.includes('house') && s.includes('rent')) ||
+          s.includes('other allowance') ||
+          (s.includes('other') && s.includes('allowance'))
+        );
+      };
+
+      const isLikelyFormDCategoryHeader = (h) => {
+        const s = normalizeLooseHeaderText(h);
+        return s.includes('category of workers') || s.includes('category of worker');
+      };
+
+      const isLikelyFormDRowCountHeader = (h) => {
+        const s = normalizeLooseHeaderText(h);
+        return s.includes('noofmenemployed') || s.includes('numberofmenemployed') || s.includes('men employed') || s.includes('male employed') || s.includes('noofwomenemployed') || s.includes('numberofwomenemployed') || s.includes('women employed') || s.includes('female employed');
+      };
+
+      const formDAutofillContext = (() => {
+        const hasRemunerationHeaders = currentHeaders.filter((h) => isFormDRemunerationHeader(h)).length >= 2;
+        const hasFormDCounts =
+          currentHeaders.some((h) => isLikelyFormDCategoryHeader(h)) ||
+          currentHeaders.some((h) => isLikelyFormDRowCountHeader(h));
+        const hasRateOfRemuneration = currentHeaders.some((h) => normalizeLooseHeaderText(h).includes('rate of remuneration'));
+        return currentHeaders.some((h) => isFormDRemunerationHeader(h)) && (hasFormDCounts || hasRateOfRemuneration || hasRemunerationHeaders);
+      })();
+
+      const isFormVIFestivalManualHeader = (header) => {
+        const s = String(header || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        if (!s) return false;
+        if (s === 'remark' || s === 'remarks') return true;
+        if (s.includes('enter days date')) return true;
+        if (s.includes('enter days dates')) return true;
+        if (s.includes('days dates') && s.includes('months')) return true;
+        if (s.includes('national') && s.includes('festival') && s.includes('holiday')) return true;
+        return /festival\s+holidays?/.test(s);
+      };
+
+      const formVIFestivalAutofillContext =
+        isFormFileModalOpen &&
+        isFormVIFestivalContext(
+          formFileModalData?.parsedFormHeader || {},
+          formFileModalData?.item,
+          String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+          currentHeaders
+        );
 
       const unwrapEmp = (empItem) => empItem.Employee || empItem.employee || empItem;
 
@@ -6965,6 +7264,66 @@ const Statutory = ({ userEmail, userRole }) => {
       const isFormBOtherDeductionsOtherAllowanceHeader = (h) => {
         const s = String(h || '').toLowerCase().replace(/\s+/g, ' ');
         return /other\s+deductions?/.test(s) || /deducted.*other\s+deductions?/.test(s);
+      };
+
+      const isFormDBasicSalaryHeader = (h) => {
+        const s = normalizeLooseHeaderText(h);
+        return (
+          s.includes('basic wages') ||
+          s.includes('basic wage') ||
+          s.includes('wages or salary') ||
+          (s.includes('basic') && s.includes('salary'))
+        );
+      };
+
+      const isFormDHouseRentAllowanceHeader = (h) => {
+        const s = normalizeLooseHeaderText(h);
+        return (
+          s.includes('house rent allowance') ||
+          s.includes('hra') ||
+          (s.includes('house') && s.includes('rent'))
+        );
+      };
+
+      const isFormDDearnessAllowanceHeader = (h) => {
+        const s = normalizeLooseHeaderText(h);
+        return s.includes('dearness') || /\bda\b/.test(s) || s.includes('dearness allowance');
+      };
+
+      const isFormDOtherAllowanceHeader = (h) => {
+        const s = normalizeLooseHeaderText(h);
+        return (
+          s.includes('other allowance') ||
+          (s.includes('other') && s.includes('allowance'))
+        );
+      };
+
+      const isFormDNoMenEmployedHeader = (h) => {
+        const s = normalizeLooseHeaderText(h);
+        return (
+          s.includes('men employed') ||
+          s.includes('male employed') ||
+          (s.includes('no') && s.includes('men') && s.includes('employed')) ||
+          (s.includes('number') && s.includes('men') && s.includes('employed'))
+        );
+      };
+
+      const isFormDNoWomenEmployedHeader = (h) => {
+        const s = normalizeLooseHeaderText(h);
+        return (
+          s.includes('women employed') ||
+          s.includes('female employed') ||
+          s.includes('noofwomen') ||
+          s.includes('no.of women') ||
+          (s.includes('no') && s.includes('women') && s.includes('employed')) ||
+          (s.includes('number') && s.includes('women') && s.includes('employed'))
+        );
+      };
+
+      const isPlaceholderStatutoryCellValue = (value) => {
+        const s = String(value || '').trim().toLowerCase();
+        if (!s) return true;
+        return /^enter\b/.test(s) || s.includes('enter ') || s.includes('select ') || s.includes('enter no');
       };
 
       /** Form B: avoid mapping People `employee_status` ("Active") into wage/balance columns. */
@@ -7113,6 +7472,18 @@ const Statutory = ({ userEmail, userRole }) => {
         return /section\s*9\b/.test(s) || /section\s*10\b/.test(s);
       };
 
+      const isFormXLeaveMetricHeader = (h) => {
+        const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        if (!s.includes('leave')) return false;
+        if (s.includes('name of the employee') || s.includes('employee identification') || s.includes('gender')) return false;
+        return (
+          s.includes('beginning of the month') ||
+          s.includes('earned during the period') ||
+          s.includes('availed during the month') ||
+          s.includes('balance at the end of the month')
+        );
+      };
+
       const getFallbackName = (emp) =>
         emp.FirstName ||
         emp['FirstName'] ||
@@ -7141,6 +7512,104 @@ const Statutory = ({ userEmail, userRole }) => {
         emp.ZohoID ||
         emp['ZohoID'] ||
         '';
+
+      const getEmployeeNameCandidates = (emp) => {
+        if (!emp || typeof emp !== 'object') return [];
+        const first = String(
+          emp.FirstName ||
+          emp['FirstName'] ||
+          emp.firstName ||
+          emp['First Name'] ||
+          emp.First_Name ||
+          emp['First_Name'] ||
+          findValueByNormalizedKey(emp, 'firstname') ||
+          ''
+        ).trim();
+        const last = String(
+          emp.LastName ||
+          emp['LastName'] ||
+          emp.lastName ||
+          emp['Last Name'] ||
+          emp.Last_Name ||
+          emp['Last_Name'] ||
+          findValueByNormalizedKey(emp, 'lastname') ||
+          ''
+        ).trim();
+        const full = `${first} ${last}`.trim();
+        const raw = [
+          full,
+          getFallbackName(emp),
+          emp.Name,
+          emp['Name'],
+          emp.EmployeeName,
+          emp['Employee Name'],
+          emp['EmployeeName'],
+          emp.Nameoftheemployee,
+          emp['Name of the employee'],
+          emp['Nameoftheemployee'],
+          first,
+          last
+        ];
+        return Array.from(
+          new Set(
+            raw
+              .map((v) => String(v || '').trim().toLowerCase())
+              .filter(Boolean)
+          )
+        );
+      };
+
+      const getEmployeeLookupName = (emp) => {
+        const candidates = getEmployeeNameCandidates(emp);
+        return candidates.length > 0 ? candidates[0] : '';
+      };
+
+      const getEmployeeLookupIdCandidates = (emp, row = {}) => {
+        const rowEntries = row && typeof row === 'object' ? Object.entries(row) : [];
+        const rowIds = rowEntries
+          .filter(([key, value]) => {
+            if (value == null || String(value).trim() === '') return false;
+            const header = String(key || '').toLowerCase();
+            return (
+              header === '__employeelookupid' ||
+              ((header.includes('employee') || header.includes('worker') || header.includes('emp')) &&
+                (header.includes('id') || header.includes('identification')))
+            );
+          })
+          .map(([, value]) => String(value || '').trim());
+
+        const empIds = [
+          getPayrollEmployeeId(emp || {}),
+          getFallbackEmployeeId(emp || {}),
+          getFallbackWorkerId(emp || {}),
+          emp?.employeeId,
+          emp?.EmployeeId,
+          emp?.['Employee Id'],
+          emp?.workerId,
+          emp?.WorkerId,
+        ]
+          .map((value) => String(value || '').trim())
+          .filter(Boolean);
+
+        return Array.from(new Set([...rowIds, ...empIds].filter(Boolean)));
+      };
+
+      const getRowPayrollLookupNameCandidates = (row = {}) => {
+        if (!row || typeof row !== 'object') return [];
+        const names = Object.entries(row)
+          .filter(([key, value]) => {
+            if (value == null || String(value).trim() === '') return false;
+            const header = String(key || '').toLowerCase();
+            return (
+              header === '__employeelookupname' ||
+              (header.includes('name') &&
+                (header.includes('employee') || header.includes('worker') || header.includes('emp')))
+            );
+          })
+          .map(([, value]) => normalizePayrollLookupValue(value))
+          .filter(Boolean);
+        return Array.from(new Set(names));
+      };
 
       const getFallbackFatherOrSpouse = (emp) =>
         emp.Father_s_Name ||
@@ -7171,9 +7640,22 @@ const Statutory = ({ userEmail, userRole }) => {
         return sanitizeValue(fallbackMap[colIndex] || '');
       };
 
-      const isLikelyFormW = currentHeaders.some((h) => /basic\s*wage/i.test(String(h || ''))) &&
-        currentHeaders.some((h) => /dearness/i.test(String(h || ''))) &&
-        currentHeaders.some((h) => /overtime/i.test(String(h || '')));
+      const formWHeaderBlob = currentHeaders.map((h) => String(h || '').toLowerCase()).join(' | ');
+      const formWFileHint = String(
+        formFileModalData?.fileName ||
+          formFileModalData?.formFileName ||
+          formFileModalData?.item?.formName ||
+          formFileModalData?.item?.FormName ||
+          ''
+      ).toLowerCase();
+      const isLikelyFormW =
+        (/form\s*[-_]?\s*w\b/.test(formWFileHint) || /\bform\s*w\b/.test(formWFileHint)) ||
+        ((/basic\s*wag/.test(formWHeaderBlob) || formWHeaderBlob.includes('basic wage')) &&
+          formWHeaderBlob.includes('dearness') &&
+          formWHeaderBlob.includes('overtime')) ||
+        (formWHeaderBlob.includes('register') &&
+          formWHeaderBlob.includes('wage') &&
+          (/basic\s*wag/.test(formWHeaderBlob) || formWHeaderBlob.includes('basic wage')));
       const isLikelyForm10 =
         currentHeaders.some((h) => /number\s+in\s+register|register\s+number/i.test(String(h || ''))) &&
         currentHeaders.some((h) => /overtime/i.test(String(h || '')));
@@ -7213,42 +7695,61 @@ const Statutory = ({ userEmail, userRole }) => {
           const first = data[0];
           if (!first) return {};
           if (typeof first === 'string') return parseMaybeJson(first);
-          return first;
+          return getPayrollPayloadObject(first);
         }
         if (typeof data !== 'object') return {};
-        if (data.salary) return parseMaybeJson(data.salary);
-        if (data.data) return parseMaybeJson(data.data);
-        if (data.employee_salary) return parseMaybeJson(data.employee_salary);
+        if (data.salary) return getPayrollPayloadObject(parseMaybeJson(data.salary));
+        if (data.employee_salary) return getPayrollPayloadObject(parseMaybeJson(data.employee_salary));
+        if (data.data) return getPayrollPayloadObject(parseMaybeJson(data.data));
+        if (data.employee && typeof data.employee === 'object') {
+          return { ...parseMaybeJson(data.employee), ...data };
+        }
         return data;
       };
 
+      const getPayrollLineAmount = (lineItem) => {
+        if (!lineItem || typeof lineItem !== 'object') return NaN;
+        return toNumber(
+          lineItem.amount ??
+            lineItem.value ??
+            lineItem.earning_amount ??
+            lineItem.monthly_amount ??
+            lineItem.Amount
+        );
+      };
+
       const getEarningsArray = (payrollObj) => {
-        const e = payrollObj?.earnings;
-        if (Array.isArray(e)) return e;
-        if (typeof e === 'string') {
-          try {
-            const parsed = JSON.parse(e);
-            return Array.isArray(parsed) ? parsed : [];
-          } catch (_) {
-            return [];
+        const p = payrollObj && typeof payrollObj === 'object' ? payrollObj : {};
+        const candidates = [p.earnings, p.earning, p.employee_earnings, p.salary_components];
+        for (const c of candidates) {
+          if (Array.isArray(c)) return c;
+          if (typeof c === 'string') {
+            try {
+              const parsed = JSON.parse(c);
+              if (Array.isArray(parsed)) return parsed;
+            } catch (_) {
+              /* ignore */
+            }
           }
         }
         return [];
       };
 
       const findEarningAmount = (earnings, matcher) => {
-        const hit = earnings.find((it) => matcher(String(it?.type || '').toLowerCase(), String(it?.name || '').toLowerCase()));
+        const hit = earnings.find((it) =>
+          matcher(String(it?.type || '').toLowerCase(), String(it?.name || '').toLowerCase())
+        );
         if (!hit) return '';
-        const amount = toNumber(hit.amount);
-        return amount > 0 ? amount : '';
+        const amount = getPayrollLineAmount(hit);
+        return Number.isFinite(amount) ? amount : '';
       };
 
       const pickFormBBasicEarningsAmount = (earnings) => {
         const list = Array.isArray(earnings) ? earnings : [];
         const exact = list.find((it) => String(it?.name || '').trim().toLowerCase() === 'basic earnings');
         if (exact) {
-          const a = toNumber(exact.amount);
-          if (a > 0) return a;
+          const a = getPayrollLineAmount(exact);
+          if (Number.isFinite(a)) return a;
         }
         return findEarningAmount(list, (type, name) => name.includes('basic earnings') || type === 'basic');
       };
@@ -7257,46 +7758,245 @@ const Statutory = ({ userEmail, userRole }) => {
         const list = Array.isArray(earnings) ? earnings : [];
         const exact = list.find((it) => String(it?.name || '').trim().toLowerCase() === 'other allowance');
         if (exact) {
-          const a = toNumber(exact.amount);
-          if (a > 0) return a;
+          const a = getPayrollLineAmount(exact);
+          if (Number.isFinite(a)) return a;
         }
         return findEarningAmount(list, (type, name) => name.includes('other allowance'));
+      };
+
+      const pickFormWHouseRentAllowanceAmount = (earnings) => {
+        const list = Array.isArray(earnings) ? earnings : [];
+        const exact = list.find((it) => String(it?.name || '').trim().toLowerCase() === 'house rent allowance');
+        if (exact) {
+          const a = getPayrollLineAmount(exact);
+          if (Number.isFinite(a)) return a;
+        }
+        return findEarningAmount(
+          list,
+          (type, name) => type === 'hra' || name.includes('house rent') || name.includes('hra')
+        );
+      };
+
+      const getDeductionsArray = (payrollObj) => {
+        const p = payrollObj && typeof payrollObj === 'object' ? payrollObj : {};
+        const candidates = [p.deductions, p.deduction, p.employee_deductions];
+        for (const c of candidates) {
+          if (Array.isArray(c)) return c;
+          if (typeof c === 'string') {
+            try {
+              const parsed = JSON.parse(c);
+              if (Array.isArray(parsed)) return parsed;
+            } catch (_) {
+              /* ignore */
+            }
+          }
+        }
+        return [];
+      };
+
+      const sumPayrollLineItems = (items) => {
+        const list = Array.isArray(items) ? items : [];
+        let total = 0;
+        let hasAny = false;
+        list.forEach((it) => {
+          const amount = getPayrollLineAmount(it);
+          if (Number.isFinite(amount)) {
+            total += amount;
+            hasAny = true;
+          }
+        });
+        return hasAny ? total : '';
+      };
+
+      const normalizePayrollLookupValue = (value) =>
+        String(value || '')
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, ' ');
+
+      const buildPayrollLookupFromRows = (payrollRows) => {
+        const byPayrollPayload = new Map();
+        if (!Array.isArray(payrollRows)) return { byPayrollPayload };
+
+        payrollRows.forEach((it) => {
+          if (!it || typeof it !== 'object' || it.fetch_error) return;
+          const payload = getPayrollPayloadObject(it);
+          const payrollEmployeeId = String(
+            it.employee_id || payload.employee_id || payload.employeeId || ''
+          ).trim();
+          const email = normalizePayrollLookupValue(
+            it.work_mail || it.email || payload.work_mail || payload.email || payload.work_email || ''
+          );
+          const firstName = normalizePayrollLookupValue(
+            it.first_name || payload.first_name || payload.firstName || ''
+          );
+          const nameCandidates = [
+            `${it.first_name || ''} ${it.last_name || ''}`,
+            `${payload.first_name || ''} ${payload.last_name || ''}`,
+            it.employee_name,
+            payload.employee_name,
+            payload.employeeName,
+            payload.name,
+          ]
+            .map(normalizePayrollLookupValue)
+            .filter(Boolean);
+
+          const register = (key) => {
+            if (!key || byPayrollPayload.has(key)) return;
+            byPayrollPayload.set(key, it);
+          };
+
+          if (payrollEmployeeId) register(payrollEmployeeId);
+          if (email) register(`email:${email}`);
+          nameCandidates.forEach((name) => register(`name:${name}`));
+          if (firstName) register(`first:${firstName}`);
+        });
+
+        return { byPayrollPayload };
+      };
+
+      const resolvePayrollRowForEmployee = (byPayrollPayload, emp, row, rowNameCandidates = []) => {
+        const payrollEmpIds = getEmployeeLookupIdCandidates(emp, row);
+        const empEmail = normalizePayrollLookupValue(
+          (emp && (emp.EmailID || emp.Email || emp.email || emp['Email ID'])) || ''
+        );
+        const empFirstName = normalizePayrollLookupValue(
+          (emp && (emp.FirstName || emp['FirstName'] || '')) || ''
+        );
+        const empNameCandidates = [
+          ...rowNameCandidates,
+          ...getRowPayrollLookupNameCandidates(row),
+          ...getEmployeeNameCandidates(emp || {}),
+        ]
+          .map(normalizePayrollLookupValue)
+          .filter(Boolean);
+
+        return (
+          payrollEmpIds.map((id) => byPayrollPayload.get(id)).find(Boolean) ||
+          (empEmail && byPayrollPayload.get(`email:${empEmail}`)) ||
+          empNameCandidates.map((name) => byPayrollPayload.get(`name:${name}`)).find(Boolean) ||
+          (empFirstName && byPayrollPayload.get(`first:${empFirstName}`)) ||
+          null
+        );
+      };
+
+      const resolveFormWTableHeaders = (headers) => ({
+        basic: headers.find((h) => {
+          const t = String(h || '').toLowerCase();
+          return t.includes('basic') && (t.includes('wage') || t.includes('wag'));
+        }),
+        dearness: headers.find((h) => String(h || '').toLowerCase().includes('dearness')),
+        houseRent: headers.find((h) => {
+          const t = String(h || '').toLowerCase();
+          return t.includes('house') && t.includes('rent');
+        }),
+        otherAllowance: headers.find((h) => {
+          const t = String(h || '').toLowerCase();
+          return t.includes('other') && t.includes('allowance');
+        }),
+        overtime: headers.find((h) => String(h || '').toLowerCase().includes('overtime')),
+        gross: headers.find((h) => {
+          const t = String(h || '').toLowerCase();
+          return t.includes('gross') && (t.includes('wage') || t.includes('wag'));
+        }),
+        net: headers.find((h) => {
+          const t = String(h || '').toLowerCase();
+          return t.includes('net') && (t.includes('wage') || t.includes('wag'));
+        }),
+        totalDeductions: headers.find((h) => {
+          const t = String(h || '').toLowerCase();
+          return t.includes('total') && t.includes('deduction');
+        }),
+        daysWorked: headers.find((h) => {
+          const hl = String(h || '').toLowerCase().replace(/\s+/g, ' ');
+          return (
+            (hl.includes('number') && hl.includes('days') && hl.includes('worked')) ||
+            (hl.includes('no') && hl.includes('days') && hl.includes('worked')) ||
+            (hl.includes('days') && hl.includes('worked'))
+          );
+        }),
+        employeeName: headers.find((h) => {
+          const t = String(h || '').toLowerCase();
+          return (
+            t.includes('name') &&
+            (t.includes('employee') || t.includes('worker') || t.includes('emp'))
+          );
+        }),
+        employeeId: headers.find((h) => {
+          const t = String(h || '').toLowerCase();
+          return (
+            (t.includes('identification') ||
+              (t.includes('employee') && t.includes('id')) ||
+              (t.includes('worker') && t.includes('id'))) &&
+            !t.includes('zoho')
+          );
+        }),
+      });
+
+      const applyFormWPayrollToRow = (row, formWPayrollMap, formWHeaders, { overwrite = false } = {}) => {
+        if (!row || !formWPayrollMap || !formWHeaders) return;
+        const setCell = (header, value) => {
+          if (!header || value === '' || value == null) return;
+          if (!overwrite && String(row[header] || '').trim()) return;
+          row[header] = sanitizeValue(value);
+        };
+        setCell(formWHeaders.basic, formWPayrollMap.basicWage);
+        setCell(formWHeaders.dearness, formWPayrollMap.dearnessAllowance);
+        setCell(formWHeaders.houseRent, formWPayrollMap.houseRentAllowance);
+        setCell(formWHeaders.otherAllowance, formWPayrollMap.otherAllowances);
+        setCell(formWHeaders.overtime, formWPayrollMap.overtimeWages);
+        setCell(formWHeaders.gross, formWPayrollMap.grossWages);
+        setCell(formWHeaders.net, formWPayrollMap.netWages);
+        setCell(formWHeaders.totalDeductions, formWPayrollMap.totalDeductions);
+      };
+
+      const pickForm25FieldValue = (record, keys) => {
+        if (!record || typeof record !== 'object' || !Array.isArray(keys)) return '';
+        for (let i = 0; i < keys.length; i += 1) {
+          const key = keys[i];
+          const direct = record[key];
+          if (direct != null && String(direct).trim() !== '') return String(direct);
+          const normalized = findValueByNormalizedKey(record, key);
+          if (normalized != null && String(normalized).trim() !== '') return String(normalized);
+        }
+        return '';
       };
 
       const buildFormWPayrollMap = (payrollData) => {
         const p = getPayrollPayloadObject(payrollData);
         const earnings = getEarningsArray(p);
+        const deductions = getDeductionsArray(p);
 
-        const basic = findEarningAmount(earnings, (type, name) => type === 'basic' || name.includes('basic'));
-        const hra = findEarningAmount(earnings, (type, name) => type === 'hra' || name.includes('house rent') || name.includes('hra'));
+        const basic = pickFormBBasicEarningsAmount(earnings);
+        const hra = pickFormWHouseRentAllowanceAmount(earnings);
         const dearness = findEarningAmount(earnings, (type, name) => type === 'da' || name.includes('dearness'));
         const overtime = findEarningAmount(earnings, (type, name) => type === 'overtime' || type === 'ot' || name.includes('overtime'));
-
-        let otherAllowanceTotal = 0;
-        earnings.forEach((it) => {
-          const type = String(it?.type || '').toLowerCase();
-          const name = String(it?.name || '').toLowerCase();
-          const isBasic = type === 'basic' || name.includes('basic');
-          const isHra = type === 'hra' || name.includes('house rent') || name.includes('hra');
-          const isDa = type === 'da' || name.includes('dearness');
-          const isOt = type === 'overtime' || type === 'ot' || name.includes('overtime');
-          if (!isBasic && !isHra && !isDa && !isOt) {
-            otherAllowanceTotal += toNumber(it?.amount);
-          }
-        });
-
         const monthlyGross = toNumber(p.monthly_gross_amount);
         const monthlySalary = toNumber(p.monthly_salary);
-        const grossAmount = toNumber(p.gross_amount);
-        const grossWage = monthlyGross || monthlySalary || grossAmount || '';
+        const otherAllowance = pickFormBOtherAllowanceAmount(earnings);
+
+        let totalDeductions = sumPayrollLineItems(deductions);
+        if (totalDeductions === '' && monthlyGross > 0 && monthlySalary >= 0 && monthlyGross >= monthlySalary) {
+          totalDeductions = monthlyGross - monthlySalary;
+        }
+        const totalDeductionsRaw = firstPresent(
+          p.total_deductions,
+          p['total_deductions'],
+          p.totalDeductions,
+          p['totalDeductions'],
+          p.monthly_total_deductions,
+          totalDeductions !== '' ? totalDeductions : ''
+        );
 
         return {
           basicWage: basic,
           dearnessAllowance: dearness,
           houseRentAllowance: hra,
-          otherAllowances: otherAllowanceTotal > 0 ? otherAllowanceTotal : '',
+          otherAllowances: otherAllowance,
           overtimeWages: overtime,
-          grossWages: grossWage
+          grossWages: Number.isFinite(monthlyGross) ? monthlyGross : '',
+          netWages: Number.isFinite(monthlySalary) ? monthlySalary : '',
+          totalDeductions: totalDeductionsRaw !== '' ? totalDeductionsRaw : '',
         };
       };
 
@@ -7518,11 +8218,22 @@ const Statutory = ({ userEmail, userRole }) => {
         };
       };
 
+      const pickFormDBasicEarningsAmount = (earnings) => {
+        const list = Array.isArray(earnings) ? earnings : [];
+        const exact = list.find((it) => String(it?.name || '').trim().toLowerCase() === 'basic earnings');
+        if (exact) {
+          const a = getPayrollLineAmount(exact);
+          if (Number.isFinite(a)) return a;
+        }
+        return findEarningAmount(list, (type, name) => name.includes('basic earnings') || type === 'basic' || name.includes('basic'));
+      };
+
       const buildFormDPayrollMap = (payrollData) => {
         const p = getPayrollPayloadObject(payrollData);
         const earnings = getEarningsArray(p);
         return {
           basicSalary: firstPresent(
+            pickFormDBasicEarningsAmount(earnings),
             p.monthly_salary,
             p['monthly_salary'],
             p.MonthlySalary,
@@ -7532,9 +8243,13 @@ const Statutory = ({ userEmail, userRole }) => {
             earnings,
             (type, name) => type === 'hra' || name.includes('house rent') || name.includes('hra')
           ),
+          dearnessAllowance: findEarningAmount(
+            earnings,
+            (type, name) => type === 'da' || name.includes('dearness') || name.includes('dearness allowance')
+          ),
           otherAllowance: findEarningAmount(
             earnings,
-            (type, name) => name.includes('other allowance')
+            (type, name) => name.includes('other allowance') || (name.includes('other') && name.includes('allowance'))
           )
         };
       };
@@ -7553,27 +8268,64 @@ const Statutory = ({ userEmail, userRole }) => {
         emp['Employee ID'] ||
         '';
 
+      const isFormWDaysWorkedHeader = (header) => {
+        const h = String(header || '').toLowerCase().replace(/\s+/g, ' ');
+        return (
+          (h.includes('number') && h.includes('days') && h.includes('worked')) ||
+          (h.includes('no') && h.includes('days') && h.includes('worked')) ||
+          (h.includes('days') && h.includes('worked'))
+        );
+      };
+
       const isFormWWageOrDeductionHeader = (header) => {
         const h = String(header || '').toLowerCase();
+        if (isFormWDaysWorkedHeader(header)) return false;
         return (
-          (h.includes('basic') && h.includes('wage')) ||
+          (h.includes('basic') && (h.includes('wage') || h.includes('wag'))) ||
           h.includes('dearness') ||
           (h.includes('house') && h.includes('rent')) ||
           (h.includes('other') && h.includes('allowance')) ||
           h.includes('overtime') ||
-          (h.includes('gross') && h.includes('wage')) ||
+          (h.includes('gross') && (h.includes('wage') || h.includes('wag'))) ||
           h.includes('provident') ||
           h.includes('insurance') ||
           (h.includes('labour') && h.includes('welfare')) ||
           h.includes('advance') ||
           h.includes('damage') ||
           h.includes('fine') ||
-          h.includes('deduction') ||
+          (h.includes('total') && h.includes('deduction')) ||
+          (h.includes('deduction') && !h.includes('nature')) ||
           (h.includes('net') && h.includes('wage')) ||
           h.includes('unpaid') ||
           h.includes('accumulation')
         );
       };
+
+      let formWPayrollLookup = null;
+      let formWHeadersResolved = null;
+      if (isLikelyFormW) {
+        formWHeadersResolved = resolveFormWTableHeaders(currentHeaders);
+        try {
+          const payrollOrgId =
+            process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
+          const allPayrollQs = new URLSearchParams({
+            all_salaries: '1',
+            organization_id: payrollOrgId,
+          });
+          const allPayrollRes = await fetch(`/server/payroll_function?${allPayrollQs.toString()}`);
+          const allPayrollJson = await allPayrollRes.json();
+          if (allPayrollRes.ok && allPayrollJson?.success && Array.isArray(allPayrollJson.data)) {
+            formWPayrollLookup = buildPayrollLookupFromRows(allPayrollJson.data);
+            console.log(
+              `Form W: indexed ${allPayrollJson.data.length} payroll row(s) for wage autofill`
+            );
+          } else {
+            console.warn('Form W payroll all_salaries preload failed:', allPayrollJson);
+          }
+        } catch (formWPayPreloadErr) {
+          console.warn('Form W payroll preload skipped:', formWPayPreloadErr?.message || formWPayPreloadErr);
+        }
+      }
 
       const mappedData = await Promise.all(employees.map(async (empItem, index) => {
         // Initialize all headers with empty strings to ensure no undefined/null values
@@ -7584,6 +8336,12 @@ const Statutory = ({ userEmail, userRole }) => {
        
         // Extract employee object - handle both wrapped and direct structures
         const emp = empItem.Employee || empItem.employee || empItem;
+        row.__employeeLookupName = getEmployeeLookupName(emp);
+        row.__employeeLookupId = firstPresent(
+          getPayrollEmployeeId(emp),
+          getFallbackEmployeeId(emp),
+          getFallbackWorkerId(emp)
+        );
        
         console.log(`Processing employee ${index + 1}:`, emp);
         console.log(`Available fields in employee ${index + 1}:`, Object.keys(emp));
@@ -7598,9 +8356,8 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
          
-          // For Form W, do not use People fallback for wage/deduction columns.
-          // These must come only from payroll_function.
-          if (isLikelyFormW && isFormWWageOrDeductionHeader(header)) {
+          // For Form W, wage/deduction and days-worked columns come from payroll / Form 25 — not People.
+          if (isLikelyFormW && (isFormWWageOrDeductionHeader(header) || isFormWDaysWorkedHeader(header))) {
             row[header] = '';
             return;
           }
@@ -7615,6 +8372,11 @@ const Statutory = ({ userEmail, userRole }) => {
             form25SkipLossPayAndNationalHolidayBenefit &&
             (isForm25LossOfPayDaysHeader(header) || isForm25NationalHolidayBenefitHeader(header))
           ) {
+            row[header] = '';
+            return;
+          }
+
+          if (formVIFestivalAutofillContext && isFormVIFestivalManualHeader(header)) {
             row[header] = '';
             return;
           }
@@ -7645,7 +8407,7 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
-          if (formDAutofillContext && headerLower.includes('components of remuneration')) {
+          if (formDAutofillContext && isFormDRemunerationHeader(header)) {
             row[header] = '';
             return;
           }
@@ -7660,7 +8422,7 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
-          if (formDAutofillContext && (normalizedHeader.includes('noofmenemployed') || normalizedHeader.includes('numberofmenemployed'))) {
+          if (isFormDNoMenEmployedHeader(header)) {
             const gender = String(
               emp.Sex ||
               emp.Gender ||
@@ -7670,11 +8432,14 @@ const Statutory = ({ userEmail, userRole }) => {
               findValueByNormalizedKey(emp, 'gender') ||
               ''
             ).trim().toLowerCase();
-            row[header] = gender === 'male' ? '1' : '';
+            const currentValue = String(row[header] || '').trim();
+            if (!currentValue || isPlaceholderStatutoryCellValue(currentValue)) {
+              row[header] = gender === 'male' || gender === 'm' ? '1' : '';
+            }
             return;
           }
 
-          if (formDAutofillContext && (normalizedHeader.includes('noofwomenemployed') || normalizedHeader.includes('numberofwomenemployed'))) {
+          if (isFormDNoWomenEmployedHeader(header)) {
             const gender = String(
               emp.Sex ||
               emp.Gender ||
@@ -7684,11 +8449,19 @@ const Statutory = ({ userEmail, userRole }) => {
               findValueByNormalizedKey(emp, 'gender') ||
               ''
             ).trim().toLowerCase();
-            row[header] = gender === 'female' ? '1' : '';
+            const currentValue = String(row[header] || '').trim();
+            if (!currentValue || isPlaceholderStatutoryCellValue(currentValue)) {
+              row[header] = gender === 'female' || gender === 'f' ? '1' : '';
+            }
             return;
           }
 
           if (isLeaveWagesPerSection9Or10Header(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (isFormXLeaveMetricHeader(header)) {
             row[header] = '';
             return;
           }
@@ -8663,36 +9436,45 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         });
        
+        if (isLikelyFormW && formWPayrollLookup && formWHeadersResolved) {
+          const rowNameCandidates =
+            formWHeadersResolved.employeeName && row[formWHeadersResolved.employeeName]
+              ? [String(row[formWHeadersResolved.employeeName]).trim().toLowerCase()]
+              : [];
+          const matchedPayrollRow = resolvePayrollRowForEmployee(
+            formWPayrollLookup.byPayrollPayload,
+            emp,
+            row,
+            rowNameCandidates
+          );
+          if (matchedPayrollRow) {
+            applyFormWPayrollToRow(
+              row,
+              buildFormWPayrollMap(matchedPayrollRow),
+              formWHeadersResolved
+            );
+          }
+        }
+
         if (isLikelyFormW || isLikelyForm10 || formBAutofillContext || formDAutofillContext) {
           try {
             const payrollEmployeeId = getPayrollEmployeeId(emp);
             if (payrollEmployeeId) {
-              const payrollRes = await fetch(`/server/payroll_function?employee_id=${encodeURIComponent(String(payrollEmployeeId))}`);
+              const payrollOrgId =
+                process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
+              const payrollQs = new URLSearchParams({
+                employee_id: String(payrollEmployeeId),
+                organization_id: payrollOrgId,
+              });
+              const payrollRes = await fetch(`/server/payroll_function?${payrollQs.toString()}`);
               const payrollJson = await payrollRes.json();
               if (payrollRes.ok && payrollJson && payrollJson.success) {
-                if (isLikelyFormW) {
-                  const formWPayrollMap = buildFormWPayrollMap(payrollJson.data || {});
-                  currentHeaders.forEach((header) => {
-                    const headerLower = String(header || '').toLowerCase();
-                    let payrollVal = '';
-                    if (headerLower.includes('basic') && headerLower.includes('wage')) {
-                      payrollVal = formWPayrollMap.basicWage;
-                    } else if (headerLower.includes('dearness')) {
-                      payrollVal = formWPayrollMap.dearnessAllowance;
-                    } else if (headerLower.includes('house') && headerLower.includes('rent')) {
-                      payrollVal = formWPayrollMap.houseRentAllowance;
-                    } else if (headerLower.includes('other') && headerLower.includes('allowance')) {
-                      payrollVal = formWPayrollMap.otherAllowances;
-                    } else if (headerLower.includes('overtime')) {
-                      payrollVal = formWPayrollMap.overtimeWages;
-                    } else if (headerLower.includes('gross') && headerLower.includes('wage')) {
-                      payrollVal = formWPayrollMap.grossWages;
-                    }
-
-                    if (payrollVal !== '' && payrollVal !== null && payrollVal !== undefined) {
-                      row[header] = sanitizeValue(payrollVal);
-                    }
-                  });
+                if (isLikelyFormW && formWHeadersResolved) {
+                  applyFormWPayrollToRow(
+                    row,
+                    buildFormWPayrollMap(payrollJson.data || {}),
+                    formWHeadersResolved
+                  );
                 }
 
                 if (formBAutofillContext) {
@@ -8717,16 +9499,19 @@ const Statutory = ({ userEmail, userRole }) => {
                 if (formDAutofillContext) {
                   const formDPayrollMap = buildFormDPayrollMap(payrollJson.data || {});
                   currentHeaders.forEach((header) => {
-                    const headerLower = String(header || '').toLowerCase();
-                    if (headerLower.includes('components of remuneration') && headerLower.includes('basic wages')) {
+                    if (isFormDBasicSalaryHeader(header)) {
                       if (formDPayrollMap.basicSalary !== '' && formDPayrollMap.basicSalary != null) {
                         row[header] = sanitizeValue(formDPayrollMap.basicSalary);
                       }
-                    } else if (headerLower.includes('components of remuneration') && headerLower.includes('house rent allowance')) {
+                    } else if (isFormDDearnessAllowanceHeader(header)) {
+                      if (formDPayrollMap.dearnessAllowance !== '' && formDPayrollMap.dearnessAllowance != null) {
+                        row[header] = sanitizeValue(formDPayrollMap.dearnessAllowance);
+                      }
+                    } else if (isFormDHouseRentAllowanceHeader(header)) {
                       if (formDPayrollMap.houseRentAllowance !== '' && formDPayrollMap.houseRentAllowance != null) {
                         row[header] = sanitizeValue(formDPayrollMap.houseRentAllowance);
                       }
-                    } else if (headerLower.includes('components of remuneration') && headerLower.includes('other allowance')) {
+                    } else if (isFormDOtherAllowanceHeader(header)) {
                       if (formDPayrollMap.otherAllowance !== '' && formDPayrollMap.otherAllowance != null) {
                         row[header] = sanitizeValue(formDPayrollMap.otherAllowance);
                       }
@@ -8829,106 +9614,127 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
 
-      // Form-10 Normal earnings fallback:
-      // If per-employee payroll fetch misses (ID mismatch), use payroll all_salaries and match by email/name.
-      if (isLikelyForm10) {
+      // Form W / Form 10 payroll fallback: fill any cells still empty after per-row preload.
+      if (isLikelyFormW || isLikelyForm10) {
         try {
-          const allPayrollRes = await fetch('/server/payroll_function?all_salaries=1');
-          const allPayrollJson = await allPayrollRes.json();
-          if (allPayrollRes.ok && allPayrollJson && allPayrollJson.success && Array.isArray(allPayrollJson.data)) {
-            const payrollRows = allPayrollJson.data;
-            const byPayrollEmployeeId = new Map();
-            const byEmail = new Map();
-            const byName = new Map();
-            const byFirstName = new Map();
-            payrollRows.forEach((it) => {
-              if (!it || typeof it !== 'object') return;
-              const payload = getPayrollPayloadObject(it);
-              const salaryVal =
-                payload.monthly_salary ??
-                payload['monthly_salary'] ??
-                payload.MonthlySalary ??
-                payload['MonthlySalary'] ??
-                '';
-              if (salaryVal === '' || salaryVal == null) return;
-              const payrollEmployeeId = String(
-                it.employee_id ||
-                payload.employee_id ||
-                payload.employeeId ||
-                ''
-              ).trim();
-              const email = String(it.work_mail || it.email || '').trim().toLowerCase();
-              const firstName = String(it.first_name || '').trim().toLowerCase();
-              const name = String(`${it.first_name || ''} ${it.last_name || ''}`.trim()).toLowerCase();
-              if (payrollEmployeeId && !byPayrollEmployeeId.has(payrollEmployeeId)) {
-                byPayrollEmployeeId.set(payrollEmployeeId, salaryVal);
+          let byPayrollPayload = formWPayrollLookup?.byPayrollPayload;
+          if (!byPayrollPayload || byPayrollPayload.size === 0) {
+            const payrollOrgId =
+              process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
+            const allPayrollQs = new URLSearchParams({
+              all_salaries: '1',
+              organization_id: payrollOrgId,
+            });
+            const allPayrollRes = await fetch(`/server/payroll_function?${allPayrollQs.toString()}`);
+            const allPayrollJson = await allPayrollRes.json();
+            if (allPayrollRes.ok && allPayrollJson?.success && Array.isArray(allPayrollJson.data)) {
+              byPayrollPayload = buildPayrollLookupFromRows(allPayrollJson.data).byPayrollPayload;
+            }
+          }
+
+          const formWHeaders = formWHeadersResolved || (isLikelyFormW ? resolveFormWTableHeaders(currentHeaders) : null);
+
+          const normalEarningsHeader = currentHeaders.find((h) => {
+            const t = String(h || '').toLowerCase();
+            return t.includes('normal') && t.includes('earning');
+          });
+          const totalEarningsHeader = currentHeaders.find((h) => {
+            const t = String(h || '').toLowerCase();
+            return t.includes('total') && t.includes('earning');
+          });
+
+          if (byPayrollPayload && ((isLikelyFormW && formWHeaders) || normalEarningsHeader || totalEarningsHeader)) {
+            mappedData.forEach((row, rowIndex) => {
+              const empItem = employees[rowIndex];
+              const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+              const rowNameCandidates =
+                formWHeaders?.employeeName && row[formWHeaders.employeeName]
+                  ? [String(row[formWHeaders.employeeName]).trim().toLowerCase()]
+                  : [];
+              const matchedPayrollRow = resolvePayrollRowForEmployee(
+                byPayrollPayload,
+                emp,
+                row,
+                rowNameCandidates
+              );
+
+              if (isLikelyFormW && matchedPayrollRow && formWHeaders) {
+                applyFormWPayrollToRow(row, buildFormWPayrollMap(matchedPayrollRow), formWHeaders);
               }
-              if (email && !byEmail.has(email)) byEmail.set(email, salaryVal);
-              if (name && !byName.has(name)) byName.set(name, salaryVal);
-              if (firstName && !byFirstName.has(firstName)) byFirstName.set(firstName, salaryVal);
-            });
 
-            const normalEarningsHeader = currentHeaders.find((h) => {
-              const t = String(h || '').toLowerCase();
-              return t.includes('normal') && t.includes('earning');
+              if (isLikelyForm10 && matchedPayrollRow) {
+                const form10PayrollMap = buildForm10PayrollMap(matchedPayrollRow);
+                const monthlySalary = form10PayrollMap.totalEarnings;
+                if (normalEarningsHeader && !String(row[normalEarningsHeader] || '').trim() && monthlySalary !== '') {
+                  row[normalEarningsHeader] = sanitizeValue(monthlySalary);
+                }
+                if (totalEarningsHeader && !String(row[totalEarningsHeader] || '').trim() && monthlySalary !== '') {
+                  row[totalEarningsHeader] = sanitizeValue(monthlySalary);
+                }
+              }
             });
-            const totalEarningsHeader = currentHeaders.find((h) => {
-              const t = String(h || '').toLowerCase();
-              return t.includes('total') && t.includes('earning');
-            });
+          }
+        } catch (allPayrollErr) {
+          console.warn('Form W / Form-10 all_salaries fallback skipped:', allPayrollErr?.message || allPayrollErr);
+        }
+      }
 
-            if (normalEarningsHeader || totalEarningsHeader) {
+      if (formDAutofillContext) {
+        try {
+          const payrollOrgId =
+            process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
+          const allPayrollQs = new URLSearchParams({
+            all_salaries: '1',
+            organization_id: payrollOrgId,
+          });
+          const allPayrollRes = await fetch(`/server/payroll_function?${allPayrollQs.toString()}`);
+          const allPayrollJson = await allPayrollRes.json();
+          if (allPayrollRes.ok && allPayrollJson?.success && Array.isArray(allPayrollJson.data)) {
+            const byPayrollPayload = buildPayrollLookupFromRows(allPayrollJson.data).byPayrollPayload;
+            if (byPayrollPayload && byPayrollPayload.size > 0) {
               mappedData.forEach((row, rowIndex) => {
                 const empItem = employees[rowIndex];
                 const emp = empItem && (empItem.Employee || empItem.employee || empItem);
-                const payrollEmpId = String(getPayrollEmployeeId(emp || {}) || '').trim();
-                const empEmail = String(
-                  (emp && (emp.EmailID || emp.Email || emp.email || emp['Email ID'])) || ''
-                ).trim().toLowerCase();
-                const empFirstName = String(
-                  (emp && (emp.FirstName || emp['FirstName'] || '')) || ''
-                ).trim().toLowerCase();
-                const empName = String(
-                  (emp && (
-                    emp.Full_Name ||
-                    emp['Full Name'] ||
-                    emp.FirstName ||
-                    emp['FirstName'] ||
-                    emp.Name1 ||
-                    emp['Name1'] ||
-                    emp.Name ||
-                    emp['Name'] ||
-                    empFirstName ||
-                    ''
-                  )) || ''
-                ).trim().toLowerCase();
-                const matchedSalary =
-                  (payrollEmpId && byPayrollEmployeeId.get(payrollEmpId)) ||
-                  (empEmail && byEmail.get(empEmail)) ||
-                  (empName && byName.get(empName)) ||
-                  (empFirstName && byFirstName.get(empFirstName)) ||
-                  '';
-                if (matchedSalary !== '' && matchedSalary != null) {
-                  if (normalEarningsHeader && !String(row[normalEarningsHeader] || '').trim()) {
-                    row[normalEarningsHeader] = sanitizeValue(matchedSalary);
+                const matchedPayrollRow = resolvePayrollRowForEmployee(byPayrollPayload, emp, row, []);
+                if (!matchedPayrollRow) return;
+
+                const formDPayrollMap = buildFormDPayrollMap(matchedPayrollRow);
+                currentHeaders.forEach((header) => {
+                  if (
+                    isFormDBasicSalaryHeader(header) &&
+                    !String(row[header] || '').trim() &&
+                    formDPayrollMap.basicSalary !== '' &&
+                    formDPayrollMap.basicSalary != null
+                  ) {
+                    row[header] = sanitizeValue(formDPayrollMap.basicSalary);
+                  } else if (
+                    isFormDDearnessAllowanceHeader(header) &&
+                    !String(row[header] || '').trim() &&
+                    formDPayrollMap.dearnessAllowance !== '' &&
+                    formDPayrollMap.dearnessAllowance != null
+                  ) {
+                    row[header] = sanitizeValue(formDPayrollMap.dearnessAllowance);
+                  } else if (
+                    isFormDHouseRentAllowanceHeader(header) &&
+                    !String(row[header] || '').trim() &&
+                    formDPayrollMap.houseRentAllowance !== '' &&
+                    formDPayrollMap.houseRentAllowance != null
+                  ) {
+                    row[header] = sanitizeValue(formDPayrollMap.houseRentAllowance);
+                  } else if (
+                    isFormDOtherAllowanceHeader(header) &&
+                    !String(row[header] || '').trim() &&
+                    formDPayrollMap.otherAllowance !== '' &&
+                    formDPayrollMap.otherAllowance != null
+                  ) {
+                    row[header] = sanitizeValue(formDPayrollMap.otherAllowance);
                   }
-                  if (totalEarningsHeader && !String(row[totalEarningsHeader] || '').trim()) {
-                    row[totalEarningsHeader] = sanitizeValue(matchedSalary);
-                  }
-                }
-                if (
-                  totalEarningsHeader &&
-                  !String(row[totalEarningsHeader] || '').trim() &&
-                  normalEarningsHeader &&
-                  String(row[normalEarningsHeader] || '').trim()
-                ) {
-                  row[totalEarningsHeader] = String(row[normalEarningsHeader]);
-                }
+                });
               });
             }
           }
-        } catch (allPayrollErr) {
-          console.warn('Form-10 all_salaries fallback skipped:', allPayrollErr?.message || allPayrollErr);
+        } catch (formDPayErr) {
+          console.warn('Form D all_salaries payroll fallback skipped:', formDPayErr?.message || formDPayErr);
         }
       }
      
@@ -8939,6 +9745,7 @@ const Statutory = ({ userEmail, userRole }) => {
       let attendanceHoursPopulated = 0;
       let hasTotalHoursColumn = false;
       let hasDailyHoursColumn = false;
+      const attendanceAggByEmployeeKey = new Map();
       try {
         const now = new Date();
         let targetMonthIndex = now.getMonth();
@@ -9108,6 +9915,8 @@ const Statutory = ({ userEmail, userRole }) => {
                 /^totalhoursworked$/i.test(h.replace(/\s/g, ''))
               );
             });
+
+            const form25LossOfPayHeader = currentHeaders.find((header) => isForm25LossOfPayDaysHeader(header));
 
             const totalHoursHeader = currentHeaders.find((header) => {
               const h = String(header || '').toLowerCase().trim();
@@ -9390,9 +10199,8 @@ const Statutory = ({ userEmail, userRole }) => {
                   ...getAttendanceCandidateIds(emp || {}),
                   String(getPayrollEmployeeId(emp || {}) || '').trim()
                 ].filter(Boolean);
-                const nameCandidate = String(
-                  (emp && (emp.FirstName || emp['FirstName'] || emp.Name || emp['Name'])) || ''
-                ).trim().toLowerCase();
+                const nameCandidates = getEmployeeNameCandidates(emp || {});
+                const nameCandidate = nameCandidates[0] || '';
                 const firstNameCandidate = String(
                   (emp && (
                     emp.FirstName ||
@@ -9411,8 +10219,8 @@ const Statutory = ({ userEmail, userRole }) => {
                     break;
                   }
                 }
-                if (!matchedAttendance && nameCandidate) {
-                  matchedAttendance = attendanceByName.get(nameCandidate) || null;
+                if (!matchedAttendance && nameCandidates.length > 0) {
+                  matchedAttendance = nameCandidates.map((candidate) => attendanceByName.get(candidate)).find(Boolean) || null;
                 }
                 if (!matchedAttendance && firstNameCandidate) {
                   matchedAttendance = attendanceByFirstName.get(firstNameCandidate) || null;
@@ -9423,8 +10231,22 @@ const Statutory = ({ userEmail, userRole }) => {
                   nameCandidate,
                   firstNameCandidate
                 );
+
+                idCandidates.forEach((id) => {
+                  const key = String(id || '').trim().toLowerCase();
+                  if (key) attendanceAggByEmployeeKey.set(`id:${key}`, agg);
+                });
+                nameCandidates.forEach((candidate) => {
+                  attendanceAggByEmployeeKey.set(`name:${candidate}`, agg);
+                });
+                if (firstNameCandidate) attendanceAggByEmployeeKey.set(`first:${firstNameCandidate}`, agg);
+
                 if (totalWorkedDaysHeader) {
                   row[totalWorkedDaysHeader] = String(agg.days);
+                }
+                if (form25LossOfPayHeader) {
+                  const daysInMonth = new Date(targetYear, targetMonthIndex + 1, 0).getDate();
+                  row[form25LossOfPayHeader] = String(Math.max(0, daysInMonth - agg.days));
                 }
                 if (totalHoursWorkedAggHeader) {
                   row[totalHoursWorkedAggHeader] = formatCumulativeHoursMM(agg.totalMins);
@@ -9509,6 +10331,324 @@ const Statutory = ({ userEmail, userRole }) => {
         console.error('Error fetching attendance data for hours columns:', attendanceErr);
         // Do not fail autofill when attendance endpoint is unavailable
       }
+
+      // Form W: Number of days worked from Form 25 Total Worked Days
+      if (isLikelyFormW) {
+        try {
+          console.log('Fetching Form 25 data for Form W days worked...');
+          const form25Res = await fetch('/server/form25_function/form25?perPage=200');
+          const form25Json = await form25Res.json();
+          let form25Records = [];
+
+          const form25Ok =
+            form25Res.ok &&
+            (form25Json.success === true || form25Json.status === 'success');
+          if (form25Ok && Array.isArray(form25Json.data?.form25Data)) {
+            form25Records = form25Json.data.form25Data;
+          } else {
+            console.warn('Form 25 fetch for Form W returned unexpected response:', form25Json);
+          }
+
+          const form25ByName = new Map();
+          const form25ById = new Map();
+          form25Records.forEach((record) => {
+            const name = String(record.nameOfTheWorker || '').trim().toLowerCase();
+            const id = String(record.workerIdentityNumber || '').trim().toLowerCase();
+            const firstNameOnly = name ? name.split(/\s+/)[0] : '';
+            if (name) form25ByName.set(name, record);
+            if (firstNameOnly && !form25ByName.has(firstNameOnly)) form25ByName.set(firstNameOnly, record);
+            if (id) form25ById.set(id, record);
+          });
+
+          const daysWorkedHeader =
+            formWHeadersResolved?.daysWorked ||
+            currentHeaders.find((header) => isFormWDaysWorkedHeader(header));
+          const employeeNameHeader =
+            formWHeadersResolved?.employeeName ||
+            currentHeaders.find((header) => {
+              const headerLower = header.toLowerCase().trim();
+              return (
+                headerLower.includes('name') &&
+                (headerLower.includes('employee') || headerLower.includes('worker') || headerLower.includes('emp'))
+              );
+            });
+          const employeeIdHeader =
+            formWHeadersResolved?.employeeId ||
+            currentHeaders.find((header) => {
+              const headerLower = header.toLowerCase().trim();
+              return (
+                (headerLower.includes('identification') ||
+                  (headerLower.includes('employee') && headerLower.includes('id')) ||
+                  (headerLower.includes('worker') && headerLower.includes('id')) ||
+                  (headerLower.includes('emp') && headerLower.includes('code'))) &&
+                !headerLower.includes('zoho')
+              );
+            });
+
+          if (daysWorkedHeader && form25Records.length > 0) {
+            let daysWorkedPopulated = 0;
+            mappedData.forEach((row, rowIndex) => {
+              const empItem = employees[rowIndex];
+              const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+              if (!emp) return;
+
+              const empNameCandidates = getEmployeeNameCandidates(emp || {});
+              const rowEmployeeName =
+                employeeNameHeader && row[employeeNameHeader]
+                  ? String(row[employeeNameHeader]).toLowerCase().trim()
+                  : '';
+              const allNameCandidates = Array.from(
+                new Set([rowEmployeeName, ...empNameCandidates].filter(Boolean))
+              );
+              const empId = String(
+                (employeeIdHeader && row[employeeIdHeader] ? row[employeeIdHeader] : '') ||
+                  getFallbackWorkerId(emp || {}) ||
+                  getFallbackEmployeeId(emp || '') ||
+                  ''
+              )
+                .toLowerCase()
+                .trim();
+
+              let matchedForm25 = null;
+              for (const name of allNameCandidates) {
+                if (form25ByName.has(name)) {
+                  matchedForm25 = form25ByName.get(name);
+                  break;
+                }
+              }
+              if (!matchedForm25 && empId && form25ById.has(empId)) {
+                matchedForm25 = form25ById.get(empId);
+              }
+              if (!matchedForm25 && allNameCandidates.length > 0) {
+                const probe = allNameCandidates[0];
+                for (const [key, record] of form25ByName.entries()) {
+                  if (key.includes(probe) || probe.includes(key)) {
+                    matchedForm25 = record;
+                    break;
+                  }
+                }
+              }
+              if (!matchedForm25) {
+                matchedForm25 = form25Records[rowIndex] || null;
+              }
+
+              const daysWorked = pickForm25FieldValue(matchedForm25, [
+                'totalDaysWorked',
+                'TotalDaysWorked',
+                'Total Worked Days',
+                'total_days_worked',
+              ]);
+              if (daysWorked !== '') {
+                row[daysWorkedHeader] = daysWorked;
+                daysWorkedPopulated++;
+              }
+            });
+            console.log(
+              `Form W days worked (Form 25 Total Worked Days) populated for ${daysWorkedPopulated} out of ${mappedData.length} employees`
+            );
+          }
+        } catch (form25FormWErr) {
+          console.warn('Form 25 data fetch for Form W skipped:', form25FormWErr?.message || form25FormWErr);
+        }
+      }
+
+      // Form A: Fetch data from Form 25 for specific fields
+      if (formAAutofillContext) {
+        try {
+          console.log('Fetching Form 25 data for Form A mappings...');
+          const form25Res = await fetch('/server/form25_function/form25?perPage=200');
+          const form25Json = await form25Res.json();
+          let form25Records = [];
+
+          const form25Ok =
+            form25Res.ok &&
+            (form25Json.success === true || form25Json.status === 'success');
+          if (form25Ok && Array.isArray(form25Json.data?.form25Data)) {
+            form25Records = form25Json.data.form25Data;
+          } else {
+            console.warn('Form 25 fetch for Form A returned unexpected response:', form25Json);
+          }
+
+          // Create maps for Form 25 data by employee identifier
+          const form25ByName = new Map();
+          const form25ById = new Map();
+
+          form25Records.forEach((record) => {
+            const name = String(record.nameOfTheWorker || '').trim().toLowerCase();
+            const id = String(record.workerIdentityNumber || '').trim().toLowerCase();
+            const firstNameOnly = name ? name.split(/\s+/)[0] : '';
+
+            if (name) {
+              form25ByName.set(name, record);
+            }
+            if (firstNameOnly && !form25ByName.has(firstNameOnly)) {
+              form25ByName.set(firstNameOnly, record);
+            }
+            if (id) {
+              form25ById.set(id, record);
+            }
+          });
+
+          // Find Form A specific headers using normalized matching because merged Excel headers
+          // can come through as "(3) Nature of work", "Month No.of days employed", etc.
+          const normalizeFormAHeader = (header) =>
+            String(header || '')
+              .toLowerCase()
+              .replace(/\r?\n/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+          const compactFormAHeader = (header) => normalizeFormAHeader(header).replace(/[^a-z0-9]/g, '');
+          const pickForm25DayValue = (record, keys) => {
+            if (!record || typeof record !== 'object' || !Array.isArray(keys)) return '';
+            for (let i = 0; i < keys.length; i += 1) {
+              const key = keys[i];
+              const direct = record[key];
+              if (direct != null && String(direct).trim() !== '') return String(direct);
+              const normalized = findValueByNormalizedKey(record, key);
+              if (normalized != null && String(normalized).trim() !== '') return String(normalized);
+            }
+            return '';
+          };
+
+          const natureOfWorkHeader = currentHeaders.find((header) => {
+            const norm = normalizeFormAHeader(header);
+            return norm.includes('nature') && norm.includes('work');
+          });
+
+          const dateOnWhichEmployedHeader = currentHeaders.find((header) => {
+            const norm = normalizeFormAHeader(header);
+            return norm.includes('date') && norm.includes('employed');
+          });
+
+          const noOfDaysEmployedHeader = currentHeaders.find((header) => {
+            const norm = normalizeFormAHeader(header);
+            const compact = compactFormAHeader(header);
+            if (norm.includes('laid off') || norm.includes('not employed')) return false;
+            return compact.includes('noofdaysemployed') ||
+              compact.includes('numberofdaysemployed') ||
+              (norm.includes('days') && norm.includes('employed'));
+          });
+
+          const noOfDaysLaidOffHeader = currentHeaders.find((header) => {
+            const norm = normalizeFormAHeader(header);
+            const compact = compactFormAHeader(header);
+            return compact.includes('noofdayslaidoff') ||
+              compact.includes('numberofdayslaidoff') ||
+              (norm.includes('laid') && norm.includes('off') && norm.includes('days'));
+          });
+
+          // Populate Form A fields from Form 25 data
+          mappedData.forEach((row, rowIndex) => {
+            const empItem = employees[rowIndex];
+            const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+
+            if (!emp) return;
+
+            const empNameCandidates = getEmployeeNameCandidates(emp);
+            const empName = empNameCandidates[0] || '';
+            const empFirstName = String(
+              emp.FirstName ||
+              emp['FirstName'] ||
+              emp.First_Name ||
+              emp['First_Name'] ||
+              findValueByNormalizedKey(emp, 'firstname') ||
+              ''
+            ).trim().toLowerCase();
+
+            const empId = String(
+              emp.EmployeeID ||
+              emp['EmployeeID'] ||
+              emp['Employee ID'] ||
+              emp.Zoho_ID ||
+              emp['Zoho_ID'] ||
+              findValueByNormalizedKey(emp, 'employeeid') ||
+              findValueByNormalizedKey(emp, 'employee_id') ||
+              ''
+            ).trim().toLowerCase();
+
+            let matchedForm25Record = null;
+            const matchedAttendanceAgg =
+              (empId && attendanceAggByEmployeeKey.get(`id:${empId}`)) ||
+              (empName && attendanceAggByEmployeeKey.get(`name:${empName}`)) ||
+              (empFirstName && attendanceAggByEmployeeKey.get(`first:${empFirstName}`)) ||
+              null;
+
+            if (empNameCandidates.length > 0) {
+              matchedForm25Record = empNameCandidates.map((candidate) => form25ByName.get(candidate)).find(Boolean) || null;
+            }
+
+            if (!matchedForm25Record && empId && form25ById.has(empId)) {
+              matchedForm25Record = form25ById.get(empId);
+            }
+
+            const fallbackForm25Record =
+              matchedForm25Record ||
+              form25Records[rowIndex] ||
+              null;
+
+            if (noOfDaysEmployedHeader) {
+              if (matchedAttendanceAgg) {
+                row[noOfDaysEmployedHeader] = String(matchedAttendanceAgg.days || 0);
+              } else if (fallbackForm25Record) {
+                row[noOfDaysEmployedHeader] = pickForm25DayValue(fallbackForm25Record, [
+                  'totalDaysWorked',
+                  'Total Worked Days',
+                  'total_worked_days'
+                ]);
+              }
+            }
+            if (noOfDaysLaidOffHeader) {
+              if (matchedAttendanceAgg) {
+                const daysInMonth = new Date(new Date().getFullYear(), (MONTH_NAMES.findIndex(
+                  (month) => month.toLowerCase().startsWith(String(selectedMonth || '').toLowerCase().trim())
+                ) >= 0 ? MONTH_NAMES.findIndex(
+                  (month) => month.toLowerCase().startsWith(String(selectedMonth || '').toLowerCase().trim())
+                ) : new Date().getMonth()) + 1, 0).getDate();
+                row[noOfDaysLaidOffHeader] = String(Math.max(0, daysInMonth - Number(matchedAttendanceAgg.days || 0)));
+              } else if (fallbackForm25Record) {
+                row[noOfDaysLaidOffHeader] = pickForm25DayValue(fallbackForm25Record, [
+                  'numberOfDaysOnLossOfPay',
+                  'No of days on loss of pay',
+                  'loss_of_pay',
+                  'lopDays'
+                ]);
+              }
+            }
+
+            if (natureOfWorkHeader) {
+              row[natureOfWorkHeader] = String(
+                emp.Designation ||
+                emp.designation ||
+                emp['Designation.displayValue'] ||
+                findValueByNormalizedKey(emp, 'designation') ||
+                ''
+              );
+            }
+
+            if (dateOnWhichEmployedHeader) {
+              row[dateOnWhichEmployedHeader] = String(
+                emp.Dateofjoining ||
+                emp['Dateofjoining'] ||
+                emp.DateofJoining ||
+                emp['Date of Joining'] ||
+                emp['DateofJoining'] ||
+                emp.dateOfJoining ||
+                emp['dateOfJoining'] ||
+                emp['Date of joining'] ||
+                emp.Date_of_Joining ||
+                emp['Date_of_Joining'] ||
+                findValueByNormalizedKey(emp, 'dateofjoining') ||
+                findValueByNormalizedKey(emp, 'dateofjoiningdisplayvalue') ||
+                ''
+              );
+            }
+          });
+
+          console.log('Form 25 data populated for Form A fields');
+        } catch (form25Err) {
+          console.warn('Form 25 data fetch for Form A skipped:', form25Err?.message || form25Err);
+        }
+      }
      
       // Check if name field was populated
       const nameHeader = currentHeaders.find(h =>
@@ -9529,126 +10669,312 @@ const Statutory = ({ userEmail, userRole }) => {
       let hasLeaveBalanceColumn = false;
       let leaveEarnedPopulated = 0;
       let hasLeaveEarnedColumn = false;
-     
+      let leaveAvailedPopulated = 0;
+      let hasLeaveAvailedColumn = false;
+      let otherLeavePopulated = 0;
+      let hasOtherLeaveColumn = false;
+
       try {
         console.log('Fetching leave data...');
-        const fromDate = '01-Jan-2025';
-        const toDate = '31-Dec-2025';
+        const { fromDate, toDate } = zohoBookedBalanceRangeForUiMonth(selectedMonth);
         const unit = 'Day';
         const leaveUrl = `/server/leavedata_function?from=${encodeURIComponent(fromDate)}&to=${encodeURIComponent(toDate)}&unit=${encodeURIComponent(unit)}`;
        
         const leaveResponse = await fetch(leaveUrl);
         const leaveResult = await leaveResponse.json();
-       
-        if (leaveResult.success && leaveResult.data) {
-          console.log('Leave data received:', leaveResult.data);
-         
-          // Extract leave records from response
+        const leaveTypeLabels = (leaveResult && leaveResult.leaveTypeLabels) || {};
+
+        if (leaveResult && typeof leaveResult === 'object') {
+          console.log('Leave data received:', leaveResult);
+
+          // Extract leave records. Backend may send a populated `records` map while `leaveRecords` is []
+          // (normalizeLeaveResponse does not always match Zoho bookedAndBalance shape). Empty array must not win.
           let leaveRecords = [];
-          const leaveData = leaveResult.data;
-         
-          // Handle different response structures
-          if (Array.isArray(leaveData)) {
-            leaveRecords = leaveData;
-          } else if (leaveData.response && Array.isArray(leaveData.response.result)) {
-            leaveRecords = leaveData.response.result;
-          } else if (leaveData.response && Array.isArray(leaveData.response)) {
-            leaveRecords = leaveData.response;
-          } else if (leaveData.result && Array.isArray(leaveData.result)) {
-            leaveRecords = leaveData.result;
+
+          if (Array.isArray(leaveResult.leaveRecords) && leaveResult.leaveRecords.length > 0) {
+            leaveRecords = leaveResult.leaveRecords;
+          } else if (
+            leaveResult.records &&
+            typeof leaveResult.records === 'object' &&
+            !Array.isArray(leaveResult.records) &&
+            Object.keys(leaveResult.records).length > 0
+          ) {
+            leaveRecords = Object.entries(leaveResult.records).map(([employeeId, row]) => ({
+              employeeId: String(employeeId),
+              ...(row && typeof row === 'object' ? row : {}),
+            }));
+          } else {
+            const leaveData =
+              (leaveResult.data && typeof leaveResult.data === 'object' ? leaveResult.data : null) ||
+              leaveResult.records ||
+              leaveResult;
+
+            if (Array.isArray(leaveData) && leaveData.length > 0) {
+              leaveRecords = leaveData;
+            } else if (leaveData && leaveData.response && Array.isArray(leaveData.response.result)) {
+              leaveRecords = leaveData.response.result;
+            } else if (leaveData && leaveData.response && Array.isArray(leaveData.response)) {
+              leaveRecords = leaveData.response;
+            } else if (leaveData && leaveData.result && Array.isArray(leaveData.result)) {
+              leaveRecords = leaveData.result;
+            } else if (leaveData && typeof leaveData === 'object' && !Array.isArray(leaveData)) {
+              const objectRows = Object.entries(leaveData).map(([employeeId, row]) => ({
+                employeeId: String(employeeId),
+                ...(row && typeof row === 'object' ? row : {}),
+              }));
+              if (objectRows.length > 0) leaveRecords = objectRows;
+            }
           }
-         
+
           console.log('Extracted leave records:', leaveRecords);
-         
-          // Find "Leave Balance at end of the Month" column header
-          const leaveBalanceHeader = currentHeaders.find(header => {
+
+          const normalizedCurrentHeaders = Array.isArray(currentHeaders) ? currentHeaders : [];
+          const parsedGroupLabels =
+            (Array.isArray(options.columnGroupLabels) &&
+              options.columnGroupLabels.length === normalizedCurrentHeaders.length &&
+              options.columnGroupLabels) ||
+            (Array.isArray(formFileModalData?.parsedColumnGroupLabels) &&
+              formFileModalData.parsedColumnGroupLabels.length === normalizedCurrentHeaders.length &&
+              formFileModalData.parsedColumnGroupLabels) ||
+            null;
+
+          const formXLeaveSections = resolveFormXLeaveSectionHeaders(
+            normalizedCurrentHeaders,
+            parsedGroupLabels
+          );
+          const leaveEarnedHeader = formXLeaveSections.earnedEarned;
+          const leaveAvailedHeader = formXLeaveSections.earnedAvailed;
+          const otherLeaveHeaderMap = {
+            beginning: formXLeaveSections.otherBeginning,
+            availed: formXLeaveSections.otherAvailed,
+            balance: formXLeaveSections.otherBalance,
+          };
+
+          const leaveBeginningHeader = normalizedCurrentHeaders.find((header) => {
             const headerLower = header.toLowerCase().trim();
-            return headerLower.includes('leave') &&
-                   headerLower.includes('balance') &&
-                   (headerLower.includes('end') || headerLower.includes('month'));
+            return (
+              headerLower.includes('leave') &&
+              headerLower.includes('beginning') &&
+              headerLower.includes('month')
+            );
           });
-         
-          // Find "Leave earned during the Period" column header
-          const leaveEarnedHeader = currentHeaders.find(header => {
+
+          const leaveBalanceHeader = normalizedCurrentHeaders.find((header) => {
             const headerLower = header.toLowerCase().trim();
-            return headerLower.includes('leave') &&
-                   headerLower.includes('earned') &&
-                   (headerLower.includes('period') || headerLower.includes('during'));
+            return (
+              headerLower.includes('leave') &&
+              headerLower.includes('balance') &&
+              headerLower.includes('end') &&
+              headerLower.includes('month')
+            );
           });
-         
-          if (leaveBalanceHeader) {
+
+          if (leaveBeginningHeader || leaveBalanceHeader) {
             hasLeaveBalanceColumn = true;
           }
-         
+
           if (leaveEarnedHeader) {
             hasLeaveEarnedColumn = true;
           }
-         
-          if ((leaveBalanceHeader || leaveEarnedHeader) && leaveRecords.length > 0) {
+
+          if (leaveAvailedHeader) {
+            hasLeaveAvailedColumn = true;
+          }
+
+          hasOtherLeaveColumn = !!(
+            otherLeaveHeaderMap.beginning ||
+            otherLeaveHeaderMap.availed ||
+            otherLeaveHeaderMap.balance
+          );
+
+          const hasAnyLeaveTargetColumn =
+            leaveBeginningHeader ||
+            leaveBalanceHeader ||
+            leaveEarnedHeader ||
+            leaveAvailedHeader ||
+            hasOtherLeaveColumn;
+
+          if (hasAnyLeaveTargetColumn && leaveRecords.length > 0) {
+            if (leaveBeginningHeader) {
+              console.log(`Found leave beginning column: "${leaveBeginningHeader}"`);
+            }
             if (leaveBalanceHeader) {
-            console.log(`Found leave balance column: "${leaveBalanceHeader}"`);
+              console.log(`Found leave balance column: "${leaveBalanceHeader}"`);
             }
             if (leaveEarnedHeader) {
               console.log(`Found leave earned column: "${leaveEarnedHeader}"`);
             }
+            if (leaveAvailedHeader) {
+              console.log(`Found leave availed column: "${leaveAvailedHeader}"`);
+            }
            
+            const tryParseLeaveCell = (value) => {
+              if (value == null || value === '') return null;
+              if (typeof value === 'object') return value;
+              const raw = String(value).trim();
+              if (!raw || raw === '{}') return null;
+              try {
+                const parsed = JSON.parse(raw);
+                return parsed && typeof parsed === 'object' ? parsed : null;
+              } catch (_) {
+                return null;
+              }
+            };
+
+            const toFiniteNumber = (value) => {
+              const n = Number(value);
+              return Number.isFinite(n) ? n : 0;
+            };
+
+            const getLeaveRowAllBalance = (leaveRecord) => {
+              let total = 0;
+              Object.entries(leaveRecord || {}).forEach(([key, value]) => {
+                const keyLower = String(key || '').toLowerCase();
+                if (keyLower === 's.no' || keyLower === 'sno' || keyLower === 'employeeid' || keyLower === 'employee_id') return;
+                const parsed = tryParseLeaveCell(value);
+                if (!parsed) return;
+                total += toFiniteNumber(parsed.balance);
+              });
+              return String(total);
+            };
+
+            const earnedLeaveTestKeyMatches = (keyOrLabel) => {
+              const kl = String(keyOrLabel || '')
+                .toLowerCase()
+                .trim();
+              return (
+                kl === 'earned leave (test)' ||
+                kl === 'earned leave(test)' ||
+                (kl.includes('earned') && kl.includes('test'))
+              );
+            };
+
+            const getEarnedLeaveTestCell = (leaveRecord) => {
+              if (!leaveRecord || typeof leaveRecord !== 'object') return null;
+              for (const k of Object.keys(leaveRecord)) {
+                if (earnedLeaveTestKeyMatches(k)) return leaveRecord[k];
+                const lab = leaveTypeLabels[k];
+                if (lab && earnedLeaveTestKeyMatches(lab)) return leaveRecord[k];
+              }
+              return null;
+            };
+
+            const getEarnedLeaveTestBalanceBooked = (leaveRecord) => {
+              const raw = getEarnedLeaveTestCell(leaveRecord);
+              const parsed = tryParseLeaveCell(raw);
+              if (!parsed || typeof parsed !== 'object') return { balance: '', booked: '' };
+              const bal = parsed.paidBalance ?? parsed.balance;
+              const book = parsed.paidBooked ?? parsed.booked;
+              return {
+                balance: bal != null && bal !== '' ? String(bal) : '',
+                booked: book != null && book !== '' ? String(book) : '',
+              };
+            };
+
+            if (otherLeaveHeaderMap.beginning) {
+              console.log(`Found other leave beginning column: "${otherLeaveHeaderMap.beginning}"`);
+            }
+            if (otherLeaveHeaderMap.availed) {
+              console.log(`Found other leave availed column: "${otherLeaveHeaderMap.availed}"`);
+            }
+            if (otherLeaveHeaderMap.balance) {
+              console.log(`Found other leave balance column: "${otherLeaveHeaderMap.balance}"`);
+            }
+
+            const collectLeaveApiIdentityKeys = (leaveRecord) => {
+              const names = [];
+              const ids = [];
+              const addName = (v) => {
+                if (v == null || !String(v).trim()) return;
+                names.push(String(v).toLowerCase().trim());
+              };
+              const addId = (v) => {
+                if (v == null || !String(v).trim()) return;
+                ids.push(String(v).toLowerCase().trim());
+              };
+              const emp = leaveRecord.employee;
+              if (emp && typeof emp === 'object') {
+                addName(emp.name);
+                addId(emp.id);
+              }
+              addName(
+                leaveRecord.EmployeeName ||
+                  leaveRecord.employeeName ||
+                  leaveRecord['Employee Name'] ||
+                  leaveRecord.name
+              );
+              addId(
+                leaveRecord.EmployeeID ||
+                  leaveRecord.Employee_ID ||
+                  leaveRecord.employee_id ||
+                  leaveRecord['Employee ID'] ||
+                  leaveRecord.employeeId ||
+                  leaveRecord.ZohoID ||
+                  leaveRecord['Zoho.ID']
+              );
+              return { names: [...new Set(names)], ids: [...new Set(ids)] };
+            };
+
             // Create maps of leave data by employee identifier
+            const leaveBeginningMap = new Map();
             const leaveBalanceMap = new Map();
-            const leaveBookedMap = new Map();
+            const leaveEarnedMap = new Map();
+            const leaveAvailedMap = new Map();
+            const otherLeaveMaps = {
+              beginning: new Map(),
+              availed: new Map(),
+              balance: new Map()
+            };
            
-            leaveRecords.forEach(leaveRecord => {
-              // Try to match by different employee identifier fields
-              const employeeName = leaveRecord.EmployeeName ||
-                                 leaveRecord.Employee ||
-                                 leaveRecord.employee_name ||
-                                 leaveRecord.employeeName ||
-                                 leaveRecord.name ||
-                                 leaveRecord['Employee Name'] || '';
-             
-              const employeeId = leaveRecord.EmployeeID ||
-                               leaveRecord.Employee_ID ||
-                               leaveRecord.employee_id ||
-                               leaveRecord['Employee ID'] || '';
-             
-              // Get balance value
-              const balance = leaveRecord.Balance ||
-                            leaveRecord.balance ||
-                            leaveRecord.BalanceDays ||
-                            leaveRecord.balance_days ||
-                            leaveRecord.balanceDays ||
-                            '0';
-             
-              // Get booked value (booked count)
-              const booked = leaveRecord.Booked ||
-                          leaveRecord.booked ||
-                          leaveRecord.BookedDays ||
-                          leaveRecord.booked_days ||
-                          leaveRecord.bookedDays ||
-                            '0';
-             
-              // Store by both name and ID for matching
-              if (employeeName) {
-                const nameKey = employeeName.toLowerCase().trim();
+            leaveRecords.forEach((leaveRecord) => {
+              const { names: nameKeys, ids: idKeys } = collectLeaveApiIdentityKeys(leaveRecord);
+              const { balance: earnedBalanceStr, booked: earnedBookedStr } = getEarnedLeaveTestBalanceBooked(leaveRecord);
+              const balance = getLeaveRowAllBalance(leaveRecord);
+              const otherLeaveMetrics = getCombinedOtherLeaveMetrics(leaveRecord, leaveTypeLabels);
+
+              const setIdentityLeaveMaps = (identityKey) => {
+                if (!identityKey) return;
+                if (otherLeaveMetrics.beginning !== '') otherLeaveMaps.beginning.set(identityKey, otherLeaveMetrics.beginning);
+                if (otherLeaveMetrics.availed !== '') otherLeaveMaps.availed.set(identityKey, otherLeaveMetrics.availed);
+                if (otherLeaveMetrics.balance !== '') otherLeaveMaps.balance.set(identityKey, otherLeaveMetrics.balance);
+              };
+
+              nameKeys.forEach((nameKey) => {
+                if (leaveBeginningHeader) {
+                  leaveBeginningMap.set(nameKey, balance);
+                }
                 if (leaveBalanceHeader) {
                   leaveBalanceMap.set(nameKey, balance);
                 }
-                if (leaveEarnedHeader) {
-                  leaveBookedMap.set(nameKey, booked);
+                if (leaveEarnedHeader && earnedBalanceStr !== '') {
+                  leaveEarnedMap.set(nameKey, earnedBalanceStr);
                 }
-              }
-              if (employeeId) {
-                const idKey = employeeId.toString().toLowerCase().trim();
+                if (leaveAvailedHeader && earnedBookedStr !== '') {
+                  leaveAvailedMap.set(nameKey, earnedBookedStr);
+                }
+                setIdentityLeaveMaps(nameKey);
+              });
+              idKeys.forEach((idKey) => {
+                if (leaveBeginningHeader) {
+                  leaveBeginningMap.set(idKey, balance);
+                }
                 if (leaveBalanceHeader) {
                   leaveBalanceMap.set(idKey, balance);
                 }
-                if (leaveEarnedHeader) {
-                  leaveBookedMap.set(idKey, booked);
+                if (leaveEarnedHeader && earnedBalanceStr !== '') {
+                  leaveEarnedMap.set(idKey, earnedBalanceStr);
                 }
-              }
+                if (leaveAvailedHeader && earnedBookedStr !== '') {
+                  leaveAvailedMap.set(idKey, earnedBookedStr);
+                }
+                setIdentityLeaveMaps(idKey);
+              });
             });
            
+            console.log('Leave beginning map:', Array.from(leaveBeginningMap.entries()));
             console.log('Leave balance map:', Array.from(leaveBalanceMap.entries()));
-            console.log('Leave booked map:', Array.from(leaveBookedMap.entries()));
+            console.log('Leave earned map:', Array.from(leaveEarnedMap.entries()));
+            console.log('Leave availed map:', Array.from(leaveAvailedMap.entries()));
            
             // Find employee name column to match employees
             const employeeNameHeader = currentHeaders.find(header => {
@@ -9666,76 +10992,182 @@ const Statutory = ({ userEmail, userRole }) => {
                      !headerLower.includes('zoho');
             });
            
-            // Populate leave balance and booked count for each employee
+            // Populate leave values for each employee
             mappedData.forEach((row, index) => {
+              const empItem = employees[index];
+              const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+              const empNameCandidates = getEmployeeNameCandidates(emp || {});
+              const empWorkerId = String(getFallbackWorkerId(emp || {}) || '').toLowerCase().trim();
+              const empVisibleId = String(getFallbackEmployeeId(emp || {}) || '').toLowerCase().trim();
+              let matchedBeginning = null;
               let matchedBalance = null;
-              let matchedBooked = null;
-             
+              let matchedEarned = null;
+              let matchedAvailed = null;
+              const matchedOtherLeave = { beginning: null, availed: null, balance: null };
+
               // Try to match by employee name first
-              if (employeeNameHeader && row[employeeNameHeader]) {
-                const employeeName = String(row[employeeNameHeader]).toLowerCase().trim();
-                if (leaveBalanceHeader && leaveBalanceMap.has(employeeName)) {
+              const rowEmployeeName = employeeNameHeader && row[employeeNameHeader]
+                ? String(row[employeeNameHeader]).toLowerCase().trim()
+                : '';
+              const allNameCandidates = Array.from(new Set([rowEmployeeName, ...empNameCandidates].filter(Boolean)));
+              const tryMatchOtherLeaveValues = (identityKey) => {
+                if (matchedOtherLeave.beginning == null && otherLeaveMaps.beginning.has(identityKey)) {
+                  matchedOtherLeave.beginning = otherLeaveMaps.beginning.get(identityKey);
+                }
+                if (matchedOtherLeave.availed == null && otherLeaveMaps.availed.has(identityKey)) {
+                  matchedOtherLeave.availed = otherLeaveMaps.availed.get(identityKey);
+                }
+                if (matchedOtherLeave.balance == null && otherLeaveMaps.balance.has(identityKey)) {
+                  matchedOtherLeave.balance = otherLeaveMaps.balance.get(identityKey);
+                }
+              };
+              for (const employeeName of allNameCandidates) {
+                if (leaveBeginningHeader && matchedBeginning == null && leaveBeginningMap.has(employeeName)) {
+                  matchedBeginning = leaveBeginningMap.get(employeeName);
+                }
+                if (leaveBalanceHeader && matchedBalance == null && leaveBalanceMap.has(employeeName)) {
                   matchedBalance = leaveBalanceMap.get(employeeName);
                 }
-                if (leaveEarnedHeader && leaveBookedMap.has(employeeName)) {
-                  matchedBooked = leaveBookedMap.get(employeeName);
+                if (leaveEarnedHeader && matchedEarned == null && leaveEarnedMap.has(employeeName)) {
+                  matchedEarned = leaveEarnedMap.get(employeeName);
                 }
+                if (leaveAvailedHeader && matchedAvailed == null && leaveAvailedMap.has(employeeName)) {
+                  matchedAvailed = leaveAvailedMap.get(employeeName);
+                }
+                tryMatchOtherLeaveValues(employeeName);
               }
-             
+
               // If not matched by name, try by employee ID
-              if ((!matchedBalance && leaveBalanceHeader) || (!matchedBooked && leaveEarnedHeader)) {
-                if (employeeIdHeader && row[employeeIdHeader]) {
-                const employeeId = String(row[employeeIdHeader]).toLowerCase().trim();
+              if ((!matchedBeginning && leaveBeginningHeader) || (!matchedBalance && leaveBalanceHeader) || (!matchedEarned && leaveEarnedHeader) || (!matchedAvailed && leaveAvailedHeader)) {
+                const candidateIds = [
+                  employeeIdHeader && row[employeeIdHeader] ? String(row[employeeIdHeader]).toLowerCase().trim() : '',
+                  empVisibleId,
+                  empWorkerId
+                ].filter(Boolean);
+                for (const employeeId of candidateIds) {
+                  if (leaveBeginningHeader && !matchedBeginning && leaveBeginningMap.has(employeeId)) {
+                    matchedBeginning = leaveBeginningMap.get(employeeId);
+                  }
                   if (leaveBalanceHeader && !matchedBalance && leaveBalanceMap.has(employeeId)) {
                     matchedBalance = leaveBalanceMap.get(employeeId);
                   }
-                  if (leaveEarnedHeader && !matchedBooked && leaveBookedMap.has(employeeId)) {
-                    matchedBooked = leaveBookedMap.get(employeeId);
+                  if (leaveEarnedHeader && !matchedEarned && leaveEarnedMap.has(employeeId)) {
+                    matchedEarned = leaveEarnedMap.get(employeeId);
                   }
+                  if (leaveAvailedHeader && !matchedAvailed && leaveAvailedMap.has(employeeId)) {
+                    matchedAvailed = leaveAvailedMap.get(employeeId);
+                  }
+                  tryMatchOtherLeaveValues(employeeId);
                 }
               }
-             
+
               // If still not matched, try to find by partial name match
-              if (employeeNameHeader && row[employeeNameHeader]) {
-                const employeeName = String(row[employeeNameHeader]).toLowerCase().trim();
-                if (leaveBalanceHeader && !matchedBalance) {
-                  for (const [key, value] of leaveBalanceMap.entries()) {
-                  if (key.includes(employeeName) || employeeName.includes(key)) {
-                    matchedBalance = value;
-                    break;
+              if (allNameCandidates.length > 0) {
+                const employeeName = allNameCandidates[0];
+                if (leaveBeginningHeader && !matchedBeginning) {
+                  for (const [key, value] of leaveBeginningMap.entries()) {
+                    if (key.includes(employeeName) || employeeName.includes(key)) {
+                      matchedBeginning = value;
+                      break;
                     }
                   }
                 }
-                if (leaveEarnedHeader && !matchedBooked) {
-                  for (const [key, value] of leaveBookedMap.entries()) {
+                if (leaveBalanceHeader && !matchedBalance) {
+                  for (const [key, value] of leaveBalanceMap.entries()) {
                     if (key.includes(employeeName) || employeeName.includes(key)) {
-                      matchedBooked = value;
+                      matchedBalance = value;
+                      break;
+                    }
+                  }
+                }
+                if (leaveEarnedHeader && !matchedEarned) {
+                  for (const [key, value] of leaveEarnedMap.entries()) {
+                    if (key.includes(employeeName) || employeeName.includes(key)) {
+                      matchedEarned = value;
+                      break;
+                    }
+                  }
+                }
+                if (leaveAvailedHeader && !matchedAvailed) {
+                  for (const [key, value] of leaveAvailedMap.entries()) {
+                    if (key.includes(employeeName) || employeeName.includes(key)) {
+                      matchedAvailed = value;
+                      break;
+                    }
+                  }
+                }
+                if (matchedOtherLeave.beginning == null) {
+                  for (const [key, value] of otherLeaveMaps.beginning.entries()) {
+                    if (key.includes(employeeName) || employeeName.includes(key)) {
+                      matchedOtherLeave.beginning = value;
+                      break;
+                    }
+                  }
+                }
+                if (matchedOtherLeave.availed == null) {
+                  for (const [key, value] of otherLeaveMaps.availed.entries()) {
+                    if (key.includes(employeeName) || employeeName.includes(key)) {
+                      matchedOtherLeave.availed = value;
+                      break;
+                    }
+                  }
+                }
+                if (matchedOtherLeave.balance == null) {
+                  for (const [key, value] of otherLeaveMaps.balance.entries()) {
+                    if (key.includes(employeeName) || employeeName.includes(key)) {
+                      matchedOtherLeave.balance = value;
                       break;
                     }
                   }
                 }
               }
-             
+
+              if (matchedBeginning !== null && leaveBeginningHeader) {
+                row[leaveBeginningHeader] = String(matchedBeginning);
+                leaveBalancePopulated++;
+              }
+
               // Populate the balance if found
               if (matchedBalance !== null && leaveBalanceHeader) {
                 row[leaveBalanceHeader] = String(matchedBalance);
                 leaveBalancePopulated++;
                 console.log(`✓ Populated leave balance for employee ${index + 1}: ${matchedBalance}`);
               }
-             
-              // Populate the booked count if found
-              if (matchedBooked !== null && leaveEarnedHeader) {
-                row[leaveEarnedHeader] = String(matchedBooked);
+
+              // Earned Leave (Test) paidBalance → "Leave earned during the Period"
+              if (matchedEarned != null && leaveEarnedHeader) {
+                row[leaveEarnedHeader] = String(matchedEarned);
                 leaveEarnedPopulated++;
-                console.log(`✓ Populated leave earned (booked count) for employee ${index + 1}: ${matchedBooked}`);
+                console.log(`✓ Populated leave earned (Earned Leave Test balance) for employee ${index + 1}: ${matchedEarned}`);
+              }
+
+              // Earned Leave (Test) paidBooked → "Leave availed during the Month"
+              if (matchedAvailed != null && leaveAvailedHeader) {
+                row[leaveAvailedHeader] = String(matchedAvailed);
+                leaveAvailedPopulated++;
+                console.log(`✓ Populated leave availed (Earned Leave Test booked) for employee ${index + 1}: ${matchedAvailed}`);
+              }
+              if (otherLeaveHeaderMap.beginning && matchedOtherLeave.beginning != null) {
+                row[otherLeaveHeaderMap.beginning] = String(matchedOtherLeave.beginning);
+                otherLeavePopulated++;
+              }
+              if (otherLeaveHeaderMap.availed && matchedOtherLeave.availed != null) {
+                row[otherLeaveHeaderMap.availed] = String(matchedOtherLeave.availed);
+                otherLeavePopulated++;
+              }
+              if (otherLeaveHeaderMap.balance && matchedOtherLeave.balance != null) {
+                row[otherLeaveHeaderMap.balance] = String(matchedOtherLeave.balance);
+                otherLeavePopulated++;
               }
             });
-           
+
             console.log(`Leave balance populated for ${leaveBalancePopulated} out of ${mappedData.length} employees`);
-            console.log(`Leave earned (booked count) populated for ${leaveEarnedPopulated} out of ${mappedData.length} employees`);
+            console.log(`Leave earned (Earned Leave Test balance) populated for ${leaveEarnedPopulated} out of ${mappedData.length} employees`);
+            console.log(`Leave availed (Earned Leave Test booked) populated for ${leaveAvailedPopulated} out of ${mappedData.length} employees`);
+            console.log(`Other leave (Privilege/LWP/Sick/Wedding totals) populated for ${otherLeavePopulated} cell(s)`);
           } else {
-            if (!leaveBalanceHeader && !leaveEarnedHeader) {
-              console.warn('⚠️ Neither "Leave Balance at end of the Month" nor "Leave earned during the Period" column found in table headers');
+            if (!leaveBalanceHeader && !leaveEarnedHeader && !leaveAvailedHeader && !hasOtherLeaveColumn) {
+              console.warn('⚠️ No leave columns matched (earned / other leave / balance at end).');
             }
             if (leaveRecords.length === 0) {
               console.warn('⚠️ No leave records found in response');
@@ -9764,6 +11196,12 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (hasLeaveEarnedColumn && leaveEarnedPopulated > 0) {
         populatedFields.push(`leave earned (${leaveEarnedPopulated} populated)`);
+      }
+      if (hasLeaveAvailedColumn && leaveAvailedPopulated > 0) {
+        populatedFields.push(`leave availed (${leaveAvailedPopulated} populated)`);
+      }
+      if (hasOtherLeaveColumn && otherLeavePopulated > 0) {
+        populatedFields.push(`other leave (${otherLeavePopulated} populated)`);
       }
       if (populatedFields.length > 0) {
         successMessage += ` with ${populatedFields.join(' and ')}`;
@@ -11420,10 +12858,29 @@ const Statutory = ({ userEmail, userRole }) => {
               console.warn('Could not load saved sample data for View Draft modal:', sampleErr);
             }
             if (!loadedSavedData) {
-              fetchAndPopulateEmployeeData(parsed.headers);
+              fetchAndPopulateEmployeeData(parsed.headers, {
+                columnGroupLabels: parsed.columnGroupLabels ?? null,
+                formFileModalData: {
+                  fileName: displayFileName,
+                  formFileName: resolvedFormFileName,
+                  fileType: 'excel-form',
+                  sheetHtml: excelSheetHtml,
+                  rawData: workbook,
+                  item: item,
+                  parsedFormHeader: formHeaderForModal,
+                  parsedTableHeaders: parsed.headers || [],
+                  parsedSubColumns: parsed.subColumns,
+                  parsedHeaderFormData: initialHeaderFormData,
+                  headerRowIndex: parsed.headerRowIndex,
+                  dataStartIndex: parsed.dataStartIndex,
+                  parsedColumnGroupLabels: parsed.columnGroupLabels ?? null
+                }
+              });
             }
           } else {
-            fetchAndPopulateEmployeeData(parsed.headers);
+            fetchAndPopulateEmployeeData(parsed.headers, {
+              columnGroupLabels: parsed.columnGroupLabels ?? null,
+            });
           }
         } else {
           console.log('📄 View File mode – using parsed Excel data');
@@ -11567,8 +13024,49 @@ const Statutory = ({ userEmail, userRole }) => {
   }, []);
 
   const resolveSiteDisplayName = useCallback((item, allRows = []) => {
-    const explicitSite = String(item?.site || item?.Site || '').trim();
+    const explicitSite = String(item?.site || item?.Site || item?.siteName || item?.SiteName || '').trim();
     if (explicitSite) return explicitSite;
+    const rowState = String(item?.state ?? item?.State ?? '').trim();
+    if (rowState) {
+      const inchargePool = Array.isArray(inchargeSitesMeta) ? inchargeSitesMeta : [];
+      const orgPool = Array.isArray(organizationSitesMeta) ? organizationSitesMeta : [];
+      const pool = inchargePool.length > 0 ? inchargePool : orgPool;
+      if (pool.length > 0) {
+        let byState = pool.filter((rec) => checklistStateMatchesSiteState(rowState, rec.siteState));
+        if (byState.length > 0) {
+          const rowSector = String(item?.sector ?? item?.Sector ?? '').trim();
+          const rowAct = String(item?.act ?? item?.Act ?? '').trim();
+          const rowCat = getActCategoryFromActSector(rowAct, rowSector);
+          if (rowCat && rowCat !== 'other') {
+            const byBucket = byState.filter((rec) => {
+              const siteCat = industryLabelToActCategory(rec.industry);
+              if (siteCat) return siteCat === rowCat;
+              const ind = String(rec.industry || '').trim();
+              if (!ind) return false;
+              return (
+                sectorMatchesInchargeSiteIndustries(rowSector, [ind]) ||
+                sectorMatchesInchargeSiteIndustries(rowAct, [ind])
+              );
+            });
+            byState = byBucket;
+          } else if (rowSector) {
+            const byFuzzy = byState.filter((rec) => {
+              const ind = String(rec.industry || '').trim();
+              if (!ind) return false;
+              return (
+                sectorMatchesInchargeSiteIndustries(rowSector, [ind]) ||
+                sectorMatchesInchargeSiteIndustries(rowAct, [ind])
+              );
+            });
+            if (byFuzzy.length > 0) byState = byFuzzy;
+          }
+          const names = [...new Set(byState.map((r) => r.siteName).filter(Boolean))];
+          if (names.length === 1) return names[0];
+          if (names.length > 1) return names.sort((a, b) => a.localeCompare(b)).join(', ');
+        }
+        if (inchargePool.length > 0) return '';
+      }
+    }
     if (Array.isArray(allowedSiteNameList) && allowedSiteNameList.length === 1) {
       return String(allowedSiteNameList[0] || '').trim();
     }
@@ -11584,7 +13082,15 @@ const Statutory = ({ userEmail, userRole }) => {
       if (scopedNames.length > 0) return scopedNames[0];
     }
     return '';
-  }, [siteFromUrl, getActCategoryWithFormFallback, siteNamesByActCategory, allowedActCategoryList, allowedSiteNameList]);
+  }, [
+    siteFromUrl,
+    getActCategoryWithFormFallback,
+    siteNamesByActCategory,
+    allowedActCategoryList,
+    allowedSiteNameList,
+    inchargeSitesMeta,
+    organizationSitesMeta
+  ]);
 
   // Filter statutory data by month and ensure forms are properly separated by act
   // Items with "Monthly Basis" due date should appear in every month (treated as 15th of that month)
@@ -11607,12 +13113,14 @@ const Statutory = ({ userEmail, userRole }) => {
     // Site login: show only corresponding site rows.
     if (siteFromUrl && data && data.length > 0) {
       const targetSite = String(siteFromUrl).trim().toLowerCase();
-      data = data.filter((item) => String(resolveSiteDisplayName(item, data) || '').trim().toLowerCase() === targetSite);
+      data = data.filter((item) =>
+        resolvedSiteMatchesSingleTarget(resolveSiteDisplayName(item, data) || '', targetSite)
+      );
     } else if (Array.isArray(allowedSiteNameList) && allowedSiteNameList.length > 0 && data && data.length > 0) {
       const allowedSites = new Set(allowedSiteNameList.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean));
       data = data.filter((item) => {
-        const rowSite = String(resolveSiteDisplayName(item, data) || '').trim().toLowerCase();
-        return rowSite && allowedSites.has(rowSite);
+        const rowResolved = resolveSiteDisplayName(item, data) || '';
+        return resolvedSiteAnyAllowed(rowResolved, allowedSites);
       });
     }
 
@@ -11940,9 +13448,40 @@ const Statutory = ({ userEmail, userRole }) => {
   [formFileModalData?.parsedFormHeader, formHeader]);
   const displayTableHeaders = useMemo(() => {
     const parsed = formFileModalData?.parsedTableHeaders;
-    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    return tableHeaders || [];
-  }, [formFileModalData?.parsedTableHeaders, tableHeaders]);
+    const baseHeaders = Array.isArray(parsed) && parsed.length > 0 ? parsed : tableHeaders || [];
+    const effectiveSelectedMonth = resolveToFullMonthName(selectedMonth) || '';
+    const selectedMonthIndex = MONTH_NAMES.findIndex(
+      (month) => month.toLowerCase().startsWith(String(effectiveSelectedMonth || '').toLowerCase().trim())
+    );
+    if (selectedMonthIndex < 0) {
+      return baseHeaders;
+    }
+
+    const monthDayCount = new Date(new Date().getFullYear(), selectedMonthIndex + 1, 0).getDate();
+    const isDayHeader = (header) => {
+      if (header == null) return false;
+      const text = String(header).trim();
+      const numericMatch = text.match(/^(?:.+_)?(\d{1,2})$/);
+      if (!numericMatch) return false;
+      const day = Number(numericMatch[1]);
+      return Number.isFinite(day) && day >= 1 && day <= 31;
+    };
+
+    const dayHeadersFound = baseHeaders.some((header) => {
+      if (!isDayHeader(header)) return false;
+      const day = Number(String(header).trim().replace(/^.+_/, ''));
+      return day >= 1 && day <= 31;
+    });
+    if (!dayHeadersFound) {
+      return baseHeaders;
+    }
+
+    return baseHeaders.filter((header) => {
+      if (!isDayHeader(header)) return true;
+      const day = Number(String(header).trim().replace(/^.+_/, ''));
+      return day <= monthDayCount;
+    });
+  }, [formFileModalData?.parsedTableHeaders, tableHeaders, selectedMonth]);
 
   const displayColumnGroupLabels = useMemo(() => {
     const g = formFileModalData?.parsedColumnGroupLabels;
@@ -12642,7 +14181,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                   const rowSiteNorm = String(resolveSiteDisplayName(row, statutoryData) || row?.site || row?.Site || '')
                                     .trim()
                                     .toLowerCase();
-                                  return rowSiteNorm === itemSiteNorm;
+                                  return resolvedSitesOverlap(rowSiteNorm, itemSiteNorm);
                                 });
                                 const siteSent = siteSiblings.find((row) =>
                                   /^sent$/i.test(String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim())

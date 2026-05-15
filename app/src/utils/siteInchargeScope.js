@@ -43,6 +43,27 @@ export function splitStateFieldTokens(statesOrState) {
     .filter((t) => t.length > 0);
 }
 
+/** Collapse punctuation/spacing so "Tamil Nadu", "TamilNadu", "tamil-nadu" compare equal. */
+export function normalizeStateCompareKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+/**
+ * True when a Checklist / Statutory row `state` value refers to the same state as Site Management `SiteState`.
+ */
+export function checklistStateMatchesSiteState(rowStatesField, siteStateFromSiteMgmt) {
+  const target = normalizeStateCompareKey(siteStateFromSiteMgmt);
+  if (!target) return false;
+  const raw = String(rowStatesField ?? '').trim();
+  if (!raw) return false;
+  const tokens = splitStateFieldTokens(raw).map(normalizeStateCompareKey).filter(Boolean);
+  const keys = tokens.length > 0 ? tokens : [normalizeStateCompareKey(raw)].filter(Boolean);
+  return keys.some((k) => k && (k === target || k.includes(target) || target.includes(k)));
+}
+
 /**
  * When Site Management assigns state(s) for this Incharge login, only rows whose `state`/`states`
  * explicitly include one of those states are kept. Blank state, "All India", "National", etc. are
@@ -130,7 +151,7 @@ export function industryLabelToActCategory(industry) {
   return null;
 }
 
-/** Derive Statutory-style act category from act + sector text. */
+/** Derive Statutory-style act category from act + sector text (act wins when it clearly implies a bucket). */
 export function getActCategoryFromActSector(act, sector) {
   const a = String(act || '')
     .trim()
@@ -138,46 +159,34 @@ export function getActCategoryFromActSector(act, sector) {
   const s = String(sector || '')
     .trim()
     .toLowerCase();
-  if (
-    a.includes('factories act') ||
-    a.includes('factory act') ||
-    a.includes('factories') ||
-    a.includes('factory') ||
-    s === 'factories act' ||
-    s === 'factory act' ||
-    s.includes('factories act') ||
-    s.includes('factory act') ||
-    s.includes('factories') ||
-    s.includes('factory')
-  ) {
-    return 'factories';
-  }
-  if (
-    a.includes('shops and establishments') ||
-    a.includes('shops and establishment') ||
-    a.includes('shop and establishment') ||
-    a.includes('the shops and establishments act') ||
-    a.includes('the shops and establishment act') ||
-    s === 'shops and establishment' ||
-    s === 'shops and establishments' ||
-    s === 'shops and establishment act' ||
-    s === 'shop and establishment' ||
-    s.includes('shops and establishment') ||
-    s.includes('shop and establishment')
-  ) {
-    return 'shops_and_establishment';
-  }
-  if (
-    a.includes('clra') ||
-    a.includes('contract labour') ||
-    a.includes('contract labor') ||
-    s === 'clra' ||
-    s.includes('clra') ||
-    s.includes('contract labour') ||
-    s.includes('contract labor')
-  ) {
-    return 'clra';
-  }
+
+  const factoriesFrom = (blob) =>
+    blob &&
+    (blob.includes('factories act') ||
+      blob.includes('factory act') ||
+      (blob.includes('factories') && !blob.includes('contract')) ||
+      blob.includes('factory'));
+  const shopsFrom = (blob) =>
+    blob &&
+    (blob.includes('shops and establishments') ||
+      blob.includes('shops and establishment') ||
+      blob.includes('shop and establishment') ||
+      blob.includes('the shops and establishments act') ||
+      blob.includes('the shops and establishment act'));
+  const clraFrom = (blob) =>
+    blob &&
+    (blob.includes('clra') ||
+      blob.includes('contract labour') ||
+      blob.includes('contract labor'));
+
+  if (clraFrom(a)) return 'clra';
+  if (factoriesFrom(a)) return 'factories';
+  if (shopsFrom(a)) return 'shops_and_establishment';
+
+  if (clraFrom(s)) return 'clra';
+  if (factoriesFrom(s)) return 'factories';
+  if (shopsFrom(s)) return 'shops_and_establishment';
+
   return 'other';
 }
 

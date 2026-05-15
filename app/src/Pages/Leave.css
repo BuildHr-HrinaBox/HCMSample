@@ -114,6 +114,12 @@
   font-size: var(--hcm-data-table-body-font-size);
 }
 
+.leave-table td.leave-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .leave-table tbody tr:hover {
   background: #f9fafb;
 }

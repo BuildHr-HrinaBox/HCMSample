@@ -3,6 +3,83 @@ import './Leave.css';
 
 const API_BASE = '/server/leavedata_function';
 
+/** Zoho `bookedAndBalance` query range (balance / booked apply to this window) */
+const LEAVE_REPORT_FROM = '01-Jan-2025';
+const LEAVE_REPORT_TO = '31-Dec-2025';
+
+/** Zoho People bookedAndBalance uses this leave type name in many orgs */
+const EARNED_LEAVE_TEST_NAMES = new Set([
+  'Earned Leave (Test)',
+  'Earned Leave(Test)',
+  'Earned Leave (test)',
+]);
+
+function parseJsonMaybe(val) {
+  if (val == null) return null;
+  if (typeof val === 'object') return val;
+  if (typeof val === 'string') {
+    const s = val.trim();
+    if (!s.startsWith('{') && !s.startsWith('[')) return null;
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Column key for Earned Leave (Test) after backend rename, or raw leave type id */
+function findEarnedLeaveTestKey(row, leaveTypeLabels) {
+  if (!row || typeof row !== 'object') return null;
+  for (const key of Object.keys(row)) {
+    if (EARNED_LEAVE_TEST_NAMES.has(key)) return key;
+    const label = leaveTypeLabels && leaveTypeLabels[key];
+    if (label && EARNED_LEAVE_TEST_NAMES.has(String(label).trim())) return key;
+  }
+  return null;
+}
+
+function getEarnedLeaveTestMetrics(row, earnedKey) {
+  if (!earnedKey || !row || typeof row !== 'object') return { balance: null, booked: null };
+  const raw = row[earnedKey];
+  const obj = parseJsonMaybe(raw) ?? (raw && typeof raw === 'object' ? raw : null);
+  if (!obj || typeof obj !== 'object') return { balance: null, booked: null };
+  const balance = obj.paidBalance ?? obj.balance ?? obj.Balance;
+  const booked = obj.paidBooked ?? obj.booked ?? obj.Booked;
+  return {
+    balance: balance != null && balance !== '' ? balance : null,
+    booked: booked != null && booked !== '' ? booked : null,
+  };
+}
+
+function formatEmployeeCell(val) {
+  const o = parseJsonMaybe(val) ?? (val && typeof val === 'object' ? val : null);
+  if (o && typeof o === 'object') {
+    const name = o.name != null ? String(o.name) : '';
+    const id = o.id != null ? String(o.id) : '';
+    if (name && id) return `${name} (${id})`;
+    return name || id || '';
+  }
+  return val == null ? '' : String(val);
+}
+
+/** Readable cell for other leave types (balance / booked) */
+function formatLeaveTypeCell(val) {
+  const obj = parseJsonMaybe(val) ?? (val && typeof val === 'object' ? val : null);
+  if (!obj || typeof obj !== 'object') return val == null ? '' : String(val);
+  if ('paidBalance' in obj || 'paidBooked' in obj) {
+    const b = obj.paidBalance ?? obj.balance;
+    const book = obj.paidBooked ?? obj.booked;
+    const parts = [];
+    if (b != null && b !== '') parts.push(`Balance: ${b}`);
+    if (book != null && book !== '') parts.push(`Booked: ${book}`);
+    return parts.length ? parts.join(', ') : JSON.stringify(obj);
+  }
+  if (Object.keys(obj).length === 1 && 'balance' in obj) return String(obj.balance);
+  return JSON.stringify(obj);
+}
+
 const Leave = ({ userRole, userEmail }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -14,8 +91,8 @@ const Leave = ({ userRole, userEmail }) => {
     setData(null);
     try {
       const params = new URLSearchParams({
-        from: '01-Jan-2025',
-        to: '31-Dec-2025',
+        from: LEAVE_REPORT_FROM,
+        to: LEAVE_REPORT_TO,
         unit: 'Day',
       });
       const res = await fetch(`${API_BASE}?${params.toString()}`);
@@ -33,6 +110,7 @@ const Leave = ({ userRole, userEmail }) => {
             : null;
         setData({
           raw: json.records ?? json.data ?? json,
+          leaveTypeLabels: json.leaveTypeLabels || {},
           leaveRecords: recordsFromMap || (Array.isArray(json.leaveRecords) ? json.leaveRecords : null),
         });
       } else {
@@ -48,6 +126,7 @@ const Leave = ({ userRole, userEmail }) => {
 
   const rawData = data && data.raw !== undefined ? data.raw : data;
   const backendRecords = data && Array.isArray(data.leaveRecords) ? data.leaveRecords : null;
+  const leaveTypeLabels = data && data.leaveTypeLabels ? data.leaveTypeLabels : {};
 
   // Find array of objects that look like leave records (have multiple keys), not just IDs
   const findLeaveRecordsArray = (obj, depth = 0) => {
@@ -112,6 +191,25 @@ const Leave = ({ userRole, userEmail }) => {
     return Array.from(keySet);
   })();
 
+  const earnedLeaveTestKey = records.reduce(
+    (acc, r) => acc || findEarnedLeaveTestKey(r, leaveTypeLabels),
+    null
+  );
+  const employeeKeyCandidates = ['employee', 'Employee', 'Employee.ID'];
+  const employeeKey =
+    employeeKeyCandidates.find((k) => keys.includes(k)) || (keys.includes('employee') ? 'employee' : null);
+
+  const detailKeys = keys.filter((k) => k !== earnedLeaveTestKey && k !== employeeKey);
+  const showEarnedLeaveTestBreakout = earnedLeaveTestKey != null;
+
+  const renderDetailCell = (row, k) => {
+    const v = row[k];
+    if (v != null && typeof v === 'object') return formatLeaveTypeCell(v);
+    const parsed = parseJsonMaybe(v);
+    if (parsed && typeof parsed === 'object') return formatLeaveTypeCell(parsed);
+    return v == null ? '' : String(v);
+  };
+
   // If no keys (e.g. empty objects or primitives), show raw data in one column
   const showRaw = records.length > 0 && keys.length === 0;
 
@@ -119,7 +217,10 @@ const Leave = ({ userRole, userEmail }) => {
     <div className="leave-page">
       <header className="leave-header">
         <h1 className="leave-title">Leave</h1>
-        <p className="leave-subtitle">Fetch and view leave data from Zoho People Leave API</p>
+        <p className="leave-subtitle">
+          Fetch leave booked/balance from Zoho People Leave API. Earned Leave (Test) shows balance for the
+          period and booked days for the same From–To window ({LEAVE_REPORT_FROM} – {LEAVE_REPORT_TO}).
+        </p>
       </header>
 
       <div className="leave-actions">
@@ -176,24 +277,47 @@ const Leave = ({ userRole, userEmail }) => {
                 <thead>
                   <tr>
                     <th>S.No</th>
-                    {keys.map(k => (
-                      <th key={k}>{k}</th>
+                    <th>Employee</th>
+                    {showEarnedLeaveTestBreakout && (
+                      <>
+                        <th title="Earned Leave (Test): paidBalance from Zoho booked/balance report">
+                          Leave earned during the Period
+                        </th>
+                        <th title="Earned Leave (Test): paidBooked from Zoho booked/balance report">
+                          Leave availed during the Month
+                        </th>
+                      </>
+                    )}
+                    {detailKeys.map((k) => (
+                      <th key={k}>{leaveTypeLabels[k] || k}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {records.map((row, i) => (
-                    <tr key={i}>
-                      <td>{i + 1}</td>
-                      {keys.map(k => (
-                        <td key={k}>
-                          {row[k] != null && typeof row[k] === 'object'
-                            ? JSON.stringify(row[k])
-                            : String(row[k] ?? '')}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
+                  {records.map((row, i) => {
+                    const earned = showEarnedLeaveTestBreakout
+                      ? getEarnedLeaveTestMetrics(row, earnedLeaveTestKey)
+                      : { balance: null, booked: null };
+                    const employeeDisplay = employeeKey
+                      ? formatEmployeeCell(row[employeeKey])
+                      : formatEmployeeCell(row.employee) ||
+                        (row.employeeId != null ? String(row.employeeId) : '');
+                    return (
+                      <tr key={i}>
+                        <td>{i + 1}</td>
+                        <td>{employeeDisplay}</td>
+                        {showEarnedLeaveTestBreakout && (
+                          <>
+                            <td className="leave-num">{earned.balance != null ? earned.balance : ''}</td>
+                            <td className="leave-num">{earned.booked != null ? earned.booked : ''}</td>
+                          </>
+                        )}
+                        {detailKeys.map((k) => (
+                          <td key={k}>{renderDetailCell(row, k)}</td>
+                        ))}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

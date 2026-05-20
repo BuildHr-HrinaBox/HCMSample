@@ -27,7 +27,6 @@ export const HCM_ORGANIZATION_CHILDREN = [
 export const HCM_TRANSACTION_CHILDREN = [
   { label: 'Transaction', to: '/rule-book/statutory' },
   { label: 'Checklist Master', to: '/rule-book/checklistbulk' },
-  { label: 'Form Master', to: '/rule-book/formmaster' },
 ];
 
 /** Form Fetch — matches NewHomeSidebar formFetch group */
@@ -99,7 +98,7 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
     };
   }, [userEmail]);
 
-  const hiddenForSiteLogin = new Set(['Company Details', 'Acts Bulk', 'Checklist Master', 'Form Master']);
+  const hiddenForSiteLogin = new Set(['Company Details', 'Acts Bulk', 'Checklist Master']);
   const shouldApplySiteNavFilter = isSiteLoginUser !== false;
   const filteredNav = NAV.map((item) => {
     if (item.type !== 'group' || !Array.isArray(item.children) || !shouldApplySiteNavFilter) return item;

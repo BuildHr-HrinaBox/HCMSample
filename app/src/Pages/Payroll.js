@@ -1,46 +1,44 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import './People.css';
 
 const API_BASE = '/server/payroll_function';
 
-const PREFERRED_KEYS = ['employee_id', 'first_name', 'last_name', 'work_mail', 'fetch_error'];
+const getOrgId = () =>
+  process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
 
-function computeColumns(rows) {
-  const keySet = new Set();
-  for (const row of rows) {
-    if (row && typeof row === 'object') {
-      Object.keys(row).forEach((k) => {
-        if (!/^_|^\./.test(k)) keySet.add(k);
-      });
-    }
-  }
-  const front = PREFERRED_KEYS.filter((k) => keySet.has(k));
-  const rest = [...keySet].filter((k) => !PREFERRED_KEYS.includes(k)).sort();
-  return [...front, ...rest];
-}
-
-const Payroll = () => {
+/**
+ * Salary details (Zoho Payroll) — same UX pattern as People / Attendance.
+ * Loads all employees with salary when the page opens.
+ */
+const Payroll = ({ userRole, userEmail }) => {
   const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const orgId = process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
-
-  const fetchAllSalaries = async () => {
+  const fetchSalaryDetails = useCallback(async () => {
+    const organizationId = getOrgId();
     setLoading(true);
     setError('');
     setData(null);
     try {
       const qs = new URLSearchParams({
-        organization_id: orgId,
         all_salaries: '1',
+        organization_id: organizationId,
       });
-
       const res = await fetch(`${API_BASE}?${qs.toString()}`);
-      const json = await res.json();
-
+      const text = await res.text();
+      let json = {};
+      try {
+        json = text ? JSON.parse(text) : {};
+      } catch {
+        throw new Error(
+          `Payroll server returned HTTP ${res.status} (response was not JSON). Check function logs.`
+        );
+      }
       if (!res.ok) {
-        throw new Error(json.error || json.message || 'Request failed');
+        throw new Error(
+          json.error || json.message || `Request failed with HTTP ${res.status}`
+        );
       }
       if (json.success && json.data !== undefined) {
         setData(json.data);
@@ -48,39 +46,40 @@ const Payroll = () => {
         throw new Error(json.error || 'Invalid response');
       }
     } catch (err) {
-      setError(err.message || 'Failed to fetch payroll data');
+      setError(err.message || 'Failed to fetch salary details');
       setData(null);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const records = useMemo(() => {
+  useEffect(() => {
+    fetchSalaryDetails();
+  }, [fetchSalaryDetails]);
+
+  const records = (() => {
     if (!data) return [];
     if (Array.isArray(data)) return data;
-    if (data.employee && typeof data.employee === 'object') return [data.employee];
-    if (Array.isArray(data.employees)) return data.employees;
-    if (Array.isArray(data.salaries)) return data.salaries;
-    if (Array.isArray(data.payrolls)) return data.payrolls;
-    if (Array.isArray(data.data)) return data.data;
     const res = data.response || data.result || data;
     if (Array.isArray(res)) return res;
+    const rec = res?.record ?? res?.records ?? res?.data;
+    if (Array.isArray(rec)) return rec;
     if (res && typeof res === 'object') return [res];
     return [];
-  }, [data]);
+  })();
 
-  const keys = useMemo(() => {
-    if (records.length === 0) return [];
-    return computeColumns(records);
-  }, [records]);
+  const firstRecord = records[0];
+  const keys =
+    firstRecord && typeof firstRecord === 'object'
+      ? Object.keys(firstRecord).filter((k) => !/^_|^\./.test(k))
+      : [];
 
   return (
     <div className="people-page">
       <header className="people-header">
-        <h1 className="people-title">Payroll</h1>
+        <h1 className="people-title">Salary details</h1>
         <p className="people-subtitle">
-          Loads every Payroll employee in your organisation (all pages), then fetches salary for each. One click —
-          results appear in the table below.
+          Zoho Payroll salary data (organisation {getOrgId()})
         </p>
       </header>
 
@@ -88,21 +87,23 @@ const Payroll = () => {
         <button
           type="button"
           className="people-fetch-btn"
-          onClick={fetchAllSalaries}
+          onClick={fetchSalaryDetails}
           disabled={loading}
         >
-          {loading ? 'Fetching…' : 'Fetch all salaries'}
+          {loading ? 'Loading...' : 'Refresh'}
         </button>
       </div>
 
       {error && <div className="people-error">{error}</div>}
 
-      {loading && <div className="people-loading">Loading salaries for all employees…</div>}
+      {loading && (
+        <div className="people-loading">Loading salary details from Zoho Payroll...</div>
+      )}
 
       {!loading && data !== null && (
         <div className="people-content">
           {records.length === 0 ? (
-            <p className="people-empty">No employees or salary rows returned.</p>
+            <p className="people-empty">No salary rows returned.</p>
           ) : (
             <div className="people-table-wrap">
               <table className="people-table">
@@ -116,7 +117,7 @@ const Payroll = () => {
                 </thead>
                 <tbody>
                   {records.map((row, i) => (
-                    <tr key={row.employee_id != null ? String(row.employee_id) : i}>
+                    <tr key={i}>
                       <td>{i + 1}</td>
                       {keys.map((k) => (
                         <td key={k}>
@@ -131,7 +132,7 @@ const Payroll = () => {
               </table>
             </div>
           )}
-          <p className="people-meta">Fetched {records.length} employee salary row(s).</p>
+          <p className="people-meta">Showing {records.length} row(s).</p>
         </div>
       )}
     </div>

@@ -23,6 +23,13 @@ const DEFAULT_METRICS = [
     tone: 'green',
   },
   {
+    key: 'due',
+    label: 'Approved',
+    value: 0,
+    icon: CheckCircle2,
+    tone: 'green',
+  },
+  {
     key: 'approvals',
     label: 'Pending Approvals',
     value: 0,
@@ -30,15 +37,8 @@ const DEFAULT_METRICS = [
     tone: 'blue',
   },
   {
-    key: 'due',
-    label: 'Compliance Due',
-    value: 5,
-    icon: AlertTriangle,
-    tone: 'orange',
-  },
-  {
     key: 'policies',
-    label: 'Policies & Documents',
+    label: 'Rejected',
     value: 0,
     icon: BookMarked,
     tone: 'purple',
@@ -156,6 +156,11 @@ const hasSubmittedFile = (item) =>
   hasValue(item?.proofSubmissionFile ?? item?.ProofSubmissionFile) ||
   hasValue(item?.draftFile ?? item?.DraftFile);
 
+const normalizeLookupValue = (value) => String(value || '').trim().toLowerCase();
+
+const buildActDescriptionKey = (act, description) =>
+  `${normalizeLookupValue(act)}|${normalizeLookupValue(description)}`;
+
 const buildTaskKey = (item) =>
   `${String(item?.name ?? '').toLowerCase()}|${String(item?.due ?? '').toLowerCase()}|${String(item?.company ?? '').toLowerCase()}`;
 
@@ -233,10 +238,12 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
         }
 
         let pendingApprovals = 0;
-        let policiesDocuments = 0;
+        let approvedForms = 0;
+        let rejectedForms = 0;
         let upcomingTasks = [];
         const dueDateCandidates = [];
         const statutoryStatusByAct = new Map();
+        const statutoryStatusByActDescription = new Map();
         if (statutoryRes.ok) {
           const statutoryJson = await statutoryRes.json();
           const statutoryData = Array.isArray(statutoryJson?.data?.statutoryData)
@@ -248,16 +255,28 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
             return status === 'pending';
           }).length;
 
-          policiesDocuments = statutoryData.filter((item) => {
+          approvedForms = statutoryData.filter((item) => {
             const status = String(item?.status ?? item?.Status ?? '').trim().toLowerCase();
             return status === 'approved';
           }).length;
 
+          rejectedForms = statutoryData.filter((item) => {
+            const status = String(item?.status ?? item?.Status ?? '').trim().toLowerCase();
+            return status === 'rejected' || status === 'reject';
+          }).length;
+
           statutoryData.forEach((item) => {
             const actName = String(item?.act ?? item?.Act ?? item?.formName ?? item?.FormName ?? '').trim().toLowerCase();
+            const description = String(
+              item?.description ?? item?.Description ?? item?.desc ?? item?.Desc ?? ''
+            ).trim().toLowerCase();
             const rawStatus = String(item?.status ?? item?.Status ?? '').trim();
             if (actName && rawStatus && !statutoryStatusByAct.has(actName)) {
               statutoryStatusByAct.set(actName, rawStatus);
+            }
+            const actDescriptionKey = buildActDescriptionKey(actName, description);
+            if (actName && description && rawStatus && !statutoryStatusByActDescription.has(actDescriptionKey)) {
+              statutoryStatusByActDescription.set(actDescriptionKey, rawStatus);
             }
           });
 
@@ -271,6 +290,7 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
               return {
                 id: item?.id ?? item?.ROWID ?? `${item?.act ?? item?.Act}-${item?.dueDate ?? item?.DueDate}`,
                 name: String(item?.act ?? item?.Act ?? item?.formName ?? item?.FormName ?? '-').trim() || '-',
+                description: String(item?.description ?? item?.Description ?? item?.desc ?? item?.Desc ?? '-').trim() || '-',
                 due: dueDateInfo.display,
                 dueClass: 'nd-due-normal',
                 company: String(
@@ -307,11 +327,17 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
             const dueDateInfo = getDueDateInfo(item?.dueDate ?? item?.DueDate, calendarMonth);
             if (dueDateInfo.day != null) dueDateCandidates.push(dueDateInfo.day);
             const actName = String(item?.act ?? item?.Act ?? item?.formName ?? item?.FormName ?? '').trim().toLowerCase();
-            const matchedStatus = statutoryStatusByAct.get(actName) || 'Yet to Complete';
+            const description = String(
+              item?.description ?? item?.Description ?? item?.desc ?? item?.Desc ?? ''
+            ).trim().toLowerCase();
+            const matchedStatus =
+              statutoryStatusByActDescription.get(buildActDescriptionKey(actName, description)) ||
+              'Yet to Complete';
             const statusMeta = getStatusMeta(matchedStatus);
             const task = {
               id: item?.id ?? item?.ROWID ?? `bulk-${index}`,
               name: String(item?.act ?? item?.Act ?? item?.formName ?? item?.FormName ?? '-').trim() || '-',
+              description: String(item?.description ?? item?.Description ?? item?.desc ?? item?.Desc ?? '-').trim() || '-',
               due: dueDateInfo.timestamp != null ? dueDateInfo.display : '-',
               dueClass: 'nd-due-normal',
               company: String(
@@ -370,7 +396,8 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
             prev.map((metric) => {
               if (metric.key === 'companies') return { ...metric, value: activeCompanies };
               if (metric.key === 'approvals') return { ...metric, value: pendingApprovals };
-              if (metric.key === 'policies') return { ...metric, value: policiesDocuments };
+              if (metric.key === 'due') return { ...metric, value: approvedForms };
+              if (metric.key === 'policies') return { ...metric, value: rejectedForms };
               return metric;
             })
           );
@@ -381,7 +408,12 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
           setTasks([]);
           setMetrics((prev) =>
             prev.map((metric) => {
-              if (metric.key === 'companies' || metric.key === 'approvals' || metric.key === 'policies') {
+              if (
+                metric.key === 'companies' ||
+                metric.key === 'approvals' ||
+                metric.key === 'due' ||
+                metric.key === 'policies'
+              ) {
                 return { ...metric, value: 0 };
               }
               return metric;
@@ -483,8 +515,8 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
                   <thead>
                     <tr>
                       <th>Act</th>
+                      <th>Description</th>
                       <th>Due Date</th>
-                      <th>Company</th>
                       <th>Status</th>
                     </tr>
                   </thead>
@@ -497,10 +529,10 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
                             {row.name}
                           </div>
                         </td>
+                        <td>{row.description || '-'}</td>
                         <td>
                           <span className={row.dueClass}>{row.due}</span>
                         </td>
-                        <td>{row.company}</td>
                         <td>
                           <span className={`nd-badge ${row.statusClass}`}>{row.status}</span>
                         </td>

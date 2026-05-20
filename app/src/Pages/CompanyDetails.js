@@ -55,8 +55,6 @@ const initialForm = {
 };
 
 const DOC_TYPES = [
-  { docType: 'SafetyOfficerAppoitnmentorder', label: 'Safety Officer Appointment Order' },
-  { docType: 'SafetyOfficerApporvalcopy', label: 'Safety Officer Approval Copy' },
   { docType: 'DoctroAppoitnmentorder', label: 'Director Appointment Order' },
   { docType: 'DoctroApporvalcopy', label: 'Director Approval Copy' },
   { docType: 'HeadHRSign', label: 'Head HR Sign' },
@@ -65,8 +63,6 @@ const DOC_TYPES = [
 
 /** Same mapping as company_function DOC_TYPE_TO_COMPANY_KEY — list rows use camelCase file id fields. */
 const DOC_TYPE_TO_COMPANY_KEY_UI = {
-  SafetyOfficerAppoitnmentorder: 'safetyOfficerAppoitnmentorder',
-  SafetyOfficerApporvalcopy: 'safetyOfficerApporvalcopy',
   DoctroAppoitnmentorder: 'doctroAppoitnmentorder',
   DoctroApporvalcopy: 'doctroApporvalcopy',
   HeadHRSign: 'headHRSign',
@@ -270,24 +266,24 @@ function validateCompanyFormValues(values) {
   const e = {};
 
   if (!String(values.companyName || '').trim()) {
-    e.companyName = 'Company name is required';
+    e.companyName = 'Name is required';
   }
 
   const mail = String(values.companyMail || '').trim();
   if (!mail) {
-    e.companyMail = 'Company email is required';
+    e.companyMail = 'Mail Id is required';
   } else if (!EMAIL_REGEX.test(mail)) {
     e.companyMail = 'Enter a valid email address (e.g., info@company.com)';
   }
 
   if (!String(values.companyPhoneNumber || '').trim()) {
-    e.companyPhoneNumber = 'Company phone number is required';
+    e.companyPhoneNumber = 'Moblie Number is required';
   } else if (digitsOnly(values.companyPhoneNumber).length !== 10) {
     e.companyPhoneNumber = 'Enter a valid 10-digit phone number';
   }
 
   if (!String(values.companyAddress || '').trim()) {
-    e.companyAddress = 'Company address is required';
+    e.companyAddress = 'Address is required';
   }
 
   const incRaw = String(values.incorprationDate || '').trim();
@@ -303,7 +299,7 @@ function validateCompanyFormValues(values) {
 
   const pan = String(values.companyPANNumber || '').trim().toUpperCase();
   if (!pan) {
-    e.companyPANNumber = 'Company PAN is required';
+    e.companyPANNumber = 'PAN is required';
   } else if (!PAN_REGEX.test(pan)) {
     e.companyPANNumber = 'Enter a valid PAN (e.g., ABCDE1234F)';
   }
@@ -1004,20 +1000,20 @@ const CompanyDetails = ({ userRole, userEmail }) => {
     /** Full company form fields (not limited to visible table columns). */
     const cols = [
       { key: 'id', label: 'ID' },
-      { key: 'companyName', label: 'Company name' },
-      { key: 'companyMail', label: 'Company email' },
-      { key: 'companyPhoneNumber', label: 'Company phone' },
-      { key: 'companyAddress', label: 'Company address' },
+      { key: 'companyName', label: 'Name' },
+      { key: 'companyMail', label: 'Mail Id' },
+      { key: 'companyPhoneNumber', label: 'Moblie Number' },
+      { key: 'companyAddress', label: 'Address' },
       { key: 'incorprationDate', label: 'Incorporation date' },
       { key: 'incorporationNo', label: 'Incorporation number' },
-      { key: 'companyPANNumber', label: 'Company PAN' },
+      { key: 'companyPANNumber', label: 'PAN' },
       { key: 'gstNo', label: 'GST number' },
       { key: 'pfNo', label: 'PF number' },
       { key: 'esiNo', label: 'ESI number' },
-      { key: 'directorName', label: 'Director name' },
-      { key: 'directorMail', label: 'Director email' },
-      { key: 'directorPhoneNumber', label: 'Director phone' },
-      { key: 'directorAddress', label: 'Director address' },
+      { key: 'directorName', label: 'Name' },
+      { key: 'directorMail', label: 'Mail Id' },
+      { key: 'directorPhoneNumber', label: 'Mobile Number' },
+      { key: 'directorAddress', label: 'Address' },
       { key: 'ownerName', label: 'Owner / In-charge name' },
       { key: 'ownerPAN', label: 'Owner / In-charge PAN' },
       { key: 'ownerAaadhar', label: 'Owner / In-charge Aadhar' },
@@ -1175,9 +1171,9 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                   <div className="company-details-fields-grid company-details-fields-grid--company-info">
                     <div className={`company-details-field${formErrors.companyName ? ' company-details-field--error' : ''}`}>
                       <label htmlFor="cd-companyName">
-                        Company name <span className="required" aria-hidden="true">*</span>
+                        Name <span className="required" aria-hidden="true">*</span>
                       </label>
-                      <input id="cd-companyName" name="companyName" value={form.companyName} onChange={handleChange} placeholder="Enter company name" disabled={viewOnly} />
+                      <input id="cd-companyName" name="companyName" value={form.companyName} onChange={handleChange} placeholder="Enter name" disabled={viewOnly} />
                       {formErrors.companyName ? (
                         <p className="company-details-field-error" role="alert">
                           <span aria-hidden="true">⚠️</span> {formErrors.companyName}
@@ -1186,7 +1182,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                     </div>
                     <div className={`company-details-field${formErrors.companyMail ? ' company-details-field--error' : ''}`}>
                       <label htmlFor="cd-companyMail">
-                        Company email <span className="required" aria-hidden="true">*</span>
+                        Mail Id <span className="required" aria-hidden="true">*</span>
                       </label>
                       <input
                         id="cd-companyMail"
@@ -1194,7 +1190,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                         type="email"
                         value={form.companyMail}
                         onChange={handleChange}
-                        placeholder="Enter company email"
+                        placeholder="Enter mail id"
                         disabled={viewOnly}
                         maxLength={254}
                       />
@@ -1206,7 +1202,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                     </div>
                     <div className={`company-details-field${formErrors.companyPhoneNumber ? ' company-details-field--error' : ''}`}>
                       <label htmlFor="cd-companyPhoneNumber">
-                        Company phone <span className="required" aria-hidden="true">*</span>
+                        Moblie Number <span className="required" aria-hidden="true">*</span>
                       </label>
                       <input
                         id="cd-companyPhoneNumber"
@@ -1216,7 +1212,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                         autoComplete="tel"
                         value={form.companyPhoneNumber}
                         onChange={handleChange}
-                        placeholder="Enter phone number (10 digits)"
+                        placeholder="Enter mobile number"
                         disabled={viewOnly}
                         maxLength={10}
                         title="Enter exactly 10 digits"
@@ -1229,9 +1225,9 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                     </div>
                     <div className={`company-details-field company-details-field--full-row${formErrors.companyAddress ? ' company-details-field--error' : ''}`}>
                       <label htmlFor="cd-companyAddress">
-                        Company address <span className="required" aria-hidden="true">*</span>
+                        Address <span className="required" aria-hidden="true">*</span>
                       </label>
-                      <input id="cd-companyAddress" name="companyAddress" value={form.companyAddress} onChange={handleChange} placeholder="Enter company address" disabled={viewOnly} />
+                      <input id="cd-companyAddress" name="companyAddress" value={form.companyAddress} onChange={handleChange} placeholder="Enter address" disabled={viewOnly} />
                       {formErrors.companyAddress ? (
                         <p className="company-details-field-error" role="alert">
                           <span aria-hidden="true">⚠️</span> {formErrors.companyAddress}
@@ -1313,7 +1309,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                     </div>
                     <div className={`company-details-field${formErrors.companyPANNumber ? ' company-details-field--error' : ''}`}>
                       <label htmlFor="cd-companyPANNumber">
-                        Company PAN <span className="required" aria-hidden="true">*</span>
+                        PAN <span className="required" aria-hidden="true">*</span>
                       </label>
                       <input
                         id="cd-companyPANNumber"
@@ -1407,18 +1403,18 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                   </header>
                   <div className="company-details-fields-grid company-details-fields-grid--four-in-row">
                     <div className="company-details-field">
-                      <label htmlFor="cd-directorName">Director name</label>
-                      <input id="cd-directorName" name="directorName" value={form.directorName} onChange={handleChange} placeholder="Enter director name" disabled={viewOnly} />
+                      <label htmlFor="cd-directorName">Name</label>
+                      <input id="cd-directorName" name="directorName" value={form.directorName} onChange={handleChange} placeholder="Enter name" disabled={viewOnly} />
                     </div>
                     <div className={`company-details-field${formErrors.directorMail ? ' company-details-field--error' : ''}`}>
-                      <label htmlFor="cd-directorMail">Director email</label>
+                      <label htmlFor="cd-directorMail">Mail Id</label>
                       <input
                         id="cd-directorMail"
                         name="directorMail"
                         type="email"
                         value={form.directorMail}
                         onChange={handleChange}
-                        placeholder="Enter director email"
+                        placeholder="Enter mail id"
                         disabled={viewOnly}
                         maxLength={254}
                       />
@@ -1429,7 +1425,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                       ) : null}
                     </div>
                     <div className={`company-details-field${formErrors.directorPhoneNumber ? ' company-details-field--error' : ''}`}>
-                      <label htmlFor="cd-directorPhoneNumber">Director phone</label>
+                      <label htmlFor="cd-directorPhoneNumber">Mobile Number</label>
                       <input
                         id="cd-directorPhoneNumber"
                         name="directorPhoneNumber"
@@ -1438,7 +1434,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                         autoComplete="tel"
                         value={form.directorPhoneNumber}
                         onChange={handleChange}
-                        placeholder="Enter phone number (10 digits)"
+                        placeholder="Enter mobile number"
                         disabled={viewOnly}
                         maxLength={10}
                         title="Enter exactly 10 digits"
@@ -1450,8 +1446,8 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                       ) : null}
                     </div>
                     <div className="company-details-field">
-                      <label htmlFor="cd-directorAddress">Director address</label>
-                      <input id="cd-directorAddress" name="directorAddress" value={form.directorAddress} onChange={handleChange} placeholder="Enter director address" disabled={viewOnly} />
+                      <label htmlFor="cd-directorAddress">Address</label>
+                      <input id="cd-directorAddress" name="directorAddress" value={form.directorAddress} onChange={handleChange} placeholder="Enter address" disabled={viewOnly} />
                     </div>
                   </div>
                 </section>
@@ -1740,7 +1736,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                           />
                         </th>
                         <th scope="col">#</th>
-                        <th scope="col">Company name</th>
+                        <th scope="col">Name</th>
                         <th scope="col">Email</th>
                         <th scope="col">Phone</th>
                         <th scope="col">Director</th>

@@ -128,7 +128,6 @@ const navigationItems = [
       { label: 'Payroll', path: '/rule-book/payroll' },
     ],
   },
-  { type: 'item', icon: <FileText size={20} strokeWidth={2} />, label: 'Formmaster', path: '/rule-book/formmaster', color: 'blue' },
   { type: 'item', icon: <BarChart3 size={20} strokeWidth={2} />, label: 'Report', path: '/reports', color: 'blue' },
 ];
 
@@ -259,7 +258,7 @@ export default function NewHomeSidebar({ isOpen, onClose, userEmail, userName, u
     });
   })();
 
-  const hiddenLabelsForSiteLogin = new Set(['Company Details', 'Acts Bulk', 'Checklist Master', 'Formmaster', 'Form Master']);
+  const hiddenLabelsForSiteLogin = new Set(['Company Details', 'Acts Bulk', 'Checklist Master']);
   const shouldApplySiteNavFilter = isSiteLoginUser !== false;
   const filteredItemsToRender = shouldApplySiteNavFilter
     ? itemsToRender

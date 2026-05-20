@@ -116,31 +116,31 @@ function sanitizeSiteFormField(name, raw) {
 /** Client-side validation (Add / Edit site modal). */
 function validateSiteFormValues(form) {
   const errors = {};
-  if (!form.siteName.trim()) errors.siteName = 'Site name is required';
-  if (!form.siteCity.trim()) errors.siteCity = 'Site city is required';
-  if (!form.siteState.trim()) errors.siteState = 'Site state is required';
+  if (!form.siteName.trim()) errors.siteName = 'Name is required';
+  if (!form.siteCity.trim()) errors.siteCity = 'City is required';
+  if (!form.siteState.trim()) errors.siteState = 'State is required';
   const pin = digitsOnly(form.sitePostalCode);
   if (!String(form.sitePostalCode || '').trim()) {
     errors.sitePostalCode = 'Postal code is required';
   } else if (pin.length !== 6) {
     errors.sitePostalCode = 'Enter a valid 6-digit PIN code';
   }
-  if (!form.siteAddress.trim()) errors.siteAddress = 'Site address is required';
+  if (!form.siteAddress.trim()) errors.siteAddress = 'Address is required';
   if (!form.unitNo.trim()) errors.unitNo = 'Unit no. is required';
   if (!form.industry.trim()) errors.industry = 'Industry is required';
-  if (!form.inchargeName.trim()) errors.inchargeName = 'Incharge name is required';
+  if (!form.inchargeName.trim()) errors.inchargeName = 'Name is required';
   if (!String(form.inchargePhone || '').trim()) {
-    errors.inchargePhone = 'Incharge phone is required';
+    errors.inchargePhone = 'Phone is required';
   } else if (digitsOnly(form.inchargePhone).length !== 10) {
     errors.inchargePhone = 'Enter a valid 10-digit phone number';
   }
   const em = String(form.inchargeEmail || '').trim();
   if (!em) {
-    errors.inchargeEmail = 'Incharge email is required';
+    errors.inchargeEmail = 'Mail Id is required';
   } else if (!SITE_FORM_EMAIL_REGEX.test(em)) {
     errors.inchargeEmail = 'Enter a valid email address (e.g., name@company.com)';
   }
-  if (!form.inchargeDesignation.trim()) errors.inchargeDesignation = 'Incharge designation is required';
+  if (!form.inchargeDesignation.trim()) errors.inchargeDesignation = 'Designation is required';
   return errors;
 }
 
@@ -352,16 +352,16 @@ const SiteManagement = ({ userEmail }) => {
     /** Site export: main form fields (audit omitted); all rows in scope (ignores table search). */
     const cols = [
       { key: 'id', label: 'ID' },
-      { key: 'siteName', label: 'Site name' },
-      { key: 'siteAddress', label: 'Site address' },
-      { key: 'siteCity', label: 'Site city' },
-      { key: 'siteState', label: 'Site state' },
+      { key: 'siteName', label: 'Name' },
+      { key: 'siteAddress', label: 'Address' },
+      { key: 'siteCity', label: 'City' },
+      { key: 'siteState', label: 'State' },
       { key: 'sitePostalCode', label: 'Postal code' },
       { key: 'unitNo', label: 'Unit no' },
-      { key: 'inchargeName', label: 'Incharge name' },
-      { key: 'inchargePhone', label: 'Incharge phone' },
-      { key: 'inchargeEmail', label: 'Incharge email' },
-      { key: 'inchargeDesignation', label: 'Incharge designation' },
+      { key: 'inchargeName', label: 'Name' },
+      { key: 'inchargePhone', label: 'Phone' },
+      { key: 'inchargeEmail', label: 'Mail Id' },
+      { key: 'inchargeDesignation', label: 'Designation' },
       { key: 'industry', label: 'Industry' }
     ];
     const CSV_EXCEL_TEXT_KEYS = new Set([
@@ -781,7 +781,7 @@ const SiteManagement = ({ userEmail }) => {
                       <div className="company-details-fields-grid">
                         <div className="company-details-field">
                           <label htmlFor="sm-siteName">
-                            Site name <span className="required" aria-hidden="true">*</span>
+                            Name <span className="required" aria-hidden="true">*</span>
                           </label>
                           <input
                             id="sm-siteName"
@@ -789,7 +789,7 @@ const SiteManagement = ({ userEmail }) => {
                             value={form.siteName}
                             onChange={handleChange}
                             onBlur={handleSiteFieldBlur}
-                            placeholder="Enter site name"
+                            placeholder="Enter name"
                             disabled={viewOnly}
                             maxLength={200}
                             required
@@ -799,8 +799,27 @@ const SiteManagement = ({ userEmail }) => {
                           )}
                         </div>
                         <div className="company-details-field">
+                          <label htmlFor="sm-siteAddress">
+                            Address <span className="required" aria-hidden="true">*</span>
+                          </label>
+                          <input
+                            id="sm-siteAddress"
+                            name="siteAddress"
+                            value={form.siteAddress}
+                            onChange={handleChange}
+                            onBlur={handleSiteFieldBlur}
+                            placeholder="Enter address"
+                            disabled={viewOnly}
+                            maxLength={500}
+                            required
+                          />
+                          {formErrors.siteAddress && (
+                            <div style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>{formErrors.siteAddress}</div>
+                          )}
+                        </div>
+                        <div className="company-details-field">
                           <label htmlFor="sm-siteCity">
-                            Site city <span className="required" aria-hidden="true">*</span>
+                            City <span className="required" aria-hidden="true">*</span>
                           </label>
                           <input
                             id="sm-siteCity"
@@ -808,7 +827,7 @@ const SiteManagement = ({ userEmail }) => {
                             value={form.siteCity}
                             onChange={handleChange}
                             onBlur={handleSiteFieldBlur}
-                            placeholder="Enter site city"
+                            placeholder="Enter city"
                             disabled={viewOnly}
                             maxLength={120}
                             required
@@ -819,7 +838,7 @@ const SiteManagement = ({ userEmail }) => {
                         </div>
                         <div className="company-details-field">
                           <label htmlFor="sm-siteState">
-                            Site state <span className="required" aria-hidden="true">*</span>
+                            State <span className="required" aria-hidden="true">*</span>
                           </label>
                           <input
                             id="sm-siteState"
@@ -827,7 +846,7 @@ const SiteManagement = ({ userEmail }) => {
                             value={form.siteState}
                             onChange={handleChange}
                             onBlur={handleSiteFieldBlur}
-                            placeholder="Enter site state"
+                            placeholder="Enter state"
                             disabled={viewOnly}
                             maxLength={120}
                             required
@@ -856,25 +875,6 @@ const SiteManagement = ({ userEmail }) => {
                           />
                           {formErrors.sitePostalCode && (
                             <div style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>{formErrors.sitePostalCode}</div>
-                          )}
-                        </div>
-                        <div className="company-details-field">
-                          <label htmlFor="sm-siteAddress">
-                            Site address <span className="required" aria-hidden="true">*</span>
-                          </label>
-                          <input
-                            id="sm-siteAddress"
-                            name="siteAddress"
-                            value={form.siteAddress}
-                            onChange={handleChange}
-                            onBlur={handleSiteFieldBlur}
-                            placeholder="Enter site address"
-                            disabled={viewOnly}
-                            maxLength={500}
-                            required
-                          />
-                          {formErrors.siteAddress && (
-                            <div style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>{formErrors.siteAddress}</div>
                           )}
                         </div>
                         <div className="company-details-field">
@@ -948,7 +948,7 @@ const SiteManagement = ({ userEmail }) => {
                       <div className="company-details-fields-grid company-details-fields-grid--four-in-row">
                         <div className="company-details-field">
                           <label htmlFor="sm-inchargeName">
-                            Incharge name <span className="required" aria-hidden="true">*</span>
+                            Name <span className="required" aria-hidden="true">*</span>
                           </label>
                           <input
                             id="sm-inchargeName"
@@ -956,7 +956,7 @@ const SiteManagement = ({ userEmail }) => {
                             value={form.inchargeName}
                             onChange={handleChange}
                             onBlur={handleSiteFieldBlur}
-                            placeholder="Enter incharge name"
+                            placeholder="Enter name"
                             disabled={viewOnly}
                             maxLength={200}
                             required
@@ -967,7 +967,7 @@ const SiteManagement = ({ userEmail }) => {
                         </div>
                         <div className="company-details-field">
                           <label htmlFor="sm-inchargePhone">
-                            Incharge phone <span className="required" aria-hidden="true">*</span>
+                            Phone <span className="required" aria-hidden="true">*</span>
                           </label>
                           <input
                             id="sm-inchargePhone"
@@ -990,7 +990,7 @@ const SiteManagement = ({ userEmail }) => {
                         </div>
                         <div className="company-details-field">
                           <label htmlFor="sm-inchargeEmail">
-                            Incharge email <span className="required" aria-hidden="true">*</span>
+                            Mail Id <span className="required" aria-hidden="true">*</span>
                           </label>
                           <input
                             id="sm-inchargeEmail"
@@ -999,7 +999,7 @@ const SiteManagement = ({ userEmail }) => {
                             value={form.inchargeEmail}
                             onChange={handleChange}
                             onBlur={handleSiteFieldBlur}
-                            placeholder="Enter incharge email"
+                            placeholder="Enter mail id"
                             disabled={viewOnly}
                             maxLength={254}
                             required
@@ -1010,7 +1010,7 @@ const SiteManagement = ({ userEmail }) => {
                         </div>
                         <div className="company-details-field">
                           <label htmlFor="sm-inchargeDesignation">
-                            Incharge designation <span className="required" aria-hidden="true">*</span>
+                            Designation <span className="required" aria-hidden="true">*</span>
                           </label>
                           <input
                             id="sm-inchargeDesignation"
@@ -1018,7 +1018,7 @@ const SiteManagement = ({ userEmail }) => {
                             value={form.inchargeDesignation}
                             onChange={handleChange}
                             onBlur={handleSiteFieldBlur}
-                            placeholder="Enter incharge designation"
+                            placeholder="Enter designation"
                             disabled={viewOnly}
                             maxLength={150}
                             required
@@ -1137,14 +1137,14 @@ const SiteManagement = ({ userEmail }) => {
                           />
                         </th>
                         <th scope="col">#</th>
-                        <th scope="col">Site name</th>
+                        <th scope="col">Name</th>
                         <th scope="col">City</th>
                         <th scope="col">State</th>
                         <th scope="col">Address</th>
                         <th scope="col">Unit</th>
                         <th scope="col">Incharge</th>
                         <th scope="col">Phone</th>
-                        <th scope="col">Email</th>
+                        <th scope="col">Mail Id</th>
                         <th scope="col">Industry</th>
                         <th className="company-details-th-actions" scope="col">
                           Actions

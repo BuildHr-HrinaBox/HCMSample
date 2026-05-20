@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 import './People.css';
 
 const API_BASE = '/server/payroll_function';
@@ -7,24 +8,30 @@ const getOrgId = () =>
   process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
 
 /**
- * Salary details (Zoho Payroll) — same UX pattern as People / Attendance.
- * Loads all employees with salary when the page opens.
+ * Zoho Payroll salary list — same UX as People / Leave (fetch on open + Refresh button).
  */
 const Payroll = ({ userRole, userEmail }) => {
+  const location = useLocation();
   const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [loadMode, setLoadMode] = useState('list');
 
-  const fetchSalaryDetails = useCallback(async () => {
+  const fetchData = useCallback(async (mode = 'list') => {
     const organizationId = getOrgId();
     setLoading(true);
     setError('');
     setData(null);
+    setLoadMode(mode);
     try {
       const qs = new URLSearchParams({
-        all_salaries: '1',
         organization_id: organizationId,
       });
+      if (mode === 'full') {
+        qs.set('all_salaries', '1');
+      } else {
+        qs.set('list_employees', '1');
+      }
       const res = await fetch(`${API_BASE}?${qs.toString()}`);
       const text = await res.text();
       let json = {};
@@ -32,12 +39,12 @@ const Payroll = ({ userRole, userEmail }) => {
         json = text ? JSON.parse(text) : {};
       } catch {
         throw new Error(
-          `Payroll server returned HTTP ${res.status} (response was not JSON). Check function logs.`
+          `Payroll server returned HTTP ${res.status} (not JSON). Redeploy payroll_function and check Catalyst logs.`
         );
       }
       if (!res.ok) {
         throw new Error(
-          json.error || json.message || `Request failed with HTTP ${res.status}`
+          json.error || json.message || `Request failed (HTTP ${res.status})`
         );
       }
       if (json.success && json.data !== undefined) {
@@ -46,7 +53,7 @@ const Payroll = ({ userRole, userEmail }) => {
         throw new Error(json.error || 'Invalid response');
       }
     } catch (err) {
-      setError(err.message || 'Failed to fetch salary details');
+      setError(err.message || 'Failed to fetch payroll data');
       setData(null);
     } finally {
       setLoading(false);
@@ -54,8 +61,8 @@ const Payroll = ({ userRole, userEmail }) => {
   }, []);
 
   useEffect(() => {
-    fetchSalaryDetails();
-  }, [fetchSalaryDetails]);
+    fetchData('list');
+  }, [fetchData, location.pathname]);
 
   const records = (() => {
     if (!data) return [];
@@ -79,31 +86,40 @@ const Payroll = ({ userRole, userEmail }) => {
       <header className="people-header">
         <h1 className="people-title">Salary details</h1>
         <p className="people-subtitle">
-          Zoho Payroll salary data (organisation {getOrgId()})
+          Fetch employee payroll roster from Zoho Payroll (same flow as People). Use Load salary breakdown for full earnings per employee (slower).
         </p>
       </header>
 
-      <div className="people-actions">
+      <div className="people-actions" style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <button
           type="button"
           className="people-fetch-btn"
-          onClick={fetchSalaryDetails}
+          onClick={() => fetchData('list')}
           disabled={loading}
         >
-          {loading ? 'Loading...' : 'Refresh'}
+          {loading && loadMode === 'list' ? 'Fetching...' : 'Fetch Data'}
+        </button>
+        <button
+          type="button"
+          className="people-fetch-btn"
+          style={{ background: '#2563eb' }}
+          onClick={() => fetchData('full')}
+          disabled={loading}
+        >
+          {loading && loadMode === 'full' ? 'Loading salaries...' : 'Load salary breakdown'}
         </button>
       </div>
 
       {error && <div className="people-error">{error}</div>}
 
       {loading && (
-        <div className="people-loading">Loading salary details from Zoho Payroll...</div>
+        <div className="people-loading">Loading payroll data from Zoho Payroll...</div>
       )}
 
       {!loading && data !== null && (
         <div className="people-content">
           {records.length === 0 ? (
-            <p className="people-empty">No salary rows returned.</p>
+            <p className="people-empty">No records in response. Raw data structure may differ.</p>
           ) : (
             <div className="people-table-wrap">
               <table className="people-table">
@@ -132,7 +148,7 @@ const Payroll = ({ userRole, userEmail }) => {
               </table>
             </div>
           )}
-          <p className="people-meta">Showing {records.length} row(s).</p>
+          <p className="people-meta">Fetched {records.length} record(s).</p>
         </div>
       )}
     </div>

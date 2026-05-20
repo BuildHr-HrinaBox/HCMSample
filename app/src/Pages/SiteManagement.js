@@ -71,6 +71,12 @@ const initialForm = {
   siteState: '',
   sitePostalCode: '',
   unitNo: '',
+  contractorName: '',
+  contractorAddress: '',
+  contractorEmail: '',
+  contractorPhone: '',
+  contractorCity: '',
+  contractorState: '',
   inchargeName: '',
   inchargePhone: '',
   inchargeEmail: '',
@@ -92,15 +98,21 @@ function sanitizeSiteFormField(name, raw) {
     case 'sitePostalCode':
       return digitsOnly(v).slice(0, 6);
     case 'inchargePhone':
+    case 'contractorPhone':
       return digitsOnly(v).slice(0, 10);
     case 'inchargeEmail':
+    case 'contractorEmail':
       return v.replace(/\s/g, '').slice(0, 254);
     case 'siteName':
+    case 'contractorName':
       return v.slice(0, 200);
     case 'siteCity':
     case 'siteState':
+    case 'contractorCity':
+    case 'contractorState':
       return v.slice(0, 120);
     case 'siteAddress':
+    case 'contractorAddress':
       return v.slice(0, 500);
     case 'unitNo':
       return v.slice(0, 80);
@@ -140,6 +152,14 @@ function validateSiteFormValues(form) {
   } else if (!SITE_FORM_EMAIL_REGEX.test(em)) {
     errors.inchargeEmail = 'Enter a valid email address (e.g., name@company.com)';
   }
+  const contractorEmail = String(form.contractorEmail || '').trim();
+  if (contractorEmail && !SITE_FORM_EMAIL_REGEX.test(contractorEmail)) {
+    errors.contractorEmail = 'Enter a valid email address (e.g., name@company.com)';
+  }
+  const contractorPhone = String(form.contractorPhone || '').trim();
+  if (contractorPhone && digitsOnly(contractorPhone).length !== 10) {
+    errors.contractorPhone = 'Enter a valid 10-digit phone number';
+  }
   if (!form.inchargeDesignation.trim()) errors.inchargeDesignation = 'Designation is required';
   return errors;
 }
@@ -151,6 +171,8 @@ const SITE_FORM_BLUR_VALIDATE_NAMES = new Set([
   'sitePostalCode',
   'siteAddress',
   'unitNo',
+  'contractorEmail',
+  'contractorPhone',
   'industry',
   'inchargeName',
   'inchargePhone',
@@ -358,6 +380,12 @@ const SiteManagement = ({ userEmail }) => {
       { key: 'siteState', label: 'State' },
       { key: 'sitePostalCode', label: 'Postal code' },
       { key: 'unitNo', label: 'Unit no' },
+      { key: 'contractorName', label: 'Contractor Name' },
+      { key: 'contractorAddress', label: 'Contractor Address' },
+      { key: 'contractorEmail', label: 'Contractor Email' },
+      { key: 'contractorPhone', label: 'Contractor Phone' },
+      { key: 'contractorCity', label: 'Contractor City' },
+      { key: 'contractorState', label: 'Contractor State' },
       { key: 'inchargeName', label: 'Name' },
       { key: 'inchargePhone', label: 'Phone' },
       { key: 'inchargeEmail', label: 'Mail Id' },
@@ -367,6 +395,8 @@ const SiteManagement = ({ userEmail }) => {
     const CSV_EXCEL_TEXT_KEYS = new Set([
       'id',
       'sitePostalCode',
+      'contractorPhone',
+      'contractorEmail',
       'inchargePhone',
       'inchargeEmail',
       'unitNo'
@@ -517,6 +547,12 @@ const SiteManagement = ({ userEmail }) => {
       siteState: site.siteState || '',
       sitePostalCode: site.sitePostalCode || '',
       unitNo: site.unitNo || '',
+      contractorName: site.contractorName || '',
+      contractorAddress: site.contractorAddress || '',
+      contractorEmail: site.contractorEmail || '',
+      contractorPhone: site.contractorPhone || '',
+      contractorCity: site.contractorCity || '',
+      contractorState: site.contractorState || '',
       inchargeName: site.inchargeName || '',
       inchargePhone: site.inchargePhone || '',
       inchargeEmail: siteInchargeEmail(site) || site.inchargeEmail || '',
@@ -539,6 +575,12 @@ const SiteManagement = ({ userEmail }) => {
       siteState: site.siteState || '',
       sitePostalCode: site.sitePostalCode || '',
       unitNo: site.unitNo || '',
+      contractorName: site.contractorName || '',
+      contractorAddress: site.contractorAddress || '',
+      contractorEmail: site.contractorEmail || '',
+      contractorPhone: site.contractorPhone || '',
+      contractorCity: site.contractorCity || '',
+      contractorState: site.contractorState || '',
       inchargeName: site.inchargeName || '',
       inchargePhone: site.inchargePhone || '',
       inchargeEmail: siteInchargeEmail(site) || site.inchargeEmail || '',
@@ -628,6 +670,12 @@ const SiteManagement = ({ userEmail }) => {
         siteState: form.siteState.trim(),
         sitePostalCode: form.sitePostalCode.trim(),
         unitNo: form.unitNo.trim(),
+        contractorName: form.contractorName.trim(),
+        contractorAddress: form.contractorAddress.trim(),
+        contractorEmail: form.contractorEmail.trim(),
+        contractorPhone: form.contractorPhone.trim(),
+        contractorCity: form.contractorCity.trim(),
+        contractorState: form.contractorState.trim(),
         inchargeName: form.inchargeName.trim(),
         inchargePhone: form.inchargePhone.trim(),
         inchargeEmail: form.inchargeEmail.trim(),
@@ -1026,6 +1074,120 @@ const SiteManagement = ({ userEmail }) => {
                           {formErrors.inchargeDesignation && (
                             <div style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>{formErrors.inchargeDesignation}</div>
                           )}
+                        </div>
+                      </div>
+                    </section>
+
+                    <section className="company-details-section-card">
+                      <header className="company-details-section-head">
+                        <h3 className="company-details-section-title">
+                          <svg
+                            className="company-details-section-title-icon"
+                            width="20"
+                            height="20"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            aria-hidden
+                          >
+                            <path d="M3 21h18" />
+                            <path d="M5 21V7l8-4 6 3v15" />
+                            <path d="M9 9h.01" />
+                            <path d="M9 13h.01" />
+                            <path d="M9 17h.01" />
+                            <path d="M14 9h.01" />
+                            <path d="M14 13h.01" />
+                            <path d="M14 17h.01" />
+                          </svg>
+                          Contractor details
+                        </h3>
+                      </header>
+                      <div className="company-details-fields-grid">
+                        <div className="company-details-field">
+                          <label htmlFor="sm-contractorName">Name</label>
+                          <input
+                            id="sm-contractorName"
+                            name="contractorName"
+                            value={form.contractorName}
+                            onChange={handleChange}
+                            placeholder="Enter contractor name"
+                            disabled={viewOnly}
+                            maxLength={200}
+                          />
+                        </div>
+                        <div className="company-details-field">
+                          <label htmlFor="sm-contractorEmail">Mail Id</label>
+                          <input
+                            id="sm-contractorEmail"
+                            name="contractorEmail"
+                            type="email"
+                            value={form.contractorEmail}
+                            onChange={handleChange}
+                            onBlur={handleSiteFieldBlur}
+                            placeholder="Enter contractor email"
+                            disabled={viewOnly}
+                            maxLength={254}
+                          />
+                          {formErrors.contractorEmail && (
+                            <div style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>{formErrors.contractorEmail}</div>
+                          )}
+                        </div>
+                        <div className="company-details-field">
+                          <label htmlFor="sm-contractorPhone">Mobile Number</label>
+                          <input
+                            id="sm-contractorPhone"
+                            name="contractorPhone"
+                            type="tel"
+                            inputMode="numeric"
+                            autoComplete="tel"
+                            value={form.contractorPhone}
+                            onChange={handleChange}
+                            onBlur={handleSiteFieldBlur}
+                            placeholder="Enter 10-digit phone"
+                            disabled={viewOnly}
+                            maxLength={10}
+                            title="Enter exactly 10 digits"
+                          />
+                          {formErrors.contractorPhone && (
+                            <div style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>{formErrors.contractorPhone}</div>
+                          )}
+                        </div>
+                        <div className="company-details-field">
+                          <label htmlFor="sm-contractorAddress">Address</label>
+                          <input
+                            id="sm-contractorAddress"
+                            name="contractorAddress"
+                            value={form.contractorAddress}
+                            onChange={handleChange}
+                            placeholder="Enter contractor address"
+                            disabled={viewOnly}
+                            maxLength={500}
+                          />
+                        </div>
+                        <div className="company-details-field">
+                          <label htmlFor="sm-contractorCity">City</label>
+                          <input
+                            id="sm-contractorCity"
+                            name="contractorCity"
+                            value={form.contractorCity}
+                            onChange={handleChange}
+                            placeholder="Enter contractor city"
+                            disabled={viewOnly}
+                            maxLength={120}
+                          />
+                        </div>
+                        <div className="company-details-field">
+                          <label htmlFor="sm-contractorState">State</label>
+                          <input
+                            id="sm-contractorState"
+                            name="contractorState"
+                            value={form.contractorState}
+                            onChange={handleChange}
+                            placeholder="Enter contractor state"
+                            disabled={viewOnly}
+                            maxLength={120}
+                          />
                         </div>
                       </div>
                     </section>

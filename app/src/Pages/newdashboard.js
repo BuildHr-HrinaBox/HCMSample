@@ -38,7 +38,7 @@ const DEFAULT_METRICS = [
   },
   {
     key: 'policies',
-    label: 'Rejected',
+    label: 'Returned',
     value: 0,
     icon: BookMarked,
     tone: 'purple',
@@ -139,7 +139,7 @@ const getStatusMeta = (value) => {
     return { label: 'Yet to Complete', statusClass: 'nd-badge-pending', iconTone: 'grey' };
   }
   if (normalized === 'rejected' || normalized === 'reject') {
-    return { label: 'Rejected', statusClass: 'nd-badge-high', iconTone: 'orange' };
+    return { label: 'Returned', statusClass: 'nd-badge-high', iconTone: 'orange' };
   }
   if (normalized === 'in progress') {
     return { label: 'In Progress', statusClass: 'nd-badge-progress', iconTone: 'blue' };

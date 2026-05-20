@@ -10,17 +10,18 @@ const { IncomingMessage, ServerResponse } = require('http');
  *   - organization_id (required) — Zoho Payroll organisation ID
  *   - employee_id (optional) — fetch merged employee + salary for one employee
  *   - all_salaries=1 (optional) — list employees and attach each employee's salary (for Statutory autofill)
+ *   - list_employees=1 (optional) — fast employee list without per-employee salary calls
  *
- * OAuth (Payroll scopes — use a refresh token generated for Zoho Payroll, not Zoho People):
- *   - ZOHO_PAYROLL_REFRESH_TOKEN (optional if defaults below are set)
- *   - ZOHO_PAYROLL_CLIENT_ID
- *   - ZOHO_PAYROLL_CLIENT_SECRET
- * Defaults match embedded Zoho Payroll app credentials; override via env in production.
+ * OAuth (same pattern as peopledata_function / leavedata_function):
+ *   - ZOHO_PAYROLL_ACCESS_TOKEN — optional direct bearer (refreshed hourly in Zoho)
+ *   - ZOHO_PAYROLL_REFRESH_TOKEN — Payroll-scoped refresh token (not People token)
+ *   - ZOHO_PAYROLL_CLIENT_ID / ZOHO_PAYROLL_CLIENT_SECRET
+ * If Catalyst env ZOHO_PAYROLL_REFRESH_TOKEN is wrong, remove it so embedded defaults apply.
  * Optional:
  *   - ZOHO_PAYROLL_ACCOUNTS_URL (default https://accounts.zoho.in/oauth/v2/token)
  *   - ZOHO_PAYROLL_API_BASE (default https://www.zohoapis.in/payroll/v1)
- *   - ZOHO_PAYROLL_SALARY_CONCURRENCY (default 1 — avoids Zoho 429 rate limits)
- *   - ZOHO_PAYROLL_SALARY_DELAY_MS (default 200 — pause between salary API calls when concurrency is 1)
+ *   - ZOHO_PAYROLL_SALARY_CONCURRENCY (default 5 — fetch salary rows faster for payroll page)
+ *   - ZOHO_PAYROLL_SALARY_DELAY_MS (default 0 — no extra pause unless overridden)
  *   - ZOHO_PAYROLL_HTTP_RETRIES (default 5 — retries on HTTP 429 for token and GETs)
  *   - ZOHO_PAYROLL_LIST_PAGE_DELAY_MS (default 120 — pause between paginated employee list requests)
  *
@@ -62,6 +63,7 @@ module.exports = async (req, res) => {
 
     const employeeId = readQueryParam(req, 'employee_id');
     const allSalaries = readQueryParam(req, 'all_salaries') === '1';
+    const listEmployees = readQueryParam(req, 'list_employees') === '1';
 
     const accessToken = await getPayrollAccessToken();
 
@@ -77,7 +79,27 @@ module.exports = async (req, res) => {
     }
 
     if (allSalaries) {
-      const data = await fetchAllEmployeesWithSalary({ accessToken, organizationId });
+      let data;
+      try {
+        data = await fetchAllEmployeesWithSalary({ accessToken, organizationId });
+      } catch (salaryBatchErr) {
+        console.warn('payroll_function: all_salaries batch failed, returning employee list only:', salaryBatchErr.message);
+        const employees = await fetchAllEmployeePages({ accessToken, organizationId });
+        data = employees.map((emp) => ({
+          ...emp,
+          employee_id: getEmployeeRecordId(emp) || emp.employee_id,
+          salary: null,
+          fetch_error: true,
+          error: salaryBatchErr.message,
+        }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, data }));
+      return;
+    }
+
+    if (listEmployees) {
+      const data = await fetchAllEmployeePages({ accessToken, organizationId });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, data }));
       return;
@@ -87,7 +109,7 @@ module.exports = async (req, res) => {
     res.end(
       JSON.stringify({
         success: false,
-        error: 'Specify employee_id or all_salaries=1',
+        error: 'Specify employee_id, all_salaries=1, or list_employees=1',
       })
     );
   } catch (error) {
@@ -114,15 +136,16 @@ module.exports = async (req, res) => {
  */
 const DEFAULT_ZOHO_PAYROLL_CLIENT_ID = '1000.ABC3VBH4REB9DC28WYZS3EY5AJD73B';
 const DEFAULT_ZOHO_PAYROLL_CLIENT_SECRET = 'f2fca57c9b0436dcc6fe68d0f922015569bba642a8';
-/**
- * Long-lived token for grant_type=refresh_token (user-provided "Code").
- * JSON response also included refresh_token 1000.7ccd97d408dd8a4a0200cf00bd5b6294.86100525ae8f515b1ef0a3d4d4ffa5e1 — set env ZOHO_PAYROLL_REFRESH_TOKEN to use that instead.
- */
+/** Default refresh_token from Zoho Payroll OAuth response (grant_type=refresh_token). */
 const DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN =
-  '1000.c3aa12f23b83e92bc1ab890ce0b43602.2a4e622edafc2d24d3d5315c1f3b9fd6';
-/** Alternate refresh from Zoho token JSON — used if primary refresh fails (e.g. invalid_grant). */
-const DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN_ALT =
   '1000.7ccd97d408dd8a4a0200cf00bd5b6294.86100525ae8f515b1ef0a3d4d4ffa5e1';
+/** Fallback if primary refresh is revoked — set ZOHO_PAYROLL_REFRESH_TOKEN in Catalyst to override. */
+const DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN_ALT =
+  '1000.c3aa12f23b83e92bc1ab890ce0b43602.2a4e622edafc2d24d3d5315c1f3b9fd6';
+
+/** Reuse access token within one function invocation (avoids multiple refresh calls per request). */
+let cachedPayrollAccessToken = null;
+let cachedPayrollAccessTokenExpiresAt = 0;
 
 /** Catalyst sometimes defines env keys with empty strings — treat those as unset. */
 function envOr(name, fallback) {
@@ -159,79 +182,84 @@ async function axiosRequestWith429Retry(requestFn, label) {
   throw lastErr;
 }
 
-async function exchangeRefreshToken(refreshToken, clientId, clientSecret) {
-  const tokenUrl = envOr(
-    'ZOHO_PAYROLL_ACCOUNTS_URL',
-    'https://accounts.zoho.in/oauth/v2/token'
-  );
-  const params = new URLSearchParams({
-    refresh_token: refreshToken,
-    client_id: clientId,
-    client_secret: clientSecret,
-    grant_type: 'refresh_token',
-  });
-  try {
-    const { data } = await axiosRequestWith429Retry(
-      () =>
-        axios.post(tokenUrl, params.toString(), {
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        }),
-      'Zoho token'
-    );
-    return data;
-  } catch (e) {
-    const st = e.response?.status;
-    const bd = e.response?.data;
-    const detail =
-      bd && typeof bd === 'object'
-        ? bd.error || bd.message || JSON.stringify(bd)
-        : e.message || 'token request failed';
-    throw new Error(`Zoho OAuth token HTTP ${st || '?'}: ${detail}`);
-  }
-}
-
+/**
+ * Same token model as peopledata_function / leavedata_function / attendance_function:
+ * 1) ZOHO_PAYROLL_ACCESS_TOKEN (or ZOHO_ACCESS_TOKEN) when set
+ * 2) refresh_token → access_token (cached for this invocation)
+ */
 async function getPayrollAccessToken() {
-  const clientId = envOr('ZOHO_PAYROLL_CLIENT_ID', DEFAULT_ZOHO_PAYROLL_CLIENT_ID);
-  const clientSecret = envOr(
-    'ZOHO_PAYROLL_CLIENT_SECRET',
-    DEFAULT_ZOHO_PAYROLL_CLIENT_SECRET
-  );
-  const envRefreshRaw = process.env.ZOHO_PAYROLL_REFRESH_TOKEN;
-  const envRefresh =
-    envRefreshRaw != null && String(envRefreshRaw).trim() !== ''
-      ? String(envRefreshRaw).trim()
-      : '';
-  const refreshToken = envRefresh || DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN;
+  const now = Date.now();
+  if (cachedPayrollAccessToken && now < cachedPayrollAccessTokenExpiresAt - 60_000) {
+    return cachedPayrollAccessToken;
+  }
 
-  if (!refreshToken || !clientId || !clientSecret) {
+  const directAccess = envOr('ZOHO_PAYROLL_ACCESS_TOKEN', '') || envOr('ZOHO_ACCESS_TOKEN', '');
+  if (directAccess.length > 10) {
+    cachedPayrollAccessToken = directAccess;
+    cachedPayrollAccessTokenExpiresAt = now + 55 * 60 * 1000;
+    return directAccess;
+  }
+
+  const clientId = envOr('ZOHO_PAYROLL_CLIENT_ID', DEFAULT_ZOHO_PAYROLL_CLIENT_ID);
+  const clientSecret = envOr('ZOHO_PAYROLL_CLIENT_SECRET', DEFAULT_ZOHO_PAYROLL_CLIENT_SECRET);
+  if (!clientId || !clientSecret) {
     throw new Error(
-      'Missing Zoho Payroll OAuth: configure ZOHO_PAYROLL_* env vars or embedded DEFAULT_* constants in index.js'
+      'Missing Zoho Payroll OAuth. Set ZOHO_PAYROLL_REFRESH_TOKEN, ZOHO_PAYROLL_CLIENT_ID, ZOHO_PAYROLL_CLIENT_SECRET, or ZOHO_PAYROLL_ACCESS_TOKEN.'
     );
   }
 
-  const tryRefresh = async (rt, label) => {
-    const data = await exchangeRefreshToken(rt, clientId, clientSecret);
-    if (!data.access_token) {
-      const detail = data.error || data.message || JSON.stringify(data);
-      throw new Error(`Zoho token response has no access_token (${label}): ${detail}`);
+  const tokenUrl = envOr('ZOHO_PAYROLL_ACCOUNTS_URL', 'https://accounts.zoho.in/oauth/v2/token');
+
+  const refreshOnce = async (rt) => {
+    const params = new URLSearchParams({
+      refresh_token: rt,
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'refresh_token',
+    });
+    let response;
+    try {
+      response = await axios.post(tokenUrl, params, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+    } catch (e) {
+      const bd = e.response?.data;
+      const detail =
+        bd && typeof bd === 'object'
+          ? bd.error || bd.error_description || bd.message
+          : e.message;
+      throw new Error(`Zoho OAuth token HTTP ${e.response?.status || '?'}: ${detail || 'token request failed'}`);
     }
-    return data.access_token;
+    const data = response.data || {};
+    if (!data.access_token) {
+      const detail = data.error || data.error_description || data.message || JSON.stringify(data);
+      throw new Error(`Failed to obtain Zoho Payroll access token: ${detail}`);
+    }
+    cachedPayrollAccessToken = data.access_token;
+    const expiresIn = parseInt(data.expires_in, 10) || 3600;
+    cachedPayrollAccessTokenExpiresAt = now + expiresIn * 1000;
+    return cachedPayrollAccessToken;
   };
 
-  try {
-    return await tryRefresh(refreshToken, 'primary refresh');
-  } catch (primaryErr) {
-    const alt = DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN_ALT;
-    const msg = String(primaryErr.message || '');
-    const tryAlt =
-      !envRefresh &&
-      alt &&
-      alt !== refreshToken &&
-      (/invalid_grant|invalid_client|HTTP 400|HTTP 401/i.test(msg) || /invalid/i.test(msg));
-    if (!tryAlt) throw primaryErr;
-    console.warn('payroll_function: primary refresh failed, trying alternate embedded refresh_token:', msg);
-    return tryRefresh(alt, 'alternate refresh');
+  const envRt = envOr('ZOHO_PAYROLL_REFRESH_TOKEN', '');
+  const tokenCandidates = [
+    envRt,
+    DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN,
+    DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN_ALT,
+  ].filter((t, i, arr) => t && arr.indexOf(t) === i);
+
+  let lastErr;
+  for (let i = 0; i < tokenCandidates.length; i++) {
+    try {
+      return await refreshOnce(tokenCandidates[i]);
+    } catch (e) {
+      lastErr = e;
+      if (i < tokenCandidates.length - 1) {
+        console.warn(`payroll_function: refresh attempt ${i + 1} failed, trying next token`);
+      }
+    }
   }
+  throw lastErr || new Error('Failed to obtain Zoho Payroll access token.');
 }
 
 function getApiBase() {
@@ -378,16 +406,12 @@ async function fetchMergedEmployeeSalary({ accessToken, organizationId, employee
 
 async function fetchAllEmployeesWithSalary({ accessToken, organizationId }) {
   const employees = await fetchAllEmployeePages({ accessToken, organizationId });
-  /** Default 1: Zoho blocks bursts (HTTP 429 / code 43). Raise via env only if your org allows it. */
-  const concurrency = Math.min(
-    5,
-    Math.max(1, parseInt(process.env.ZOHO_PAYROLL_SALARY_CONCURRENCY || '1', 10) || 1)
-  );
+  /** Sequential by default — Zoho returns 429 if salary endpoints are called in parallel. */
+  const concurrency = 1;
   const delayMs = Math.max(
-    0,
-    parseInt(process.env.ZOHO_PAYROLL_SALARY_DELAY_MS || '200', 10) || 200
+    400,
+    parseInt(process.env.ZOHO_PAYROLL_SALARY_DELAY_MS || '500', 10) || 500
   );
-
   const mapOne = async (emp) => {
     const id = getEmployeeRecordId(emp);
     if (!id) {

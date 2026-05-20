@@ -326,9 +326,10 @@
 .checklistbulk-data-head {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
-  align-items: flex-start;
-  margin-bottom: 10px;
+  gap: 16px;
+  align-items: stretch;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
 }
 
 .checklistbulk-data-head h2 {
@@ -346,14 +347,19 @@
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: stretch;
 }
 
 .checklistbulk-stat-card {
   border-radius: 0;
-  padding: 8px 12px;
+  padding: 10px 16px;
   min-width: 120px;
   display: flex;
   flex-direction: column;
+  justify-content: center;
+  min-height: 82px;
+  box-sizing: border-box;
 }
 
 .checklistbulk-stat-card strong {
@@ -390,8 +396,8 @@
 .checklistbulk-data-toolbar {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: 16px;
+  margin-bottom: 16px;
   align-items: center;
   flex-wrap: wrap;
 }
@@ -401,20 +407,22 @@
   gap: 10px;
   align-items: center;
   flex: 1;
-  min-width: 300px;
+  min-width: 320px;
   flex-wrap: wrap;
 }
 
 .checklistbulk-search {
-  flex: 1 1 260px;
-  max-width: 420px;
+  flex: 1 1 420px;
+  max-width: 640px;
   border: 1px solid #e5e7eb;
   border-radius: 0;
-  padding: 8px 12px;
+  padding: 12px 16px;
   font-size: 13px;
   background: #f9fafb;
   color: #374151;
   font-family: inherit;
+  min-height: 52px;
+  box-sizing: border-box;
 }
 
 .checklistbulk-search:focus {
@@ -438,6 +446,8 @@
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .checklistbulk-btn-clear {
@@ -483,7 +493,7 @@
 
 .checklistbulk-table {
   width: 100%;
-  min-width: 1100px;
+  min-width: 1480px;
   border-collapse: collapse;
   font-size: var(--hcm-data-table-body-font-size);
 }
@@ -502,8 +512,8 @@
   letter-spacing: 0.01em;
   border-bottom: 1px solid #e5e7eb;
   border-right: 1px solid #eceff3;
-  white-space: normal;
-  word-break: break-word;
+  white-space: nowrap;
+  word-break: normal;
 }
 
 .checklistbulk-table th:last-child {
@@ -545,36 +555,61 @@
 .checklistbulk-table th:nth-child(2),
 .checklistbulk-table td:nth-child(2) {
   width: 13%;
+  min-width: 140px;
 }
 
 .checklistbulk-table th:nth-child(3),
 .checklistbulk-table td:nth-child(3) {
   width: 10%;
+  min-width: 120px;
 }
 
 .checklistbulk-table th:nth-child(4),
 .checklistbulk-table td:nth-child(4) {
-  width: 18%;
+  width: 11%;
+  min-width: 150px;
 }
 
 .checklistbulk-table th:nth-child(5),
 .checklistbulk-table td:nth-child(5) {
-  width: 12%;
+  width: 18%;
+  min-width: 260px;
 }
 
 .checklistbulk-table th:nth-child(6),
 .checklistbulk-table td:nth-child(6) {
-  width: 22%;
+  width: 14%;
+  min-width: 170px;
 }
 
 .checklistbulk-table th:nth-child(7),
 .checklistbulk-table td:nth-child(7) {
-  width: 16%;
+  width: 12%;
+  min-width: 150px;
 }
 
 .checklistbulk-table th:nth-child(8),
 .checklistbulk-table td:nth-child(8) {
+  width: 22%;
+  min-width: 280px;
+}
+
+.checklistbulk-table th:nth-child(9),
+.checklistbulk-table td:nth-child(9) {
+  width: 16%;
+  min-width: 150px;
+}
+
+.checklistbulk-table th:nth-child(10),
+.checklistbulk-table td:nth-child(10) {
   width: 9%;
+  min-width: 110px;
+}
+
+.checklistbulk-table th:nth-child(11),
+.checklistbulk-table td:nth-child(11) {
+  width: 9%;
+  min-width: 110px;
 }
 
 .checklistbulk-pill {
@@ -638,6 +673,7 @@
   .checklistbulk-data-head,
   .checklistbulk-data-toolbar {
     flex-direction: column;
+    align-items: stretch;
   }
 
   .checklistbulk-btn-outline {
@@ -646,6 +682,7 @@
 
   .checklistbulk-data-stats {
     flex-wrap: wrap;
+    justify-content: flex-start;
   }
 
   .checklistbulk-search {

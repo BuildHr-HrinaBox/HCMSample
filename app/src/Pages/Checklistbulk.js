@@ -33,7 +33,10 @@ const mapRowToRecord = (row) => ({
   formName: row.FormName ?? row['Form Name'] ?? row.formName ?? '',
   description: row.Description ?? row.description ?? '',
   concernedGovtDepartment: row.ConcernedGovtDepartment ?? row['Concerned Govt Department'] ?? row['Govt Department'] ?? row.concernedGovtDepartment ?? '',
-  dueDate: row.DueDate ?? row['Due Date'] ?? row.dueDate ?? ''
+  dueDate: row.DueDate ?? row['Due Date'] ?? row.dueDate ?? '',
+  nameOfTheCode: row.Nameofthecode ?? row.NameOfTheCode ?? row['Name of the Code'] ?? row.nameOfTheCode ?? row.nameofthecode ?? '',
+  frequency: row.Frequency ?? row.frequency ?? '',
+  nameOfTheRule: row.NameoftheRule ?? row.NameOfTheRule ?? row['Name of the Rule'] ?? row.nameOfTheRule ?? row.nameoftheRule ?? ''
 });
 
 const Checklistbulk = ({ userRole, userEmail }) => {
@@ -159,7 +162,7 @@ const Checklistbulk = ({ userRole, userEmail }) => {
 
   const filteredData = importedData.filter((row) => {
     const term = searchTerm.trim().toLowerCase();
-    return !term || [row.act, row.formName, row.concernedGovtDepartment, row.state, row.sector, row.description]
+    return !term || [row.act, row.formName, row.concernedGovtDepartment, row.state, row.sector, row.description, row.nameOfTheCode, row.frequency, row.nameOfTheRule]
       .some((value) => String(value || '').toLowerCase().includes(term));
   });
 
@@ -198,7 +201,10 @@ const Checklistbulk = ({ userRole, userEmail }) => {
       FormName: 'Form 11',
       Description: 'Accident Book',
       ConcernedGovtDepartment: 'Labour Department',
-      DueDate: 'Monthly Basis'
+      DueDate: 'Monthly Basis',
+      Nameofthecode: 'FAC-AB-011',
+      Frequency: 'Monthly',
+      NameoftheRule: 'Factories Rules'
     }];
     const worksheet = XLSX.utils.json_to_sheet(templateRows);
     const workbook = XLSX.utils.book_new();
@@ -211,7 +217,7 @@ const Checklistbulk = ({ userRole, userEmail }) => {
       <header className="checklistbulk-header">
         <div>
           <h1 className="checklistbulk-title">Checklist Bulk Import</h1>
-          <p className="checklistbulk-subtitle">Import Excel data with sector, state, act, form details and due dates</p>
+          <p className="checklistbulk-subtitle">Import Excel data with sector, state, act, form details, rule details and due dates</p>
         </div>
         <button type="button" className="checklistbulk-btn checklistbulk-btn-outline" onClick={handleTemplateDownload}>
           Download Template
@@ -256,7 +262,7 @@ const Checklistbulk = ({ userRole, userEmail }) => {
           </div>
           <div className="checklistbulk-guidelines">
             <div className="checklistbulk-guideline-row"><span>File Format</span><strong>Excel (.xlsx, .xls)</strong></div>
-            <div className="checklistbulk-guideline-row"><span>Required Columns</span><strong>Sector, State, Act, FormName, Description, ConcernedGovtDepartment, DueDate</strong></div>
+            <div className="checklistbulk-guideline-row"><span>Required Columns</span><strong>Sector, State, Act, FormName, Description, ConcernedGovtDepartment, DueDate, Nameofthecode, Frequency, NameoftheRule</strong></div>
             <div className="checklistbulk-guideline-row"><span>Data Validation</span><strong>Automatic validation on import</strong></div>
             <div className="checklistbulk-guideline-row"><span>Tips</span><strong>Use the template to ensure correct column format</strong></div>
           </div>
@@ -282,7 +288,7 @@ const Checklistbulk = ({ userRole, userEmail }) => {
             <input
               type="text"
               className="checklistbulk-search"
-              placeholder="Search by Act or Form name..."
+              placeholder="Search by act, form, code, frequency, or rule..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
             />
@@ -306,26 +312,32 @@ const Checklistbulk = ({ userRole, userEmail }) => {
                   <th>S.No</th>
                   <th>Sector</th>
                   <th>State</th>
+                  <th>Name of the Code</th>
                   <th>Act</th>
+                  <th>Name of the Rule</th>
                   <th>Form Name</th>
                   <th>Description</th>
                   <th>Govt Department</th>
+                  <th>Frequency</th>
                   <th>Due Date</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredData.length === 0 ? (
-                  <tr><td colSpan={8} className="checklistbulk-empty">No imported data. Upload an Excel file and click Import Data.</td></tr>
+                  <tr><td colSpan={11} className="checklistbulk-empty">No imported data. Upload an Excel file and click Import Data.</td></tr>
                 ) : (
                   paginatedData.map((row, i) => (
                     <tr key={row.id || i}>
                       <td>{(effectivePage - 1) * rowsPerPage + i + 1}</td>
                       <td>{row.sector}</td>
                       <td>{row.state}</td>
+                      <td>{row.nameOfTheCode || '-'}</td>
                       <td>{row.act}</td>
+                      <td>{row.nameOfTheRule || '-'}</td>
                       <td><span className="checklistbulk-pill checklistbulk-pill-form">{row.formName || '-'}</span></td>
                       <td>{row.description}</td>
                       <td>{row.concernedGovtDepartment}</td>
+                      <td>{row.frequency || '-'}</td>
                       <td>{row.dueDate}</td>
                     </tr>
                   ))

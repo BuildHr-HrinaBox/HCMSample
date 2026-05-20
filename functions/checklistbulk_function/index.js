@@ -101,7 +101,10 @@ const createChecklistBulkRecord = (data) => {
     FormName: data.formName || '',
     ConcernedGovtDepartment: data.concernedGovtDepartment || '',
     DueDate: normalizedDueDate,
-    Description: data.description || ''
+    Description: data.description || '',
+    Nameofthecode: data.nameOfTheCode || data.nameofthecode || '',
+    Frequency: data.frequency || '',
+    NameoftheRule: data.nameOfTheRule || data.nameoftheRule || ''
   };
 };
 
@@ -116,6 +119,9 @@ const convertToAppFormat = (record) => {
     concernedGovtDepartment: record.ConcernedGovtDepartment || '',
     dueDate: record.DueDate || '',
     description: record.Description || '',
+    nameOfTheCode: record.Nameofthecode || '',
+    frequency: record.Frequency || '',
+    nameOfTheRule: record.NameoftheRule || '',
     createdTime: record.CREATEDTIME,
     modifiedTime: record.MODIFIEDTIME,
     creatorId: record.CREATORID
@@ -661,7 +667,10 @@ const populateTableWithSampleData = async (catalyst) => {
         FormName: "Form 3",
         ConcernedGovtDepartment: "Labour Department",
         DueDate: "31-Aug-2024",
-        Description: "Annual return for manufacturing units"
+        Description: "Annual return for manufacturing units",
+        Nameofthecode: "FAC-AR-001",
+        Frequency: "Annual",
+        NameoftheRule: "Factories Rules"
       },
       {
         Sector: "Manufacturing",
@@ -670,7 +679,10 @@ const populateTableWithSampleData = async (catalyst) => {
         FormName: "Form 4",
         ConcernedGovtDepartment: "Labour Department",
         DueDate: "31-Oct-2024",
-        Description: "Quarterly return submission"
+        Description: "Quarterly return submission",
+        Nameofthecode: "FAC-QR-004",
+        Frequency: "Quarterly",
+        NameoftheRule: "Factories Rules"
       },
       {
         Sector: "Healthcare",
@@ -679,7 +691,10 @@ const populateTableWithSampleData = async (catalyst) => {
         FormName: "Form 3-A",
         ConcernedGovtDepartment: "Health Department",
         DueDate: "31-Oct-2024",
-        Description: "Registration renewal for clinical establishments"
+        Description: "Registration renewal for clinical establishments",
+        Nameofthecode: "HEA-RN-003A",
+        Frequency: "Annual",
+        NameoftheRule: "Clinical Establishments Rules"
       },
       {
         Sector: "Finance",
@@ -688,7 +703,10 @@ const populateTableWithSampleData = async (catalyst) => {
         FormName: "Form 4(6)",
         ConcernedGovtDepartment: "RBI",
         DueDate: "15-Dec-2024",
-        Description: "Compliance report submission"
+        Description: "Compliance report submission",
+        Nameofthecode: "FIN-CR-046",
+        Frequency: "Half Yearly",
+        NameoftheRule: "Banking Regulation Rules"
       },
       {
         Sector: "Environment",
@@ -697,7 +715,10 @@ const populateTableWithSampleData = async (catalyst) => {
         FormName: "Form 10",
         ConcernedGovtDepartment: "Environment Department",
         DueDate: "30-Sep-2024",
-        Description: "Environmental clearance application"
+        Description: "Environmental clearance application",
+        Nameofthecode: "ENV-EC-010",
+        Frequency: "Annual",
+        NameoftheRule: "Environment Protection Rules"
       },
       {
         Sector: "Manufacturing",
@@ -706,7 +727,10 @@ const populateTableWithSampleData = async (catalyst) => {
         FormName: "Form 12",
         ConcernedGovtDepartment: "Labour Department",
         DueDate: "30-Sep-2024",
-        Description: "Safety report submission"
+        Description: "Safety report submission",
+        Nameofthecode: "FAC-SR-012",
+        Frequency: "Monthly",
+        NameoftheRule: "Factories Rules"
       },
       {
         Sector: "Manufacturing",
@@ -715,7 +739,10 @@ const populateTableWithSampleData = async (catalyst) => {
         FormName: "Form 15",
         ConcernedGovtDepartment: "Labour Department",
         DueDate: "30-Sep-2024",
-        Description: "Annual compliance report"
+        Description: "Annual compliance report",
+        Nameofthecode: "FAC-AC-015",
+        Frequency: "Annual",
+        NameoftheRule: "Factories Rules"
       },
       {
         Sector: "Manufacturing",
@@ -724,7 +751,10 @@ const populateTableWithSampleData = async (catalyst) => {
         FormName: "Accident Report",
         ConcernedGovtDepartment: "Labour Department",
         DueDate: "30-Sep-2024",
-        Description: "Accident incident reporting"
+        Description: "Accident incident reporting",
+        Nameofthecode: "FAC-AI-AR",
+        Frequency: "Event Based",
+        NameoftheRule: "Factories Rules"
       }
     ];
     
@@ -745,7 +775,10 @@ const populateTableWithSampleData = async (catalyst) => {
         formName: record.FormName,
         concernedGovtDepartment: record.ConcernedGovtDepartment,
         dueDate: record.DueDate,
-        description: record.Description
+        description: record.Description,
+        nameOfTheCode: record.Nameofthecode,
+        frequency: record.Frequency,
+        nameOfTheRule: record.NameoftheRule
       }))
     };
   } catch (error) {
@@ -841,7 +874,10 @@ app.post('/test-add', async (req, res) => {
       formName: "Test Form",
       concernedGovtDepartment: "Test Department",
       dueDate: "31-Dec-2024",
-      description: "Test Description"
+      description: "Test Description",
+      nameOfTheCode: "TEST-001",
+      frequency: "Monthly",
+      nameOfTheRule: "Test Rules"
     };
     
     console.log('Test data to be added:', testData);
@@ -874,7 +910,10 @@ app.post('/test-bulk-import', async (req, res) => {
         formName: "Form 3",
         concernedGovtDepartment: "Labour Department",
         dueDate: "31-Aug-2024",
-        description: "Annual return for manufacturing units"
+        description: "Annual return for manufacturing units",
+        nameOfTheCode: "FAC-AR-001",
+        frequency: "Annual",
+        nameOfTheRule: "Factories Rules"
       },
       {
         sector: "Healthcare",
@@ -883,7 +922,10 @@ app.post('/test-bulk-import', async (req, res) => {
         formName: "Form 3-A",
         concernedGovtDepartment: "Health Department",
         dueDate: "31-Oct-2024",
-        description: "Registration renewal for clinical establishments"
+        description: "Registration renewal for clinical establishments",
+        nameOfTheCode: "HEA-RN-003A",
+        frequency: "Annual",
+        nameOfTheRule: "Clinical Establishments Rules"
       }
     ];
     

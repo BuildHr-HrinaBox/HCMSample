@@ -8534,7 +8534,18 @@ const Statutory = ({ userEmail, userRole }) => {
         const earnings = getEarningsArray(p);
         const deductions = getDeductionsArray(p);
 
-        const basic = pickFormBBasicEarningsAmount(earnings);
+        const basic = (() => {
+          const list = Array.isArray(earnings) ? earnings : [];
+          const exact = list.find((it) => payrollEarningName(it) === 'basic earnings');
+          if (exact) return toNumber(exact.amount);
+          return findEarningAmount(
+            list,
+            (type, name) =>
+              name.includes('basic earnings') ||
+              name.includes('basic wage') ||
+              type === 'basic'
+          );
+        })();
         const hra = pickFormWHouseRentAllowanceAmount(earnings);
         const dearness = findEarningAmount(earnings, (type, name) => type === 'da' || name.includes('dearness'));
         const overtime = findEarningAmount(earnings, (type, name) => type === 'overtime' || type === 'ot' || name.includes('overtime'));
@@ -8910,10 +8921,16 @@ const Statutory = ({ userEmail, userRole }) => {
         const p = getPayrollPayloadObject(payrollData);
         const earnings = getEarningsArray(p);
         const deductions = getDeductionsArray(p);
-        /** FORM-T_S_E: align with Zoho Payroll component names (India). */
-        const basic =
-          pickFormBBasicEarningsAmount(earnings) ||
-          findEarningAmount(earnings, (t, n) => n === 'basic' || t === 'basic');
+        /** FORM-T_S_E: Zoho Payroll earning/deduction names → form columns. */
+        const basic = pickFormBBasicEarningsAmount(earnings);
+        const da = findEarningAmount(
+          earnings,
+          (t, n) =>
+            t === 'da' ||
+            n.includes('dearness allowance') ||
+            n.includes('dearness') ||
+            n.includes('vda')
+        );
         const hra =
           findEarningAmount(
             earnings,
@@ -8955,7 +8972,99 @@ const Statutory = ({ userEmail, userRole }) => {
             n.includes('epf') ||
             (n.includes('pf') && !n.includes('pt') && !n.includes('professional'))
         );
-        return { basic, hra, conv, medAllow, esi, pf };
+        return { basic, da, hra, conv, medAllow, esi, pf };
+      };
+
+      const applyFormTSEPayrollToRow = (row, payrollRow, headers) => {
+        if (!row || !payrollRow || !headers) return false;
+        const map = buildFormTSEPayrollMap(payrollRow);
+        const setCell = (hdr, val) => {
+          if (hdr == null || hdr === '') return;
+          if (val === '' || val == null) return;
+          const num = Number(val);
+          if (!Number.isFinite(num)) return;
+          row[hdr] = sanitizeValue(num);
+        };
+        setCell(headers.basic, map.basic);
+        setCell(headers.da, map.da);
+        setCell(headers.hra, map.hra);
+        setCell(headers.conv, map.conv);
+        setCell(headers.medAllow, map.medAllow);
+        setCell(headers.esi, map.esi);
+        setCell(headers.pf, map.pf);
+
+        const earningHeaders = [
+          headers.basic,
+          headers.da,
+          headers.hra,
+          headers.conv,
+          headers.medAllow,
+          headers.attendanceBonus,
+          headers.specialAllow,
+          headers.ot,
+          headers.nfh,
+          headers.maternityBenefit,
+          headers.othersEarning,
+          headers.subsistence
+        ];
+        const deductionHeaders = [
+          headers.esi,
+          headers.pf,
+          headers.pt,
+          headers.tos,
+          headers.society,
+          headers.insurance,
+          headers.salaryAdv,
+          headers.fines,
+          headers.damages,
+          headers.othersDeduction
+        ];
+        const totalEarnings = sumRowNumericHeaders(row, earningHeaders);
+        const totalDeductions = sumRowNumericHeaders(row, deductionHeaders);
+        if (headers.totalEarnings && totalEarnings !== '') {
+          row[headers.totalEarnings] = sanitizeValue(totalEarnings);
+        }
+        if (headers.deductionTotal && totalDeductions !== '') {
+          row[headers.deductionTotal] = sanitizeValue(totalDeductions);
+        }
+        if (headers.netPayable && totalEarnings !== '') {
+          const dedVal = totalDeductions === '' ? 0 : Number(totalDeductions);
+          row[headers.netPayable] = sanitizeValue(Number(totalEarnings) - dedVal);
+        }
+        return map.basic !== '' || map.hra !== '' || map.conv !== '' || map.medAllow !== '';
+      };
+
+      const getFormTSEPayrollHeaderSet = (headers) => {
+        if (!headers) return new Set();
+        return new Set(
+          [
+            headers.basic,
+            headers.da,
+            headers.hra,
+            headers.conv,
+            headers.medAllow,
+            headers.attendanceBonus,
+            headers.specialAllow,
+            headers.ot,
+            headers.nfh,
+            headers.maternityBenefit,
+            headers.othersEarning,
+            headers.subsistence,
+            headers.totalEarnings,
+            headers.esi,
+            headers.pf,
+            headers.pt,
+            headers.tos,
+            headers.society,
+            headers.insurance,
+            headers.salaryAdv,
+            headers.fines,
+            headers.damages,
+            headers.othersDeduction,
+            headers.deductionTotal,
+            headers.netPayable
+          ].filter(Boolean)
+        );
       };
 
       const findHeaderByFormTColumnNumber = (headers, colNum, labelTest) => {
@@ -9171,16 +9280,38 @@ const Statutory = ({ userEmail, userRole }) => {
         if (!em || !Array.isArray(payrollRows) || payrollRows.length === 0) return null;
         const zid = String(em.Zoho_ID || em['Zoho_ID'] || em.ZohoID || '').trim();
         const eid = String(em.EmployeeID || em['EmployeeID'] || em['Employee ID'] || '').trim();
+        const empNum = String(
+          em.employee_number ||
+            em['employee_number'] ||
+            em.Employee_Number ||
+            em['Employee Number'] ||
+            ''
+        ).trim();
         const email = String(em.EmailID || em.Email || em.email || em['Email ID'] || '')
           .trim()
           .toLowerCase();
         const fn = String(em.FirstName || em['FirstName'] || '').trim().toLowerCase();
         const ln = String(em.LastName || em['LastName'] || '').trim().toLowerCase();
         const combo = `${fn} ${ln}`.trim();
+        const normNum = (v) => String(v || '').trim().replace(/^0+/, '') || '0';
         let hit = payrollRows.find((r) => zid && String(r.employee_id || '') === zid);
         if (hit) return hit;
         hit = payrollRows.find((r) => eid && String(r.employee_id || '') === eid);
         if (hit) return hit;
+        if (empNum) {
+          hit = payrollRows.find(
+            (r) => normNum(r.employee_number || r.Employee_Number) === normNum(empNum)
+          );
+          if (hit) return hit;
+          hit = payrollRows.find((r) => String(r.employee_number || '').trim() === empNum);
+          if (hit) return hit;
+        }
+        if (eid) {
+          hit = payrollRows.find(
+            (r) => normNum(r.employee_number || r.Employee_Number) === normNum(eid)
+          );
+          if (hit) return hit;
+        }
         hit = payrollRows.find(
           (r) => email && String(r.work_mail || r.email || r.work_email || '').trim().toLowerCase() === email
         );
@@ -9194,12 +9325,32 @@ const Statutory = ({ userEmail, userRole }) => {
         );
       };
 
+      const fetchPayrollRowForEmployee = async (payrollEmpId, organizationId) => {
+        const id = String(payrollEmpId || '').trim();
+        if (!id) return null;
+        const payrollQs = new URLSearchParams({
+          employee_id: id,
+          organization_id: organizationId,
+        });
+        const payrollRes = await fetch(`/server/payroll_function?${payrollQs.toString()}`);
+        const payrollJson = await payrollRes.json();
+        if (payrollRes.ok && payrollJson?.success && payrollJson.data) {
+          return payrollJson.data;
+        }
+        return null;
+      };
+
       let formWPayrollLookup = null;
       let formWHeadersResolved = null;
       let statutoryPayrollRows = null;
       const formTSEHeadersResolved = formTSEAutofillContext
         ? resolveFormTSETableHeaders(currentHeaders)
         : null;
+      const formTSEPayrollHeaderSet = formTSEAutofillContext
+        ? getFormTSEPayrollHeaderSet(formTSEHeadersResolved)
+        : new Set();
+      const payrollOrgIdForForms =
+        process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
       if (formTSEAutofillContext || formXVIIIAutofillContext) {
         try {
           const payrollOrgId =
@@ -9215,6 +9366,19 @@ const Statutory = ({ userEmail, userRole }) => {
             console.log(
               `Statutory payroll preload: ${statutoryPayrollRows.length} salary row(s) for Form T / Form XVIII`
             );
+          } else if (formTSEAutofillContext) {
+            const listQs = new URLSearchParams({
+              list_employees: '1',
+              organization_id: payrollOrgId,
+            });
+            const listRes = await fetch(`/server/payroll_function?${listQs.toString()}`);
+            const listJson = await listRes.json();
+            if (listRes.ok && listJson?.success && Array.isArray(listJson.data)) {
+              statutoryPayrollRows = listJson.data;
+              console.log(
+                `Form T: using ${statutoryPayrollRows.length} payroll employee(s) (salary loaded per row)`
+              );
+            }
           }
         } catch (payPreloadErr) {
           console.warn('Statutory payroll preload skipped:', payPreloadErr?.message || payPreloadErr);
@@ -9320,6 +9484,11 @@ const Statutory = ({ userEmail, userRole }) => {
           }
 
           if (formBAutofillContext && isFormBOtherDeductionsOtherAllowanceHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (formTSEAutofillContext && formTSEPayrollHeaderSet.has(header)) {
             row[header] = '';
             return;
           }
@@ -10423,77 +10592,40 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
 
-        if ((formTSEAutofillContext || formXVIIIAutofillContext) && statutoryPayrollRows?.length) {
+        if (formTSEAutofillContext && formTSEHeadersResolved) {
+          let pr = statutoryPayrollRows?.length
+            ? resolvePayrollRowForPeople(emp, statutoryPayrollRows)
+            : null;
+          const payrollPayload =
+            pr && !pr.fetch_error && getEarningsArray(pr).length > 0
+              ? pr
+              : pr?.employee_id
+                ? await fetchPayrollRowForEmployee(pr.employee_id, payrollOrgIdForForms)
+                : null;
+          if (payrollPayload) {
+            applyFormTSEPayrollToRow(row, payrollPayload, formTSEHeadersResolved);
+          }
+        }
+
+        if (formXVIIIAutofillContext && statutoryPayrollRows?.length) {
           const pr = resolvePayrollRowForPeople(emp, statutoryPayrollRows);
           if (pr && !pr.fetch_error) {
-            if (formXVIIIAutofillContext) {
-              const form18Map = buildFormXVIIIPayrollMap(pr);
-              currentHeaders.forEach((header) => {
-                if (isFormXVIIIBasicWagesHeader(header) && form18Map.basicWages !== '') {
-                  row[header] = sanitizeValue(form18Map.basicWages);
-                } else if (isFormXVIIIDearnessAllowanceHeader(header) && form18Map.dearnessAllowance !== '') {
-                  row[header] = sanitizeValue(form18Map.dearnessAllowance);
-                } else if (isFormXVIIIOvertimeHeader(header) && form18Map.overtimeWages !== '') {
-                  row[header] = sanitizeValue(form18Map.overtimeWages);
-                } else if (isFormXVIIIOtherCashPaymentsHeader(header) && form18Map.otherCashPayments !== '') {
-                  row[header] = sanitizeValue(form18Map.otherCashPayments);
-                } else if (isFormXVIIINetAmountPaidHeader(header) && form18Map.netAmountPaid !== '') {
-                  row[header] = sanitizeValue(form18Map.netAmountPaid);
-                } else if (isFormXVIIITotalAmountHeader(header) && form18Map.totalAmount !== '') {
-                  row[header] = sanitizeValue(form18Map.totalAmount);
-                }
-              });
-            }
-            if (formTSEAutofillContext && formTSEHeadersResolved) {
-              const tseMap = buildFormTSEPayrollMap(pr);
-              const setTse = (hdr, val) => {
-                if (hdr && val !== '' && val != null) row[hdr] = sanitizeValue(val);
-              };
-              setTse(formTSEHeadersResolved.basic, tseMap.basic);
-              setTse(formTSEHeadersResolved.hra, tseMap.hra);
-              setTse(formTSEHeadersResolved.conv, tseMap.conv);
-              setTse(formTSEHeadersResolved.medAllow, tseMap.medAllow);
-              setTse(formTSEHeadersResolved.esi, tseMap.esi);
-              setTse(formTSEHeadersResolved.pf, tseMap.pf);
-              const earningHeaders = [
-                formTSEHeadersResolved.basic,
-                formTSEHeadersResolved.da,
-                formTSEHeadersResolved.hra,
-                formTSEHeadersResolved.conv,
-                formTSEHeadersResolved.medAllow,
-                formTSEHeadersResolved.attendanceBonus,
-                formTSEHeadersResolved.specialAllow,
-                formTSEHeadersResolved.ot,
-                formTSEHeadersResolved.nfh,
-                formTSEHeadersResolved.maternityBenefit,
-                formTSEHeadersResolved.othersEarning,
-                formTSEHeadersResolved.subsistence
-              ];
-              const deductionHeaders = [
-                formTSEHeadersResolved.esi,
-                formTSEHeadersResolved.pf,
-                formTSEHeadersResolved.pt,
-                formTSEHeadersResolved.tos,
-                formTSEHeadersResolved.society,
-                formTSEHeadersResolved.insurance,
-                formTSEHeadersResolved.salaryAdv,
-                formTSEHeadersResolved.fines,
-                formTSEHeadersResolved.damages,
-                formTSEHeadersResolved.othersDeduction
-              ];
-              const totalEarnings = sumRowNumericHeaders(row, earningHeaders);
-              const totalDeductions = sumRowNumericHeaders(row, deductionHeaders);
-              if (formTSEHeadersResolved.totalEarnings && totalEarnings !== '') {
-                row[formTSEHeadersResolved.totalEarnings] = sanitizeValue(totalEarnings);
+            const form18Map = buildFormXVIIIPayrollMap(pr);
+            currentHeaders.forEach((header) => {
+              if (isFormXVIIIBasicWagesHeader(header) && form18Map.basicWages !== '') {
+                row[header] = sanitizeValue(form18Map.basicWages);
+              } else if (isFormXVIIIDearnessAllowanceHeader(header) && form18Map.dearnessAllowance !== '') {
+                row[header] = sanitizeValue(form18Map.dearnessAllowance);
+              } else if (isFormXVIIIOvertimeHeader(header) && form18Map.overtimeWages !== '') {
+                row[header] = sanitizeValue(form18Map.overtimeWages);
+              } else if (isFormXVIIIOtherCashPaymentsHeader(header) && form18Map.otherCashPayments !== '') {
+                row[header] = sanitizeValue(form18Map.otherCashPayments);
+              } else if (isFormXVIIINetAmountPaidHeader(header) && form18Map.netAmountPaid !== '') {
+                row[header] = sanitizeValue(form18Map.netAmountPaid);
+              } else if (isFormXVIIITotalAmountHeader(header) && form18Map.totalAmount !== '') {
+                row[header] = sanitizeValue(form18Map.totalAmount);
               }
-              if (formTSEHeadersResolved.deductionTotal && totalDeductions !== '') {
-                row[formTSEHeadersResolved.deductionTotal] = sanitizeValue(totalDeductions);
-              }
-              if (formTSEHeadersResolved.netPayable && totalEarnings !== '') {
-                const dedVal = totalDeductions === '' ? 0 : Number(totalDeductions);
-                row[formTSEHeadersResolved.netPayable] = sanitizeValue(Number(totalEarnings) - dedVal);
-              }
-            }
+            });
           }
         }
 
@@ -10679,13 +10811,14 @@ const Statutory = ({ userEmail, userRole }) => {
             }
           }
           if (Array.isArray(payrollRows) && payrollRows.length > 0) {
-            mappedData.forEach((row, rowIndex) => {
+            for (let rowIndex = 0; rowIndex < mappedData.length; rowIndex++) {
+              const row = mappedData[rowIndex];
               const empItem = employees[rowIndex];
               const em = unwrapEmp(empItem);
               const pr = resolvePayrollRowForPeople(em, payrollRows);
-              if (!pr || pr.fetch_error) return;
+              if (!pr) continue;
 
-              if (formXVIIIAutofillContext) {
+              if (formXVIIIAutofillContext && !pr.fetch_error) {
                 const form18Map = buildFormXVIIIPayrollMap(pr);
                 currentHeaders.forEach((header) => {
                   if (isFormXVIIIBasicWagesHeader(header) && form18Map.basicWages !== '') {
@@ -10705,57 +10838,25 @@ const Statutory = ({ userEmail, userRole }) => {
               }
 
               if (formTSEAutofillContext && formTSEHeadersResolved) {
-                const tseMap = buildFormTSEPayrollMap(pr);
-                const setTse = (hdr, val) => {
-                  if (hdr && val !== '' && val != null) row[hdr] = sanitizeValue(val);
-                };
-                setTse(formTSEHeadersResolved.basic, tseMap.basic);
-                setTse(formTSEHeadersResolved.hra, tseMap.hra);
-                setTse(formTSEHeadersResolved.conv, tseMap.conv);
-                setTse(formTSEHeadersResolved.medAllow, tseMap.medAllow);
-                setTse(formTSEHeadersResolved.esi, tseMap.esi);
-                setTse(formTSEHeadersResolved.pf, tseMap.pf);
-
-                const earningHeaders = [
-                  formTSEHeadersResolved.basic,
-                  formTSEHeadersResolved.da,
-                  formTSEHeadersResolved.hra,
-                  formTSEHeadersResolved.conv,
-                  formTSEHeadersResolved.medAllow,
-                  formTSEHeadersResolved.attendanceBonus,
-                  formTSEHeadersResolved.specialAllow,
-                  formTSEHeadersResolved.ot,
-                  formTSEHeadersResolved.nfh,
-                  formTSEHeadersResolved.maternityBenefit,
-                  formTSEHeadersResolved.othersEarning,
-                  formTSEHeadersResolved.subsistence
-                ];
-                const deductionHeaders = [
-                  formTSEHeadersResolved.esi,
-                  formTSEHeadersResolved.pf,
-                  formTSEHeadersResolved.pt,
-                  formTSEHeadersResolved.tos,
-                  formTSEHeadersResolved.society,
-                  formTSEHeadersResolved.insurance,
-                  formTSEHeadersResolved.salaryAdv,
-                  formTSEHeadersResolved.fines,
-                  formTSEHeadersResolved.damages,
-                  formTSEHeadersResolved.othersDeduction
-                ];
-                const totalEarnings = sumRowNumericHeaders(row, earningHeaders);
-                const totalDeductions = sumRowNumericHeaders(row, deductionHeaders);
-                if (formTSEHeadersResolved.totalEarnings && totalEarnings !== '') {
-                  row[formTSEHeadersResolved.totalEarnings] = sanitizeValue(totalEarnings);
+                let payrollPayload = pr;
+                if (
+                  pr.fetch_error ||
+                  getEarningsArray(getPayrollPayloadObject(payrollPayload)).length === 0
+                ) {
+                  const payrollEmpId = String(pr.employee_id || '').trim();
+                  if (payrollEmpId) {
+                    payrollPayload = await fetchPayrollRowForEmployee(
+                      payrollEmpId,
+                      payrollOrgIdForForms
+                    );
+                  }
                 }
-                if (formTSEHeadersResolved.deductionTotal && totalDeductions !== '') {
-                  row[formTSEHeadersResolved.deductionTotal] = sanitizeValue(totalDeductions);
-                }
-                if (formTSEHeadersResolved.netPayable && totalEarnings !== '') {
-                  const dedVal = totalDeductions === '' ? 0 : Number(totalDeductions);
-                  row[formTSEHeadersResolved.netPayable] = sanitizeValue(Number(totalEarnings) - dedVal);
+                if (payrollPayload) {
+                  applyFormTSEPayrollToRow(row, payrollPayload, formTSEHeadersResolved);
                 }
               }
-            });
+            }
+            console.log('Form T payroll enrich completed from all_salaries batch');
           }
         } catch (formTsePayErr) {
           console.warn('Form T / Form XVIII all_salaries payroll enrich skipped:', formTsePayErr?.message || formTsePayErr);
@@ -16950,7 +17051,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                                 ? 'Approved row is locked for editing'
                                               : isRejected
                                                 ? 'Already rejected'
-                                                : 'Set approval to Rejected'
+                                                : 'Set approval to Return'
                                           }
                                           onClick={(e) => {
                                             e.stopPropagation();
@@ -16958,7 +17059,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                             handleApprovalColumnAction(item, 'Rejected');
                                           }}
                                         >
-                                          {rowBusy ? '…' : 'Reject'}
+                                          {rowBusy ? '…' : 'Return'}
                                         </button>
                                       </div>
                                     </div>
@@ -16991,7 +17092,9 @@ const Statutory = ({ userEmail, userRole }) => {
                                       : normalized === 'pending'
                                         ? 'statutory-status-btn--pending'
                                       : 'statutory-status-btn--default';
-                                return <span className={`statutory-status-btn ${statusClass}`}>{norm}</span>;
+                                const displayStatus =
+                                  normalized === 'rejected' || normalized === 'reject' ? 'Returned' : norm;
+                                return <span className={`statutory-status-btn ${statusClass}`}>{displayStatus}</span>;
                               })()}
                             </td>
                             {showRemarksColumn ? (

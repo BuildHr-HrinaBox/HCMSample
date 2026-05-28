@@ -1,12 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Bell,
-  CircleHelp,
   Building,
   ClipboardList,
   AlertTriangle,
   BookMarked,
   CheckCircle2,
+  MapPin,
   ShieldCheck,
 } from 'lucide-react';
 import HcmDashboardSidebar from '../components/HcmDashboardSidebar';
@@ -23,11 +22,11 @@ const DEFAULT_METRICS = [
     tone: 'green',
   },
   {
-    key: 'due',
-    label: 'Approved',
+    key: 'sites',
+    label: 'Active Site',
     value: 0,
-    icon: CheckCircle2,
-    tone: 'green',
+    icon: MapPin,
+    tone: 'orange',
   },
   {
     key: 'approvals',
@@ -35,6 +34,13 @@ const DEFAULT_METRICS = [
     value: 0,
     icon: ClipboardList,
     tone: 'blue',
+  },
+  {
+    key: 'due',
+    label: 'Approved',
+    value: 0,
+    icon: CheckCircle2,
+    tone: 'green',
   },
   {
     key: 'policies',
@@ -46,6 +52,8 @@ const DEFAULT_METRICS = [
 ];
 
 const COMPANY_API = '/server/company_function/company';
+/** Site count from Catalyst sitemanagement_function (same as Site Management page). */
+const SITE_MANAGEMENT_API = '/server/sitemanagement_function/sitemanagement';
 const STATUTORY_API = '/server/statutoryreg_function/statutory';
 const CHECKLIST_BULK_API = '/server/checklistbulk_function/checklistbulk?action=getAll';
 
@@ -164,6 +172,49 @@ const buildActDescriptionKey = (act, description) =>
 const buildTaskKey = (item) =>
   `${String(item?.name ?? '').toLowerCase()}|${String(item?.due ?? '').toLowerCase()}|${String(item?.company ?? '').toLowerCase()}`;
 
+const SITE_MANAGEMENT_CACHE_KEY = 'siteManagementData';
+
+function activeSiteCountFromCache() {
+  try {
+    const cached = localStorage.getItem(SITE_MANAGEMENT_CACHE_KEY);
+    if (!cached) return 0;
+    const parsed = JSON.parse(cached);
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+/** Parse active site count from sitemanagement_function GET /sitemanagement (same as Site Management). */
+async function fetchActiveSiteCountFromSiteManagement() {
+  try {
+    const res = await fetch(SITE_MANAGEMENT_API, { cache: 'no-store' });
+    const text = await res.text();
+    const trimmed = text.trim();
+    if (!trimmed || trimmed[0] === '<') {
+      return activeSiteCountFromCache();
+    }
+    const data = JSON.parse(trimmed);
+    const siteDetails = data?.data?.siteDetails;
+    const listCount = Array.isArray(siteDetails) ? siteDetails.length : 0;
+    const total = parseInt(data?.data?.total, 10);
+    const fromTotal = !Number.isNaN(total) && total >= 0 ? total : 0;
+    const count = Math.max(fromTotal, listCount);
+    if (count > 0) {
+      if (listCount > 0) {
+        try {
+          localStorage.setItem(SITE_MANAGEMENT_CACHE_KEY, JSON.stringify(siteDetails));
+        } catch (_) {}
+      }
+      return count;
+    }
+    if (data?.status === 'success' || listCount > 0) return count;
+    return activeSiteCountFromCache();
+  } catch (_) {
+    return activeSiteCountFromCache();
+  }
+}
+
 const limitUpcomingTasks = (items, limit = 4) => {
   const submitted = [];
   const remaining = [];
@@ -218,8 +269,9 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
 
     const loadMetrics = async () => {
       try {
-        const [companyRes, statutoryRes, bulkRes] = await Promise.all([
+        const [companyRes, activeSites, statutoryRes, bulkRes] = await Promise.all([
           fetch(COMPANY_API, { cache: 'no-store' }),
+          fetchActiveSiteCountFromSiteManagement(),
           fetch(STATUTORY_API, { cache: 'no-store' }),
           fetch(CHECKLIST_BULK_API, { cache: 'no-store' }),
         ]);
@@ -395,6 +447,7 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
           setMetrics((prev) =>
             prev.map((metric) => {
               if (metric.key === 'companies') return { ...metric, value: activeCompanies };
+              if (metric.key === 'sites') return { ...metric, value: activeSites };
               if (metric.key === 'approvals') return { ...metric, value: pendingApprovals };
               if (metric.key === 'due') return { ...metric, value: approvedForms };
               if (metric.key === 'policies') return { ...metric, value: rejectedForms };
@@ -410,6 +463,7 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
             prev.map((metric) => {
               if (
                 metric.key === 'companies' ||
+                metric.key === 'sites' ||
                 metric.key === 'approvals' ||
                 metric.key === 'due' ||
                 metric.key === 'policies'
@@ -438,13 +492,6 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
         <header className="nd-header">
           <h1 className="nd-header-title">HR Compliance Management</h1>
           <div className="nd-header-actions">
-            <button type="button" className="nd-icon-btn nd-icon-btn--badge" aria-label="Notifications">
-              <Bell size={20} />
-              <span className="nd-badge-count">3</span>
-            </button>
-            <button type="button" className="nd-icon-btn" aria-label="Help">
-              <CircleHelp size={20} />
-            </button>
             <HcmHeaderProfileMenu userInitials={userInitials} userEmail={userEmail} />
           </div>
         </header>

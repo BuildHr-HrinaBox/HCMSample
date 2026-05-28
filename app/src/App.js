@@ -48,6 +48,8 @@ import Leave from './Pages/Leave';
 import Payroll from './Pages/Payroll';
 import Reports from './Pages/Reports';
 import Mainreport from './Pages/Mainreport';
+import ReturnedReport from './Pages/ReturnedReport';
+import Settings from './Pages/Settings';
 import AuditMasterImport from './Pages/AuditMasterImport';
 import Audit from './Pages/Audit';
 import AuditReport from './Pages/AuditReport';
@@ -367,7 +369,7 @@ function MainApp({ userRole, userEmail, userName }) {
   const isRestrictedUser = userEmail === 'afrindinu29@gmail.com';
   // Audit-only user: sidebar shows only Home, Audit, Audit Report, and site-wise audit links.
   const isAuditOnlyUser = userEmail === 'afrindinu14@gmail.com';
-  const auditOnlyAllowedPaths = ['/', '/rule-book/main-audit', '/audit-report', '/mainreport', '/rule-book/statutory'];
+  const auditOnlyAllowedPaths = ['/', '/rule-book/main-audit', '/audit-report', '/mainreport', '/returned-report', '/rule-book/statutory', '/settings'];
 
   const shouldShowOnlySiteManagement = false;
 
@@ -406,6 +408,8 @@ function MainApp({ userRole, userEmail, userName }) {
   const isChecklistBulkHcmShell = location.pathname === '/rule-book/checklistbulk';
   const isFormmasterHcmShell = location.pathname === '/rule-book/formmaster';
   const isMainReportHcmShell = location.pathname === '/mainreport';
+  const isReturnedReportHcmShell = location.pathname === '/returned-report';
+  const isSettingsHcmShell = location.pathname === '/settings';
   const isPeopleHcmShell = location.pathname === '/rule-book/people';
   const isAttendanceHcmShell = location.pathname === '/rule-book/attendance';
   const isLeaveHcmShell = location.pathname === '/rule-book/leave';
@@ -422,6 +426,8 @@ function MainApp({ userRole, userEmail, userName }) {
     isChecklistBulkHcmShell ||
     isFormmasterHcmShell ||
     isMainReportHcmShell ||
+    isReturnedReportHcmShell ||
+    isSettingsHcmShell ||
     isPeopleHcmShell ||
     isAttendanceHcmShell ||
     isLeaveHcmShell ||
@@ -470,7 +476,7 @@ function MainApp({ userRole, userEmail, userName }) {
           transition: 'margin-left 0.2s ease',
           display: 'flex',
           flexDirection: 'column',
-          background: isHcmFullShell ? '#f8f9fa' : isHomePage ? 'transparent' : '#f8f9fa',
+          background: isHcmFullShell ? '#ffffff' : isHomePage ? 'transparent' : '#f8f9fa',
         }}
       >
         {!isHomePage && !isHcmFullShell && (
@@ -483,7 +489,7 @@ function MainApp({ userRole, userEmail, userName }) {
               : isAuditOnlyUser
                 ? auditOnlyAllowedPaths
                 : isRestrictedUser 
-                  ? ['/', '/new-dashboard', '/hcm-dashboard', '/rule-book/company-details', '/rule-book/site-management', '/rule-book/se-master', '/rule-book/formmaster', '/rule-book/actsbulk', '/rule-book/act-descriptions', '/rule-book/regulationsbulk', '/rule-book/regulations', '/rule-book/statutory', '/rule-book/checklist', '/rule-book/checklistbulk', '/rule-book/people', '/rule-book/attendance', '/rule-book/leave', '/rule-book/payroll', '/rule-book/todo-list', '/rule-book/calendarbulk', '/rule-book/statutory-master', '/rule-book/statutorymasterfactory', '/form-builder', '/calendar-picker', '/compliance', '/certificate', '/mainreport', '/assessments/assessment-report', '/assessments/vendor-view', '/assessments/face-sheets', '/assessments/category-score'] 
+                  ? ['/', '/new-dashboard', '/hcm-dashboard', '/rule-book/company-details', '/rule-book/site-management', '/rule-book/se-master', '/rule-book/formmaster', '/rule-book/actsbulk', '/rule-book/act-descriptions', '/rule-book/regulationsbulk', '/rule-book/regulations', '/rule-book/statutory', '/rule-book/checklist', '/rule-book/checklistbulk', '/rule-book/people', '/rule-book/attendance', '/rule-book/leave', '/rule-book/payroll', '/rule-book/todo-list', '/rule-book/calendarbulk', '/rule-book/statutory-master', '/rule-book/statutorymasterfactory', '/form-builder', '/calendar-picker', '/compliance', '/certificate', '/mainreport', '/returned-report', '/settings', '/assessments/assessment-report', '/assessments/vendor-view', '/assessments/face-sheets', '/assessments/category-score'] 
                   : ['*']
           }>
             <Routes>
@@ -727,6 +733,33 @@ function MainApp({ userRole, userEmail, userName }) {
                     mainExtraClassName="nd-content--viewport-scroll nd-content--mainreport"
                   >
                     <Mainreport userEmail={userEmail} />
+                  </HcmDashboardPageShell>
+                }
+              />
+              <Route
+                path="/settings"
+                element={
+                  <HcmDashboardPageShell
+                    userName={userName || 'User'}
+                    userRole={userRole || 'App User'}
+                    userInitials={dashboardInitials}
+                    userEmail={userEmail}
+                  >
+                    <Settings />
+                  </HcmDashboardPageShell>
+                }
+              />
+              <Route
+                path="/returned-report"
+                element={
+                  <HcmDashboardPageShell
+                    userName={userName || 'User'}
+                    userRole={userRole || 'App User'}
+                    userInitials={dashboardInitials}
+                    userEmail={userEmail}
+                    mainExtraClassName="nd-content--viewport-scroll nd-content--mainreport"
+                  >
+                    <ReturnedReport userEmail={userEmail} />
                   </HcmDashboardPageShell>
                 }
               />

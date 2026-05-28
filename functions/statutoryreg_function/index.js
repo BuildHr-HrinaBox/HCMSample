@@ -110,18 +110,130 @@ async function updateStatutoryRow(table, updateData) {
   throw lastErr;
 }
 
+/** Statutory UI "Returned" / approver reject — Status is often stored as Rejected. */
+function isReturnedStatutoryDecision(status, approval) {
+  const s = String(status || '').trim().toLowerCase();
+  const a = String(approval || '').trim().toLowerCase();
+  return (
+    s === 'rejected' ||
+    s === 'returned' ||
+    a === 'rejected' ||
+    a === 'reject'
+  );
+}
+
+/**
+ * When a statutory line is returned/rejected with remarks, copy snapshot into Data Store table "Returned".
+ * Non-fatal: statutory update still succeeds if Returned insert fails.
+ */
+async function persistReturnedTableRow(catalyst, source) {
+  const remarks = String(source?.remarks ?? source?.Remarks ?? '').trim();
+  if (!remarks) return null;
+
+  const siteName =
+    source?.site != null ? String(source.site).trim() : String(source?.Site ?? '').trim();
+  const monthFilter = resolveMonthFilterFromSource(source);
+
+  try {
+    const returnedTable = catalyst.datastore().table('Returned');
+    const row = {
+      Site: siteName || null,
+      MonthFilter: monthFilter,
+      Act: source?.act != null ? String(source.act).trim() : String(source?.Act ?? '').trim(),
+      Description:
+        source?.description != null
+          ? String(source.description).trim()
+          : String(source?.Description ?? '').trim(),
+      FormName:
+        source?.formName != null
+          ? String(source.formName).trim()
+          : String(source?.FormName ?? '').trim(),
+      Status: 'Returned',
+      DueDate:
+        source?.dueDate != null ? String(source.dueDate).trim() : String(source?.DueDate ?? '').trim(),
+      Remarks: remarks
+    };
+    let inserted;
+    try {
+      inserted = await returnedTable.insertRow(row);
+    } catch (err) {
+      if (isDatastoreColumnError(err) && row.MonthFilter != null) {
+        const { MonthFilter: _mf, ...withoutMonth } = row;
+        inserted = await returnedTable.insertRow(withoutMonth);
+        console.warn('Returned insert: retried without MonthFilter:', err.message);
+      } else {
+        throw err;
+      }
+    }
+    console.log('Returned table row inserted:', inserted?.ROWID || inserted, {
+      site: siteName,
+      monthFilter
+    });
+    return inserted;
+  } catch (err) {
+    console.error('persistReturnedTableRow failed:', err.message || err);
+    return null;
+  }
+}
+
+async function syncReturnedTableIfApplicable(catalyst, statutoryRow, context = {}) {
+  if (!statutoryRow || !isReturnedStatutoryDecision(statutoryRow.Status, statutoryRow.Approval)) {
+    return null;
+  }
+  const reqBody = context.requestBody && typeof context.requestBody === 'object' ? context.requestBody : {};
+  const existing = context.existingRecord && typeof context.existingRecord === 'object' ? context.existingRecord : {};
+  const siteName = resolveSiteNameForReturned(statutoryRow, existing, reqBody);
+  const monthFilter =
+    trimMonthFilterForDatastore(statutoryRow.MonthFilter) ||
+    resolveMonthFilterFromSource(reqBody) ||
+    trimMonthFilterForDatastore(existing.MonthFilter);
+
+  return persistReturnedTableRow(catalyst, {
+    site: siteName,
+    MonthFilter: monthFilter,
+    act: pickNonEmptyText(reqBody.act, reqBody.Act, statutoryRow.Act, existing.Act),
+    description: pickNonEmptyText(
+      reqBody.description,
+      reqBody.Description,
+      statutoryRow.Description,
+      existing.Description
+    ),
+    formName: pickNonEmptyText(
+      reqBody.formName,
+      reqBody.FormName,
+      statutoryRow.FormName,
+      existing.FormName
+    ),
+    dueDate: pickNonEmptyText(reqBody.dueDate, reqBody.DueDate, statutoryRow.DueDate, existing.DueDate),
+    remarks: pickNonEmptyText(statutoryRow.Remarks, reqBody.remarks, reqBody.Remarks)
+  });
+}
+
 /** Save current statutory grid snapshot into SampleData table. */
 async function persistSampleDataSnapshot(catalyst, payload) {
   try {
+    const headers = Array.isArray(payload?.headers) ? payload.headers : [];
+    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+    const headerFormData =
+      payload?.headerFormData && typeof payload.headerFormData === 'object' && !Array.isArray(payload.headerFormData)
+        ? payload.headerFormData
+        : {};
+    const statutoryId =
+      payload?.statutoryId != null ? String(payload.statutoryId).trim() : '';
+    const hasUsableSnapshot = headers.length > 0 || rows.length > 0 || Object.keys(headerFormData).length > 0;
+    if (!statutoryId || !hasUsableSnapshot) {
+      return;
+    }
     const table = catalyst.datastore().table('SampleData');
     const headerPayload = {
       formName: payload?.formName || null,
-      statutoryId: payload?.statutoryId || null,
+      statutoryId,
       monthfilter: payload?.monthfilter || null,
-      headers: Array.isArray(payload?.headers) ? payload.headers : []
+      headers,
+      headerFormData
     };
     const dataPayload = {
-      rows: Array.isArray(payload?.rows) ? payload.rows : []
+      rows
     };
     await table.insertRow({
       Header: JSON.stringify(headerPayload),
@@ -147,6 +259,49 @@ function trimMonthFilterForDatastore(value) {
   const s = String(value).trim();
   if (s === '' || s === 'null' || s === 'undefined') return null;
   return s;
+}
+
+function resolveMonthFilterFromSource(source) {
+  if (!source || typeof source !== 'object') return null;
+  const raw =
+    source.monthfilter !== undefined
+      ? source.monthfilter
+      : source.monthFilter !== undefined
+        ? source.monthFilter
+        : source.MonthFilter;
+  return trimMonthFilterForDatastore(raw);
+}
+
+function pickNonEmptyText(...values) {
+  for (const v of values) {
+    const s = String(v ?? '').trim();
+    if (s && s !== 'null' && s !== 'undefined') return s;
+  }
+  return '';
+}
+
+/** Reject accidental time/id strings in Site (e.g. Catalyst CREATEDTIME shown in wrong column). */
+function looksLikeInvalidReturnedSiteValue(value) {
+  const s = String(value || '').trim();
+  if (!s) return true;
+  if (/^\d{1,2}:\d{2}:\d{2,}$/.test(s)) return true;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return true;
+  if (/^\d{10,}$/.test(s)) return true;
+  return false;
+}
+
+function resolveSiteNameForReturned(statutoryRow, existingRecord, reqBody) {
+  const candidates = [
+    reqBody?.site,
+    reqBody?.Site,
+    statutoryRow?.Site,
+    existingRecord?.Site
+  ];
+  for (const c of candidates) {
+    const s = String(c ?? '').trim();
+    if (s && !looksLikeInvalidReturnedSiteValue(s)) return s;
+  }
+  return '';
 }
 
 function safeJsonParse(value, fallback = null) {
@@ -904,6 +1059,10 @@ app.get('/statutory/:id/sampledata', async (req, res) => {
         const dataObj = safeJsonParse(row?.Data, {});
         const statutoryId = headerObj?.statutoryId != null ? String(headerObj.statutoryId).trim() : '';
         const headers = Array.isArray(headerObj?.headers) ? headerObj.headers : [];
+        const headerFormData =
+          headerObj?.headerFormData && typeof headerObj.headerFormData === 'object' && !Array.isArray(headerObj.headerFormData)
+            ? headerObj.headerFormData
+            : {};
         const tableRows = Array.isArray(dataObj?.rows) ? dataObj.rows : [];
         return {
           rowid: row?.ROWID != null ? String(row.ROWID) : '',
@@ -912,6 +1071,7 @@ app.get('/statutory/:id/sampledata', async (req, res) => {
           formName: headerObj?.formName || null,
           monthfilter: headerObj?.monthfilter || null,
           headers,
+          headerFormData,
           rows: tableRows
         };
       })
@@ -930,7 +1090,10 @@ app.get('/statutory/:id/sampledata', async (req, res) => {
       return rb - ra;
     });
 
-    const latest = matching[0];
+    const latest =
+      matching.find((row) => Array.isArray(row.rows) && row.rows.length > 0) ||
+      matching.find((row) => Array.isArray(row.headers) && row.headers.length > 0) ||
+      matching[0];
     return res.status(200).json({
       status: 'success',
       data: {
@@ -939,6 +1102,7 @@ app.get('/statutory/:id/sampledata', async (req, res) => {
           formName: latest.formName,
           monthfilter: latest.monthfilter,
           headers: latest.headers,
+          headerFormData: latest.headerFormData,
           rows: latest.rows
         }
       }
@@ -977,6 +1141,7 @@ app.post('/statutory', async (req, res) => {
       sendForApproval,
       remarks,
       sampleDataHeader,
+      sampleHeaderFormData,
       sampleData
     } = req.body;
 
@@ -1062,8 +1227,11 @@ app.post('/statutory', async (req, res) => {
       formName: created.FormName || formName || null,
       monthfilter: created.MonthFilter || trimMonthFilterForDatastore(monthfilterRaw) || null,
       headers: sampleDataHeader,
+      headerFormData: sampleHeaderFormData,
       rows: sampleData
     });
+
+    await syncReturnedTableIfApplicable(catalyst, created, { requestBody: req.body });
     
     res.status(201).json({
       status: 'success',
@@ -1184,6 +1352,7 @@ app.put('/statutory/:id', async (req, res) => {
       sendForApproval,
       remarks,
       sampleDataHeader,
+      sampleHeaderFormData,
       sampleData
     } = req.body;
     const monthfilterRaw = normalizeMonthFilterValue(req.body);
@@ -1350,9 +1519,15 @@ app.put('/statutory/:id', async (req, res) => {
     await persistSampleDataSnapshot(catalyst, {
       statutoryId: updated.ROWID || id,
       formName: updated.FormName || formName || null,
-      monthfilter: updated.MonthFilter || monthfilter || null,
+      monthfilter: updated.MonthFilter || trimMonthFilterForDatastore(monthfilterRaw) || existingRecord?.MonthFilter || null,
       headers: sampleDataHeader,
+      headerFormData: sampleHeaderFormData,
       rows: sampleData
+    });
+
+    await syncReturnedTableIfApplicable(catalyst, updated, {
+      existingRecord,
+      requestBody: req.body
     });
     
     res.status(200).json({

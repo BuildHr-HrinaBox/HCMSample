@@ -202,7 +202,9 @@
 
 .notification-status-tags {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 0.5rem;
 }
 
@@ -218,25 +220,50 @@
   cursor: default;
 }
 
+.status-tag.returned,
 .status-tag.pending {
   background: #dc2626;
 }
 
+.status-tag.returned.is-active,
 .status-tag.pending.is-active {
   background: #b91c1c;
   box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.35);
 }
 
+.status-tag.status-pending {
+  background: #ca8a04;
+}
+
+.status-tag.status-pending.is-active {
+  background: #a16207;
+  box-shadow: 0 0 0 2px rgba(202, 138, 4, 0.35);
+}
+
+.status-tag.yet-to-complete {
+  background: #ea580c;
+}
+
+.status-tag.yet-to-complete.is-active {
+  background: #c2410c;
+  box-shadow: 0 0 0 2px rgba(234, 88, 12, 0.35);
+}
+
 .status-tag.completed {
-  background: #9ca3af;
+  background: #16a34a;
 }
 
 .status-tag.completed.is-active {
-  background: #16a34a;
+  background: #15803d;
   box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.35);
 }
 
-.status-tag.is-inactive {
+.status-tag.completed.is-inactive {
+  background: #22c55e;
+  opacity: 0.9;
+}
+
+.status-tag.is-inactive:not(.completed) {
   opacity: 0.55;
 }
 
@@ -553,8 +580,10 @@
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 2px;
   position: relative;
   font-family: inherit;
   padding: 0;
@@ -569,6 +598,22 @@
 
 .calendar-day-number {
   line-height: 1;
+}
+
+.calendar-day-returned-count {
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: #dc2626;
+  background: #fee2e2;
+  border-radius: 6px;
+  padding: 1px 4px;
+  min-width: 14px;
+  text-align: center;
+}
+
+.calendar-day.has-returned:not(.selected) {
+  border-color: #fecaca;
 }
 
 .calendar-day:hover {

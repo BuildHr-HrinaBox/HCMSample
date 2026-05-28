@@ -411,11 +411,36 @@ app.get('/sitemanagement', async (req, res) => {
     
     console.log('Executing count query...');
     const countRows = await zcql.executeZCQLQuery('SELECT COUNT(ROWID) as count FROM Site');
-    const total = parseInt(countRows[0].Site.count, 10) || 0;
+    const countCell = countRows[0]?.Site || countRows[0]?.site || {};
+    const total = parseInt(
+      countCell.count ?? countCell.COUNT ?? countCell['COUNT(ROWID)'] ?? 0,
+      10
+    ) || 0;
     console.log('Total records:', total);
     
     console.log('Executing data query...');
-    const rows = await zcql.executeZCQLQuery(`SELECT ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, CREATEDTIME, MODIFIEDTIME FROM Site ORDER BY ROWID DESC ${limitClause}`);
+    const siteSelectFull =
+      'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, CREATEDTIME, MODIFIEDTIME';
+    const siteSelectBase =
+      'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, CREATEDTIME, MODIFIEDTIME';
+    let rows;
+    let hasContractorColumns = true;
+    try {
+      rows = await zcql.executeZCQLQuery(
+        `SELECT ${siteSelectFull} FROM Site ORDER BY ROWID DESC ${limitClause}`
+      );
+    } catch (queryErr) {
+      const errMsg = String(queryErr?.message || queryErr || '');
+      if (/invalid|unknown|no such|column/i.test(errMsg)) {
+        console.warn('Site list: contractor columns missing, using base SELECT:', errMsg);
+        hasContractorColumns = false;
+        rows = await zcql.executeZCQLQuery(
+          `SELECT ${siteSelectBase} FROM Site ORDER BY ROWID DESC ${limitClause}`
+        );
+      } else {
+        throw queryErr;
+      }
+    }
     console.log('Raw rows from database:', JSON.stringify(rows, null, 2));
     
     const siteDetails = rows.map(r => ({
@@ -426,12 +451,12 @@ app.get('/sitemanagement', async (req, res) => {
       siteState: r.Site.SiteState,
       sitePostalCode: r.Site.SitePostalCode,
       unitNo: r.Site.UNITNO,
-      contractorName: r.Site.ContractorName,
-      contractorAddress: r.Site.ContractorAddress,
-      contractorEmail: r.Site.ContractorEmail,
-      contractorPhone: r.Site.ContractorPhone,
-      contractorCity: r.Site.ContractorCity,
-      contractorState: r.Site.ContractorState,
+      contractorName: hasContractorColumns ? r.Site.ContractorName : '',
+      contractorAddress: hasContractorColumns ? r.Site.ContractorAddress : '',
+      contractorEmail: hasContractorColumns ? r.Site.ContractorEmail : '',
+      contractorPhone: hasContractorColumns ? r.Site.ContractorPhone : '',
+      contractorCity: hasContractorColumns ? r.Site.ContractorCity : '',
+      contractorState: hasContractorColumns ? r.Site.ContractorState : '',
       inchargeName: r.Site.InchargeName,
       inchargePhone: r.Site.InchargePhone,
       inchargeEmail: r.Site.InchargeEmail,

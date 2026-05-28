@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Bell, CircleHelp, MoreVertical } from 'lucide-react';
+import { MoreVertical } from 'lucide-react';
 import { performLogout } from '../utils/performLogout';
 import './Header.css';
 
@@ -47,13 +47,6 @@ const Header = ({ onMenuToggle, userEmail, userName }) => {
         <h1 className="hcm-app-header-title">HR Compliance Management</h1>
       </div>
       <div className="hcm-app-header-right">
-        <button type="button" className="hcm-app-header-icon-btn" aria-label="Notifications">
-          <Bell size={20} strokeWidth={2} />
-          <span className="hcm-app-header-badge">3</span>
-        </button>
-        <button type="button" className="hcm-app-header-icon-btn" aria-label="Help">
-          <CircleHelp size={20} strokeWidth={2} />
-        </button>
         <div ref={profileRef} style={{ position: 'relative' }}>
           <button
             type="button"

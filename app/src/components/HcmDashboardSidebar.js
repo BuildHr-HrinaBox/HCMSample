@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -6,10 +6,10 @@ import {
   BookOpen,
   Calendar,
   ArrowLeftRight,
-  ChevronDown,
   ChevronRight,
   FileText,
   Download,
+  Settings as SettingsIcon,
 } from 'lucide-react';
 import '../Pages/newdashboard.css';
 import vayonaBrandLogo from './Yanona Logo.png';
@@ -25,7 +25,7 @@ export const HCM_ORGANIZATION_CHILDREN = [
 
 /** Statutory / checklist bulk / form master — nested under sidebar "Transaction" */
 export const HCM_TRANSACTION_CHILDREN = [
-  { label: 'Transaction', to: '/rule-book/statutory' },
+  { label: 'Statutory', to: '/rule-book/statutory' },
   { label: 'Checklist Master', to: '/rule-book/checklistbulk' },
 ];
 
@@ -71,7 +71,9 @@ const NAV = [
     children: HCM_FORM_FETCH_CHILDREN,
   },
   { type: 'link', id: 'calendar', label: 'Calendar', icon: Calendar, to: '/calendar-picker' },
+  { type: 'link', id: 'settings', label: 'Settings', icon: SettingsIcon, to: '/settings' },
   { type: 'link', id: 'main-report', label: 'Reports', icon: FileText, to: '/mainreport' },
+  { type: 'link', id: 'returned-report', label: 'Returned Report', icon: FileText, to: '/returned-report' },
 ];
 
 /**
@@ -118,21 +120,42 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
   const formFetchSectionActive = filteredNav.some(
     (i) => i.type === 'group' && i.id === 'formFetch' && (i.children || []).some((c) => location.pathname === c.to)
   );
-  // Accordion open group: only one group open at a time.
-  const [openGroupId, setOpenGroupId] = useState(() => {
-    if (orgSectionActive) return 'org';
-    if (librarySectionActive) return 'library';
-    if (transactionSectionActive) return 'transaction';
-    if (formFetchSectionActive) return 'formFetch';
-    return null;
+  // Start collapsed so route-driven open runs after paint (smooth expand animation).
+  const [openGroups, setOpenGroups] = useState({
+    org: false,
+    library: false,
+    transaction: false,
+    formFetch: false,
   });
+  const userCollapsedGroupsRef = useRef({});
 
   useEffect(() => {
-    if (orgSectionActive) setOpenGroupId('org');
-    else if (librarySectionActive) setOpenGroupId('library');
-    else if (transactionSectionActive) setOpenGroupId('transaction');
-    else if (formFetchSectionActive) setOpenGroupId('formFetch');
+    userCollapsedGroupsRef.current = {};
+  }, [location.pathname]);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      setOpenGroups((prev) => ({
+        ...prev,
+        ...(orgSectionActive && !userCollapsedGroupsRef.current.org ? { org: true } : {}),
+        ...(librarySectionActive && !userCollapsedGroupsRef.current.library ? { library: true } : {}),
+        ...(transactionSectionActive && !userCollapsedGroupsRef.current.transaction
+          ? { transaction: true }
+          : {}),
+        ...(formFetchSectionActive && !userCollapsedGroupsRef.current.formFetch ? { formFetch: true } : {}),
+      }));
+    });
+    return () => cancelAnimationFrame(frame);
   }, [orgSectionActive, librarySectionActive, transactionSectionActive, formFetchSectionActive]);
+
+  const toggleGroup = (groupId) => {
+    setOpenGroups((prev) => {
+      const nextOpen = !prev[groupId];
+      if (!nextOpen) userCollapsedGroupsRef.current[groupId] = true;
+      else delete userCollapsedGroupsRef.current[groupId];
+      return { ...prev, [groupId]: nextOpen };
+    });
+  };
 
   const isLinkActive = (item) => {
     if (item.to === '/') return location.pathname === '/';
@@ -158,46 +181,48 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
           {filteredNav.map((item) => {
             if (item.type === 'link') {
               const Icon = item.icon;
-              const active = isLinkActive(item) && openGroupId === null;
+              const active = isLinkActive(item);
               return (
                 <Link
                   key={item.id}
                   to={item.to}
-                  className={`nd-nav-item${item.id === 'calendar' ? ' nd-nav-item--calendar-centered' : ''}${active ? ' nd-nav-item--active' : ''}`}
+                  title={item.label}
+                  className={`nd-nav-item nd-nav-item--leaf${item.id === 'calendar' ? ' nd-nav-item--calendar-centered' : ''}${item.id === 'returned-report' ? ' nd-nav-item--returned-report' : ''}${active ? ' nd-nav-item--active' : ''}`}
                 >
-                  <Icon size={20} strokeWidth={2} />
-                  <span>{item.label}</span>
+                  <Icon size={20} strokeWidth={2} aria-hidden />
+                  <span className="nd-nav-item-label">{item.label}</span>
                 </Link>
               );
             }
             if (item.type === 'group') {
               const Icon = item.icon;
-              const groupOpen = openGroupId === item.id;
-              const headerActive =
+              const groupOpen = !!openGroups[item.id];
+              const sectionActive =
                 item.id === 'org'
-                  ? groupOpen || (orgSectionActive && openGroupId === null)
+                  ? orgSectionActive
                   : item.id === 'library'
-                    ? groupOpen || (librarySectionActive && openGroupId === null)
+                    ? librarySectionActive
                     : item.id === 'transaction'
-                      ? groupOpen || (transactionSectionActive && openGroupId === null)
+                      ? transactionSectionActive
                       : item.id === 'formFetch'
-                        ? groupOpen || (formFetchSectionActive && openGroupId === null)
+                        ? formFetchSectionActive
                         : false;
               return (
                 <div key={item.id} className="nd-nav-group">
                   <button
                     type="button"
-                    className={`nd-nav-group-header${headerActive ? ' nd-nav-group-header--active' : ''}${groupOpen ? ' nd-nav-group-header--open' : ''}`}
-                    onClick={() => setOpenGroupId((prev) => (prev === item.id ? null : item.id))}
+                    className={`nd-nav-group-header${groupOpen ? ' nd-nav-group-header--active nd-nav-group-header--open' : ''}${!groupOpen && sectionActive ? ' nd-nav-group-header--route' : ''}`}
+                    onClick={() => toggleGroup(item.id)}
                     aria-expanded={groupOpen}
                   >
                     <Icon size={20} strokeWidth={2} />
                     <span className="nd-nav-group-label">{item.label}</span>
-                    {groupOpen ? (
-                      <ChevronDown size={18} strokeWidth={2} className="nd-nav-group-chevron" />
-                    ) : (
-                      <ChevronRight size={18} strokeWidth={2} className="nd-nav-group-chevron" />
-                    )}
+                    <ChevronRight
+                      size={18}
+                      strokeWidth={2}
+                      className={`nd-nav-group-chevron${groupOpen ? ' nd-nav-group-chevron--open' : ''}`}
+                      aria-hidden
+                    />
                   </button>
                   <div className={`nd-nav-group-panel${groupOpen ? ' nd-nav-group-panel--open' : ''}`}>
                     <div className="nd-nav-group-panel-inner">

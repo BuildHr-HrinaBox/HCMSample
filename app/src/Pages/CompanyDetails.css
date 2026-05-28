@@ -13,18 +13,24 @@ main.nd-content.nd-content--embedded-page > .company-details-page.site-managemen
 .nd-content--embedded-page .company-details-page.site-management-hcm-route {
   margin-top: 0;
   padding-top: 8px;
+  background-color: #ffffff;
 }
 
 /* Company Details list: drop the outer white “card” only; toolbar + scrollable table + pagination stay as-is */
 .company-details-page.company-details-hcm-route:not(.company-details-page-form-open) .company-details-shell-box {
-  background: transparent;
+  background: #ffffff;
   border: none;
   box-shadow: none;
   padding: 0;
 }
 
 .company-details-page.company-details-hcm-route:not(.company-details-page-form-open) .company-details-table-wrap {
-  background: transparent;
+  background: #ffffff;
+}
+
+.company-details-page.company-details-hcm-route.company-details-page-form-open,
+.company-details-page.site-management-hcm-route.company-details-page-form-open {
+  background-color: #ffffff;
 }
 
 /* Inside HcmDashboardPageShell: same usable width as main dashboard (nd-content horizontal padding only) */

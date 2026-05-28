@@ -1,0 +1,150 @@
+.settings-page {
+  min-height: 100%;
+}
+
+.settings-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.settings-page-heading {
+  padding: 2px 2px 12px;
+}
+
+.settings-page-heading--row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-page-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.settings-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-list-card {
+  min-height: 220px;
+}
+
+.settings-list-body {
+  padding: 16px 20px 20px;
+}
+
+.settings-list-empty {
+  margin: 0;
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
+.settings-list-item {
+  display: grid;
+  gap: 10px;
+  font-size: 0.92rem;
+  color: #1f2937;
+}
+
+.settings-table-actions {
+  justify-content: flex-start;
+}
+
+.settings-data-table {
+  table-layout: fixed;
+}
+
+.settings-data-table th:nth-child(1),
+.settings-data-table td:nth-child(1) {
+  width: 40px;
+  min-width: 40px;
+}
+
+.settings-data-table th:nth-child(2),
+.settings-data-table td:nth-child(2) {
+  width: 56px;
+  min-width: 56px;
+}
+
+.settings-data-table th:nth-child(3),
+.settings-data-table td:nth-child(3) {
+  width: 38%;
+}
+
+.settings-data-table th:nth-child(4),
+.settings-data-table td:nth-child(4) {
+  width: 34%;
+}
+
+.settings-data-table th:nth-child(5),
+.settings-data-table td:nth-child(5) {
+  width: 140px;
+  min-width: 140px;
+  text-align: left;
+}
+
+.settings-data-table td:nth-child(5) .company-details-table-action {
+  white-space: nowrap;
+}
+
+.settings-inline-form-wrap {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.settings-modal.company-details-modal {
+  width: 100%;
+  max-height: none;
+  height: 100%;
+  border-radius: 0;
+  border: 1px solid #e8eaed;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18);
+}
+
+.settings-modal .company-details-modal-body {
+  padding: 18px 18px 8px;
+}
+
+.settings-section-card.company-details-section-card {
+  margin-bottom: 8px;
+  padding: 16px 16px 18px;
+}
+
+.settings-fields-grid.company-details-fields-grid {
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.settings-file-name {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #64748b;
+}
+
+.settings-message {
+  margin: 8px 18px 0;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 0.84rem;
+  padding: 10px 12px;
+}
+
+.settings-modal .company-details-modal-footer {
+  padding: 10px 18px;
+}
+
+@media (max-width: 720px) {
+  .settings-modal.company-details-modal {
+    width: 100%;
+  }
+}

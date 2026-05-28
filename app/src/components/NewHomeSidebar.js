@@ -129,6 +129,7 @@ const navigationItems = [
     ],
   },
   { type: 'item', icon: <BarChart3 size={20} strokeWidth={2} />, label: 'Report', path: '/reports', color: 'blue' },
+  { type: 'item', icon: <FileText size={20} strokeWidth={2} />, label: 'Returned Report', path: '/returned-report', color: 'blue' },
 ];
 
 const auditOnlyNavItems = [
@@ -142,6 +143,7 @@ const auditOnlyNavItems = [
       { label: 'Main Audit', path: '/rule-book/main-audit' },
       { label: 'Audit Report', path: '/audit-report' },
       { label: 'Reports', path: '/mainreport' },
+      { label: 'Returned Report', path: '/returned-report' },
     ],
   },
   {

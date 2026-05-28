@@ -367,6 +367,7 @@ function buildStatutoryDraftRow(stRow) {
   const formName = String(stRow.FormName || '').trim();
   const act = getActFromAnyRow(stRow);
   const description = getDescriptionFromAnyRow(stRow);
+  const sector = getSectorFromAnyRow(stRow);
   const approved = isStatutoryTransactionApproved(stRow);
   const hasDraftStored =
     stRow.DraftFile != null && String(stRow.DraftFile).trim() !== '' && String(stRow.DraftFile).toLowerCase() !== 'null';
@@ -389,6 +390,7 @@ function buildStatutoryDraftRow(stRow) {
     formName,
     act,
     description,
+    sector,
     monthFilter,
     draftFile: approved ? draftFile : null,
     draftFileName: approved ? draftFileName : '',
@@ -418,6 +420,10 @@ function getDescriptionFromAnyRow(row) {
   return String(row?.Description || row?.description || '').trim();
 }
 
+function getSectorFromAnyRow(row) {
+  return String(row?.Sector || row?.sector || '').trim();
+}
+
 function getMasterKeyFromAnyRow(row) {
   const formKey = normalizeFormKey(getFormNameFromAnyRow(row));
   const actKey = normalizeFormKey(getActFromAnyRow(row));
@@ -425,7 +431,7 @@ function getMasterKeyFromAnyRow(row) {
   return `${formKey}|${actKey}|${descKey}`;
 }
 
-function buildEmptyFormRow(formKey, formName, act, description, reportMonthNorm) {
+function buildEmptyFormRow(formKey, formName, act, description, sector, reportMonthNorm) {
   const mf = normalizeMonth(reportMonthNorm) || String(reportMonthNorm || '').trim();
   return {
     rowId: `master_${formKey}`,
@@ -433,6 +439,7 @@ function buildEmptyFormRow(formKey, formName, act, description, reportMonthNorm)
     formName: formName || '',
     act: act || '',
     description: description || '',
+    sector: sector || '',
     monthFilter: mf,
     draftFile: null,
     draftFileName: '',
@@ -615,7 +622,8 @@ app.get('/mainreport/entries', async (req, res) => {
         formsMap.set(key, {
           formName: name,
           act: getActFromAnyRow(row),
-          description: getDescriptionFromAnyRow(row)
+          description: getDescriptionFromAnyRow(row),
+          sector: getSectorFromAnyRow(row)
         });
       }
     }
@@ -628,7 +636,8 @@ app.get('/mainreport/entries', async (req, res) => {
         formsMap.set(key, {
           formName: name,
           act: getActFromAnyRow(row),
-          description: getDescriptionFromAnyRow(row)
+          description: getDescriptionFromAnyRow(row),
+          sector: getSectorFromAnyRow(row)
         });
       }
     }
@@ -644,10 +653,11 @@ app.get('/mainreport/entries', async (req, res) => {
         const built = buildStatutoryDraftRow(picked);
         if (!built.act && meta?.act) built.act = meta.act;
         if (!built.description && meta?.description) built.description = meta.description;
+        if (meta?.sector) built.sector = meta.sector;
         built.monthFilter = getStatutoryMonthFilterDisplay(picked, reportMonthNorm) || reportMonthNorm;
         out.push(built);
       } else {
-        out.push(buildEmptyFormRow(formKey, meta?.formName, meta?.act, meta?.description, reportMonthNorm));
+        out.push(buildEmptyFormRow(formKey, meta?.formName, meta?.act, meta?.description, meta?.sector, reportMonthNorm));
       }
     }
 
@@ -663,6 +673,187 @@ app.get('/mainreport/entries', async (req, res) => {
   } catch (err) {
     console.error('mainreport/entries:', err);
     res.status(500).json({ status: 'failure', message: err.message || 'Failed to load entries.' });
+  }
+});
+
+function looksLikeInvalidReturnedSiteValue(value) {
+  const s = String(value || '').trim();
+  if (!s) return true;
+  if (/^\d{1,2}:\d{2}:\d{2,}$/.test(s)) return true;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return true;
+  if (/^\d{10,}$/.test(s)) return true;
+  return false;
+}
+
+function getReturnedRowYear(row) {
+  const ct = row?.CREATEDTIME || row?.createdtime || row?.MODIFIEDTIME || row?.modifiedtime;
+  if (ct) {
+    const d = new Date(ct);
+    if (!Number.isNaN(d.getTime())) return d.getFullYear();
+  }
+  const due = row?.DueDate || row?.dueDate;
+  if (due) {
+    const d = new Date(due);
+    if (!Number.isNaN(d.getTime())) return d.getFullYear();
+  }
+  return null;
+}
+
+function returnedRowMatchesYear(row, yearParam) {
+  const y = getReturnedRowYear(row);
+  if (y == null) return true;
+  return yearMatch(y, yearParam);
+}
+
+function returnedRowMatchesMonth(row, monthParam) {
+  const mf = row?.MonthFilter || row?.monthFilter || '';
+  if (!mf) return false;
+  return monthsMatch(mf, monthParam);
+}
+
+function buildReturnedReportApiRow(row) {
+  const siteRaw = String(row?.Site || row?.site || '').trim();
+  const site = looksLikeInvalidReturnedSiteValue(siteRaw) ? '' : siteRaw;
+  return {
+    rowId: row?.ROWID != null ? String(row.ROWID) : null,
+    formName: getFormNameFromAnyRow(row),
+    act: getActFromAnyRow(row),
+    description: getDescriptionFromAnyRow(row),
+    monthFilter: normalizeMonth(row?.MonthFilter || row?.monthFilter || '') || '',
+    site,
+    status: String(row?.Status || row?.status || 'Returned').trim() || 'Returned',
+    remarks: String(row?.Remarks || row?.remarks || '').trim(),
+    dueDate: String(row?.DueDate || row?.dueDate || '').trim(),
+    returnedAt: row?.CREATEDTIME || row?.createdtime || row?.MODIFIEDTIME || null
+  };
+}
+
+async function loadScopedReturnedRows(catalyst, userEmail, siteParam) {
+  const inchargeScope = await getInchargeReportScope(catalyst, userEmail);
+  const allowedActCategories = inchargeScope.actCategories;
+
+  let narrowActCategories = allowedActCategories;
+  if (siteParam) {
+    const siteRow = await findSiteRowByName(catalyst, siteParam);
+    if (!siteRow) return { rows: [], inchargeScope, allowedActCategories };
+    const siteCat = getActCategoryForSiteRow(siteRow, siteParam);
+    const siteCats = [siteCat];
+    if (Array.isArray(allowedActCategories) && allowedActCategories.length > 0) {
+      const intersection = siteCats.filter((c) => allowedActCategories.includes(c));
+      if (intersection.length === 0) {
+        return { rows: [], inchargeScope, allowedActCategories };
+      }
+      narrowActCategories = intersection;
+    } else {
+      narrowActCategories = siteCats;
+    }
+  }
+
+  const returnedTable = catalyst.datastore().table('Returned');
+  const all = await returnedTable.getAllRows();
+  let scoped = filterRowsByActCategoryScope(all, narrowActCategories);
+
+  if (inchargeScope.siteNamesLower && inchargeScope.siteNamesLower.size > 0) {
+    scoped = scoped.filter((r) => {
+      const site = String(r.Site || r.site || '')
+        .trim()
+        .toLowerCase();
+      return site && inchargeScope.siteNamesLower.has(site);
+    });
+  }
+
+  if (siteParam) {
+    const want = String(siteParam).trim().toLowerCase();
+    scoped = scoped.filter((r) => {
+      const site = String(r.Site || r.site || '')
+        .trim()
+        .toLowerCase();
+      return site === want;
+    });
+  }
+
+  scoped = scoped.filter((r) => !looksLikeInvalidReturnedSiteValue(r.Site || r.site));
+
+  return { rows: scoped, inchargeScope, allowedActCategories };
+}
+
+/** Years/months derived from Returned table row timestamps and MonthFilter. */
+app.get('/mainreport/returned-summary', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const { catalyst } = res.locals;
+    const currentYear = new Date().getFullYear();
+    const yearNums = new Set([currentYear]);
+    const monthsByYear = {};
+
+    try {
+      const all = await catalyst.datastore().table('Returned').getAllRows();
+      for (const r of all) {
+        const y = getReturnedRowYear(r);
+        if (y == null || Number.isNaN(y)) continue;
+        yearNums.add(y);
+        const yk = String(y);
+        const m = normalizeMonth(r.MonthFilter || r.monthFilter || '');
+        if (!m) continue;
+        if (!monthsByYear[yk]) monthsByYear[yk] = [];
+        monthsByYear[yk].push(m);
+      }
+    } catch (err) {
+      console.warn('returned-summary: Returned table read failed:', err?.message || err);
+    }
+
+    for (const k of Object.keys(monthsByYear)) {
+      monthsByYear[k] = sortMonths(monthsByYear[k]);
+    }
+
+    const years = [...yearNums].sort((a, b) => b - a).map(String);
+    res.status(200).json({
+      status: 'success',
+      data: { years, monthsByYear, serverYear: currentYear }
+    });
+  } catch (err) {
+    console.error('mainreport/returned-summary:', err);
+    res.status(500).json({ status: 'failure', message: err.message || 'Failed to load returned report summary.' });
+  }
+});
+
+app.get('/mainreport/returned-entries', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const year = req.query.year;
+    const month = req.query.month;
+    const userEmail = req.query.userEmail != null ? String(req.query.userEmail) : '';
+    if (year == null || year === '' || month == null || month === '') {
+      return res.status(400).json({ status: 'failure', message: 'year and month query parameters are required.' });
+    }
+
+    const { catalyst } = res.locals;
+    const siteParam = req.query.site != null ? String(req.query.site).trim() : '';
+
+    const { rows: scoped, inchargeScope, allowedActCategories } = await loadScopedReturnedRows(
+      catalyst,
+      userEmail,
+      siteParam
+    );
+
+    const filtered = scoped
+      .filter((r) => returnedRowMatchesMonth(r, month))
+      .filter((r) => returnedRowMatchesYear(r, year))
+      .map(buildReturnedReportApiRow);
+
+    filtered.sort((a, b) =>
+      String(a.formName || '').localeCompare(String(b.formName || ''), undefined, { sensitivity: 'base' })
+    );
+
+    const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
+
+    res.status(200).json({
+      status: 'success',
+      data: { rows: filtered, siteNames, source: 'returned' }
+    });
+  } catch (err) {
+    console.error('mainreport/returned-entries:', err);
+    res.status(500).json({ status: 'failure', message: err.message || 'Failed to load returned entries.' });
   }
 });
 

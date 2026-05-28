@@ -15,6 +15,7 @@ main.nd-content.nd-content--embedded-page > .statutory-page {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  background-color: #ffffff;
 }
 
 .nd-content--embedded-page .statutory-page .statutory-card-container,
@@ -23,6 +24,7 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-card-cont
   min-height: 0;
   display: flex;
   flex-direction: column;
+  background: #ffffff;
 }
 
 .nd-content--embedded-page .statutory-page .statutory-page-heading,
@@ -137,10 +139,11 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
 
   .statutory-inner-toolbar {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     justify-content: flex-start;
     gap: 10px;
+    min-width: 0;
     padding-top: 0;
     margin-bottom: 12px;
     padding-bottom: 12px;
@@ -415,15 +418,20 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   padding: 0;
   flex-shrink: 0;
   width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .statutory-table-top-search {
-  width: 100%;
-  max-width: clamp(300px, 38vw, 480px);
+  flex: 1 1 auto;
+  min-width: 140px;
+  width: auto;
+  max-width: none;
   border: 1px solid #e5e7eb;
   border-radius: 0;
   padding: 8px 12px;
@@ -442,7 +450,8 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
 }
 
 .statutory-table-top-select {
-  min-width: 130px;
+  flex-shrink: 0;
+  min-width: 110px;
   border: 1px solid #e5e7eb;
   border-radius: 0;
   padding: 8px 12px;
@@ -461,6 +470,8 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
 }
 
 .statutory-table-top-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
   border: 1px solid #e5e7eb;
   border-radius: 0;
   padding: 8px 12px;

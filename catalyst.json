@@ -46,7 +46,8 @@
       "attendance_function",
       "todolist_function",
       "mainreport_function",
-      "payroll_function"
+      "payroll_function",
+      "settings_function"
     ],
     "ignore": [],
     "source": "functions"

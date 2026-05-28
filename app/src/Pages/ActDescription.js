@@ -1412,7 +1412,7 @@ const ActDescription = ({ userRole, userEmail }) => {
         </>
       )}
 
-      {/* Act Details modal - 2 panels: summary + mind-map */}
+      {/* Act Details modal - card list style */}
       {actDetailsModalAct && (
         <div className="act-description-modal-overlay" onClick={() => setActDetailsModalAct(null)}>
           <div className="act-description-modal" onClick={(e) => e.stopPropagation()}>
@@ -1421,74 +1421,64 @@ const ActDescription = ({ userRole, userEmail }) => {
               <button type="button" className="act-description-modal-close" onClick={() => setActDetailsModalAct(null)} aria-label="Close">×</button>
             </div>
             <div className="act-description-modal-body">
-              <div className="act-description-modal-panel act-description-modal-mindmap">
-                <div className="act-details-mindmap">
-                  <svg className="act-details-mindmap-arrows" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                    <defs>
-                      <marker id="act-details-arrowhead" markerUnits="userSpaceOnUse" markerWidth="3" markerHeight="3" refX="2.5" refY="1.5" orient="auto">
-                        <polygon points="0 0, 3 1.5, 0 3" fill="#7C3AED" />
-                      </marker>
-                    </defs>
-                    <line x1="50" y1="50" x2="50" y2="12" stroke="#7C3AED" strokeDasharray="0.5,1.5" strokeLinecap="round" opacity="0.8" markerEnd="url(#act-details-arrowhead)" className="act-details-connection-line" vectorEffect="nonScalingStroke" />
-                    <line x1="50" y1="50" x2="12" y2="50" stroke="#7C3AED" strokeDasharray="0.5,1.5" strokeLinecap="round" opacity="0.8" markerEnd="url(#act-details-arrowhead)" className="act-details-connection-line" vectorEffect="nonScalingStroke" />
-                    <line x1="50" y1="50" x2="88" y2="50" stroke="#7C3AED" strokeDasharray="0.5,1.5" strokeLinecap="round" opacity="0.8" markerEnd="url(#act-details-arrowhead)" className="act-details-connection-line" vectorEffect="nonScalingStroke" />
-                    <line x1="50" y1="50" x2="12" y2="88" stroke="#7C3AED" strokeDasharray="0.5,1.5" strokeLinecap="round" opacity="0.8" markerEnd="url(#act-details-arrowhead)" className="act-details-connection-line" vectorEffect="nonScalingStroke" />
-                    <line x1="50" y1="50" x2="88" y2="88" stroke="#7C3AED" strokeDasharray="0.5,1.5" strokeLinecap="round" opacity="0.8" markerEnd="url(#act-details-arrowhead)" className="act-details-connection-line" vectorEffect="nonScalingStroke" />
-                  </svg>
-                  <div className="act-details-mindmap-center">
-                    <div className="act-details-mindmap-center-card">
-                      {actDetailsModalAct.acts || '—'}
+              <div className="act-details-layout">
+                <div className="act-details-cover">
+                  <div className="act-details-cover__badge">Act Overview</div>
+                  <h3 className="act-details-cover__title">{actDetailsModalAct.acts || '—'}</h3>
+                  <p className="act-details-cover__desc">
+                    {actDetailsModalAct.description || 'Comprehensive legal requirements and compliance highlights.'}
+                  </p>
+                </div>
+                <div className="act-details-list">
+                  <div className="act-details-item act-details-item--violet">
+                    <div className="act-details-item__icon" aria-hidden>
+                      <FileText size={18} strokeWidth={2} />
                     </div>
+                    <div className="act-details-item__content">
+                      <h4>Registers</h4>
+                      <p>{actDetailsModalAct.registers || '—'}</p>
+                    </div>
+                    <span className="act-details-item__no">01</span>
                   </div>
-                  <div className="act-details-mindmap-connector act-details-mindmap-connector-top" />
-                  <div className="act-details-mindmap-node act-details-mindmap-node-top">
-                    <div className="act-details-mindmap-node-card">
-                      <div className="act-details-mindmap-node-icon icon-registers">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /><path d="M8 7h8" /><path d="M8 11h8" /></svg>
-                      </div>
-                      <span className="act-details-mindmap-node-label">Registers</span>
-                      <span className="act-details-mindmap-node-value">{actDetailsModalAct.registers || '—'}</span>
+                  <div className="act-details-item act-details-item--red">
+                    <div className="act-details-item__icon" aria-hidden>
+                      <Scale size={18} strokeWidth={2} />
                     </div>
+                    <div className="act-details-item__content">
+                      <h4>Penalty For Non Compliance</h4>
+                      <p>{actDetailsModalAct.penaltyforNonCompliance || '—'}</p>
+                    </div>
+                    <span className="act-details-item__no">02</span>
                   </div>
-                  <div className="act-details-mindmap-connector act-details-mindmap-connector-left" />
-                  <div className="act-details-mindmap-node act-details-mindmap-node-left">
-                    <div className="act-details-mindmap-node-card penalty">
-                      <div className="act-details-mindmap-node-icon icon-penalty">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
-                      </div>
-                      <span className="act-details-mindmap-node-label">Penalty for Non Compliance</span>
-                      <span className="act-details-mindmap-node-value">{actDetailsModalAct.penaltyforNonCompliance || '—'}</span>
+                  <div className="act-details-item act-details-item--blue">
+                    <div className="act-details-item__icon" aria-hidden>
+                      <Briefcase size={18} strokeWidth={2} />
                     </div>
+                    <div className="act-details-item__content">
+                      <h4>Applicability</h4>
+                      <p>{actDetailsModalAct.applicability || '—'}</p>
+                    </div>
+                    <span className="act-details-item__no">03</span>
                   </div>
-                  <div className="act-details-mindmap-connector act-details-mindmap-connector-right" />
-                  <div className="act-details-mindmap-node act-details-mindmap-node-right">
-                    <div className="act-details-mindmap-node-card">
-                      <div className="act-details-mindmap-node-icon icon-applicability">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
-                      </div>
-                      <span className="act-details-mindmap-node-label">Applicability</span>
-                      <span className="act-details-mindmap-node-value">{actDetailsModalAct.applicability || '—'}</span>
+                  <div className="act-details-item act-details-item--green">
+                    <div className="act-details-item__icon" aria-hidden>
+                      <Check size={18} strokeWidth={2.4} />
                     </div>
+                    <div className="act-details-item__content">
+                      <h4>Key Compliance Requirements</h4>
+                      <p>{actDetailsModalAct.keyComplianceRequirements || '—'}</p>
+                    </div>
+                    <span className="act-details-item__no">04</span>
                   </div>
-                  <div className="act-details-mindmap-connector act-details-mindmap-connector-bottom-left" />
-                  <div className="act-details-mindmap-node act-details-mindmap-node-bottom-left">
-                    <div className="act-details-mindmap-node-card">
-                      <div className="act-details-mindmap-node-icon icon-compliance">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" /></svg>
-                      </div>
-                      <span className="act-details-mindmap-node-label">Key Compliance Requirements</span>
-                      <span className="act-details-mindmap-node-value">{actDetailsModalAct.keyComplianceRequirements || '—'}</span>
+                  <div className="act-details-item act-details-item--orange">
+                    <div className="act-details-item__icon" aria-hidden>
+                      <Calendar size={18} strokeWidth={2} />
                     </div>
-                  </div>
-                  <div className="act-details-mindmap-connector act-details-mindmap-connector-bottom-right" />
-                  <div className="act-details-mindmap-node act-details-mindmap-node-bottom-right">
-                    <div className="act-details-mindmap-node-card">
-                      <div className="act-details-mindmap-node-icon icon-due-date">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></svg>
-                      </div>
-                      <span className="act-details-mindmap-node-label">Due Date</span>
-                      <span className="act-details-mindmap-node-value">{actDetailsModalAct.dueDate || '—'}</span>
+                    <div className="act-details-item__content">
+                      <h4>Due Date</h4>
+                      <p>{actDetailsModalAct.dueDate || '—'}</p>
                     </div>
+                    <span className="act-details-item__no">05</span>
                   </div>
                 </div>
               </div>

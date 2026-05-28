@@ -94,6 +94,19 @@ const getStatusLabel = (row) => {
   return 'Yet to Complete';
 };
 
+const getSectorGroupLabel = (row) => {
+  const s = String(row?.sector || '').trim();
+  return s || 'Others';
+};
+
+const sortRowsSectorWise = (rows) =>
+  [...(Array.isArray(rows) ? rows : [])].sort((a, b) => {
+    const sa = getSectorGroupLabel(a).toLowerCase();
+    const sb = getSectorGroupLabel(b).toLowerCase();
+    if (sa !== sb) return sa.localeCompare(sb);
+    return String(a?.formName || '').localeCompare(String(b?.formName || ''), undefined, { sensitivity: 'base' });
+  });
+
 const toIntOrNull = (v) => {
   const n = Number.parseInt(String(v || ''), 10);
   return Number.isFinite(n) ? n : null;
@@ -189,6 +202,7 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
   }, [years, calendarYearStr, selectedYear, draftYear]);
 
   const lastUrlFilterKeyRef = useRef('');
+  const reportLogoDataUrlRef = useRef(null);
 
   const loadSummary = useCallback(async () => {
     setError('');
@@ -302,61 +316,121 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
     setSiteNames([]);
   };
 
-  const downloadConsolidatedPdf = () => {
-    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  const getReportLogoDataUrl = useCallback(async () => {
+    if (reportLogoDataUrlRef.current) return reportLogoDataUrlRef.current;
+    try {
+      const res = await fetch('/server/settings_function/settings/logo');
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      if (!blob || !blob.type.startsWith('image/')) return null;
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(String(reader.result || ''));
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      reportLogoDataUrlRef.current = dataUrl || null;
+      return reportLogoDataUrlRef.current;
+    } catch (_) {
+      return null;
+    }
+  }, []);
+
+  const downloadConsolidatedPdf = async () => {
+    const doc = new jsPDF({ unit: 'pt', format: 'a4', orientation: 'landscape' });
     const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const logoDataUrl = await getReportLogoDataUrl();
 
     const title = `Consolidated Report - ${selectedMonth || draftMonth || ''} ${selectedYear || draftYear || ''}${(selectedSite || draftSite) ? ` (${selectedSite || draftSite})` : ''}`;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(16);
-    doc.text(title, 32, 36);
 
     const totalForms = tableRows.length;
     let approvedPdf = 0;
     for (const row of tableRows) {
       if (isStatutoryTransactionStatusApproved(row) && getStatusLabel(row) === 'Approved') approvedPdf += 1;
     }
-    const pendingPdf = Math.max(0, totalForms - approvedPdf);
+    let pendingPdf = 0;
+    let yetToCompletePdf = 0;
+    for (const row of tableRows) {
+      const status = getStatusLabel(row);
+      if (status === 'Pending') pendingPdf += 1;
+      else if (status === 'Yet to Complete') yetToCompletePdf += 1;
+    }
 
     const boxes = [
       { label: 'Total Forms', count: totalForms, color: [34, 197, 94] },
       { label: 'Approved', count: approvedPdf, color: [99, 102, 241] },
-      { label: 'Pending', count: pendingPdf, color: [234, 179, 8] }
+      { label: 'Pending', count: pendingPdf, color: [245, 158, 11] },
+      { label: 'Yet to Complete', count: yetToCompletePdf, color: [234, 179, 8] }
     ];
 
     const startX = 32;
-    let y = 64;
     const gap = 12;
-    const boxW = (pageWidth - startX * 2 - gap * 2) / 3;
+    const boxW = (pageWidth - startX * 2 - gap * 3) / 4;
     const boxH = 72;
 
-    boxes.forEach((b, idx) => {
-      const xPos = startX + idx * (boxW + gap);
-      const yPos = y;
-      doc.setDrawColor(...b.color);
-      doc.setFillColor(255, 255, 255);
-      doc.roundedRect(xPos, yPos, boxW, boxH, 8, 8, 'FD');
+    const header = ['S.NO', 'Sector', 'Form Name', 'Act', 'Description', 'Month Filter', 'Status', 'Draft File'];
+    const colW = [28, 72, 112, 136, 200, 66, 82, 74];
+    const rowH = 18;
+    const tableX = 32;
+    let tableY = 0;
+
+    const getCellLines = (value, colIndex) => {
+      const text = String(value ?? '');
+      // Wrap all columns except serial number so row height accounts for line breaks.
+      if (colIndex === 0) return [text];
+      const wrapped = doc.splitTextToSize(text || '-', colW[colIndex] - 10);
+      return Array.isArray(wrapped) && wrapped.length > 0 ? wrapped : ['-'];
+    };
+
+    const drawPageHeader = () => {
+      let titleX = 32;
+      const titleY = 36;
+      if (logoDataUrl) {
+        try {
+          const logoX = 32;
+          const logoY = 16;
+          const logoW = 74;
+          const logoH = 26;
+          const logoFormat = logoDataUrl.includes('image/png')
+            ? 'PNG'
+            : logoDataUrl.includes('image/webp')
+              ? 'WEBP'
+              : 'JPEG';
+          doc.addImage(logoDataUrl, logoFormat, logoX, logoY, logoW, logoH);
+          titleX = logoX + logoW + 56;
+        } catch (_) {
+          titleX = 32;
+        }
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(16);
+      doc.setTextColor(17, 24, 39);
+      doc.text(title, titleX, titleY);
+
+      let y = 64;
+      boxes.forEach((b, idx) => {
+        const xPos = startX + idx * (boxW + gap);
+        const yPos = y;
+        doc.setDrawColor(...b.color);
+        doc.setFillColor(255, 255, 255);
+        doc.roundedRect(xPos, yPos, boxW, boxH, 8, 8, 'FD');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(12);
+        doc.setTextColor(31, 41, 55);
+        doc.text(b.label, xPos + 12, yPos + 22);
+        doc.setFontSize(22);
+        doc.setTextColor(...b.color);
+        doc.text(String(b.count), xPos + 12, yPos + 54);
+      });
+
+      y = y + boxH + 18;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(12);
       doc.setTextColor(31, 41, 55);
-      doc.text(b.label, xPos + 12, yPos + 22);
-      doc.setFontSize(22);
-      doc.setTextColor(...b.color);
-      doc.text(String(b.count), xPos + 12, yPos + 54);
-    });
-
-    y = y + boxH + 18;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.setTextColor(31, 41, 55);
-    doc.text(`Month Data: ${selectedMonth || draftMonth || ''} ${selectedYear || draftYear || ''}`, 32, y);
-    y += 16;
-
-    const header = ['S.NO', 'Form Name', 'Month Filter', 'DraftFile', 'Status'];
-    const colW = [40, 168, 72, 100, 90];
-    const rowH = 18;
-    const tableX = 32;
-    let tableY = y;
+      doc.text(`Month Data: ${selectedMonth || draftMonth || ''} ${selectedYear || draftYear || ''}`, 32, y);
+      return y + 16;
+    };
 
     const drawHeader = () => {
       let x = tableX;
@@ -372,7 +446,7 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
         doc.line(headerDividerX, tableY, headerDividerX, tableY + rowH);
       }
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10);
+      doc.setFontSize(9);
       doc.setTextColor(55, 65, 81);
       header.forEach((h, i) => {
         doc.text(h, x + 6, tableY + 12);
@@ -381,38 +455,50 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
       tableY += rowH;
     };
 
+    tableY = drawPageHeader();
     drawHeader();
 
-    const rows = tableRows.length
-      ? tableRows.map((row, idx) => [
+    const sortedPdfRows = sortRowsSectorWise(tableRows);
+    const rows = sortedPdfRows.length
+      ? sortedPdfRows.map((row, idx) => [
           String(idx + 1),
+          String(row.sector || '—'),
           String(row.formName || '-'),
+          String(row.act || '-'),
+          String(row.description || '-'),
           String(row.monthFilter || row.MonthFilter || selectedMonth || draftMonth || '—'),
-          String(canShowDraftFileLink(row) && row.draftFileName ? row.draftFileName : '-'),
-          getStatusLabel(row)
+          getStatusLabel(row),
+          String(canShowDraftFileLink(row) && row.draftFileName ? row.draftFileName : '-')
         ])
-      : [['', '', 'No rows for this month.', '', '']];
+      : [['', '', '', '', 'No rows for this month.', '', '', '']];
 
     rows.forEach((r) => {
-      if (tableY > 770) {
+      const lineHeight = 10;
+      const rowPaddingTop = 12;
+      const rowPaddingBottom = 4;
+      const cellLinesByCol = r.map((cell, i) => getCellLines(cell, i));
+      const maxLines = Math.max(...cellLinesByCol.map((lines) => lines.length));
+      const dynamicRowH = Math.max(rowH, rowPaddingTop + (maxLines - 1) * lineHeight + rowPaddingBottom);
+
+      if (tableY + dynamicRowH > pageHeight - 28) {
         doc.addPage();
-        tableY = 36;
+        tableY = drawPageHeader();
         drawHeader();
       }
       let x = tableX;
       doc.setLineWidth(1.1);
       doc.setDrawColor(130, 130, 130);
-      doc.rect(tableX, tableY, colW.reduce((a, b) => a + b, 0), rowH);
+      doc.rect(tableX, tableY, colW.reduce((a, b) => a + b, 0), dynamicRowH);
       // Draw vertical separators for body columns
       let rowDividerX = tableX;
       for (let i = 0; i < colW.length - 1; i += 1) {
         rowDividerX += colW[i];
-        doc.line(rowDividerX, tableY, rowDividerX, tableY + rowH);
+        doc.line(rowDividerX, tableY, rowDividerX, tableY + dynamicRowH);
       }
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9);
+      doc.setFontSize(8);
       r.forEach((cell, i) => {
-        if (i === 4) {
+        if (i === 6) {
           const statusLower = String(cell || '').toLowerCase();
           if (statusLower.includes('approved')) {
             doc.setTextColor(22, 163, 74);
@@ -422,11 +508,25 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
         } else {
           doc.setTextColor(75, 85, 99);
         }
-        doc.text(String(cell), x + 6, tableY + 12, { maxWidth: colW[i] - 10 });
+        const lines = cellLinesByCol[i];
+        lines.forEach((line, lineIdx) => {
+          doc.text(String(line), x + 6, tableY + rowPaddingTop + lineIdx * lineHeight, {
+            maxWidth: colW[i] - 10,
+          });
+        });
         x += colW[i];
       });
-      tableY += rowH;
+      tableY += dynamicRowH;
     });
+
+    const totalPdfPages = doc.getNumberOfPages();
+    for (let p = 1; p <= totalPdfPages; p += 1) {
+      doc.setPage(p);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(100, 116, 139);
+      doc.text(`Page ${p} of ${totalPdfPages}`, pageWidth - 32, pageHeight - 14, { align: 'right' });
+    }
 
     const fname = `Consolidated_Report_${selectedYear || draftYear || ''}_${selectedMonth || draftMonth || ''}_${(selectedSite || draftSite) || 'All'}.pdf`;
     doc.save(fname.replace(/\s+/g, '_'));
@@ -434,24 +534,29 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
 
   /**
    * KPIs match the Forms Summary STATUS column (`getStatusLabel`).
-   * Approved only when transaction status is explicitly Approved (same gate as draft links).
-   * Pending = all other rows so Total = Approved + Pending.
    */
   const statusCounts = useMemo(() => {
     if (!Array.isArray(tableRows) || tableRows.length === 0) {
-      return { total: 0, approved: 0, pending: 0 };
+      return { total: 0, approved: 0, pending: 0, yetToComplete: 0 };
     }
     let approved = 0;
+    let pending = 0;
+    let yetToComplete = 0;
     for (const row of tableRows) {
-      if (isStatutoryTransactionStatusApproved(row) && getStatusLabel(row) === 'Approved') approved += 1;
+      const status = getStatusLabel(row);
+      if (isStatutoryTransactionStatusApproved(row) && status === 'Approved') approved += 1;
+      else if (status === 'Pending') pending += 1;
+      else if (status === 'Yet to Complete') yetToComplete += 1;
     }
     const total = tableRows.length;
-    return { total, approved, pending: Math.max(0, total - approved) };
+    return { total, approved, pending, yetToComplete };
   }, [tableRows]);
 
   const filteredRows = useMemo(() => {
-    if (!showDraftOnly) return tableRows;
-    return (Array.isArray(tableRows) ? tableRows : []).filter((r) => canShowDraftFileLink(r));
+    const rows = !showDraftOnly
+      ? tableRows
+      : (Array.isArray(tableRows) ? tableRows : []).filter((r) => canShowDraftFileLink(r));
+    return sortRowsSectorWise(rows);
   }, [tableRows, showDraftOnly]);
 
   // Pagination: slice filteredRows for current page
@@ -604,11 +709,15 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
             <div className="mr-kpi-value">{statusCounts.approved}</div>
           </div>
           <div
-            className="mr-kpi mr-kpi--yet"
-            title="All forms that are not Approved in the table (includes Yet to Complete, workflow Pending, and Rejected)."
+            className="mr-kpi mr-kpi--pending"
+            title="Forms that are in Pending status."
           >
             <div className="mr-kpi-label">Pending</div>
             <div className="mr-kpi-value">{statusCounts.pending}</div>
+          </div>
+          <div className="mr-kpi mr-kpi--yet" title="Forms that are Yet to Complete.">
+            <div className="mr-kpi-label">Yet to Complete</div>
+            <div className="mr-kpi-value">{statusCounts.yetToComplete}</div>
           </div>
           </section>
 
@@ -619,7 +728,6 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
               <div className="mr-table-head">
                 <div>
                   <div className="mr-table-title">Forms Summary</div>
-                  <div className="mr-muted">List of forms with status and draft file availability for the selected period.</div>
                 </div>
                 <div className="mr-table-actions">
                   <button
@@ -655,6 +763,7 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                   <thead>
                     <tr>
                       <th style={{ width: 70 }}>S.No</th>
+                      <th style={{ width: 180, minWidth: 180 }}>Sector</th>
                       <th style={{ maxWidth: 190, width: 190 }}>Form Name</th>
                       <th style={{ maxWidth: 260, width: 260 }}>Act</th>
                       <th style={{ maxWidth: 360, width: 360 }}>Description</th>
@@ -666,20 +775,22 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                   <tbody>
                     {!draftHasYearMonth ? (
                       <tr>
-                        <td colSpan={7} className="mr-empty">
-                          Select year and month to load the table. Click <strong>Apply Filters</strong> to save this selection in the link (for sharing or bookmarks).
+                        <td colSpan={8} className="mr-empty">
+                          Select year and month to load the table.
                         </td>
                       </tr>
                     ) : tableLoading && filteredRows.length === 0 ? (
                       <tr aria-hidden="true">
-                        <td colSpan={7} className="mr-table-placeholder" />
+                        <td colSpan={8} className="mr-table-placeholder" />
                       </tr>
                     ) : filteredRows.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="mr-empty">No rows for this selection.</td>
+                        <td colSpan={8} className="mr-empty">No rows for this selection.</td>
                       </tr>
                     ) : (
                       pagedRows.map((row, idx) => {
+                        const seq = (effectivePage - 1) * PAGE_SIZE + idx + 1;
+                        const key = row?.rowId != null ? String(row.rowId) : `${(effectivePage - 1) * PAGE_SIZE + idx}`;
                         const status = getStatusLabel(row);
                         const statusClass =
                           status === 'Approved'
@@ -692,8 +803,11 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                           String(row?.monthFilter || row?.MonthFilter || reportMonthForStatutory || '').trim() || '—';
                         const monthToPrime = monthCell !== '—' ? monthCell : reportMonthForStatutory;
                         return (
-                          <tr key={row?.rowId != null ? String(row.rowId) : `${(effectivePage - 1) * PAGE_SIZE + idx}-${draftName}`}>
-                            <td>{(effectivePage - 1) * PAGE_SIZE + idx + 1}</td>
+                          <tr key={key}>
+                            <td>{seq}</td>
+                            <td style={{ width: 180, minWidth: 180, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {row?.sector || '—'}
+                            </td>
                             <td
                               className="mr-strong"
                               style={{ maxWidth: 190, width: 190, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
@@ -720,18 +834,9 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                               {row?.description || ''}
                             </td>
                             <td className="mr-month-filter-cell">
-                              <div className="mr-month-filter-stack">
-                                <span className="mr-month-filter-value" title={monthCell}>
-                                  {monthCell}
-                                </span>
-                                <Link
-                                  className="mr-statutory-tx-link"
-                                  to={statutoryTransactionHref}
-                                  onClick={() => primeStatutoryMonthFilter(monthToPrime)}
-                                >
-                                  Statutory
-                                </Link>
-                              </div>
+                              <span className="mr-month-filter-value" title={monthCell}>
+                                {monthCell}
+                              </span>
                             </td>
                             <td>
                               <span className={`mr-status ${statusClass}`}>{status}</span>

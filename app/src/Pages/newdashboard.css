@@ -8,7 +8,7 @@
   --nd-card: #ffffff;
   --nd-text: #1a1d21;
   --nd-text-muted: #6b7280;
-  --nd-sidebar-width: clamp(220px, 15vw, 260px);
+  --nd-sidebar-width: clamp(248px, 17vw, 280px);
   --nd-radius: 12px;
   --nd-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
   --nd-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.06);
@@ -29,6 +29,16 @@
   font-size: clamp(14px, 0.82vw, 16px);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+}
+
+/* HCM embedded pages (Company Details, Statutory, Form Fetch, …): flat white chrome, no gray/peach band */
+.nd-root.nd-root--embed-shell {
+  --nd-bg: #ffffff;
+  background: #ffffff;
+}
+
+.nd-root.nd-root--embed-shell .nd-header {
+  background: #ffffff;
 }
 
 /* ——— Sidebar ——— */
@@ -121,12 +131,33 @@
 }
 
 /* Match Organization/Library/Transaction row: label flexes like .nd-nav-group-label; reserve chevron column */
-.nd-nav-item > span {
+.nd-nav-item svg {
+  flex-shrink: 0;
+}
+
+.nd-nav-item > span,
+.nd-nav-item-label {
   flex: 1;
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Leaf links (Dashboard, Calendar, Reports, …) — no chevron spacer so long labels fit */
+.nd-nav-item--leaf::after {
+  display: none;
+  content: none;
+  width: 0;
+  margin: 0;
+}
+
+.nd-nav-item--returned-report > span,
+.nd-nav-item--returned-report .nd-nav-item-label {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.3;
 }
 
 .nd-nav-item::after {
@@ -187,6 +218,16 @@
   color: var(--nd-green);
 }
 
+/* Current route but submenu collapsed — subtle hint, not full “open” styling */
+.nd-nav-group-header--route:not(.nd-nav-group-header--open) {
+  background: transparent;
+  color: var(--nd-text-muted);
+}
+
+.nd-nav-group-header--route:not(.nd-nav-group-header--open) svg:first-of-type {
+  color: var(--nd-green);
+}
+
 /* Removed active hover effect */
 
 .nd-nav-group-header--active:hover svg:first-of-type,
@@ -211,32 +252,56 @@
   flex-shrink: 0;
   opacity: 0.75;
   margin-left: 4px;
+  transform: rotate(0deg);
+  transition: transform 0.28s ease, opacity 0.2s ease;
+}
+
+.nd-nav-group-chevron--open {
+  transform: rotate(90deg);
+  opacity: 0.9;
+}
+
+.nd-nav-group-header--open .nd-nav-group-chevron {
+  opacity: 0.9;
 }
 
 .nd-nav-group-panel {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 0.28s ease;
+  transition: grid-template-rows 0.35s cubic-bezier(0.4, 0, 0.2, 1);
   margin: 0;
+  pointer-events: none;
 }
 
 .nd-nav-group-panel--open {
   grid-template-rows: 1fr;
+  pointer-events: auto;
 }
 
 .nd-nav-group-panel-inner {
   min-height: 0;
   overflow: hidden;
+  visibility: hidden;
+}
+
+.nd-nav-group-panel--open .nd-nav-group-panel-inner {
+  visibility: visible;
 }
 
 .nd-nav-subitem-list {
   background: transparent;
-  border-radius: 0;
+  border-radius: 10px;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 0;
-  margin: 0;
+  margin: 0 4px 6px;
+  transition: background 0.25s ease, padding 0.35s ease;
+}
+
+.nd-nav-group-panel--open .nd-nav-subitem-list {
+  background: #f3f4f6;
+  padding: 4px 0 6px;
 }
 
 .nd-nav-subitem {
@@ -645,8 +710,8 @@
 /* ——— Metrics ——— */
 .nd-metrics {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 18px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 14px;
   margin-bottom: 24px;
 }
 
@@ -665,11 +730,12 @@
 .nd-metric {
   background: var(--nd-card);
   border-radius: var(--nd-radius);
-  padding: 20px;
+  padding: 16px 14px;
   box-shadow: var(--nd-shadow);
   display: flex;
-  gap: 16px;
+  gap: 12px;
   align-items: flex-start;
+  min-width: 0;
 }
 
 .nd-metric-icon-wrap {
@@ -710,9 +776,11 @@
 }
 
 .nd-metric-label {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--nd-text-muted);
   font-weight: 500;
+  white-space: nowrap;
+  line-height: 1.25;
 }
 
 .nd-metric-value {

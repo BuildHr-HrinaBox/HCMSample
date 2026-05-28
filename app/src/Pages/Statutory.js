@@ -136,14 +136,42 @@ const FORM_U_FORMAT2_HEADERS = [
 const FORM_12_ALIGNMENT_HEADERS = [
   'Serial Number',
   'Name of the Worker',
-  'Worker Identity No',
+  'Worker Identity No.',
   'Gender',
   'Father / Spouse Name',
   'Date of Birth',
   'Present Address',
   'Permanent Address',
-  'Aadhaar'
+  'Aadhaar No.',
+  'Date of entry into service',
+  'Designation / Nature of work',
+  'EPF No / UAN No.',
+  'ESI No',
+  'Date on which completion of 480 days of service',
+  'Date on which made permanent',
+  'Period of Suspension if any',
+  'Bank A/c Number, Name of Bank, Branch (Indian Financial System Code)',
+  'Photo',
+  'Mobile Number',
+  'E Mail Id',
+  'Specimen Signature / Thumb Impression',
+  'Date of Exit',
+  'Reason for Exit',
+  'Remarks'
 ];
+
+function isForm12StatutoryContext(item, fileName, formHeader) {
+  const blob = [
+    item?.formName,
+    item?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle
+  ]
+    .map((s) => String(s || ''))
+    .join(' ');
+  return /\bform\s*[-"']?\s*12\b/i.test(blob);
+}
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -395,6 +423,11 @@ function squashStatutoryKeyPart(v) {
     .replace(/\s+/g, ' ');
 }
 
+function statutorySendForApprovalIsSent(row) {
+  if (!row) return false;
+  return /^sent$/i.test(String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim());
+}
+
 /** Prefer rows with draft file / proof / real Catalyst id when collapsing duplicates. */
 function statutoryRowRichnessScore(r) {
   let s = 0;
@@ -406,7 +439,105 @@ function statutoryRowRichnessScore(r) {
   if (!r.isBulkImported) s += 40;
   const ff = r?.formFile ?? r?.FormFile;
   if (ff && ff !== 'null' && String(ff).trim() !== '') s += 25;
+  // Site-submitted draft (Send for approval) must win over a separate approver autofill save on a sibling row.
+  if (statutorySendForApprovalIsSent(r)) s += 5000;
   return s;
+}
+
+/**
+ * Approver view: locate the numeric statutory row the site marked Sent that holds DraftFile.
+ * Ignores approver-only draft rows for the same form/month/site.
+ */
+function findStatutorySentDraftDonorRow(item, allRows, resolveSiteFn) {
+  if (!item || !Array.isArray(allRows) || allRows.length === 0) return null;
+  const uiMonthNorm = statutoryDedupeMonthNorm(item, null);
+  const formNorm = baseFormNameKey(item?.formName || item?.FormName);
+  const sectorNorm = String(item?.sector || item?.Sector || '').trim().toLowerCase();
+  const stateNorm = String(item?.state || item?.State || '').trim().toLowerCase();
+  const actNorm = String(item?.act || item?.Act || '').trim().toLowerCase();
+  const descNorm = String(item?.description || item?.Description || '').trim().toLowerCase();
+  const siteNorm = statutoryCollapseSiteKey(item, allRows, resolveSiteFn);
+
+  const candidates = allRows.filter((row) => {
+    if (!/^\d+$/.test(String(row?.id ?? ''))) return false;
+    const df = row?.draftFile ?? row?.DraftFile;
+    if (!df || df === 'null' || String(df).trim() === '') return false;
+    if (!statutorySendForApprovalIsSent(row)) return false;
+    if (uiMonthNorm !== 'nomonth' && statutoryDedupeMonthNorm(row, null) !== uiMonthNorm) return false;
+    if (baseFormNameKey(row?.formName || row?.FormName) !== formNorm) return false;
+    if (String(row?.sector || row?.Sector || '').trim().toLowerCase() !== sectorNorm) return false;
+    if (String(row?.state || row?.State || '').trim().toLowerCase() !== stateNorm) return false;
+    if (actNorm && String(row?.act || row?.Act || '').trim().toLowerCase() !== actNorm) return false;
+    if (descNorm && String(row?.description || row?.Description || '').trim().toLowerCase() !== descNorm) {
+      return false;
+    }
+    if (siteNorm !== 'nosite') {
+      const rowSite = statutoryCollapseSiteKey(row, allRows, resolveSiteFn);
+      if (rowSite !== siteNorm) return false;
+    }
+    return true;
+  });
+  if (candidates.length === 0) return null;
+  return candidates.reduce((best, row) => (isPreferredStatutoryRow(row, best) ? row : best), null);
+}
+
+/**
+ * Approver view after site clicked Send for approval: resolve the numeric row that holds
+ * the site-saved DraftFile. SendForApproval may live on a merged bulk row while DraftFile
+ * is on the Catalyst statutory row (draftStatutoryRowIdForFile).
+ */
+function findStatutoryDraftDonorForApproverView(item, allRows, resolveSiteFn, workflowMeta) {
+  const strict = findStatutorySentDraftDonorRow(item, allRows, resolveSiteFn);
+  if (strict) return strict;
+
+  const workflowSent =
+    statutorySendForApprovalIsSent(item) || statutorySendForApprovalIsSent(workflowMeta);
+  if (!workflowSent) return null;
+
+  const linkedId = item?.draftStatutoryRowIdForFile;
+  if (/^\d+$/.test(String(linkedId ?? ''))) {
+    const linked = allRows.find((r) => String(r?.id ?? '') === String(linkedId));
+    const df = linked?.draftFile ?? linked?.DraftFile;
+    if (linked && df && df !== 'null' && String(df).trim() !== '') return linked;
+  }
+
+  const uiMonthNorm = statutoryDedupeMonthNorm(item, null);
+  const formNorm = baseFormNameKey(item?.formName || item?.FormName);
+  const siteNorm = statutoryCollapseSiteKey(item, allRows, resolveSiteFn);
+
+  const candidates = allRows.filter((row) => {
+    if (!/^\d+$/.test(String(row?.id ?? ''))) return false;
+    const df = row?.draftFile ?? row?.DraftFile;
+    if (!df || df === 'null' || String(df).trim() === '') return false;
+    if (uiMonthNorm !== 'nomonth' && statutoryDedupeMonthNorm(row, null) !== uiMonthNorm) return false;
+    if (baseFormNameKey(row?.formName || row?.FormName) !== formNorm) return false;
+    if (siteNorm !== 'nosite') {
+      const rowSite = statutoryCollapseSiteKey(row, allRows, resolveSiteFn);
+      if (rowSite !== siteNorm) return false;
+    }
+    return true;
+  });
+  if (candidates.length === 0) return null;
+
+  return candidates.reduce((best, row) => {
+    if (!best) return row;
+    const sentA = statutorySendForApprovalIsSent(row);
+    const sentB = statutorySendForApprovalIsSent(best);
+    if (sentA !== sentB) return sentA ? row : best;
+    return isPreferredStatutoryRow(row, best) ? row : best;
+  }, null);
+}
+
+function isPreferredStatutoryRow(candidate, current) {
+  if (!candidate) return false;
+  if (!current) return true;
+  const richnessDiff = statutoryRowRichnessScore(candidate) - statutoryRowRichnessScore(current);
+  if (richnessDiff !== 0) return richnessDiff > 0;
+  const activityDiff = getStatutoryRowActivityTimeMs(candidate) - getStatutoryRowActivityTimeMs(current);
+  if (activityDiff !== 0) return activityDiff > 0;
+  const candidateId = /^\d+$/.test(String(candidate?.id ?? '').trim()) ? Number.parseInt(String(candidate.id).trim(), 10) : 0;
+  const currentId = /^\d+$/.test(String(current?.id ?? '').trim()) ? Number.parseInt(String(current.id).trim(), 10) : 0;
+  return candidateId > currentId;
 }
 
 /** Bulk rows often have no Site; saved statutory rows do — merge so dedupe keys align. */
@@ -522,7 +653,12 @@ function dedupeStatutoryRowsForDisplay(rows, uiMonthFallback, resolveSiteFn) {
       return d && d !== 'null' && String(d).trim() !== '';
     });
     if (withDraft.length > 0) {
-      withDraft.sort((a, b) => statutoryRowRichnessScore(b) - statutoryRowRichnessScore(a));
+      withDraft.sort((a, b) => {
+        const sentDiff =
+          (statutorySendForApprovalIsSent(b) ? 1 : 0) - (statutorySendForApprovalIsSent(a) ? 1 : 0);
+        if (sentDiff !== 0) return sentDiff;
+        return statutoryRowRichnessScore(b) - statutoryRowRichnessScore(a);
+      });
       out.push(withDraft[0]);
     } else {
       grp.sort((a, b) => statutoryRowRichnessScore(b) - statutoryRowRichnessScore(a));
@@ -942,6 +1078,171 @@ const splitForm10FactoryContractorBlock = (text) => {
     ];
   }
   return null;
+};
+
+const STATUTORY_CONTRACTOR_HEADER_KEYS = [
+  'form12_header_contractor',
+  'form10_header_contractor',
+  'form25_contractor',
+  'form_xvi_contractor',
+  'form_xvii_contractor',
+  'form_xviii_contractor'
+];
+
+const STATUTORY_MANAGER_INCHARGE_HEADER_KEYS = ['form_header_manager_incharge'];
+
+const normalizeHeaderLabelForMatch = (label) =>
+  String(label || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/** Excel labels like "Name of the Manager/Incharge:" */
+const isManagerInchargeHeaderLabel = (label) => {
+  const compact = normalizeHeaderLabelForMatch(label);
+  if (!compact) return false;
+  if (/name\s+of\s+the\s+manager/.test(compact) && /incharge/.test(compact)) return true;
+  if (/name\s+of\s+the\s+manager/.test(compact)) return true;
+  if (/manager\s*\/\s*incharge/.test(compact)) return true;
+  if (/manager/.test(compact) && /\bin\s*charge\b/.test(compact)) return true;
+  return false;
+};
+
+const resolveStableStatutoryHeaderFieldKey = (label) => {
+  if (isManagerInchargeHeaderLabel(label)) return 'form_header_manager_incharge';
+  return null;
+};
+
+const isStatutoryHeaderPlaceholderValue = (value) => {
+  const s = String(value || '').trim().toLowerCase();
+  if (!s) return true;
+  return /^enter\b/.test(s) || s.includes('enter ') || s.includes('select ');
+};
+
+/** Site Management contractor fields → "Name and Address of the Contractor" line. */
+const buildSiteContractorNameAndAddress = (site) => {
+  if (!site || typeof site !== 'object') return '';
+  const name = String(site.contractorName ?? site.ContractorName ?? '').trim();
+  const addr = String(site.contractorAddress ?? site.ContractorAddress ?? '').trim();
+  const city = String(site.contractorCity ?? site.ContractorCity ?? '').trim();
+  const state = String(site.contractorState ?? site.ContractorState ?? '').trim();
+  const parts = [];
+  if (name) parts.push(name);
+  const addrLine = [addr, city, state].filter(Boolean).join(', ');
+  if (addrLine) parts.push(addrLine);
+  return parts.join(', ').trim();
+};
+
+const findSiteDetailByName = (siteDetailsList, siteName) => {
+  if (!Array.isArray(siteDetailsList) || siteDetailsList.length === 0) return null;
+  const tokens = String(siteName || '')
+    .trim()
+    .split(/\s*,\s*/)
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+  if (tokens.length === 0) return null;
+  for (const token of tokens) {
+    const match = siteDetailsList.find((s) => {
+      const sn = String(s?.siteName ?? s?.SiteName ?? '')
+        .trim()
+        .toLowerCase();
+      return sn === token;
+    });
+    if (match) return match;
+  }
+  return null;
+};
+
+const buildSiteInchargeName = (site) =>
+  String(site?.inchargeName ?? site?.InchargeName ?? '').trim();
+
+/** Fill contractor + manager/incharge headers from Site Management when empty or placeholder. */
+const applySiteManagementToHeaderFormData = (
+  headerData,
+  siteName,
+  siteDetailsList,
+  formHeaderFields = []
+) => {
+  if (!headerData || typeof headerData !== 'object') return headerData;
+  const site = findSiteDetailByName(siteDetailsList, siteName);
+  if (!site) return headerData;
+
+  const out = { ...headerData };
+  let changed = false;
+
+  const contractorText = buildSiteContractorNameAndAddress(site);
+  if (contractorText) {
+    for (const key of STATUTORY_CONTRACTOR_HEADER_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(out, key)) continue;
+      const cur = String(out[key] ?? '').trim();
+      if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+        out[key] = contractorText;
+        changed = true;
+      }
+    }
+  }
+
+  const inchargeName = buildSiteInchargeName(site);
+  if (inchargeName) {
+    const applyInchargeToKey = (key) => {
+      if (!key || !Object.prototype.hasOwnProperty.call(out, key)) return;
+      const cur = String(out[key] ?? '').trim();
+      if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+        out[key] = inchargeName;
+        changed = true;
+      }
+    };
+    for (const key of STATUTORY_MANAGER_INCHARGE_HEADER_KEYS) {
+      applyInchargeToKey(key);
+    }
+    const fields = Array.isArray(formHeaderFields) ? formHeaderFields : [];
+    for (const field of fields) {
+      if (!isManagerInchargeHeaderLabel(field?.label)) continue;
+      applyInchargeToKey(field.key);
+    }
+  }
+
+  return changed ? out : headerData;
+};
+
+/** @deprecated Use applySiteManagementToHeaderFormData */
+const applySiteContractorToHeaderFormData = (headerData, siteName, siteDetailsList, formHeaderFields) =>
+  applySiteManagementToHeaderFormData(headerData, siteName, siteDetailsList, formHeaderFields);
+
+/** Site name for Site Management header autofill — explicit row site / URL param first. */
+const resolveStatutorySiteNameForContractorAutofill = (item, ctx = {}) => {
+  const explicit = String(
+    item?.site ?? item?.Site ?? item?.siteName ?? item?.SiteName ?? ''
+  ).trim();
+  if (explicit) return explicit;
+  const fromUrl = String(ctx.siteFromUrl || '').trim();
+  if (fromUrl) return fromUrl;
+  if (Array.isArray(ctx.allowedSiteNameList) && ctx.allowedSiteNameList.length === 1) {
+    return String(ctx.allowedSiteNameList[0] || '').trim();
+  }
+  if (typeof ctx.resolveSiteFn === 'function') {
+    try {
+      return String(ctx.resolveSiteFn(item, ctx.allRows) || '').trim();
+    } catch (err) {
+      console.warn('resolveSiteDisplayName failed during contractor autofill:', err);
+    }
+  }
+  return '';
+};
+
+const friendlyZohoPeopleAutofillError = (rawMessage, httpStatus) => {
+  const msg = String(rawMessage || '').trim();
+  if (/request failed with status code 400/i.test(msg)) {
+    return 'Zoho People returned a bad request (400). Check that the employee form API is enabled and OAuth scopes include employee access.';
+  }
+  if (/request failed with status code 401/i.test(msg)) {
+    return 'Zoho People authorization failed (401). Refresh the People API token in server settings.';
+  }
+  if (httpStatus && Number(httpStatus) >= 400) {
+    return `Employee data API failed (HTTP ${httpStatus})${msg ? `: ${msg}` : ''}`;
+  }
+  return msg || 'Failed to fetch employee data from Zoho People';
 };
 
 /** Form I: merged heading block should render as separate lines (Form - I / REGISTER OF WORKMEN / legal lines). */
@@ -1440,6 +1741,25 @@ const isRowStatusApproved = (row) => {
   return aNorm === 'approved' || aNorm === 'approve';
 };
 
+/** Display status for Statutory grid Status column and Status filter (matches table rendering). */
+const getStatutoryRowDisplayStatus = (item) => {
+  const draftVal = item?.draftFile ?? item?.DraftFile ?? null;
+  const hasDraftFile =
+    draftVal != null &&
+    String(draftVal).trim() !== '' &&
+    String(draftVal).trim() !== 'null' &&
+    String(draftVal).trim() !== 'undefined';
+  if (!hasDraftFile) return 'Yet to Complete';
+  const raw = item?.status != null && item.status !== '' ? item.status : item?.Status;
+  const norm = String(raw || '').trim();
+  const normalized = norm.toLowerCase();
+  if (norm === '' || norm === '-' || norm === '—') return 'Pending';
+  if (normalized === 'rejected' || normalized === 'reject') return 'Returned';
+  if (normalized === 'approved' || normalized === 'approve') return 'Approved';
+  if (normalized === 'pending') return 'Pending';
+  return norm;
+};
+
 const AUTH_SIGNATORY_LABEL_RE =
   /\b(authorised|authorized)\s+signator(y|ies)\b/i;
 
@@ -1868,6 +2188,8 @@ const Statutory = ({ userEmail, userRole }) => {
   const [inchargeSitesMeta, setInchargeSitesMeta] = useState([]);
   /** All org sites (Site Management) with SiteState — used for Site column when user has no Incharge rows. */
   const [organizationSitesMeta, setOrganizationSitesMeta] = useState([]);
+  /** Full Site Management rows (incl. contractor name/address) for statutory form header autofill. */
+  const [siteDetailsList, setSiteDetailsList] = useState([]);
   /** Site `SiteState` values from Site Management for rows where Incharge = login (filter Statutory `state`). */
   const [allowedInchargeStateLabels, setAllowedInchargeStateLabels] = useState(null);
   /** After first `fetchStatutoryData` run finishes (incl. silent mount refresh), Site column visibility can use scope lists — avoids cache-first paint before Site Management meta arrives. */
@@ -1918,6 +2240,7 @@ const Statutory = ({ userEmail, userRole }) => {
   const [selectedMonth, setSelectedMonth] = useState(getInitialMonth);
   const [tableSearch, setTableSearch] = useState('');
   const [selectedFormFilter, setSelectedFormFilter] = useState('all');
+  const [selectedStatusFilter, setSelectedStatusFilter] = useState('all');
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 10;
   useEffect(() => {
@@ -2148,7 +2471,8 @@ const Statutory = ({ userEmail, userRole }) => {
               allowedNames: null,
               inchargeStates: null,
               inchargeSites: [],
-              organizationSites: []
+              organizationSites: [],
+              siteDetails: []
             };
           const json = await resp.json().catch(() => ({}));
           const details = Array.isArray(json?.data?.siteDetails) ? json.data.siteDetails : [];
@@ -2201,10 +2525,18 @@ const Statutory = ({ userEmail, userRole }) => {
             allowedNames: allowedNames.size > 0 ? Array.from(allowedNames) : null,
             inchargeStates: inchargeStates.size > 0 ? Array.from(inchargeStates) : null,
             inchargeSites,
-            organizationSites
+            organizationSites,
+            siteDetails: details
           };
         } catch {
-          return { byCategory: {}, allowedNames: null, inchargeStates: null, inchargeSites: [], organizationSites: [] };
+          return {
+            byCategory: {},
+            allowedNames: null,
+            inchargeStates: null,
+            inchargeSites: [],
+            organizationSites: [],
+            siteDetails: []
+          };
         }
       })();
 
@@ -2222,6 +2554,7 @@ const Statutory = ({ userEmail, userRole }) => {
         setAllowedSiteNameList(siteMeta?.allowedNames || null);
         setInchargeSitesMeta(Array.isArray(siteMeta?.inchargeSites) ? siteMeta.inchargeSites : []);
         setOrganizationSitesMeta(Array.isArray(siteMeta?.organizationSites) ? siteMeta.organizationSites : []);
+        setSiteDetailsList(Array.isArray(siteMeta?.siteDetails) ? siteMeta.siteDetails : []);
         setAllowedInchargeStateLabels(siteMeta?.inchargeStates ?? null);
         if (data.status === 'success' && data.data && data.data.statutoryData) {
           baseStatutoryData = data.data.statutoryData;
@@ -2596,7 +2929,7 @@ const Statutory = ({ userEmail, userRole }) => {
           if (hasStatutoryDraftFileRef(row)) score += 1000;
           if (row?.formFile && String(row.formFile).trim() !== '') score += 100;
           const sfa = String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim().toLowerCase();
-          if (sfa === 'sent') score += 90;
+          if (sfa === 'sent') score += 500;
           const approval = String(row?.approval ?? row?.Approval ?? '').trim().toLowerCase();
           if (approval === 'approved' || approval === 'rejected' || approval === 'approve' || approval === 'reject') score += 30;
           if (isNumericStatutoryBackendId(row?.id)) score += 10;
@@ -3440,15 +3773,49 @@ const Statutory = ({ userEmail, userRole }) => {
     return `${form}_${act}_${desc}_${monthNorm}_${sector || 'nosector'}_${state || 'nostate'}`;
   };
 
-  const resolveNumericStatutoryIdForProofRow = (item) => {
-    if (/^\d+$/.test(String(item.id ?? ''))) return String(item.id);
-    if (/^\d+$/.test(String(item?.draftStatutoryRowIdForFile ?? ''))) {
-      return String(item.draftStatutoryRowIdForFile);
+  const resolveNumericStatutoryIdForProofRow = (item, options = {}) => {
+    const preferSiteSubmittedDraft = options?.preferSiteSubmittedDraft === true;
+    if (preferSiteSubmittedDraft && item) {
+      const approverDonor = findStatutoryDraftDonorForApproverView(
+        item,
+        statutoryData || [],
+        resolveSiteDisplayName,
+        null
+      );
+      if (approverDonor?.id) return String(approverDonor.id);
+      const linkedId = item?.draftStatutoryRowIdForFile;
+      if (/^\d+$/.test(String(linkedId ?? ''))) return String(linkedId);
     }
+    if (/^\d+$/.test(String(item.id ?? ''))) {
+      if (preferSiteSubmittedDraft) {
+        const approverDonor = findStatutoryDraftDonorForApproverView(
+          item,
+          statutoryData || [],
+          resolveSiteDisplayName,
+          null
+        );
+        if (approverDonor && String(approverDonor.id) !== String(item.id)) {
+          return String(approverDonor.id);
+        }
+      }
+      return String(item.id);
+    }
+    const hintedId = /^\d+$/.test(String(item?.draftStatutoryRowIdForFile ?? ''))
+      ? String(item.draftStatutoryRowIdForFile)
+      : null;
+    const hintedRow = hintedId
+      ? ((statutoryData || []).find((r) => String(r?.id ?? '') === hintedId) || null)
+      : null;
     const key = proofRowDedupKey(item);
     if (!key || key.startsWith('_')) return null;
-    const match = (statutoryData || []).find((r) => /^\d+$/.test(String(r.id)) && proofRowDedupKey(r) === key);
+    const match = (statutoryData || [])
+      .filter((r) => /^\d+$/.test(String(r.id)) && proofRowDedupKey(r) === key)
+      .reduce((best, row) => (isPreferredStatutoryRow(row, best) ? row : best), null);
+    if (match && hintedRow) {
+      return String((isPreferredStatutoryRow(match, hintedRow) ? match : hintedRow).id);
+    }
     if (match) return String(match.id);
+    if (hintedRow) return String(hintedRow.id);
 
     // Fallback: strict key can fail when description/act text differs between bulk placeholder and saved statutory row.
     // Match by base form + month + sector/state and prefer rows that already have saved files.
@@ -3486,21 +3853,101 @@ const Statutory = ({ userEmail, userRole }) => {
       return true;
     });
     if (candidates.length === 0) return null;
-    candidates.sort((a, b) => {
-      const score = (row) => {
-        let s = 0;
-        const draft = row?.draftFile ?? row?.DraftFile;
-        const proof = row?.proofSubmissionFile ?? row?.ProofSubmissionFile;
-        const formFile = row?.formFile ?? row?.FormFile;
-        if (draft && String(draft).trim() !== '' && String(draft).trim() !== 'null') s += 100;
-        if (proof && String(proof).trim() !== '' && String(proof).trim() !== 'null') s += 80;
-        if (formFile && String(formFile).trim() !== '' && String(formFile).trim() !== 'null') s += 20;
-        return s;
-      };
-      return score(b) - score(a);
-    });
-    return String(candidates[0].id);
+    const bestCandidate = candidates.reduce((best, row) => (isPreferredStatutoryRow(row, best) ? row : best), hintedRow);
+    return bestCandidate ? String(bestCandidate.id) : null;
   };
+
+  /** Approval / status / draft for the UI month only — never reuse another month's statutory row. */
+  const resolveStatutoryRowMetaForSelectedMonth = (item) => {
+    const emptyMeta = {
+      approval: '',
+      Approval: '',
+      status: '',
+      Status: '',
+      remarks: '',
+      Remarks: '',
+      sendForApproval: '',
+      SendForApproval: '',
+      draftFile: null,
+      DraftFile: null,
+      draftFileName: null,
+      DraftFileName: null,
+      draft: '',
+      Draft: ''
+    };
+    if (!item) return emptyMeta;
+
+    const uiMonthNorm = statutoryDedupeMonthNorm(
+      { monthFilter: selectedMonth, MonthFilter: selectedMonth },
+      selectedMonth
+    );
+    const pickMeta = (row) => ({
+      approval: row?.approval ?? row?.Approval ?? '',
+      Approval: row?.approval ?? row?.Approval ?? '',
+      status: row?.status ?? row?.Status ?? '',
+      Status: row?.status ?? row?.Status ?? '',
+      remarks: row?.remarks ?? row?.Remarks ?? '',
+      Remarks: row?.remarks ?? row?.Remarks ?? '',
+      sendForApproval: row?.sendForApproval ?? row?.SendForApproval ?? '',
+      SendForApproval: row?.sendForApproval ?? row?.SendForApproval ?? '',
+      draftFile: row?.draftFile ?? row?.DraftFile ?? null,
+      DraftFile: row?.draftFile ?? row?.DraftFile ?? null,
+      draftFileName: row?.draftFileName ?? row?.DraftFileName ?? null,
+      DraftFileName: row?.draftFileName ?? row?.DraftFileName ?? null,
+      draft: row?.draft ?? row?.Draft ?? '',
+      Draft: row?.draft ?? row?.Draft ?? ''
+    });
+
+    const rowMonthNorm = statutoryDedupeMonthNorm(item, selectedMonth);
+    if (/^\d+$/.test(String(item?.id ?? '')) && uiMonthNorm !== 'nomonth' && rowMonthNorm === uiMonthNorm) {
+      return pickMeta(item);
+    }
+    if (uiMonthNorm !== 'nomonth' && rowMonthNorm === uiMonthNorm) {
+      const hasWorkflow =
+        (item?.draftFile ?? item?.DraftFile) ||
+        String(item?.approval ?? item?.Approval ?? '').trim() ||
+        String(item?.status ?? item?.Status ?? '').trim() ||
+        String(item?.sendForApproval ?? item?.SendForApproval ?? '').trim();
+      if (hasWorkflow) return pickMeta(item);
+    }
+
+    const formNorm = baseFormNameKey(item?.formName || item?.FormName);
+    const sectorNorm = String(item?.sector || item?.Sector || '').trim().toLowerCase();
+    const stateNorm = String(item?.state || item?.State || '').trim().toLowerCase();
+    const actNorm = String(item?.act || item?.Act || '').trim().toLowerCase();
+    const descNorm = String(item?.description || item?.Description || '').trim().toLowerCase();
+    const candidates = (statutoryData || []).filter((row) => {
+      if (!/^\d+$/.test(String(row?.id ?? ''))) return false;
+      if (uiMonthNorm !== 'nomonth' && statutoryDedupeMonthNorm(row, selectedMonth) !== uiMonthNorm) return false;
+      if (baseFormNameKey(row?.formName || row?.FormName) !== formNorm) return false;
+      if (String(row?.sector || row?.Sector || '').trim().toLowerCase() !== sectorNorm) return false;
+      if (String(row?.state || row?.State || '').trim().toLowerCase() !== stateNorm) return false;
+      if (actNorm && String(row?.act || row?.Act || '').trim().toLowerCase() !== actNorm) return false;
+      if (descNorm && String(row?.description || row?.Description || '').trim().toLowerCase() !== descNorm) {
+        return false;
+      }
+      return true;
+    });
+    if (candidates.length > 0) {
+      const approverDonor = findStatutoryDraftDonorForApproverView(
+        item,
+        statutoryData,
+        resolveSiteDisplayName,
+        pickMeta(item)
+      );
+      if (approverDonor) return pickMeta(approverDonor);
+      const best = [...candidates].sort((a, b) => {
+        const sentDiff =
+          (statutorySendForApprovalIsSent(b) ? 1 : 0) - (statutorySendForApprovalIsSent(a) ? 1 : 0);
+        if (sentDiff !== 0) return sentDiff;
+        return statutoryRowRichnessScore(b) - statutoryRowRichnessScore(a);
+      })[0];
+      return pickMeta(best);
+    }
+
+    return emptyMeta;
+  };
+
   const buildMonthFilterPayload = (item) => {
     const monthValue = resolveMonthFilterForSave(
       item?.dueDate,
@@ -3514,8 +3961,34 @@ const Statutory = ({ userEmail, userRole }) => {
     };
   };
 
-  const submitApprovalColumnAction = async (rowItem, decision, rejectRemarks) => {
-    const targetId = resolveNumericStatutoryIdForProofRow(rowItem);
+  /** Site/act/form context for approval + Returned table sync (UI site may not be on DB row yet). */
+  const buildStatutoryRowSyncPayload = (item) => {
+    const resolvedSite = String(
+      (typeof resolveSiteDisplayName === 'function'
+        ? resolveSiteDisplayName(item, statutoryData)
+        : '') ||
+        item?.site ||
+        item?.Site ||
+        item?.siteName ||
+        item?.SiteName ||
+        siteFromUrl ||
+        ''
+    ).trim();
+    const payload = {
+      ...buildMonthFilterPayload(item),
+      act: item?.act || item?.Act || null,
+      description: item?.description || item?.Description || null,
+      formName: item?.formName || item?.FormName || null,
+      dueDate: item?.dueDate || item?.DueDate || null
+    };
+    if (resolvedSite) payload.site = resolvedSite;
+    return payload;
+  };
+
+  const submitApprovalColumnAction = async (rowItem, decision, rejectRemarks, explicitTargetId = null) => {
+    const targetId =
+      (explicitTargetId != null && String(explicitTargetId).trim() !== '' ? String(explicitTargetId).trim() : null) ||
+      resolveNumericStatutoryIdForProofRow(rowItem);
     if (!targetId) return false;
     const decisionNorm = String(decision || '').trim().toLowerCase();
     const isApproveDecision = decisionNorm === 'approved' || decisionNorm === 'approve';
@@ -3530,7 +4003,7 @@ const Statutory = ({ userEmail, userRole }) => {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...buildMonthFilterPayload(rowItem),
+          ...buildStatutoryRowSyncPayload(rowItem),
           approval: payloadApproval,
           ...(payloadStatus ? { status: payloadStatus } : {}),
           ...(isRejectDecision ? { remarks: rejectRemarks } : {}),
@@ -3574,13 +4047,16 @@ const Statutory = ({ userEmail, userRole }) => {
     const ok = await submitApprovalColumnAction(
       rejectRemarksTarget.rowItem,
       rejectRemarksTarget.decision,
-      trimmedRemarks
+      trimmedRemarks,
+      rejectRemarksTarget.targetId
     );
     if (ok) closeRejectRemarksModal();
   };
 
-  const handleApprovalColumnAction = async (rowItem, decision) => {
-    const targetId = resolveNumericStatutoryIdForProofRow(rowItem);
+  const handleApprovalColumnAction = async (rowItem, decision, explicitTargetId = null) => {
+    const targetId =
+      (explicitTargetId != null && String(explicitTargetId).trim() !== '' ? String(explicitTargetId).trim() : null) ||
+      resolveNumericStatutoryIdForProofRow(rowItem);
     if (!targetId) {
       setError('Approval can only be set for saved statutory table rows.');
       setTimeout(() => setError(''), 5000);
@@ -3590,15 +4066,18 @@ const Statutory = ({ userEmail, userRole }) => {
     const isRejectDecision = decisionNorm === 'rejected' || decisionNorm === 'reject';
     if (isRejectDecision) {
       setRejectRemarksTarget({ rowItem, decision, targetId });
-      setRejectRemarksValue(String(rowItem?.remarks ?? rowItem?.Remarks ?? ''));
+      const monthRemarks = resolveStatutoryRowMetaForSelectedMonth(rowItem);
+      setRejectRemarksValue(String(monthRemarks?.remarks ?? monthRemarks?.Remarks ?? ''));
       setIsRejectRemarksModalOpen(true);
       return;
     }
-    await submitApprovalColumnAction(rowItem, decision);
+    await submitApprovalColumnAction(rowItem, decision, undefined, targetId);
   };
 
-  const handleSendForApprovalColumnAction = async (rowItem) => {
-    const targetId = resolveNumericStatutoryIdForProofRow(rowItem);
+  const handleSendForApprovalColumnAction = async (rowItem, explicitTargetId = null) => {
+    const targetId =
+      (explicitTargetId != null && String(explicitTargetId).trim() !== '' ? String(explicitTargetId).trim() : null) ||
+      resolveNumericStatutoryIdForProofRow(rowItem);
     if (!targetId) {
       setError('Send for approval is only available for saved statutory table rows.');
       setTimeout(() => setError(''), 5000);
@@ -3649,6 +4128,9 @@ const Statutory = ({ userEmail, userRole }) => {
                 const sameSiteFormSibling =
                   !!siteNorm && sameBaseForm && resolvedSitesOverlap(siteNorm, rowSiteNorm);
                 if (!sameId && !sameSiteFormSibling) return row;
+                const targetRow = sameId ? row : prev.find((r) => String(r?.id ?? '') === String(targetId));
+                const syncDraftFile = targetRow?.draftFile ?? targetRow?.DraftFile ?? null;
+                const syncDraftFileName = targetRow?.draftFileName ?? targetRow?.DraftFileName ?? null;
                 return {
                   ...row,
                   sendForApproval: 'Sent',
@@ -3658,7 +4140,18 @@ const Statutory = ({ userEmail, userRole }) => {
                   status: 'Pending',
                   Status: 'Pending',
                   remarks: '',
-                  Remarks: ''
+                  Remarks: '',
+                  ...(syncDraftFile
+                    ? {
+                        draftFile: syncDraftFile,
+                        DraftFile: syncDraftFile,
+                        draftFileName: syncDraftFileName,
+                        DraftFileName: syncDraftFileName,
+                        draft: targetRow?.draft ?? targetRow?.Draft ?? row.draft ?? 'Draft',
+                        Draft: targetRow?.draft ?? targetRow?.Draft ?? row.Draft ?? 'Draft',
+                        draftStatutoryRowIdForFile: targetId
+                      }
+                    : { draftStatutoryRowIdForFile: targetId })
                 };
               });
             })()
@@ -4106,6 +4599,31 @@ const Statutory = ({ userEmail, userRole }) => {
           const cellRef = XLSX.utils.encode_cell({ r: effectiveDataStartIndex + i, c: colIdx });
           writeCellPreserveStyle(cellRef, value);
         }
+      }
+      // When imported rows extend beyond the template's original used range,
+      // expand !ref so the saved workbook actually includes those appended rows.
+      if (Array.isArray(formTableData) && formTableData.length > 0) {
+        const writtenCols = Array.from(headerToCol.values()).filter((n) => Number.isFinite(n));
+        const maxWrittenCol = writtenCols.length > 0
+          ? Math.max(...writtenCols)
+          : Math.max(0, headersToUse.length - 1);
+        const maxWrittenRow = effectiveDataStartIndex + Math.max(formTableData.length - 1, 0);
+        let range;
+        try {
+          range = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']) : null;
+        } catch (_) {
+          range = null;
+        }
+        if (!range) {
+          range = {
+            s: { r: 0, c: 0 },
+            e: { r: maxWrittenRow, c: maxWrittenCol }
+          };
+        } else {
+          range.e.r = Math.max(range.e.r, maxWrittenRow);
+          range.e.c = Math.max(range.e.c, maxWrittenCol);
+        }
+        ws['!ref'] = XLSX.utils.encode_range(range);
       }
       // Do not overwrite the header row – keep the original formmaster template layout exactly. Only data rows are filled above.
     } else {
@@ -4604,11 +5122,6 @@ const Statutory = ({ userEmail, userRole }) => {
 
     const headerRow = snoAnchor.r;
     const startCol = snoAnchor.c;
-    const headerColMap = new Map();
-    for (let c = Math.max(1, startCol - 1); c <= 240; c++) {
-      const txt = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
-      if (txt) headerColMap.set(c, txt);
-    }
     const nextRowValues = [];
     for (let c = startCol; c <= startCol + 40; c++) {
       nextRowValues.push(normalize(excelCellValueToString(worksheet.getCell(headerRow + 1, c)?.value)));
@@ -4616,56 +5129,40 @@ const Statutory = ({ userEmail, userRole }) => {
     const numericMarkers = nextRowValues.filter((v) => /^\d+$/.test(v)).length;
     const startRow = numericMarkers >= 4 ? (headerRow + 2) : (headerRow + 1);
 
-    const fieldMatchers = [
-      /\bs\.?\s*no\b|serial/,
-      /name.*employee|employee.*name|worker.*name/,
-      /father|husband|spouse/,
-      /\bage\b|date.*birth|\bdob\b/,
-      /sex|gender/,
-      /designation|nature.*work|occupation/,
-      /date.*joining|date.*employment/,
-      /wage|salary|rate.*wage/,
-      /attendance|days.*worked|days.*present/,
-      /overtime|ot/,
-      /remarks|signature/
-    ];
-    const fieldCols = fieldMatchers.map((re, idx) => {
-      for (const [col, txt] of headerColMap.entries()) {
-        if (re.test(txt)) return col;
+    const orderedHeaders = Array.isArray(headersToUse) && headersToUse.length > 0
+      ? headersToUse
+      : FORM_12_ALIGNMENT_HEADERS;
+    const templateHeaderCols = [];
+    let blankRun = 0;
+    for (let c = startCol; c <= 260; c++) {
+      const txt = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (txt) {
+        templateHeaderCols.push(c);
+        blankRun = 0;
+      } else if (templateHeaderCols.length > 0) {
+        blankRun += 1;
+        if (blankRun >= 8) break;
       }
-      return startCol + idx;
-    });
-    const pickObjectValue = (row, patterns, fallbackIndex = null) => {
+    }
+    const effectiveHeaders =
+      templateHeaderCols.length > 0
+        ? orderedHeaders.slice(0, templateHeaderCols.length)
+        : orderedHeaders;
+    const fieldCols = effectiveHeaders.map((_, idx) => templateHeaderCols[idx] ?? (startCol + idx));
+    const getRowValueForHeader = (row, header, headerIndex) => {
       if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
-      const keys = Object.keys(row);
-      const norm = (s) => normalize(String(s || '').replace(/[^a-z0-9]/gi, ' '));
-      for (let pi = 0; pi < patterns.length; pi++) {
-        const p = patterns[pi];
-        const hit = keys.find((k) => p.test(norm(k)));
-        if (hit) {
-          const v = row[hit];
-          if (v != null && String(v).trim() !== '') return v;
-        }
-      }
-      if (fallbackIndex != null && fallbackIndex >= 0 && fallbackIndex < keys.length) {
-        return row[keys[fallbackIndex]];
-      }
+      if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
+      const target = normalize(String(header || '').replace(/[^a-z0-9]/gi, ' '));
+      if (!target) return '';
+      const rowKeys = Object.keys(row);
+      const exact = rowKeys.find((k) => normalize(String(k || '').replace(/[^a-z0-9]/gi, ' ')) === target);
+      if (exact) return row[exact];
+      const fuzzy = rowKeys.find((k) => {
+        const nk = normalize(String(k || '').replace(/[^a-z0-9]/gi, ' '));
+        return nk && (nk.includes(target) || target.includes(nk));
+      });
+      if (fuzzy) return row[fuzzy];
       return '';
-    };
-    const pickValueFromHeaders = (row, headerList, patterns, fallbackIndex = null) => {
-      if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
-      const headers = Array.isArray(headerList) ? headerList : [];
-      for (let hi = 0; hi < headers.length; hi++) {
-        const h = headers[hi];
-        const nh = normalize(String(h || '').replace(/[^a-z0-9]/gi, ' '));
-        const matched = patterns.some((p) => p.test(nh));
-        if (!matched) continue;
-        if (Object.prototype.hasOwnProperty.call(row, h)) {
-          const v = row[h];
-          if (v != null && String(v).trim() !== '') return v;
-        }
-      }
-      return pickObjectValue(row, patterns, fallbackIndex);
     };
     const toForm12OrderedValues = (row, rowIndex) => {
       if (Array.isArray(row)) {
@@ -4679,29 +5176,12 @@ const Statutory = ({ userEmail, userRole }) => {
             out[1] = m[2];
           }
         }
-        return [
-          out[0] ?? '',
-          out[1] ?? '',
-          out[2] ?? '',
-          out[3] ?? '',
-          out[4] ?? '',
-          out[5] ?? '',
-          out[6] ?? '',
-          out[7] ?? '',
-          out[8] ?? ''
-        ];
+        if (out[0] == null || String(out[0]).trim() === '') out[0] = rowIndex + 1;
+        return effectiveHeaders.map((_, idx) => out[idx] ?? '');
       }
-      return [
-        pickValueFromHeaders(row, headersToUse, [/\bserial\b/, /\bs\.?\s*no\b/], 0),
-        pickValueFromHeaders(row, headersToUse, [/name.*worker/, /name.*employee/, /worker.*name/], 1),
-        pickValueFromHeaders(row, headersToUse, [/worker.*identity/, /employee.*identification/, /employee.*id/], 2),
-        pickValueFromHeaders(row, headersToUse, [/\bgender\b/, /\bsex\b/], 3),
-        pickValueFromHeaders(row, headersToUse, [/father.*spouse/, /spouse.*name/, /father.*name/], 4),
-        pickValueFromHeaders(row, headersToUse, [/date.*birth/, /\bdob\b/], 5),
-        pickValueFromHeaders(row, headersToUse, [/present.*address/], 6),
-        pickValueFromHeaders(row, headersToUse, [/permanent.*address/], 7),
-        pickValueFromHeaders(row, headersToUse, [/aadha?r/], 8)
-      ];
+      const out = effectiveHeaders.map((header, idx) => getRowValueForHeader(row, header, idx));
+      if (out[0] == null || String(out[0]).trim() === '') out[0] = rowIndex + 1;
+      return out;
     };
 
     const rowLooksMeaningful = (row) => {
@@ -4726,7 +5206,7 @@ const Statutory = ({ userEmail, userRole }) => {
         return out;
       });
 
-    const writableCols = fieldCols.slice(0, 9);
+    const writableCols = fieldCols.slice(0, effectiveHeaders.length);
     for (let i = 0; i < sourceRows.length; i++) {
       const row = sourceRows[i];
       // Clear existing template sample row values so every employee row follows the same model alignment.
@@ -6063,10 +6543,11 @@ const Statutory = ({ userEmail, userRole }) => {
 
       // If Autofill modal is open for this statutory line, export the same rows as on screen (avoids stale SampleData).
       const modalRow = formFileModalData?.item || autofillItem;
+      const draftIdOpts = showApprovalColumn ? { preferSiteSubmittedDraft: true } : {};
       const nidDownload =
-        resolveNumericStatutoryIdForProofRow(item) ||
-        resolveNumericStatutoryIdForProofRow(resolvedFormFileItem);
-      const nidModal = modalRow ? resolveNumericStatutoryIdForProofRow(modalRow) : null;
+        resolveNumericStatutoryIdForProofRow(item, draftIdOpts) ||
+        resolveNumericStatutoryIdForProofRow(resolvedFormFileItem, draftIdOpts);
+      const nidModal = modalRow ? resolveNumericStatutoryIdForProofRow(modalRow, draftIdOpts) : null;
       const dedupD = proofRowDedupKey(item);
       const dedupM = modalRow ? proofRowDedupKey(modalRow) : '';
       const sameStatutoryLineAsModal =
@@ -6281,8 +6762,8 @@ const Statutory = ({ userEmail, userRole }) => {
       // Must resolve real Catalyst ROWID: merged ChecklistBulk rows keep bulk_* id while draft lives on draftStatutoryRowIdForFile.
       if (!usedLiveModalGrid) {
         const sampleStatutoryId =
-          resolveNumericStatutoryIdForProofRow(item) ||
-          resolveNumericStatutoryIdForProofRow(resolvedFormFileItem);
+          resolveNumericStatutoryIdForProofRow(item, draftIdOpts) ||
+          resolveNumericStatutoryIdForProofRow(resolvedFormFileItem, draftIdOpts);
         if (sampleStatutoryId && isNumericStatutoryBackendId(sampleStatutoryId)) {
           try {
             const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleStatutoryId}/sampledata?_ts=${downloadReqTs}`);
@@ -6306,11 +6787,11 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
 
-      // Prefer saved Draft file rows when available (DraftFileName-backed data), then fit those rows into original template.
-      if (!usedLiveModalGrid && (isFormADownload || isFormUDownload || isForm12Download || isForm10Download || isForm25Download || isFormBDownload || isFormWDownload || isFormXDownload || isFormCDownload || isFormDDownload || isFormIDownload || isFormVDownload || isFormVIDownload || !Array.isArray(mappedData) || mappedData.length === 0)) {
+      // Prefer saved Draft file rows only when no exact SampleData snapshot exists.
+      if (!usedLiveModalGrid && !usedSnapshot && (isFormADownload || isFormUDownload || isForm12Download || isForm10Download || isForm25Download || isFormBDownload || isFormWDownload || isFormXDownload || isFormCDownload || isFormDDownload || isFormIDownload || isFormVDownload || isFormVIDownload || !Array.isArray(mappedData) || mappedData.length === 0)) {
         const draftStatutoryId =
-          resolveNumericStatutoryIdForProofRow(item) ||
-          resolveNumericStatutoryIdForProofRow(resolvedFormFileItem);
+          resolveNumericStatutoryIdForProofRow(item, draftIdOpts) ||
+          resolveNumericStatutoryIdForProofRow(resolvedFormFileItem, draftIdOpts);
         if (draftStatutoryId && isNumericStatutoryBackendId(draftStatutoryId)) {
           try {
             const draftFileResp = await fetch(`/server/statutoryreg_function/statutory/${draftStatutoryId}/file/Draft?_ts=${downloadReqTs}`);
@@ -6501,8 +6982,8 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       // Form 12 strict alignment rule:
-      // Rebuild from fresh autofill mapping (same model row -> all rows) unless live modal rows are already in use.
-      if (isForm12Download && !usedLiveModalGrid) {
+      // Rebuild from fresh autofill mapping only when we do not already have an exact saved snapshot/draft.
+      if (isForm12Download && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !showApprovalColumn) {
         try {
           const canonicalForm12Headers = [...FORM_12_ALIGNMENT_HEADERS];
           const refreshedForm12Rows = await fetchAndPopulateEmployeeData(canonicalForm12Headers, { returnMappedData: true });
@@ -6517,7 +6998,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isForm10Download && !usedLiveModalGrid) {
+      if (isForm10Download && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedForm10Rows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedForm10Rows) && refreshedForm10Rows.length > 0) {
@@ -6530,7 +7011,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isForm25Download && !usedLiveModalGrid) {
+      if (isForm25Download && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedForm25Rows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -6546,7 +7027,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormBDownload && !usedLiveModalGrid) {
+      if (isFormBDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedFormBRows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -6562,7 +7043,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormWDownload && !usedLiveModalGrid) {
+      if (isFormWDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedFormWRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormWRows) && refreshedFormWRows.length > 0) {
@@ -6575,7 +7056,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormXDownload && !usedLiveModalGrid) {
+      if (isFormXDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedFormXRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormXRows) && refreshedFormXRows.length > 0) {
@@ -6588,7 +7069,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormCDownload && !usedLiveModalGrid) {
+      if (isFormCDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedFormCRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormCRows) && refreshedFormCRows.length > 0) {
@@ -6601,7 +7082,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormDDownload && !usedLiveModalGrid) {
+      if (isFormDDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedFormDRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormDRows) && refreshedFormDRows.length > 0) {
@@ -6614,7 +7095,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormIDownload && !usedLiveModalGrid) {
+      if (isFormIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedFormIRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormIRows) && refreshedFormIRows.length > 0) {
@@ -6627,7 +7108,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormVDownload && !usedLiveModalGrid) {
+      if (isFormVDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedFormVRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormVRows) && refreshedFormVRows.length > 0) {
@@ -6640,7 +7121,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormVIDownload && !usedLiveModalGrid) {
+      if (isFormVIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedFormVIRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormVIRows) && refreshedFormVIRows.length > 0) {
@@ -6653,7 +7134,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormXVIDownload && !usedLiveModalGrid) {
+      if (isFormXVIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedRows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -6671,7 +7152,7 @@ const Statutory = ({ userEmail, userRole }) => {
           /* keep existing mappedData */
         }
       }
-      if (isFormXVIIIDownload && !usedLiveModalGrid) {
+      if (isFormXVIIIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedRows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -6689,7 +7170,7 @@ const Statutory = ({ userEmail, userRole }) => {
           /* keep existing mappedData */
         }
       }
-      if (isFormTSEDownload && !usedLiveModalGrid) {
+      if (isFormTSEDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedRows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -6925,6 +7406,118 @@ const Statutory = ({ userEmail, userRole }) => {
     }
   };
 
+  const handleDownloadSavedDraftFile = async (draftApiRowId, fileName, sourceItem, resolvedFormFileItem) => {
+    if (!draftApiRowId) {
+      await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem);
+      return;
+    }
+    try {
+      setFormFileLoading(true);
+      setError('');
+
+      const form12Ctx =
+        isForm12StatutoryContext(sourceItem, fileName, null) ||
+        isForm12StatutoryContext(resolvedFormFileItem, fileName, null);
+      if (showApprovalColumn || form12Ctx) {
+        try {
+          const sampleResp = await fetch(
+            `/server/statutoryreg_function/statutory/${draftApiRowId}/sampledata?_ts=${Date.now()}`
+          );
+          if (sampleResp.ok) {
+            const sampleJson = await sampleResp.json().catch(() => null);
+            const sampleBlock = sampleJson?.data?.sampleData;
+            const sampleRows = sampleBlock?.rows;
+            const sampleHeaders = Array.isArray(sampleBlock?.headers) ? sampleBlock.headers : [];
+            if (Array.isArray(sampleRows) && sampleRows.length > 0) {
+              const templateMeta =
+                resolvedFormFileItem?.formFile && resolvedFormFileItem.formFile !== 'null'
+                  ? resolvedFormFileItem
+                  : sourceItem;
+              const hasTemplate =
+                templateMeta?.formFile && String(templateMeta.formFile).trim() !== '';
+              if (hasTemplate) {
+                const fn = String(
+                  templateMeta.formFileName || fileName || 'form12.xlsx'
+                ).replace(/[^a-zA-Z0-9._-]/g, '_');
+                const tplUrl = `/server/formmaster_function/templates/download/${templateMeta.formFile}?fileName=${encodeURIComponent(fn)}`;
+                const tplResp = await fetch(tplUrl);
+                if (tplResp.ok) {
+                  const tplBuf = await tplResp.arrayBuffer();
+                  const headersForBuild =
+                    sampleHeaders.length > 0 ? sampleHeaders : [...FORM_12_ALIGNMENT_HEADERS];
+                  const { blob: outBlob, fileName: outName } = await buildForm12WorkbookWithTemplateStyles({
+                    templateArrayBuffer: tplBuf,
+                    mappedData: sampleRows,
+                    mappedRowMatrix: null,
+                    headersToUse: headersForBuild,
+                    parsedFormHeader: null,
+                    formFileName: fileName || 'form12-draft.xlsx'
+                  });
+                  const dlBlob = await appendApprovedStatutoryHeadHrSignSealToDownloadBlob(
+                    outBlob,
+                    sourceItem || resolvedFormFileItem
+                  );
+                  const url = URL.createObjectURL(dlBlob);
+                  const link = document.createElement('a');
+                  link.href = url;
+                  link.download = fileName || outName || 'form12-draft.xlsx';
+                  document.body.appendChild(link);
+                  link.click();
+                  document.body.removeChild(link);
+                  URL.revokeObjectURL(url);
+                  setSuccess('Downloaded site-saved draft (including manual edits).');
+                  setTimeout(() => setSuccess(''), 4000);
+                  return;
+                }
+              }
+            }
+          }
+        } catch (sampleExportErr) {
+          console.warn('SampleData-based Form 12 export failed, falling back to stored Draft file:', sampleExportErr);
+        }
+      }
+
+      const resp = await fetch(
+        `/server/statutoryreg_function/statutory/${draftApiRowId}/file/Draft?disposition=attachment&_ts=${Date.now()}`
+      );
+      if (!resp.ok) {
+        const errJson = await resp.json().catch(() => null);
+        const errMsg = errJson?.message || `Failed to download draft file (HTTP ${resp.status}).`;
+        throw new Error(errMsg);
+      }
+      const arrayBuffer = await resp.arrayBuffer();
+      const blob = new Blob([arrayBuffer], {
+        type: resp.headers.get('content-type') || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName || 'draft_file.xlsx';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      setSuccess('Saved draft file downloaded.');
+      setTimeout(() => setSuccess(''), 4000);
+    } catch (err) {
+      console.error('Saved draft direct download error:', err);
+      const msg = String(err?.message || '');
+      const shouldFallbackToGenerated =
+        !msg ||
+        /file no longer exists in storage/i.test(msg) ||
+        /file not found/i.test(msg) ||
+        /no file id stored/i.test(msg) ||
+        /re-upload the file/i.test(msg);
+      if (shouldFallbackToGenerated) {
+        await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem);
+        return;
+      }
+      setError(err?.message || 'Failed to download saved draft file.');
+    } finally {
+      setFormFileLoading(false);
+    }
+  };
+
   // Save form file data to Excel and upload as draft
   const handleSaveFormFile = async () => {
     try {
@@ -7011,19 +7604,42 @@ const Statutory = ({ userEmail, userRole }) => {
       const draftFileNameForSave = formFileModalData?.formFileName ||
         formHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
         `Form_${Date.now()}.xlsx`;
-      const { blob, fileName } = buildDraftWorkbook({
+      const form12Save = isForm12StatutoryContext(
         currentItem,
-        templateWb,
-        headersToUse,
-        headerRowIndex,
-        dataStartIndex,
-        parsedFormHeader: parsedFormHeaderForSave,
-        headerFormData,
-        formTableData: tableDataForSave,
-        hasSubColumns,
-        formFileName: draftFileNameForSave,
-        allowTemplateFallback: false
-      });
+        draftFileNameForSave,
+        parsedFormHeaderForSave || formHeader
+      );
+      let blob;
+      let fileName;
+      if (form12Save && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const form12Headers =
+          Array.isArray(headersToUse) && headersToUse.length > 0
+            ? headersToUse
+            : [...FORM_12_ALIGNMENT_HEADERS];
+        ({ blob, fileName } = await buildForm12WorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: tableDataForSave,
+          mappedRowMatrix: null,
+          headersToUse: form12Headers,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave
+        }));
+      } else {
+        ({ blob, fileName } = buildDraftWorkbook({
+          currentItem,
+          templateWb,
+          headersToUse,
+          headerRowIndex,
+          dataStartIndex,
+          parsedFormHeader: parsedFormHeaderForSave,
+          headerFormData,
+          formTableData: tableDataForSave,
+          hasSubColumns,
+          formFileName: draftFileNameForSave,
+          allowTemplateFallback: false
+        }));
+      }
       const file = new File([blob], fileName, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 
       // Upload draft file
@@ -7155,6 +7771,10 @@ const Statutory = ({ userEmail, userRole }) => {
         })(),
         // Persist autofill/imported grid snapshot in SampleData table on backend save.
         sampleDataHeader: Array.isArray(headersToUse) ? headersToUse : [],
+        sampleHeaderFormData:
+          headerFormData && typeof headerFormData === 'object' && !Array.isArray(headerFormData)
+            ? headerFormData
+            : {},
         sampleData: Array.isArray(tableDataForSave) ? tableDataForSave : []
       };
 
@@ -7371,16 +7991,36 @@ const Statutory = ({ userEmail, userRole }) => {
      
       // Fetch employee data from peopledata_function
       const response = await fetch('/server/peopledata_function?form=employee&limit=100');
-      const result = await response.json();
-     
-      console.log('Zoho People API Response:', result);
-     
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to fetch employee data');
+      let result = {};
+      try {
+        result = await response.json();
+      } catch (parseErr) {
+        console.warn('peopledata_function response was not JSON:', parseErr);
       }
-     
+
+      console.log('Zoho People API Response:', result);
+
+      if (!response.ok || !result.success) {
+        const friendly = friendlyZohoPeopleAutofillError(result.error, response.status);
+        console.warn('Zoho People autofill skipped:', friendly);
+        if (!returnMappedData) {
+          setError(
+            `${friendly} The form template is still open — fill contractor/header fields manually or retry after fixing Zoho People connection.`
+          );
+          setFormFileLoading(false);
+        }
+        if (returnMappedData) return [];
+        return;
+      }
+
       if (!result.data) {
-        throw new Error('No data received from Zoho People API');
+        const friendly = 'No employee data received from Zoho People API';
+        if (!returnMappedData) {
+          setError(friendly);
+          setFormFileLoading(false);
+        }
+        if (returnMappedData) return [];
+        return;
       }
      
       // Extract employee records from Zoho People response
@@ -7443,6 +8083,191 @@ const Statutory = ({ userEmail, userRole }) => {
       if (!Array.isArray(employees) || employees.length === 0) {
         console.error('No employees found. Full response:', JSON.stringify(result, null, 2));
         throw new Error('No employee data found in response. Please check the API response structure.');
+      }
+
+      const normalizeEmployeeLookupKey = (value) =>
+        String(value == null ? '' : value).trim().toLowerCase().replace(/\s+/g, ' ');
+
+      const pickFirstFilledValue = (...values) => {
+        for (const value of values) {
+          if (value == null) continue;
+          const trimmed = String(value).trim();
+          if (trimmed) return trimmed;
+        }
+        return '';
+      };
+
+      const getZohoEmployeeLookupCode = (emp) => pickFirstFilledValue(
+        emp.EmployeeID,
+        emp['EmployeeID'],
+        emp['Employee ID'],
+        emp.employeeId,
+        emp.employeeCode,
+        emp.EmployeeCode,
+        emp['Employee Code'],
+        emp['Role.ID'],
+        emp.Role && typeof emp.Role === 'object' ? emp.Role.ID : ''
+      );
+
+      const getZohoEmployeeLookupName = (emp) => {
+        const directName = pickFirstFilledValue(
+          emp.Full_Name,
+          emp['Full Name'],
+          emp.Name,
+          emp['Name'],
+          emp.Name1,
+          emp['Name1'],
+          emp.employeeName,
+          emp['Employee Name']
+        );
+        if (directName) return directName;
+        const firstName = pickFirstFilledValue(emp.FirstName, emp['FirstName'], emp.firstName, emp['First Name']);
+        const lastName = pickFirstFilledValue(emp.LastName, emp['LastName'], emp.lastName, emp['Last Name']);
+        return `${firstName} ${lastName}`.trim();
+      };
+
+      try {
+        const cmsResponse = await fetch('/server/cms_function/employees');
+        const cmsJson = await cmsResponse.json().catch(() => null);
+        const cmsEmployees = Array.isArray(cmsJson?.data?.employees) ? cmsJson.data.employees : [];
+
+        if (cmsResponse.ok && cmsEmployees.length > 0) {
+          const cmsEmployeesByCode = new Map();
+          const cmsEmployeesByName = new Map();
+
+          cmsEmployees.forEach((cmsEmp) => {
+            const codeKey = normalizeEmployeeLookupKey(
+              pickFirstFilledValue(cmsEmp?.employeeCode, cmsEmp?.EmployeeCode, cmsEmp?.['Employee Code'])
+            );
+            const nameKey = normalizeEmployeeLookupKey(
+              pickFirstFilledValue(cmsEmp?.employeeName, cmsEmp?.EmployeeName, cmsEmp?.Name, cmsEmp?.['Employee Name'])
+            );
+            if (codeKey && !cmsEmployeesByCode.has(codeKey)) cmsEmployeesByCode.set(codeKey, cmsEmp);
+            if (nameKey && !cmsEmployeesByName.has(nameKey)) cmsEmployeesByName.set(nameKey, cmsEmp);
+          });
+
+          let enrichedEmployeesCount = 0;
+          employees = employees.map((empItem) => {
+            const sourceEmp = empItem?.Employee || empItem?.employee || empItem;
+            if (!sourceEmp || typeof sourceEmp !== 'object') return empItem;
+
+            const codeKey = normalizeEmployeeLookupKey(getZohoEmployeeLookupCode(sourceEmp));
+            const nameKey = normalizeEmployeeLookupKey(getZohoEmployeeLookupName(sourceEmp));
+            const cmsMatch = (codeKey && cmsEmployeesByCode.get(codeKey)) || (nameKey && cmsEmployeesByName.get(nameKey));
+            if (!cmsMatch) return empItem;
+
+            const mergedBankHolderName = pickFirstFilledValue(
+              sourceEmp.Bank_Holder_Name,
+              sourceEmp['Bank_Holder_Name'],
+              sourceEmp.BankHolderName,
+              sourceEmp['Bank Holder Name'],
+              sourceEmp.bankHolderName,
+              cmsMatch.bankHolderName,
+              cmsMatch.BankHolderName,
+              cmsMatch['Bank Holder Name']
+            );
+            const mergedBankName = pickFirstFilledValue(
+              sourceEmp.Bank_Name,
+              sourceEmp['Bank_Name'],
+              sourceEmp.BankName,
+              sourceEmp['Bank Name'],
+              sourceEmp.bankName,
+              cmsMatch.bankName,
+              cmsMatch.BankName,
+              cmsMatch['Bank Name'],
+              cmsMatch.Bank_Name,
+              cmsMatch['Bank_Name']
+            );
+            const mergedAccountNumber = pickFirstFilledValue(
+              sourceEmp.Account_Number,
+              sourceEmp['Account_Number'],
+              sourceEmp.AccountNumber,
+              sourceEmp['Account Number'],
+              sourceEmp.accountNumber,
+              cmsMatch.accountNumber,
+              cmsMatch.AccountNumber,
+              cmsMatch['Account Number'],
+              cmsMatch.Account_Number,
+              cmsMatch['Account_Number']
+            );
+            const mergedIfscCode = pickFirstFilledValue(
+              sourceEmp.IFSC_Code,
+              sourceEmp['IFSC_Code'],
+              sourceEmp.IFSCCode,
+              sourceEmp['IFSC Code'],
+              sourceEmp.ifscCode,
+              sourceEmp.IFSC,
+              sourceEmp['IFSC'],
+              cmsMatch.ifscCode,
+              cmsMatch.IFSCCode,
+              cmsMatch['IFSC Code'],
+              cmsMatch.IFSC_Code,
+              cmsMatch['IFSC_Code']
+            );
+            const mergedBranchName = pickFirstFilledValue(
+              sourceEmp.Branch_Name,
+              sourceEmp['Branch_Name'],
+              sourceEmp.BranchName,
+              sourceEmp['Branch Name'],
+              sourceEmp.branchName,
+              sourceEmp.bankBranch,
+              cmsMatch.bankBranch,
+              cmsMatch.BranchName,
+              cmsMatch['Branch Name'],
+              cmsMatch.Branch_Name,
+              cmsMatch['Branch_Name']
+            );
+
+            const enrichedEmp = { ...sourceEmp };
+            if (mergedBankHolderName) {
+              enrichedEmp.Bank_Holder_Name = mergedBankHolderName;
+              enrichedEmp.BankHolderName = mergedBankHolderName;
+              enrichedEmp.bankHolderName = mergedBankHolderName;
+            }
+            if (mergedBankName) {
+              enrichedEmp.Bank_Name = mergedBankName;
+              enrichedEmp.BankName = mergedBankName;
+              enrichedEmp.bankName = mergedBankName;
+            }
+            if (mergedAccountNumber) {
+              enrichedEmp.Account_Number = mergedAccountNumber;
+              enrichedEmp.AccountNumber = mergedAccountNumber;
+              enrichedEmp.accountNumber = mergedAccountNumber;
+            }
+            if (mergedIfscCode) {
+              enrichedEmp.IFSC_Code = mergedIfscCode;
+              enrichedEmp.IFSCCode = mergedIfscCode;
+              enrichedEmp.ifscCode = mergedIfscCode;
+              enrichedEmp.IFSC = mergedIfscCode;
+            }
+            if (mergedBranchName) {
+              enrichedEmp.Branch_Name = mergedBranchName;
+              enrichedEmp.BranchName = mergedBranchName;
+              enrichedEmp.branchName = mergedBranchName;
+              enrichedEmp.bankBranch = mergedBranchName;
+            }
+
+            if (
+              mergedBankName ||
+              mergedAccountNumber ||
+              mergedIfscCode ||
+              mergedBranchName ||
+              mergedBankHolderName
+            ) {
+              enrichedEmployeesCount += 1;
+            }
+
+            if (empItem?.Employee) return { ...empItem, Employee: enrichedEmp };
+            if (empItem?.employee) return { ...empItem, employee: enrichedEmp };
+            return enrichedEmp;
+          });
+
+          if (enrichedEmployeesCount > 0) {
+            console.log(`Enriched ${enrichedEmployeesCount} statutory employee row(s) with CMS bank details.`);
+          }
+        }
+      } catch (cmsEmployeeErr) {
+        console.warn('Could not enrich statutory employees from CMS employee data:', cmsEmployeeErr);
       }
 
       /** Form B table: infer from column titles when modal title/act is incomplete (merged TN LWF headers). */
@@ -12865,7 +13690,12 @@ const Statutory = ({ userEmail, userRole }) => {
     } catch (err) {
       console.error('Error fetching employee data:', err);
       console.error('Error stack:', err.stack);
-      if (!returnMappedData) setError(err.message || 'Failed to fetch employee data from Zoho People');
+      const friendly = friendlyZohoPeopleAutofillError(err?.message);
+      if (!returnMappedData) {
+        setError(
+          `${friendly} The form template is still open — you can edit fields manually or retry after fixing the connection.`
+        );
+      }
       if (returnMappedData) throw err;
     } finally {
       if (!returnMappedData) setFormFileLoading(false);
@@ -13424,10 +14254,13 @@ const Statutory = ({ userEmail, userRole }) => {
               });
              
               if (!existingField && label.length > 2) {
+                const stableKey = resolveStableStatutoryHeaderFieldKey(label);
                 headerFields.push({
                   label: label,
                   value: value,
-                  key: `header_${rowIdx}_${colIdx}_${label.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`
+                  key:
+                    stableKey ||
+                    `header_${rowIdx}_${colIdx}_${label.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`
                 });
               }
             }
@@ -14777,21 +15610,54 @@ const Statutory = ({ userEmail, userRole }) => {
       setTableHeaders([]);
       setSubColumns(null);
 
-      const fileUrls = getFormFileFetchUrlCandidates(item);
+      const savedDraftSourceItem = options?.savedDraftSourceItem || item;
+      const preferDirectDraftFile = !!options?.preferDirectDraftFile;
+      const sentDraftDonorForModal =
+        options?.preferSavedDraftData && Array.isArray(statutoryData)
+          ? findStatutoryDraftDonorForApproverView(
+              savedDraftSourceItem,
+              statutoryData,
+              resolveSiteDisplayName,
+              savedDraftSourceItem
+            )
+          : null;
+      const modalDraftSourceItem = sentDraftDonorForModal || savedDraftSourceItem;
+      const directDraftRowId = preferDirectDraftFile
+        ? (
+            (sentDraftDonorForModal?.id != null ? String(sentDraftDonorForModal.id).trim() : null) ||
+            resolveNumericStatutoryIdForProofRow(modalDraftSourceItem, { preferSiteSubmittedDraft: true }) ||
+            resolveNumericStatutoryIdForProofRow(item, { preferSiteSubmittedDraft: true }) ||
+            (isNumericStatutoryBackendId(modalDraftSourceItem?.id) ? String(modalDraftSourceItem.id).trim() : null) ||
+            (isNumericStatutoryBackendId(item?.id) ? String(item.id).trim() : null)
+          )
+        : null;
+      const directDraftUrl = directDraftRowId
+        ? `/server/statutoryreg_function/statutory/${directDraftRowId}/file/Draft`
+        : null;
+      // Site grid edits live in SampleData; opening stored Draft first shows stale Zoho autofill (e.g. missing Gender on Form 12).
+      const fileUrls =
+        preferDirectDraftFile && directDraftUrl
+          ? [directDraftUrl, ...getFormFileFetchUrlCandidates(item)]
+          : getFormFileFetchUrlCandidates(item);
       if (!fileUrls.length) {
         throw new Error('No form file linked for this row');
       }
       let response = null;
+      let selectedFileUrl = null;
       let lastFetchError = null;
       for (let i = 0; i < fileUrls.length; i++) {
         try {
           const candidateResp = await fetch(fileUrls[i]);
           if (candidateResp.ok) {
             response = candidateResp;
+            selectedFileUrl = fileUrls[i];
             break;
           }
           const errorData = await candidateResp.json().catch(() => ({ message: 'Failed to load file' }));
-          lastFetchError = new Error(errorData.message || 'Failed to load form file');
+          const apiMsg = String(errorData.message || errorData.error || '').trim();
+          lastFetchError = new Error(
+            apiMsg || `Failed to load form file (HTTP ${candidateResp.status})`
+          );
         } catch (fetchErr) {
           lastFetchError = fetchErr instanceof Error ? fetchErr : new Error('Failed to load form file');
         }
@@ -14802,9 +15668,14 @@ const Statutory = ({ userEmail, userRole }) => {
 
       const contentType = (response.headers.get('content-type') || '').toLowerCase();
       const cdName = parseContentDispositionFilename(response.headers.get('content-disposition'));
-      const nameFromItem = formFileNameLooksLikePlaceholder(item.formFileName)
-        ? defaultFormTemplateFileName(item)
-        : (item.formFileName || '');
+      const openedDirectDraftFile = !!(directDraftUrl && selectedFileUrl === directDraftUrl);
+      const nameFromItem = openedDirectDraftFile
+        ? (savedDraftSourceItem?.draftFileName || savedDraftSourceItem?.DraftFileName || 'draft_file.xlsx')
+        : (
+            formFileNameLooksLikePlaceholder(item.formFileName)
+              ? defaultFormTemplateFileName(item)
+              : (item.formFileName || '')
+          );
       let displayFileName = cdName || nameFromItem || defaultFormTemplateFileName(item);
       if (formFileNameLooksLikePlaceholder(displayFileName)) {
         displayFileName = defaultFormTemplateFileName(item);
@@ -14927,13 +15798,65 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
 
+        try {
+          const resolvedSiteForContractor = resolveStatutorySiteNameForContractorAutofill(item, {
+            siteFromUrl,
+            allowedSiteNameList,
+            allRows: statutoryData,
+            resolveSiteFn:
+              typeof resolveSiteDisplayName === 'function' ? resolveSiteDisplayName : null
+          });
+          if (resolvedSiteForContractor) {
+            let sitesForContractor = siteDetailsList;
+            if (!Array.isArray(sitesForContractor) || sitesForContractor.length === 0) {
+              try {
+                const siteResp = await fetch('/server/sitemanagement_function/sitemanagement', {
+                  cache: 'no-store'
+                });
+                if (siteResp.ok) {
+                  const siteJson = await siteResp.json().catch(() => ({}));
+                  const fetched = Array.isArray(siteJson?.data?.siteDetails)
+                    ? siteJson.data.siteDetails
+                    : [];
+                  if (fetched.length > 0) {
+                    sitesForContractor = fetched;
+                    setSiteDetailsList(fetched);
+                  }
+                }
+              } catch (siteErr) {
+                console.warn('Could not load Site Management for contractor autofill:', siteErr);
+              }
+            }
+            const withSiteHeaders = applySiteManagementToHeaderFormData(
+              initialHeaderFormData,
+              resolvedSiteForContractor,
+              sitesForContractor,
+              formHeaderForModal?.fields || []
+            );
+            if (withSiteHeaders !== initialHeaderFormData) {
+              initialHeaderFormData = withSiteHeaders;
+              setHeaderFormData(withSiteHeaders);
+            }
+          }
+        } catch (contractorAutofillErr) {
+          console.warn('Site contractor header autofill skipped:', contractorAutofillErr);
+        }
+
+        const modalSourceItem = {
+          ...item,
+          ...(savedDraftSourceItem || {})
+        };
+        if (item?.formFile != null) modalSourceItem.formFile = item.formFile;
+        if (resolvedFormFileName) modalSourceItem.formFileName = resolvedFormFileName;
+
         const modalPayloadForAutofill = {
           fileName: displayFileName,
           formFileName: resolvedFormFileName,
           fileType: 'excel-form',
+          readOnly: !!options?.readOnly,
           sheetHtml: excelSheetHtml,
           rawData: workbook,
-          item: item,
+          item: modalSourceItem,
           parsedFormHeader: formHeaderForModal,
           parsedTableHeaders: parsed.headers || [],
           parsedSubColumns: parsed.subColumns,
@@ -14957,70 +15880,103 @@ const Statutory = ({ userEmail, userRole }) => {
             const modalReqTs = Date.now();
             try {
               const sampleRowId =
-                resolveNumericStatutoryIdForProofRow(item) ||
+                (sentDraftDonorForModal?.id != null ? String(sentDraftDonorForModal.id).trim() : null) ||
+                resolveNumericStatutoryIdForProofRow(modalDraftSourceItem, { preferSiteSubmittedDraft: true }) ||
+                resolveNumericStatutoryIdForProofRow(item, { preferSiteSubmittedDraft: true }) ||
+                (isNumericStatutoryBackendId(modalDraftSourceItem?.id) ? String(modalDraftSourceItem.id).trim() : null) ||
                 (isNumericStatutoryBackendId(item?.id) ? String(item.id).trim() : null);
               if (sampleRowId) {
-                // Prefer the saved Draft Excel (same source as "Download form template")
-                // so View Draft modal shows exactly what user saved.
-                const draftResp = await fetch(`/server/statutoryreg_function/statutory/${sampleRowId}/file/Draft?_ts=${modalReqTs}`);
-                if (draftResp.ok) {
-                  const draftArrayBuffer = await draftResp.arrayBuffer();
-                  const draftWb = XLSX.read(draftArrayBuffer, { type: 'array' });
-                  const draftRows = extractMappedRowsFromSavedDraft({
-                    draftWorkbook: draftWb,
-                    templateHeaders: parsed.headers || [],
-                    templateHeaderRowIndex: parsed.headerRowIndex,
-                    templateDataStartIndex: parsed.dataStartIndex,
-                    hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0
-                  });
-                  if (Array.isArray(draftRows) && draftRows.length > 0) {
-                    setFormTableData(draftRows);
+                // SampleData is the exact grid the site user saved, including manual add/delete/edit cells.
+                const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleRowId}/sampledata?_ts=${modalReqTs}`);
+                if (sampleResp.ok) {
+                  const sampleJson = await sampleResp.json().catch(() => null);
+                  const sampleBlock = sampleJson?.data?.sampleData;
+                  const sampleRows = sampleBlock?.rows;
+                  const sampleHeaders = Array.isArray(sampleBlock?.headers) ? sampleBlock.headers : [];
+                  const sampleHeaderFormData =
+                    sampleBlock?.headerFormData &&
+                    typeof sampleBlock.headerFormData === 'object' &&
+                    !Array.isArray(sampleBlock.headerFormData)
+                      ? sampleBlock.headerFormData
+                      : {};
+                  const hasSavedHeaderFormData = Object.keys(sampleHeaderFormData).length > 0;
+                  if (sampleHeaders.length > 0 || hasSavedHeaderFormData) {
+                    setFormFileModalData((prev) => {
+                      if (!prev) return prev;
+                      const next = { ...prev };
+                      if (sampleHeaders.length > 0) next.parsedTableHeaders = sampleHeaders;
+                      if (hasSavedHeaderFormData) {
+                        next.parsedHeaderFormData = {
+                          ...(prev.parsedHeaderFormData || {}),
+                          ...sampleHeaderFormData
+                        };
+                      }
+                      return next;
+                    });
+                  }
+                  if (hasSavedHeaderFormData) {
+                    setHeaderFormData((prev) => ({
+                      ...(prev || {}),
+                      ...sampleHeaderFormData
+                    }));
+                  }
+                  if (Array.isArray(sampleRows) && sampleRows.length > 0) {
+                    setFormTableData(sampleRows);
+                  }
+                  if ((Array.isArray(sampleRows) && sampleRows.length > 0) || hasSavedHeaderFormData) {
                     loadedSavedData = true;
-                    setSuccess('Loaded saved draft data.');
+                    setSuccess('Loaded saved draft/imported data.');
                     setTimeout(() => setSuccess(''), 2500);
                   }
-                  // Some forms (like Form 25) are easier to recover via matrix rows.
-                  // If header-based extraction is empty, map matrix rows to current template headers.
-                  if (!loadedSavedData) {
-                    const matrixRows = extractRowMatrixFromSavedDraft({
+                }
+                if (!loadedSavedData) {
+                  const draftResp = await fetch(`/server/statutoryreg_function/statutory/${sampleRowId}/file/Draft?_ts=${modalReqTs}`);
+                  if (draftResp.ok) {
+                    const draftArrayBuffer = await draftResp.arrayBuffer();
+                    const draftWb = XLSX.read(draftArrayBuffer, { type: 'array' });
+                    const draftRows = extractMappedRowsFromSavedDraft({
                       draftWorkbook: draftWb,
+                      templateHeaders: parsed.headers || [],
                       templateHeaderRowIndex: parsed.headerRowIndex,
                       templateDataStartIndex: parsed.dataStartIndex,
                       hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0
                     });
-                    if (Array.isArray(matrixRows) && matrixRows.length > 0) {
-                      const headersForMatrix =
-                        Array.isArray(parsed.headers) && parsed.headers.length > 0
-                          ? parsed.headers
-                          : Array.from({ length: matrixRows[0]?.length || 0 }, (_, idx) => `Column ${idx + 1}`);
-                      const matrixAsObjects = matrixRows.map((rowArr, rowIdx) => {
-                        const obj = {};
-                        headersForMatrix.forEach((h, colIdx) => {
-                          const v = Array.isArray(rowArr) ? rowArr[colIdx] : '';
-                          obj[h] = v != null ? v : '';
-                        });
-                        if ((obj[headersForMatrix[0]] == null || String(obj[headersForMatrix[0]]).trim() === '') && headersForMatrix.length > 0) {
-                          obj[headersForMatrix[0]] = rowIdx + 1;
-                        }
-                        return obj;
-                      });
-                      setFormTableData(matrixAsObjects);
+                    if (Array.isArray(draftRows) && draftRows.length > 0) {
+                      setFormTableData(draftRows);
                       loadedSavedData = true;
                       setSuccess('Loaded saved draft data.');
                       setTimeout(() => setSuccess(''), 2500);
                     }
-                  }
-                }
-                if (!loadedSavedData) {
-                  const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleRowId}/sampledata?_ts=${modalReqTs}`);
-                  if (sampleResp.ok) {
-                    const sampleJson = await sampleResp.json().catch(() => null);
-                    const sampleRows = sampleJson?.data?.sampleData?.rows;
-                    if (Array.isArray(sampleRows) && sampleRows.length > 0) {
-                      setFormTableData(sampleRows);
-                      loadedSavedData = true;
-                      setSuccess('Loaded saved draft/imported data.');
-                      setTimeout(() => setSuccess(''), 2500);
+                    // Some forms (like Form 25) are easier to recover via matrix rows.
+                    // If header-based extraction is empty, map matrix rows to current template headers.
+                    if (!loadedSavedData) {
+                      const matrixRows = extractRowMatrixFromSavedDraft({
+                        draftWorkbook: draftWb,
+                        templateHeaderRowIndex: parsed.headerRowIndex,
+                        templateDataStartIndex: parsed.dataStartIndex,
+                        hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0
+                      });
+                      if (Array.isArray(matrixRows) && matrixRows.length > 0) {
+                        const headersForMatrix =
+                          Array.isArray(parsed.headers) && parsed.headers.length > 0
+                            ? parsed.headers
+                            : Array.from({ length: matrixRows[0]?.length || 0 }, (_, idx) => `Column ${idx + 1}`);
+                        const matrixAsObjects = matrixRows.map((rowArr, rowIdx) => {
+                          const obj = {};
+                          headersForMatrix.forEach((h, colIdx) => {
+                            const v = Array.isArray(rowArr) ? rowArr[colIdx] : '';
+                            obj[h] = v != null ? v : '';
+                          });
+                          if ((obj[headersForMatrix[0]] == null || String(obj[headersForMatrix[0]]).trim() === '') && headersForMatrix.length > 0) {
+                            obj[headersForMatrix[0]] = rowIdx + 1;
+                          }
+                          return obj;
+                        });
+                        setFormTableData(matrixAsObjects);
+                        loadedSavedData = true;
+                        setSuccess('Loaded saved draft data.');
+                        setTimeout(() => setSuccess(''), 2500);
+                      }
                     }
                   }
                 }
@@ -15029,25 +15985,34 @@ const Statutory = ({ userEmail, userRole }) => {
               console.warn('Could not load saved sample data for View Draft modal:', sampleErr);
             }
             if (!loadedSavedData) {
-              fetchAndPopulateEmployeeData(parsed.headers, {
-                columnGroupLabels: parsed.columnGroupLabels ?? null,
-                formFileModalData: {
-                  fileName: displayFileName,
-                  formFileName: resolvedFormFileName,
-                  fileType: 'excel-form',
-                  sheetHtml: excelSheetHtml,
-                  rawData: workbook,
-                  item: item,
-                  parsedFormHeader: formHeaderForModal,
-                  parsedTableHeaders: parsed.headers || [],
-                  parsedSubColumns: parsed.subColumns,
-                  parsedHeaderFormData: initialHeaderFormData,
-                  headerRowIndex: parsed.headerRowIndex,
-                  dataStartIndex: parsed.dataStartIndex,
-                  parsedColumnGroupLabels: parsed.columnGroupLabels ?? null,
-                  originalHeaderRowIndex: parsed.originalHeaderRowIndex ?? parsed.headerRowIndex
-                }
-              });
+              if (openedDirectDraftFile) {
+                setSuccess('Loaded saved draft file.');
+                setTimeout(() => setSuccess(''), 2500);
+                return;
+              }
+              if (shouldPreferSavedDraftData) {
+                setError('Could not load the site saved draft. Use Download Draft File or try again.');
+              } else {
+                fetchAndPopulateEmployeeData(parsed.headers, {
+                  columnGroupLabels: parsed.columnGroupLabels ?? null,
+                  formFileModalData: {
+                    fileName: displayFileName,
+                    formFileName: resolvedFormFileName,
+                    fileType: 'excel-form',
+                    sheetHtml: excelSheetHtml,
+                    rawData: workbook,
+                    item: modalSourceItem,
+                    parsedFormHeader: formHeaderForModal,
+                    parsedTableHeaders: parsed.headers || [],
+                    parsedSubColumns: parsed.subColumns,
+                    parsedHeaderFormData: initialHeaderFormData,
+                    headerRowIndex: parsed.headerRowIndex,
+                    dataStartIndex: parsed.dataStartIndex,
+                    parsedColumnGroupLabels: parsed.columnGroupLabels ?? null,
+                    originalHeaderRowIndex: parsed.originalHeaderRowIndex ?? parsed.headerRowIndex
+                  }
+                });
+              }
             }
           } else {
             fetchAndPopulateEmployeeData(parsed.headers, {
@@ -15326,6 +16291,7 @@ const Statutory = ({ userEmail, userRole }) => {
           const dRef = r.draftFile ?? r.DraftFile;
           const hasDraft = dRef && dRef !== 'null' && String(dRef).trim() !== '';
           if (hasDraft) s += 100;
+          if (statutorySendForApprovalIsSent(r)) s += 500;
           if (/^\d+$/.test(idStr)) s += 50;
           if (!idStr.startsWith('bulk_') && !idStr.startsWith('placeholder_') && !idStr.startsWith('formmaster_')) s += 25;
           return s;
@@ -15338,7 +16304,8 @@ const Statutory = ({ userEmail, userRole }) => {
         if (storedMonthNorm) return selectedMonthNorm === storedMonthNorm;
         if (!item.dueDate) return false;
         const dueDateLower = String(item.dueDate).toLowerCase().trim();
-        if (dueDateLower.includes('monthly basis')) return true;
+        // Monthly-basis forms need a saved MonthFilter per month — do not match every month with one row.
+        if (dueDateLower.includes('monthly basis')) return false;
         const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
         const monthAbbr = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
         const selectedMonthLower = String(effectiveSelectedMonth).toLowerCase();
@@ -15373,9 +16340,20 @@ const Statutory = ({ userEmail, userRole }) => {
             formFileName: template.isFromFormmaster ? template.formFileName : null,
             draftFile: null,
             draftFileName: null,
+            draft: '',
+            Draft: '',
             proofSubmissionFile: null,
             proofSubmissionFileName: null,
+            sendForApproval: '',
+            SendForApproval: '',
+            approval: '',
+            Approval: '',
+            status: '',
+            Status: '',
+            remarks: '',
+            Remarks: '',
             monthFilter: effectiveSelectedMonth,
+            MonthFilter: effectiveSelectedMonth,
             monthfilter: effectiveSelectedMonth,
             isFromFormmaster: template.isFromFormmaster || false
           });
@@ -15421,7 +16399,13 @@ const Statutory = ({ userEmail, userRole }) => {
         item.Remarks
       ].some((value) => String(value || '').toLowerCase().includes(searchValue));
       const formMatch = selectedFormFilter === 'all' || formName === selectedFormFilter;
-      return searchMatch && formMatch;
+      const statusMatch =
+        selectedStatusFilter === 'all' ||
+        getStatutoryRowDisplayStatus({
+          ...item,
+          ...resolveStatutoryRowMetaForSelectedMonth(item)
+        }) === selectedStatusFilter;
+      return searchMatch && formMatch && statusMatch;
     });
     // Group site-wise; within a site: non-approved with draft/sent first, then other non-approved, then approved last.
     return [...filtered].sort((a, b) => {
@@ -15432,8 +16416,18 @@ const Statutory = ({ userEmail, userRole }) => {
         if (!siteB) return -1;
         return siteA.localeCompare(siteB);
       }
-      const tierA = isRowStatusApproved(a) ? 1 : 0;
-      const tierB = isRowStatusApproved(b) ? 1 : 0;
+      const tierA = isRowStatusApproved({
+        ...a,
+        ...resolveStatutoryRowMetaForSelectedMonth(a)
+      })
+        ? 1
+        : 0;
+      const tierB = isRowStatusApproved({
+        ...b,
+        ...resolveStatutoryRowMetaForSelectedMonth(b)
+      })
+        ? 1
+        : 0;
       if (tierA !== tierB) return tierA - tierB;
       const draftRankA = !isRowStatusApproved(a) && hasStatutoryDraftSubmittedForSort(a) ? 0 : 1;
       const draftRankB = !isRowStatusApproved(b) && hasStatutoryDraftSubmittedForSort(b) ? 0 : 1;
@@ -15446,7 +16440,7 @@ const Statutory = ({ userEmail, userRole }) => {
       if (formA !== formB) return formA.localeCompare(formB);
       return String(a.id || '').localeCompare(String(b.id || ''));
     });
-  }, [filteredStatutoryData, tableSearch, selectedFormFilter, resolveSiteDisplayName]);
+  }, [filteredStatutoryData, tableSearch, selectedFormFilter, selectedStatusFilter, resolveSiteDisplayName]);
 
   const totalPages = Math.max(1, Math.ceil(transactionTableData.length / PAGE_SIZE));
   const effectivePage = Math.min(currentPage, totalPages);
@@ -15462,7 +16456,8 @@ const Statutory = ({ userEmail, userRole }) => {
       String(userRole || '').trim().toLowerCase().includes('site') ||
       String(userRole || '').trim().toLowerCase().includes('incharge') ||
       transactionTableData.some((item) => {
-        const rawA = item?.approval ?? item?.Approval ?? '';
+        const monthMeta = resolveStatutoryRowMetaForSelectedMonth(item);
+        const rawA = monthMeta?.approval ?? monthMeta?.Approval ?? '';
         const aNorm = String(rawA).trim().toLowerCase();
         return aNorm === 'rejected' || aNorm === 'reject';
       }),
@@ -15548,7 +16543,7 @@ const Statutory = ({ userEmail, userRole }) => {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [tableSearch, selectedFormFilter, selectedMonth]);
+  }, [tableSearch, selectedFormFilter, selectedStatusFilter, selectedMonth]);
 
   useEffect(() => {
     if (currentPage > totalPages) setCurrentPage(totalPages);
@@ -15557,6 +16552,7 @@ const Statutory = ({ userEmail, userRole }) => {
   const clearTransactionFilters = () => {
     setTableSearch('');
     setSelectedFormFilter('all');
+    setSelectedStatusFilter('all');
     const currentMonth = getCurrentMonth();
     setSelectedMonth(currentMonth);
     persistMonthFilter(currentMonth);
@@ -15598,17 +16594,10 @@ const Statutory = ({ userEmail, userRole }) => {
       const descNorm = String(row?.description || row?.Description || '').trim().toLowerCase();
       const secNorm = String(row?.sector || row?.Sector || '').trim().toLowerCase();
       const stateNorm = String(row?.state || row?.State || '').trim().toLowerCase();
-      const key = `${String(row?.formName || '').toLowerCase().trim()}|${String(row?.act || '').toLowerCase().trim()}|${descNorm}|${monthNorm || 'nomonth'}|${secNorm}|${stateNorm}`;
-      if (!map.has(key)) {
-        map.set(key, row);
-        return;
-      }
+      const siteNorm = squashStatutoryKeyPart(row?.site ?? row?.Site ?? '');
+      const key = `${String(row?.formName || '').toLowerCase().trim()}|${String(row?.act || '').toLowerCase().trim()}|${descNorm}|${monthNorm || 'nomonth'}|${secNorm}|${stateNorm}|${siteNorm || 'nosite'}`;
       const prev = map.get(key);
-      const prevId = String(prev?.id ?? '');
-      const rowId = String(row?.id ?? '');
-      const prevNumeric = /^\d+$/.test(prevId);
-      const rowNumeric = /^\d+$/.test(rowId);
-      if (!prevNumeric && rowNumeric) {
+      if (isPreferredStatutoryRow(row, prev)) {
         map.set(key, row);
       }
     });
@@ -15619,6 +16608,7 @@ const Statutory = ({ userEmail, userRole }) => {
   const displayFormHeader = useMemo(() =>
     (formFileModalData?.parsedFormHeader != null) ? formFileModalData.parsedFormHeader : formHeader,
   [formFileModalData?.parsedFormHeader, formHeader]);
+  const isFormFileReadOnly = !!formFileModalData?.readOnly;
   const displayTableHeaders = useMemo(() => {
     const parsed = formFileModalData?.parsedTableHeaders;
     const baseHeaders = Array.isArray(parsed) && parsed.length > 0 ? parsed : tableHeaders || [];
@@ -16472,6 +17462,18 @@ const Statutory = ({ userEmail, userRole }) => {
                   ))}
                 </select>
                 <select
+                  value={selectedStatusFilter}
+                  onChange={(e) => setSelectedStatusFilter(e.target.value)}
+                  className="statutory-table-top-select"
+                  title="Status"
+                >
+                  <option value="all">Status</option>
+                  <option value="Approved">Approved</option>
+                  <option value="Returned">Returned</option>
+                  <option value="Pending">Pending</option>
+                  <option value="Yet to Complete">Yet to Complete</option>
+                </select>
+                <select
                   value={selectedMonth}
                   onChange={(e) => {
                     const v = e.target.value;
@@ -16570,7 +17572,7 @@ const Statutory = ({ userEmail, userRole }) => {
                       <th>Form File</th>
                       <th>Due Date</th>
                       <th>Month Filter</th>
-                      <th>Autofill</th>
+                      {!showApprovalColumn ? <th>Autofill</th> : null}
                       <th>Draft</th>
                       {showSendForApprovalColumn ? <th className="statutory-col-send-for-approval">Send for approval</th> : null}
                       {showApprovalColumn ? <th className="statutory-col-approval">Approval</th> : null}
@@ -16595,18 +17597,38 @@ const Statutory = ({ userEmail, userRole }) => {
                       </tr>
                     ) : (
                       pagedTransactionTableData.map((item, index) => {
+                          const monthWorkflowMeta = resolveStatutoryRowMetaForSelectedMonth(item);
+                          const itemForMonthWorkflow = { ...item, ...monthWorkflowMeta };
                           const isSelected = selectedRows.has(item.id);
-                          const rowLocked = isRowStatusApproved(item);
+                          const rowLocked = isRowStatusApproved(itemForMonthWorkflow);
                           const rowMonth = item.monthFilter || item.MonthFilter || item.monthfilter || '';
                           const selectedMonthNorm = (selectedMonth || '').trim().toLowerCase().substring(0, 3);
                           const rowMonthNorm = String(rowMonth).trim().toLowerCase().substring(0, 3);
-                          const rowDraftFile = item.draftFile ?? item.DraftFile ?? null;
+                          const rowDraftFile =
+                            item.draftFile ??
+                            item.DraftFile ??
+                            monthWorkflowMeta.draftFile ??
+                            monthWorkflowMeta.DraftFile ??
+                            null;
                           const rowHasDraft = rowDraftFile && rowDraftFile !== 'null' && String(rowDraftFile).trim() !== '';
                           const secPart = String(item.sector || item.Sector || '').trim().toLowerCase();
                           const statePart = String(item.state || item.State || '').trim().toLowerCase();
                           const descPart = String(item.description || item.Description || '').trim().toLowerCase();
-                          const draftLookupKey = `${String(item.formName || '').toLowerCase().trim()}|${String(item.act || '').toLowerCase().trim()}|${descPart}|${(rowMonthNorm || selectedMonthNorm || 'nomonth')}|${secPart}|${statePart}`;
-                          let fallbackDraftRow = draftRowByFormActMonthKey.get(draftLookupKey) || null;
+                          const sitePart = squashStatutoryKeyPart(
+                            resolveSiteDisplayName(item, statutoryData) || item.site || item.Site || ''
+                          );
+                          const draftLookupKey = `${String(item.formName || '').toLowerCase().trim()}|${String(item.act || '').toLowerCase().trim()}|${descPart}|${(rowMonthNorm || selectedMonthNorm || 'nomonth')}|${secPart}|${statePart}|${sitePart || 'nosite'}`;
+                          const approverDraftDonorRow =
+                            showApprovalColumn && Array.isArray(statutoryData)
+                              ? findStatutoryDraftDonorForApproverView(
+                                  item,
+                                  statutoryData,
+                                  resolveSiteDisplayName,
+                                  monthWorkflowMeta
+                                )
+                              : null;
+                          let fallbackDraftRow =
+                            approverDraftDonorRow || draftRowByFormActMonthKey.get(draftLookupKey) || null;
                           // Autofill → Save POST creates a numeric statutory row with DraftFile while the grid row may still be bulk_* / checklist_* — pick sibling by line identity.
                           if (!fallbackDraftRow && !rowHasDraft && Array.isArray(statutoryData)) {
                             const fn = (x) => String(x?.formName || x?.FormName || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -16615,7 +17637,8 @@ const Statutory = ({ userEmail, userRole }) => {
                             const sc = (x) => String(x?.sector || x?.Sector || '').trim().toLowerCase();
                             const st = (x) => String(x?.state || x?.State || '').trim().toLowerCase();
                             fallbackDraftRow =
-                              statutoryData.find((r) => {
+                              statutoryData
+                                .filter((r) => {
                                 if (!/^\d+$/.test(String(r?.id ?? ''))) return false;
                                 const df = r?.draftFile ?? r?.DraftFile;
                                 if (!df || df === 'null' || String(df).trim() === '') return false;
@@ -16626,7 +17649,15 @@ const Statutory = ({ userEmail, userRole }) => {
                                   sc(r) === sc(item) &&
                                   st(r) === st(item)
                                 );
-                              }) || null;
+                                })
+                                .reduce((best, row) => {
+                                  if (showApprovalColumn) {
+                                    const sentA = statutorySendForApprovalIsSent(row);
+                                    const sentB = statutorySendForApprovalIsSent(best);
+                                    if (sentA !== sentB) return sentA ? row : best;
+                                  }
+                                  return isPreferredStatutoryRow(row, best) ? row : best;
+                                }, null);
                           }
                           // Use the same statutory DB sibling key as Send for approval / proof — avoids drafts staying hidden
                           // for admin until metadata lines up (strict fn/act/description match above is often stricter).
@@ -16640,7 +17671,27 @@ const Statutory = ({ userEmail, userRole }) => {
                               }
                             }
                           }
-                          const draftSourceItem = rowHasDraft ? item : fallbackDraftRow;
+                          const draftSourceItem = (() => {
+                            if (showApprovalColumn) {
+                              if (approverDraftDonorRow) return approverDraftDonorRow;
+                              if (fallbackDraftRow) return fallbackDraftRow;
+                              if (rowHasDraft && statutorySendForApprovalIsSent(item)) return item;
+                              return null;
+                            }
+                            return rowHasDraft ? item : fallbackDraftRow;
+                          })();
+                          const preferredDraftApiRowId =
+                            (draftSourceItem && isNumericStatutoryBackendId(draftSourceItem?.id)
+                              ? String(draftSourceItem.id)
+                              : null) ||
+                            (showApprovalColumn
+                              ? resolveNumericStatutoryIdForProofRow(item, { preferSiteSubmittedDraft: true })
+                              : null) ||
+                            resolveNumericStatutoryIdForProofRow(draftSourceItem || item) ||
+                            (isNumericStatutoryBackendId(item?.draftStatutoryRowIdForFile)
+                              ? String(item.draftStatutoryRowIdForFile)
+                              : null) ||
+                            (isNumericStatutoryBackendId(item?.id) ? String(item.id) : null);
                           const dsDraft = draftSourceItem?.draftFile ?? draftSourceItem?.DraftFile;
                           const draftSourceHasFile = !!(dsDraft && dsDraft !== 'null' && String(dsDraft).trim() !== '');
                           const draftStoredMonthRaw =
@@ -16661,58 +17712,9 @@ const Statutory = ({ userEmail, userRole }) => {
                             uiMonthSelNorm !== 'nomonth' &&
                             draftStoredMonthNorm !== uiMonthSelNorm;
                           const sendForApprovalEffective = (() => {
-                            for (const r of [item, draftSourceItem, fallbackDraftRow].filter(Boolean)) {
-                              const v = r.sendForApproval ?? r.SendForApproval;
-                              if (v != null && String(v).trim() !== '') return String(v).trim();
-                            }
-                            const nid = resolveNumericStatutoryIdForProofRow(item);
-                            if (nid && Array.isArray(statutoryData)) {
-                              const nr = statutoryData.find((row) => String(row.id) === nid);
-                              const v = nr?.sendForApproval ?? nr?.SendForApproval;
-                              if (v != null && String(v).trim() !== '') return String(v).trim();
-                            }
-                            // Fallback for month-mismatch rows (e.g. UI month differs from saved row month):
-                            // read SendForApproval from any numeric sibling of the same statutory line.
-                            if (Array.isArray(statutoryData)) {
-                              const formNorm = baseFormNameKey(item?.formName || item?.FormName);
-                              const secNorm = String(item?.sector || item?.Sector || '').trim().toLowerCase();
-                              const stateNorm = String(item?.state || item?.State || '').trim().toLowerCase();
-                              const siblings = statutoryData.filter((row) => {
-                                if (!isNumericStatutoryBackendId(row?.id)) return false;
-                                if (baseFormNameKey(row?.formName || row?.FormName) !== formNorm) return false;
-                                if (String(row?.sector || row?.Sector || '').trim().toLowerCase() !== secNorm) return false;
-                                if (String(row?.state || row?.State || '').trim().toLowerCase() !== stateNorm) return false;
-                                return true;
-                              });
-                              const sentSibling = siblings.find((row) => /^sent$/i.test(String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim()));
-                              if (sentSibling) return 'Sent';
-                              const anySibling = siblings.find((row) => {
-                                const v = row?.sendForApproval ?? row?.SendForApproval;
-                                return v != null && String(v).trim() !== '';
-                              });
-                              if (anySibling) return String(anySibling.sendForApproval ?? anySibling.SendForApproval).trim();
-
-                              // Site-view fallback: in site logins, sector/state may be blank or mismatched in bulk placeholders.
-                              // Use same site + base form to mirror already-sent status.
-                              const itemSiteNorm = String(resolveSiteDisplayName(item, statutoryData) || item?.site || item?.Site || '')
-                                .trim()
-                                .toLowerCase();
-                              if (itemSiteNorm) {
-                                const siteSiblings = statutoryData.filter((row) => {
-                                  if (!isNumericStatutoryBackendId(row?.id)) return false;
-                                  if (baseFormNameKey(row?.formName || row?.FormName) !== formNorm) return false;
-                                  const rowSiteNorm = String(resolveSiteDisplayName(row, statutoryData) || row?.site || row?.Site || '')
-                                    .trim()
-                                    .toLowerCase();
-                                  return resolvedSitesOverlap(rowSiteNorm, itemSiteNorm);
-                                });
-                                const siteSent = siteSiblings.find((row) =>
-                                  /^sent$/i.test(String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim())
-                                );
-                                if (siteSent) return 'Sent';
-                              }
-                            }
-                            return '';
+                            const v =
+                              monthWorkflowMeta.sendForApproval ?? monthWorkflowMeta.SendForApproval ?? '';
+                            return v != null && String(v).trim() !== '' ? String(v).trim() : '';
                           })();
                           // Approval-flow gating: in approver view, show draft only after site marks Send for Approval as Sent.
                           const hideDraftUntilSiteSent =
@@ -16760,12 +17762,12 @@ const Statutory = ({ userEmail, userRole }) => {
                           if (
                             !hideDraftUntilSiteSent &&
                             !hideDraftByStoredMonth &&
-                            item.draftStatutoryRowIdForFile &&
+                            preferredDraftApiRowId &&
                             !isNumericStatutoryBackendId(item?.id)
                           ) {
                             resolvedFormFileItem = {
                               ...resolvedFormFileItem,
-                              id: item.draftStatutoryRowIdForFile,
+                              id: preferredDraftApiRowId,
                               draftFile: item.draftFile ?? item.DraftFile ?? resolvedFormFileItem.draftFile,
                               draftFileName:
                                 item.draftFileName ??
@@ -16853,30 +17855,46 @@ const Statutory = ({ userEmail, userRole }) => {
                                 return abbrev != null && abbrev !== '' ? <span className="statutory-pill statutory-pill-month">{abbrev}</span> : '-';
                               })()}
                             </td>
-                            <td style={{ textAlign: 'center', padding: '8px' }}>
-                              {(() => {
-                                const hasFormFileForRow = resolvedFormFileItem.formFile && resolvedFormFileItem.formFile !== 'null' && String(resolvedFormFileItem.formFile).trim() !== '';
-                                return (
-                                  <button
-                                    className="statutory-autofill-btn-ui"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (hasFormFileForRow && !rowLocked) handleAutofill(resolvedFormFileItem);
-                                    }}
-                                    title={
-                                      rowLocked
-                                        ? 'Approved row is locked for editing'
-                                        : hasFormFileForRow
-                                          ? 'Autofill using same form format as View File'
-                                          : 'No form file – upload or link a form to enable Autofill'
-                                    }
-                                    disabled={!hasFormFileForRow || rowLocked}
-                                  >
-                                    Autofill
-                                  </button>
-                                );
-                              })()}
-                            </td>
+                            {!showApprovalColumn ? (
+                              <td style={{ textAlign: 'center', padding: '8px' }}>
+                                {(() => {
+                                  const hasFormFileForRow = resolvedFormFileItem.formFile && resolvedFormFileItem.formFile !== 'null' && String(resolvedFormFileItem.formFile).trim() !== '';
+                                  const hasSavedDraftForRow = !!(
+                                    (draftSourceItem?.draftFile ?? draftSourceItem?.DraftFile) &&
+                                    String(draftSourceItem?.draftFile ?? draftSourceItem?.DraftFile).trim() !== '' &&
+                                    String(draftSourceItem?.draftFile ?? draftSourceItem?.DraftFile).trim().toLowerCase() !== 'null'
+                                  );
+                                  const openSavedDraftForReview = hasSavedDraftForRow;
+                                  return (
+                                    <button
+                                      className="statutory-autofill-btn-ui"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (hasFormFileForRow && !rowLocked) {
+                                          handleAutofill(resolvedFormFileItem, {
+                                            preferSavedDraftData: openSavedDraftForReview,
+                                            readOnly: showApprovalColumn || openSavedDraftForReview,
+                                            savedDraftSourceItem: draftSourceItem || item
+                                          });
+                                        }
+                                      }}
+                                      title={
+                                        rowLocked
+                                          ? 'Approved row is locked for editing'
+                                          : hasFormFileForRow
+                                            ? openSavedDraftForReview
+                                              ? 'Review the saved site draft'
+                                              : 'Autofill using same form format as View File'
+                                            : 'No form file – upload or link a form to enable Autofill'
+                                      }
+                                      disabled={!hasFormFileForRow || rowLocked}
+                                    >
+                                      Autofill
+                                    </button>
+                                  );
+                                })()}
+                              </td>
+                            ) : null}
                             <td>
                               {(() => {
                                 const draftTextValue = String(item?.draft ?? item?.Draft ?? '').trim();
@@ -16887,17 +17905,23 @@ const Statutory = ({ userEmail, userRole }) => {
                                 const showDraftActions =
                                   !hideDraftUntilSiteSent &&
                                   !hideDraftByStoredMonth &&
-                                  (showDraftForRow || (hasDraftTextMarker && isNumericStatutoryBackendId(item?.id)));
+                                  (
+                                    showDraftForRow ||
+                                    (
+                                      hasDraftTextMarker &&
+                                      (
+                                        isNumericStatutoryBackendId(preferredDraftApiRowId) ||
+                                        isNumericStatutoryBackendId(item?.id)
+                                      )
+                                    )
+                                  );
                                 return showDraftActions ? (
                                 (() => {
                                   const formNameNorm = (item.formName || '').trim().toUpperCase().replace(/\s+/g, ' ');
                                   const draftNameNorm = String(draftSourceItem?.draftFileName || draftSourceItem?.DraftFileName || '').trim().toUpperCase().replace(/\s+/g, ' ');
                                   const draftLabelRedundant = formNameNorm && draftNameNorm && draftNameNorm.startsWith(formNameNorm);
                                   const draftLinkLabel = draftLabelRedundant ? 'View Draft File' : (draftSourceItem?.draftFileName || 'View Draft File');
-                                  const draftApiRowId =
-                                    item.draftStatutoryRowIdForFile ??
-                                    (isNumericStatutoryBackendId(draftSourceItem?.id) ? draftSourceItem.id : null) ??
-                                    (isNumericStatutoryBackendId(item?.id) ? item.id : null);
+                                  const draftApiRowId = preferredDraftApiRowId;
                                   const draftDownloadUrl = draftApiRowId
                                     ? `/server/statutoryreg_function/statutory/${draftApiRowId}/file/Draft`
                                     : '#';
@@ -16906,18 +17930,45 @@ const Statutory = ({ userEmail, userRole }) => {
                                     draftSourceItem?.DraftFileName ||
                                     resolvedFormFileItem.formFileName ||
                                     'form-template-with-data.xlsx';
+                                  const hasSavedDraftFileForDownload =
+                                    !!(
+                                      draftApiRowId &&
+                                      (draftSourceItem?.draftFile ?? draftSourceItem?.DraftFile) &&
+                                      String(draftSourceItem?.draftFile ?? draftSourceItem?.DraftFile).trim() !== '' &&
+                                      String(draftSourceItem?.draftFile ?? draftSourceItem?.DraftFile).trim().toLowerCase() !== 'null'
+                                    );
+                                  const shouldDownloadSavedDraftDirectly = hasSavedDraftFileForDownload;
                                   const hasFormFileForDraft = resolvedFormFileItem?.formFile && resolvedFormFileItem.formFile !== 'null' && String(resolvedFormFileItem.formFile).trim() !== '';
-                                  const canOpenDraftEditModal = hasFormFileForDraft && !rowLocked;
+                                  const draftModalReadOnly = showApprovalColumn || rowLocked;
+                                  const canOpenDraftModal = hasFormFileForDraft || !!draftApiRowId;
                                   return (
                                     <span style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                       <a
                                         href="#"
                                         style={{ color: '#3b82f6', textDecoration: 'underline' }}
-                                        title={canOpenDraftEditModal ? 'Open Autofill modal for this draft' : 'View Draft File'}
+                                        title={
+                                          showApprovalColumn && hasSavedDraftFileForDownload
+                                            ? 'Open the exact saved draft file from site view'
+                                            : (draftModalReadOnly ? 'Review saved draft' : 'Open Autofill modal for this draft')
+                                        }
                                         onClick={(e) => {
                                           e.preventDefault();
                                           e.stopPropagation();
-                                          if (canOpenDraftEditModal) handleAutofill(resolvedFormFileItem, { preferSavedDraftData: true });
+                                          if (showApprovalColumn && hasSavedDraftFileForDownload) {
+                                            handleDownloadSavedDraftFile(
+                                              draftApiRowId,
+                                              draftDownloadFileName,
+                                              draftSourceItem || item,
+                                              resolvedFormFileItem
+                                            );
+                                          } else if (canOpenDraftModal) {
+                                            handleAutofill(resolvedFormFileItem, {
+                                              preferSavedDraftData: true,
+                                              preferDirectDraftFile: hasSavedDraftFileForDownload || !hasFormFileForDraft,
+                                              readOnly: draftModalReadOnly,
+                                              savedDraftSourceItem: draftSourceItem || item
+                                            });
+                                          }
                                         }}
                                       >
                                         {draftLinkLabel}
@@ -16926,13 +17977,23 @@ const Statutory = ({ userEmail, userRole }) => {
                                         href={draftDownloadUrl}
                                         download={draftDownloadFileName}
                                         style={{ color: '#059669', textDecoration: 'underline', fontSize: '12px' }}
-                                        title="Download with same data as View Draft File"
+                                        title={shouldDownloadSavedDraftDirectly ? 'Download saved draft file' : 'Download with same data as View Draft File'}
                                         onClick={(e) => {
-                                          e.preventDefault();
-                                          handleViewDraftFileGenerate(draftSourceItem || item, resolvedFormFileItem);
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                          if (shouldDownloadSavedDraftDirectly) {
+                                            handleDownloadSavedDraftFile(
+                                              draftApiRowId,
+                                              draftDownloadFileName,
+                                              draftSourceItem || item,
+                                              resolvedFormFileItem
+                                            );
+                                          } else {
+                                            handleViewDraftFileGenerate(draftSourceItem || item, resolvedFormFileItem);
+                                          }
                                         }}
                                       >
-                                        Download form template
+                                        {shouldDownloadSavedDraftDirectly ? 'Download Draft File' : 'Download form template'}
                                       </a>
                                     </span>
                                   );
@@ -16951,15 +18012,23 @@ const Statutory = ({ userEmail, userRole }) => {
                                       : '';
                                   const looksSent = /^sent$/i.test(sfaStr);
                                   // Rejected rows in site view must allow re-send for approval.
-                                  const approvalNorm = String(item?.approval ?? item?.Approval ?? '').trim().toLowerCase();
-                                  const statusNorm = String(item?.status ?? item?.Status ?? '').trim().toLowerCase();
+                                  const approvalNorm = String(
+                                    itemForMonthWorkflow?.approval ?? itemForMonthWorkflow?.Approval ?? ''
+                                  )
+                                    .trim()
+                                    .toLowerCase();
+                                  const statusNorm = String(
+                                    itemForMonthWorkflow?.status ?? itemForMonthWorkflow?.Status ?? ''
+                                  )
+                                    .trim()
+                                    .toLowerCase();
                                   const rejectedByApprover =
                                     approvalNorm === 'rejected' ||
                                     approvalNorm === 'reject' ||
                                     statusNorm === 'rejected' ||
                                     statusNorm === 'reject';
                                   const showAsSent = looksSent && !rejectedByApprover;
-                                  const numericId = resolveNumericStatutoryIdForProofRow(item);
+                                  const numericId = preferredDraftApiRowId || resolveNumericStatutoryIdForProofRow(item);
                                   const sfaBusy = numericId && sendForApprovalUpdatingRowId === numericId;
                                   return (
                                     <div onClick={(e) => e.stopPropagation()}>
@@ -16979,7 +18048,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                         onClick={(e) => {
                                           e.stopPropagation();
                                           if (!numericId || sfaBusy || showAsSent || rowLocked) return;
-                                          handleSendForApprovalColumnAction(item);
+                                          handleSendForApprovalColumnAction(item, numericId);
                                         }}
                                       >
                                         {sfaBusy ? '…' : showAsSent ? 'Sent' : 'Send for approval'}
@@ -17000,13 +18069,15 @@ const Statutory = ({ userEmail, userRole }) => {
                             {showApprovalColumn ? (
                               <td className="statutory-col-approval" style={{ textAlign: 'center' }}>
                                 {(() => {
-                                  const rawA = item.approval ?? item.Approval;
+                                  const rawA =
+                                    itemForMonthWorkflow.approval ?? itemForMonthWorkflow.Approval;
                                   const aStr = rawA != null && String(rawA).trim() !== '' ? String(rawA).trim() : '';
                                   const aNorm = aStr.toLowerCase();
                                   const isApproved = aNorm === 'approved' || aNorm === 'approve';
                                   const isRejected = aNorm === 'rejected' || aNorm === 'reject';
                                   const hasOtherApproval = aStr && !isApproved && !isRejected;
-                                  const numericId = resolveNumericStatutoryIdForProofRow(item);
+                                  const numericId =
+                                    preferredDraftApiRowId || resolveNumericStatutoryIdForProofRow(item);
                                   const rowBusy = numericId && approvalUpdatingRowId === numericId;
                                   return (
                                     <div
@@ -17035,7 +18106,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                           onClick={(e) => {
                                             e.stopPropagation();
                                             if (!numericId || rowBusy || rowLocked) return;
-                                            handleApprovalColumnAction(item, 'Approved');
+                                            handleApprovalColumnAction(item, 'Approved', numericId);
                                           }}
                                         >
                                           {rowBusy ? '…' : 'Approve'}
@@ -17056,7 +18127,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                           onClick={(e) => {
                                             e.stopPropagation();
                                             if (!numericId || rowBusy || rowLocked) return;
-                                            handleApprovalColumnAction(item, 'Rejected');
+                                            handleApprovalColumnAction(item, 'Rejected', numericId);
                                           }}
                                         >
                                           {rowBusy ? '…' : 'Return'}
@@ -17069,7 +18140,8 @@ const Statutory = ({ userEmail, userRole }) => {
                             ) : null}
                             <td style={{ textAlign: 'center' }}>
                               {(() => {
-                                const draftVal = item.draftFile ?? item.DraftFile ?? null;
+                                const draftVal =
+                                  itemForMonthWorkflow.draftFile ?? itemForMonthWorkflow.DraftFile ?? null;
                                 const hasDraftFile =
                                   draftVal != null &&
                                   String(draftVal).trim() !== '' &&
@@ -17078,7 +18150,10 @@ const Statutory = ({ userEmail, userRole }) => {
                                 if (!hasDraftFile) {
                                   return <span className="statutory-status-btn statutory-status-btn--yet-to-complete">Yet to Complete</span>;
                                 }
-                                const raw = item.status != null && item.status !== '' ? item.status : item.Status;
+                                const raw =
+                                  itemForMonthWorkflow.status != null && itemForMonthWorkflow.status !== ''
+                                    ? itemForMonthWorkflow.status
+                                    : itemForMonthWorkflow.Status;
                                 const norm = String(raw || '').trim();
                                 const normalized = norm.toLowerCase();
                                 if (norm === '' || norm === '-' || norm === '—') {
@@ -17098,7 +18173,11 @@ const Statutory = ({ userEmail, userRole }) => {
                               })()}
                             </td>
                             {showRemarksColumn ? (
-                              <td>{renderRemarksDisplay(item.remarks || item.Remarks || '')}</td>
+                              <td>
+                                {renderRemarksDisplay(
+                                  itemForMonthWorkflow.remarks || itemForMonthWorkflow.Remarks || ''
+                                )}
+                              </td>
                             ) : null}
                           </tr>
                           );
@@ -17207,10 +18286,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 }}
                 onClick={(e) => e.stopPropagation()}
               >
-                <h3 style={{ margin: '0 0 10px 0', fontSize: '18px', color: '#111827' }}>Reject Remarks</h3>
-                <p style={{ margin: '0 0 8px 0', fontSize: '13px', color: '#6b7280' }}>
-                  Enter remarks. Press <b>Shift+Enter</b> for a new line. Press <b>Enter</b> to submit.
-                </p>
+                <h3 style={{ margin: '0 0 10px 0', fontSize: '18px', color: '#111827' }}>Remarks</h3>
                 <textarea
                   value={rejectRemarksValue}
                   onChange={(e) => setRejectRemarksValue(e.target.value)}
@@ -17222,7 +18298,7 @@ const Statutory = ({ userEmail, userRole }) => {
                   }}
                   autoFocus
                   rows={5}
-                  placeholder="Type reject remarks..."
+                  placeholder="Type remarks..."
                   style={{
                     width: '100%',
                     border: '1px solid #d1d5db',
@@ -17716,6 +18792,20 @@ const Statutory = ({ userEmail, userRole }) => {
                       {success}
                     </div>
                   )}
+                  {isFormFileReadOnly && (
+                    <div style={{
+                      marginBottom: '16px',
+                      padding: '12px 16px',
+                      backgroundColor: '#eff6ff',
+                      border: '1px solid #bfdbfe',
+                      borderRadius: '8px',
+                      color: '#1d4ed8',
+                      fontSize: '14px',
+                      fontWeight: '500'
+                    }}>
+                      Review mode: showing the saved site draft exactly as submitted for approval.
+                    </div>
+                  )}
                  
                   {/* Form Header Section – format from View File */}
                   {displayFormHeader && (
@@ -17897,11 +18987,18 @@ const Statutory = ({ userEmail, userRole }) => {
                               <input
                                 type="text"
                                 value={headerFormData[field.key] || ''}
-                                onChange={(e) => handleHeaderFieldChange(field.key, e.target.value)}
+                                onChange={(e) => {
+                                  if (isFormFileReadOnly) return;
+                                  handleHeaderFieldChange(field.key, e.target.value);
+                                }}
+                                readOnly={isFormFileReadOnly}
                                 placeholder={compactHeaderField
                                   ? `Enter ${field.label.replace(/:+$/, '').trim()}`
                                   : `Enter ${field.label.replace(':', '')}`}
-                                style={commonStyle}
+                                style={{
+                                  ...commonStyle,
+                                  backgroundColor: isFormFileReadOnly ? '#f9fafb' : commonStyle.backgroundColor
+                                }}
                                 onFocus={(e) => { e.target.style.borderColor = '#3b82f6'; }}
                                 onBlur={(e) => { e.target.style.borderColor = '#d1d5db'; }}
                               />
@@ -17939,7 +19036,11 @@ const Statutory = ({ userEmail, userRole }) => {
                               <input
                                 type="text"
                                 value={headerFormData[displayFormHeader.festivalGrid.approvalProceedings.key] || ''}
-                                onChange={(e) => handleHeaderFieldChange(displayFormHeader.festivalGrid.approvalProceedings.key, e.target.value)}
+                                onChange={(e) => {
+                                  if (isFormFileReadOnly) return;
+                                  handleHeaderFieldChange(displayFormHeader.festivalGrid.approvalProceedings.key, e.target.value);
+                                }}
+                                readOnly={isFormFileReadOnly}
                                 placeholder="Festival holidays approval proceedings no. and date"
                                 style={{
                                   width: '100%',
@@ -17950,7 +19051,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                   borderRadius: '6px',
                                   fontSize: '14px',
                                   color: '#1f2937',
-                                  backgroundColor: '#fff',
+                                  backgroundColor: isFormFileReadOnly ? '#f9fafb' : '#fff',
                                   transition: 'border-color 0.2s'
                                 }}
                                 onFocus={(e) => { e.target.style.borderColor = '#3b82f6'; }}
@@ -17988,14 +19089,18 @@ const Statutory = ({ userEmail, userRole }) => {
                                     <input
                                       type="text"
                                       value={headerFormData[slotKey] || ''}
-                                      onChange={(e) => handleHeaderFieldChange(slotKey, e.target.value)}
+                                      onChange={(e) => {
+                                        if (isFormFileReadOnly) return;
+                                        handleHeaderFieldChange(slotKey, e.target.value);
+                                      }}
+                                      readOnly={isFormFileReadOnly}
                                       style={{
                                         padding: '10px 12px',
                                         border: '1px solid #d1d5db',
                                         borderRadius: '6px',
                                         fontSize: '14px',
                                         color: '#1f2937',
-                                        backgroundColor: '#fff',
+                                        backgroundColor: isFormFileReadOnly ? '#f9fafb' : '#fff',
                                         transition: 'border-color 0.2s',
                                         minWidth: 0
                                       }}
@@ -18021,7 +19126,7 @@ const Statutory = ({ userEmail, userRole }) => {
                     flexWrap: 'wrap'
                   }}>
                     {/* Autofill button - Hide if draft file exists */}
-                    {displayTableHeaders.length > 0 && !formFileModalData?.item?.draftFile && (
+                    {!isFormFileReadOnly && displayTableHeaders.length > 0 && !formFileModalData?.item?.draftFile && (
                       <button
                         onClick={() =>
                           fetchAndPopulateEmployeeData(
@@ -18062,7 +19167,7 @@ const Statutory = ({ userEmail, userRole }) => {
                       </button>
                     )}
                     {/* Import button (after Autofill) */}
-                    {displayTableHeaders.length > 0 && (
+                    {!isFormFileReadOnly && displayTableHeaders.length > 0 && (
                       <>
                         <input
                           ref={formModalImportInputRef}
@@ -18109,7 +19214,7 @@ const Statutory = ({ userEmail, userRole }) => {
                       </>
                     )}
                     {/* Save Button */}
-                    {formTableData.length > 0 && displayTableHeaders.length > 0 && (
+                    {!isFormFileReadOnly && formTableData.length > 0 && displayTableHeaders.length > 0 && (
                       <button
                         onClick={handleSaveFormFile}
                         disabled={submitting}
@@ -18148,7 +19253,7 @@ const Statutory = ({ userEmail, userRole }) => {
                       </button>
                     )}
                     {/* Add Row Button */}
-                    {formTableData.length > 0 && (
+                    {!isFormFileReadOnly && formTableData.length > 0 && (
                       <button
                         onClick={() => {
                           // Add a new empty row
@@ -18350,6 +19455,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                     type="text"
                                     value={row[header] === false || row[header] === 'false' || !row[header] ? '' : row[header]}
                                     onChange={(e) => {
+                                      if (isFormFileReadOnly) return;
                                       const newData = [...formTableData];
                                       newData[rowIndex] = {
                                         ...newData[rowIndex],
@@ -18357,13 +19463,14 @@ const Statutory = ({ userEmail, userRole }) => {
                                       };
                                       setFormTableData(newData);
                                     }}
+                                    readOnly={isFormFileReadOnly}
                                     style={{
                                       width: '100%',
                                       padding: '6px 8px',
                                       border: '1px solid #d1d5db',
                                       borderRadius: '4px',
                                       fontSize: '14px',
-                                      backgroundColor: 'white'
+                                      backgroundColor: isFormFileReadOnly ? '#f9fafb' : 'white'
                                     }}
                                     placeholder={`Enter ${formatStatutoryTableHeaderLabel(header)}`}
                                   />

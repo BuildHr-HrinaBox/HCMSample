@@ -260,7 +260,7 @@
 
 .mr-kpis {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
   margin: 0 0 36px 0;
 }
@@ -384,6 +384,9 @@
 }
 .mr-kpi--yet {
   background: rgba(234, 179, 8, 0.1);
+}
+.mr-kpi--pending {
+  background: rgba(245, 158, 11, 0.12);
 }
 .mr-kpi--drafts {
   background: rgba(99, 102, 241, 0.08);
@@ -580,6 +583,21 @@
   border-bottom: none;
 }
 
+.mr-table tbody tr.mr-sector-group-row td {
+  background: #eef6ff;
+  color: #1e3a8a;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-right: none;
+  border-bottom: 1px solid #dbeafe;
+  padding: 8px 12px;
+}
+
+.mr-sector-group-cell {
+  text-align: left;
+}
+
 .mr-empty {
   text-align: center;
   color: #6b7280;
@@ -617,6 +635,12 @@
   background: rgba(217, 119, 6, 0.12);
   border-color: rgba(217, 119, 6, 0.35);
   color: #9a3412;
+}
+
+.mr-status--returned {
+  background: rgba(234, 88, 12, 0.12);
+  border-color: rgba(234, 88, 12, 0.35);
+  color: #c2410c;
 }
 
 .mr-link {

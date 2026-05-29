@@ -315,8 +315,8 @@ const Checklistbulk = ({ userRole, userEmail }) => {
                   <th>Name of the Code</th>
                   <th>Act</th>
                   <th>Name of the Rule</th>
+                  <th>Form Number</th>
                   <th>Form Name</th>
-                  <th>Description</th>
                   <th>Govt Department</th>
                   <th>Frequency</th>
                   <th>Due Date</th>

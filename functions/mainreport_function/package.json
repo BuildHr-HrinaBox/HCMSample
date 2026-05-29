@@ -4,6 +4,7 @@
 	"main": "index.js",
 	"author": "user39@demo1.buildhr.co.in",
 	"dependencies": {
+		"archiver": "^7.0.1",
 		"express": "^5.1.0",
 		"zcatalyst-sdk-node": "latest"
 	}

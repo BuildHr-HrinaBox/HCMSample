@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const archiver = require('archiver');
 const catalystSDK = require('zcatalyst-sdk-node');
 
 const app = express();
@@ -202,7 +203,10 @@ function filterRowsForInchargeLocation(rows, stateLabels, siteNamesLower) {
   return rows.filter((r) => {
     const site = String(r.Site || r.site || '').trim().toLowerCase();
     if (siteNamesLower && siteNamesLower.size > 0 && site && !siteNamesLower.has(site)) return false;
-    return rowStatesMatchInchargeScope(r.State || r.state || '', stateLabels);
+    const stateRaw = getStateFromAnyRow(r);
+    /** ChecklistBulk master rows often have no Site; resolve State later from bulk/sector/site scope. */
+    if (!site && !stateRaw) return true;
+    return rowStatesMatchInchargeScope(stateRaw, stateLabels);
   });
 }
 
@@ -264,6 +268,36 @@ function filterRowsByActCategoryScope(rows, allowedActCategories) {
   if (!Array.isArray(allowedActCategories) || allowedActCategories.length === 0) return rows;
   const allow = new Set(allowedActCategories);
   return rows.filter((r) => allow.has(getActCategoryFromStatutoryRow(r)));
+}
+
+function isPanIndiaOrBlankState(stateRaw) {
+  const raw = String(stateRaw ?? '').trim();
+  if (!raw) return true;
+  const blob = normStateToken(raw);
+  return /\b(all india|pan india|pan-india|national|central|all states|all state)\b/.test(blob);
+}
+
+/** Checklist bulk row state vs selected site's SiteState (pan-India / blank master rows still match). */
+function rowStateMatchesSiteState(row, siteState) {
+  if (!siteState) return true;
+  const stateRaw = getStateFromAnyRow(row);
+  if (isPanIndiaOrBlankState(stateRaw)) return true;
+  return rowStatesMatchInchargeScope(stateRaw, [siteState]);
+}
+
+function filterBulkRowsForSiteScope(bulkRows, siteRow, allowedActCategories) {
+  let scoped = filterRowsByActCategoryScope(bulkRows, allowedActCategories);
+  const siteState = getSiteStateFromSiteRow(siteRow);
+  if (siteState) {
+    scoped = scoped.filter((r) => rowStateMatchesSiteState(r, siteState));
+  }
+  return scoped;
+}
+
+function filterStatutoryRowsForSite(rows, siteParam) {
+  if (!siteParam) return rows;
+  const want = String(siteParam).trim().toLowerCase();
+  return rows.filter((r) => String(r.Site || r.site || '').trim().toLowerCase() === want);
 }
 
 /** Month filter as stored on Statutory / Catalyst rows (field names vary by table mapping). */
@@ -391,9 +425,11 @@ function buildStatutoryDraftRow(stRow) {
     act,
     description,
     sector,
+    state: getStateFromAnyRow(stRow),
     monthFilter,
     draftFile: approved ? draftFile : null,
-    draftFileName: approved ? draftFileName : '',
+    draftFileId: hasDraftStored ? draftFile : null,
+    draftFileName: hasDraftStored ? draftFileName : '',
     draftFileUrl,
     approval,
     statutoryStatus,
@@ -424,6 +460,159 @@ function getSectorFromAnyRow(row) {
   return String(row?.Sector || row?.sector || '').trim();
 }
 
+function getStateFromAnyRow(row) {
+  if (!row) return '';
+  const direct = String(row.State ?? row.state ?? '').trim();
+  if (direct) return direct;
+  for (const k of Object.keys(row)) {
+    if (String(k).toLowerCase() === 'state') {
+      const v = row[k];
+      if (v != null && String(v).trim() !== '') return String(v).trim();
+    }
+  }
+  return '';
+}
+
+function unwrapCatalystTableRow(row, tableName) {
+  if (!row || typeof row !== 'object') return row;
+  const nested = row[tableName];
+  if (nested && typeof nested === 'object') {
+    return { ...nested, ROWID: nested.ROWID ?? row.ROWID };
+  }
+  return row;
+}
+
+function normalizeChecklistBulkRowForReport(row) {
+  const base = unwrapCatalystTableRow(row, 'checklistbulk');
+  if (!base || typeof base !== 'object') return base;
+  return {
+    ...base,
+    Sector: base.Sector ?? base.sector ?? '',
+    State: base.State ?? base.state ?? '',
+    Act: base.Act ?? base.act ?? '',
+    FormName: base.FormName ?? base.formName ?? '',
+    Description: base.Description ?? base.description ?? '',
+    Site: base.Site ?? base.site ?? ''
+  };
+}
+
+function upsertFormMeta(formsMap, key, row) {
+  const name = getFormNameFromAnyRow(row);
+  const state = getStateFromAnyRow(row);
+  const sector = getSectorFromAnyRow(row);
+  if (!formsMap.has(key)) {
+    formsMap.set(key, {
+      formName: name,
+      act: getActFromAnyRow(row),
+      description: getDescriptionFromAnyRow(row),
+      sector,
+      state
+    });
+    return;
+  }
+  const existing = formsMap.get(key);
+  if (!existing.state && state) existing.state = state;
+  if (!existing.sector && sector) existing.sector = sector;
+  if (!existing.act) existing.act = getActFromAnyRow(row);
+  if (!existing.description) existing.description = getDescriptionFromAnyRow(row);
+}
+
+function findStateForMasterKey(formKey, bulkRows, statutoryRows) {
+  for (const r of bulkRows) {
+    if (getMasterKeyFromAnyRow(r) === formKey) {
+      const st = getStateFromAnyRow(r);
+      if (st) return st;
+    }
+  }
+  for (const r of statutoryRows) {
+    if (getMasterKeyFromAnyRow(r) === formKey) {
+      const st = getStateFromAnyRow(r);
+      if (st) return st;
+    }
+  }
+  return '';
+}
+
+function findStateByFormNameLoose(formName, bulkRows, statutoryRows) {
+  const want = normalizeFormKey(formName);
+  if (!want) return '';
+  for (const r of bulkRows) {
+    if (normalizeFormKey(getFormNameFromAnyRow(r)) === want) {
+      const st = getStateFromAnyRow(r);
+      if (st) return st;
+    }
+  }
+  for (const r of statutoryRows) {
+    if (normalizeFormKey(getFormNameFromAnyRow(r)) === want) {
+      const st = getStateFromAnyRow(r);
+      if (st) return st;
+    }
+  }
+  return '';
+}
+
+function buildSectorStateMap(bulkRows) {
+  const map = new Map();
+  for (const row of bulkRows) {
+    const sec = getSectorFromAnyRow(row).toLowerCase();
+    const st = getStateFromAnyRow(row);
+    if (sec && st && !map.has(sec)) map.set(sec, st);
+  }
+  return map;
+}
+
+function getSiteStateFromSiteRow(siteRow) {
+  if (!siteRow) return '';
+  return String(siteRow.SiteState || siteRow.siteState || siteRow.State || siteRow.state || '').trim();
+}
+
+async function buildSiteStateByNameMap(catalyst) {
+  const map = new Map();
+  try {
+    const rows = await catalyst.datastore().table('Site').getAllRows();
+    for (const r of rows) {
+      const name = String(r.SiteName || r.siteName || '')
+        .trim()
+        .toLowerCase();
+      const st = getSiteStateFromSiteRow(r);
+      if (name && st) map.set(name, st);
+    }
+  } catch (err) {
+    console.warn('buildSiteStateByNameMap:', err?.message || err);
+  }
+  return map;
+}
+
+function resolveReportState(dataRow, metaState, siteStateByName, siteParam, options = {}) {
+  const {
+    masterState = '',
+    sectorStateMap = null,
+    sector = '',
+    inchargeStateLabels = null
+  } = options;
+  const direct =
+    getStateFromAnyRow(dataRow) ||
+    String(metaState || '').trim() ||
+    String(masterState || '').trim();
+  if (direct) return direct;
+  const secKey = String(sector || '').trim().toLowerCase();
+  if (secKey && sectorStateMap && sectorStateMap.has(secKey)) {
+    return sectorStateMap.get(secKey);
+  }
+  const siteName = String(dataRow?.Site || dataRow?.site || siteParam || '')
+    .trim()
+    .toLowerCase();
+  if (siteName && siteStateByName.has(siteName)) return siteStateByName.get(siteName);
+  if (siteParam) {
+    const fromFilter = siteStateByName.get(String(siteParam).trim().toLowerCase());
+    if (fromFilter) return fromFilter;
+  }
+  if (Array.isArray(inchargeStateLabels) && inchargeStateLabels.length === 1) {
+    return String(inchargeStateLabels[0] || '').trim();
+  }
+  return '';
+}
+
 function getMasterKeyFromAnyRow(row) {
   const formKey = normalizeFormKey(getFormNameFromAnyRow(row));
   const actKey = normalizeFormKey(getActFromAnyRow(row));
@@ -431,7 +620,7 @@ function getMasterKeyFromAnyRow(row) {
   return `${formKey}|${actKey}|${descKey}`;
 }
 
-function buildEmptyFormRow(formKey, formName, act, description, sector, reportMonthNorm) {
+function buildEmptyFormRow(formKey, formName, act, description, sector, reportMonthNorm, state = '') {
   const mf = normalizeMonth(reportMonthNorm) || String(reportMonthNorm || '').trim();
   return {
     rowId: `master_${formKey}`,
@@ -440,6 +629,7 @@ function buildEmptyFormRow(formKey, formName, act, description, sector, reportMo
     act: act || '',
     description: description || '',
     sector: sector || '',
+    state: String(state || '').trim(),
     monthFilter: mf,
     draftFile: null,
     draftFileName: '',
@@ -496,6 +686,192 @@ function getContentType(filename) {
     txt: 'text/plain'
   };
   return contentTypes[ext] || 'application/octet-stream';
+}
+
+function sanitizeZipPathSegment(value) {
+  const s = String(value || '')
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return s.slice(0, 80) || 'Unknown';
+}
+
+const CONSOLIDATED_SECTOR_FOLDERS = ['CLRA', 'Factories Act', 'Shops and Establishment', 'Others'];
+
+function getConsolidatedStateFolder(row) {
+  const state = String(row?.state || '').trim();
+  return sanitizeZipPathSegment(state || 'Unknown');
+}
+
+function getConsolidatedSectorFolder(row) {
+  const cat = getActCategoryFromStatutoryRow({
+    Act: row?.act,
+    act: row?.act,
+    Sector: row?.sector,
+    sector: row?.sector
+  });
+  if (cat === 'clra') return 'CLRA';
+  if (cat === 'factories') return 'Factories Act';
+  if (cat === 'shops_and_establishment') return 'Shops and Establishment';
+  const s = String(row?.sector || '').trim();
+  if (s) return sanitizeZipPathSegment(s);
+  return 'Others';
+}
+
+function ensureUniqueZipName(baseName, usedNames) {
+  let name = String(baseName || 'draft').trim() || 'draft';
+  if (!usedNames.has(name)) {
+    usedNames.add(name);
+    return name;
+  }
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  let n = 2;
+  while (usedNames.has(`${stem}_${n}${ext}`)) n += 1;
+  name = `${stem}_${n}${ext}`;
+  usedNames.add(name);
+  return name;
+}
+
+/** Shared report rows builder for /entries and /consolidated-zip. */
+async function buildMainReportEntries(catalyst, { year, month, userEmail, siteParam }) {
+  const inchargeScope = await getInchargeReportScope(catalyst, userEmail);
+  const allowedActCategories = inchargeScope.actCategories;
+
+  let narrowActCategories = allowedActCategories;
+  let siteRow = null;
+  if (siteParam) {
+    siteRow = await findSiteRowByName(catalyst, siteParam);
+    if (!siteRow) {
+      const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
+      return { rows: [], siteNames };
+    }
+    const siteCat = getActCategoryForSiteRow(siteRow, siteParam);
+    const siteCats = [siteCat];
+    if (Array.isArray(allowedActCategories) && allowedActCategories.length > 0) {
+      const intersection = siteCats.filter((c) => allowedActCategories.includes(c));
+      if (intersection.length === 0) {
+        const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
+        return { rows: [], siteNames };
+      }
+      narrowActCategories = intersection;
+    } else {
+      narrowActCategories = siteCats;
+    }
+  }
+
+  const statutoryTable = catalyst.datastore().table('Statutory');
+  const statutoryAll = await statutoryTable.getAllRows();
+  let statutoryForUser = filterRowsByActCategoryScope(statutoryAll, narrowActCategories);
+  statutoryForUser = filterRowsForInchargeLocation(
+    statutoryForUser,
+    inchargeScope.stateLabels,
+    inchargeScope.siteNamesLower
+  );
+
+  const bulkTable = catalyst.datastore().table('checklistbulk');
+  const bulkAllRaw = await bulkTable.getAllRows();
+  const bulkAll = (Array.isArray(bulkAllRaw) ? bulkAllRaw : []).map(normalizeChecklistBulkRowForReport);
+
+  const siteStateByName = await buildSiteStateByNameMap(catalyst);
+  const sectorStateMap = buildSectorStateMap(bulkAll);
+  const reportMonthNorm = normalizeMonth(month);
+  const resolveOptsBase = {
+    siteStateByName,
+    siteParam,
+    sectorStateMap,
+    inchargeStateLabels: inchargeScope.stateLabels
+  };
+
+  const statutoryForMatch = siteParam
+    ? statutoryAll.filter((r) => {
+        const site = String(r.Site || r.site || '')
+          .trim()
+          .toLowerCase();
+        return site === siteParam.toLowerCase();
+      })
+    : statutoryAll;
+
+  const pushReportRowForBulkMeta = (listKey, meta, formKey) => {
+    const masterState =
+      getStateFromAnyRow(meta) ||
+      findStateForMasterKey(formKey, bulkAll, statutoryAll) ||
+      findStateByFormNameLoose(meta?.formName, bulkAll, statutoryAll) ||
+      String(meta?.state || '').trim();
+    const candidates = statutoryForMatch.filter((r) => getMasterKeyFromAnyRow(r) === formKey);
+    const monthCandidates = candidates.filter((r) => statutoryRowMatchesMonth(r, month));
+    const picked = monthCandidates.length > 0 ? pickBestStatutoryRow(monthCandidates) : null;
+    const stateOptions = { ...resolveOptsBase, masterState, sector: meta?.sector || '' };
+    if (picked) {
+      const built = buildStatutoryDraftRow(picked);
+      if (!built.act && meta?.act) built.act = meta.act;
+      if (!built.description && meta?.description) built.description = meta.description;
+      if (meta?.sector) built.sector = meta.sector;
+      built.state = resolveReportState(picked, meta?.state, siteStateByName, siteParam, stateOptions);
+      built.monthFilter = getStatutoryMonthFilterDisplay(picked, reportMonthNorm) || reportMonthNorm;
+      built.bulkRowId = listKey;
+      return built;
+    }
+    const emptyState = resolveReportState(null, meta?.state, siteStateByName, siteParam, stateOptions);
+    const empty = buildEmptyFormRow(
+      listKey,
+      meta?.formName,
+      meta?.act,
+      meta?.description,
+      meta?.sector,
+      reportMonthNorm,
+      emptyState
+    );
+    empty.bulkRowId = listKey;
+    return empty;
+  };
+
+  const out = [];
+  const bulkFormKeysSeen = new Set();
+
+  const bulkForReport =
+    siteParam && siteRow ? filterBulkRowsForSiteScope(bulkAll, siteRow, narrowActCategories) : bulkAll;
+
+  for (const row of bulkForReport) {
+    const name = getFormNameFromAnyRow(row);
+    if (!normalizeFormKey(name)) continue;
+    const formKey = getMasterKeyFromAnyRow(row);
+    bulkFormKeysSeen.add(formKey);
+    const listKey = row.ROWID != null ? `bulk_${row.ROWID}` : `bulk_${formKey}_${out.length}`;
+    const meta = {
+      formName: name,
+      act: getActFromAnyRow(row),
+      description: getDescriptionFromAnyRow(row),
+      sector: getSectorFromAnyRow(row),
+      state: getStateFromAnyRow(row)
+    };
+    out.push(pushReportRowForBulkMeta(listKey, meta, formKey));
+  }
+
+  const statutoryForSite = filterStatutoryRowsForSite(statutoryForUser, siteParam);
+
+  for (const row of statutoryForSite) {
+    const name = getFormNameFromAnyRow(row);
+    if (!normalizeFormKey(name)) continue;
+    const formKey = getMasterKeyFromAnyRow(row);
+    if (bulkFormKeysSeen.has(formKey)) continue;
+    bulkFormKeysSeen.add(formKey);
+    const meta = {
+      formName: name,
+      act: getActFromAnyRow(row),
+      description: getDescriptionFromAnyRow(row),
+      sector: getSectorFromAnyRow(row),
+      state: getStateFromAnyRow(row)
+    };
+    out.push(pushReportRowForBulkMeta(`statutory_${row.ROWID}`, meta, formKey));
+  }
+
+  out.sort((a, b) => String(a.formName || '').localeCompare(String(b.formName || ''), undefined, { sensitivity: 'base' }));
+
+  const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
+  return { rows: out, siteNames };
 }
 
 /**
@@ -556,123 +932,90 @@ app.get('/mainreport/entries', async (req, res) => {
       return res.status(400).json({ status: 'failure', message: 'year and month query parameters are required.' });
     }
 
+    const siteParam = req.query.site != null ? String(req.query.site).trim() : '';
     const { catalyst } = res.locals;
-    const inchargeScope = await getInchargeReportScope(catalyst, userEmail);
-    const allowedActCategories = inchargeScope.actCategories;
-
-    const siteParamRaw = req.query.site != null ? String(req.query.site) : '';
-    const siteParam = siteParamRaw.trim();
-
-    /** When a site is chosen, narrow to that site's Industry (act bucket). Incharge scope still applies. */
-    let narrowActCategories = allowedActCategories;
-    if (siteParam) {
-      const siteRow = await findSiteRowByName(catalyst, siteParam);
-      if (!siteRow) {
-        const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
-        return res.status(200).json({
-          status: 'success',
-          data: { rows: [], siteNames }
-        });
-      }
-      const siteCat = getActCategoryForSiteRow(siteRow, siteParam);
-      const siteCats = [siteCat];
-      if (Array.isArray(allowedActCategories) && allowedActCategories.length > 0) {
-        const intersection = siteCats.filter((c) => allowedActCategories.includes(c));
-        if (intersection.length === 0) {
-          const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
-          return res.status(200).json({
-            status: 'success',
-            data: { rows: [], siteNames }
-          });
-        }
-        narrowActCategories = intersection;
-      } else {
-        narrowActCategories = siteCats;
-      }
-    }
-
-    // Submitted rows (with draft linkage) come from Statutory.
-    const statutoryTable = catalyst.datastore().table('Statutory');
-    const statutoryAll = await statutoryTable.getAllRows();
-    let statutoryForUser = filterRowsByActCategoryScope(statutoryAll, narrowActCategories);
-    statutoryForUser = filterRowsForInchargeLocation(
-      statutoryForUser,
-      inchargeScope.stateLabels,
-      inchargeScope.siteNamesLower
-    );
-
-    // Master form list comes from checklistbulk (same source used by Statutory page merge).
-    const bulkTable = catalyst.datastore().table('checklistbulk');
-    const bulkAll = await bulkTable.getAllRows();
-    let bulkForUser = filterRowsByActCategoryScope(bulkAll, narrowActCategories);
-    bulkForUser = filterRowsForInchargeLocation(
-      bulkForUser,
-      inchargeScope.stateLabels,
-      inchargeScope.siteNamesLower
-    );
-
-    // Keep duplicates by form when act/description differs (same behavior user expects from Statutory list).
-    const formsMap = new Map();
-    for (const row of bulkForUser) {
-      const name = getFormNameFromAnyRow(row);
-      const formOnlyKey = normalizeFormKey(name);
-      if (!formOnlyKey) continue;
-      const key = getMasterKeyFromAnyRow(row);
-      if (!formsMap.has(key)) {
-        formsMap.set(key, {
-          formName: name,
-          act: getActFromAnyRow(row),
-          description: getDescriptionFromAnyRow(row),
-          sector: getSectorFromAnyRow(row)
-        });
-      }
-    }
-    for (const row of statutoryForUser) {
-      const name = getFormNameFromAnyRow(row);
-      const formOnlyKey = normalizeFormKey(name);
-      if (!formOnlyKey) continue;
-      const key = getMasterKeyFromAnyRow(row);
-      if (!formsMap.has(key)) {
-        formsMap.set(key, {
-          formName: name,
-          act: getActFromAnyRow(row),
-          description: getDescriptionFromAnyRow(row),
-          sector: getSectorFromAnyRow(row)
-        });
-      }
-    }
-
-    const reportMonthNorm = normalizeMonth(month);
-    const out = [];
-    for (const [formKey, meta] of formsMap.entries()) {
-      const candidates = statutoryForUser.filter((r) => getMasterKeyFromAnyRow(r) === formKey);
-      const monthCandidates = candidates.filter((r) => statutoryRowMatchesMonth(r, month));
-      /** Do not fall back to other months' statutory rows — e.g. May submission must not show under January Reports. */
-      const picked = monthCandidates.length > 0 ? pickBestStatutoryRow(monthCandidates) : null;
-      if (picked) {
-        const built = buildStatutoryDraftRow(picked);
-        if (!built.act && meta?.act) built.act = meta.act;
-        if (!built.description && meta?.description) built.description = meta.description;
-        if (meta?.sector) built.sector = meta.sector;
-        built.monthFilter = getStatutoryMonthFilterDisplay(picked, reportMonthNorm) || reportMonthNorm;
-        out.push(built);
-      } else {
-        out.push(buildEmptyFormRow(formKey, meta?.formName, meta?.act, meta?.description, meta?.sector, reportMonthNorm));
-      }
-    }
-
-    out.sort((a, b) => String(a.formName || '').localeCompare(String(b.formName || ''), undefined, { sensitivity: 'base' }));
-
-    // Full site list for the dropdown; do not filter by `site` query (that hid all other sites).
-    const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
+    const { rows, siteNames } = await buildMainReportEntries(catalyst, { year, month, userEmail, siteParam });
 
     res.status(200).json({
       status: 'success',
-      data: { rows: out, siteNames }
+      data: { rows, siteNames }
     });
   } catch (err) {
     console.error('mainreport/entries:', err);
     res.status(500).json({ status: 'failure', message: err.message || 'Failed to load entries.' });
+  }
+});
+
+/** Draft files: State → Sector folders. PDFs are built in the app. */
+app.get('/mainreport/consolidated-zip', async (req, res) => {
+  try {
+    const year = req.query.year;
+    const month = req.query.month;
+    const userEmail = req.query.userEmail != null ? String(req.query.userEmail) : '';
+    if (year == null || year === '' || month == null || month === '') {
+      return res.status(400).json({ status: 'failure', message: 'year and month query parameters are required.' });
+    }
+
+    const siteParam = req.query.site != null ? String(req.query.site).trim() : '';
+    const monthNorm = normalizeMonth(month) || String(month).trim();
+    const { catalyst } = res.locals;
+    const { rows } = await buildMainReportEntries(catalyst, { year, month, userEmail, siteParam });
+
+    const zipBase = `Consolidated_Report_${year}_${monthNorm}_${siteParam || 'All'}`.replace(/\s+/g, '_');
+    const zipFileName = `${zipBase}.zip`;
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipFileName.replace(/"/g, '')}"`);
+
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.on('error', (err) => {
+      console.error('mainreport/consolidated-zip archive:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ status: 'failure', message: err.message || 'Failed to build ZIP.' });
+      } else {
+        res.end();
+      }
+    });
+    archive.pipe(res);
+
+    const folder = catalyst.filestore().folder(DRAFT_FOLDER_ID);
+    const usedNamesByPath = new Map();
+    let filesAdded = 0;
+
+    for (const row of rows) {
+      const fileId = row?.draftFileId || row?.draftFile;
+      if (!fileId) continue;
+
+      const stateDir = getConsolidatedStateFolder(row);
+      const sectorDir = getConsolidatedSectorFolder(row);
+      const pathKey = `${stateDir}/${sectorDir}`;
+      if (!usedNamesByPath.has(pathKey)) usedNamesByPath.set(pathKey, new Set());
+      const usedInPath = usedNamesByPath.get(pathKey);
+
+      let fileName = String(row.draftFileName || row.formName || 'draft').trim() || 'draft';
+      fileName = ensureUniqueZipName(fileName, usedInPath);
+
+      try {
+        const buffer = await folder.downloadFile(fileId);
+        archive.append(buffer, { name: `${stateDir}/${sectorDir}/${fileName}` });
+        filesAdded += 1;
+      } catch (err) {
+        console.warn('mainreport/consolidated-zip skip file:', fileId, err?.message || err);
+      }
+    }
+
+    if (filesAdded === 0) {
+      const note =
+        'No draft files in ZIP. Use Consolidated Report in the app for State → Sector PDF folders.\n';
+      archive.append(Buffer.from(note, 'utf8'), { name: 'README.txt' });
+    }
+
+    await archive.finalize();
+  } catch (err) {
+    console.error('mainreport/consolidated-zip:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ status: 'failure', message: err.message || 'Failed to build consolidated ZIP.' });
+    }
   }
 });
 
@@ -711,16 +1054,23 @@ function returnedRowMatchesMonth(row, monthParam) {
   return monthsMatch(mf, monthParam);
 }
 
-function buildReturnedReportApiRow(row) {
+function buildReturnedReportApiRow(row, siteStateByName = null) {
   const siteRaw = String(row?.Site || row?.site || '').trim();
   const site = looksLikeInvalidReturnedSiteValue(siteRaw) ? '' : siteRaw;
+  const act = getActFromAnyRow(row);
+  const state = resolveReportState(row, '', siteStateByName, site);
+  const sector = getConsolidatedSectorFolder({
+    act,
+    sector: getSectorFromAnyRow(row)
+  });
   return {
     rowId: row?.ROWID != null ? String(row.ROWID) : null,
     formName: getFormNameFromAnyRow(row),
-    act: getActFromAnyRow(row),
+    act,
     description: getDescriptionFromAnyRow(row),
-    monthFilter: normalizeMonth(row?.MonthFilter || row?.monthFilter || '') || '',
     site,
+    state,
+    sector,
     status: String(row?.Status || row?.status || 'Returned').trim() || 'Returned',
     remarks: String(row?.Remarks || row?.remarks || '').trim(),
     dueDate: String(row?.DueDate || row?.dueDate || '').trim(),
@@ -836,10 +1186,11 @@ app.get('/mainreport/returned-entries', async (req, res) => {
       siteParam
     );
 
+    const siteStateByName = await buildSiteStateByNameMap(catalyst);
     const filtered = scoped
       .filter((r) => returnedRowMatchesMonth(r, month))
       .filter((r) => returnedRowMatchesYear(r, year))
-      .map(buildReturnedReportApiRow);
+      .map((r) => buildReturnedReportApiRow(r, siteStateByName));
 
     filtered.sort((a, b) =>
       String(a.formName || '').localeCompare(String(b.formName || ''), undefined, { sensitivity: 'base' })

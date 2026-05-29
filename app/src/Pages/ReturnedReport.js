@@ -1,5 +1,7 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { jsPDF } from 'jspdf';
+import JSZip from 'jszip';
 import './Mainreport.css';
 
 const API = '/server/mainreport_function/mainreport';
@@ -37,11 +39,204 @@ function buildPaginationItems(currentPage, totalPages) {
   return out;
 }
 
+const CONSOLIDATED_SECTOR_FOLDERS = ['CLRA', 'Factories Act', 'Shops and Establishment', 'Others'];
+
+const getReturnedSectorFolder = (row) => {
+  const sector = String(row?.sector || '').trim();
+  if (sector) return sector;
+  const act = String(row?.act || '').toLowerCase();
+  const isFactories = act.includes('factories') || act.includes('factory');
+  if (isFactories) return 'Factories Act';
+  const isShops =
+    act.includes('shops and establishment') || act.includes('shop and establishment');
+  if (isShops) return 'Shops and Establishment';
+  const isClra =
+    act.includes('clra') || act.includes('contract labour') || act.includes('contract labor');
+  if (isClra) return 'CLRA';
+  return 'Others';
+};
+
+const getReturnedStateFolder = (row) => {
+  const s = String(row?.state || '')
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return s.slice(0, 80) || 'Unknown';
+};
+
+const groupReturnedRowsByStateAndSector = (rows) => {
+  const byState = new Map();
+  for (const row of rows) {
+    const stateKey = getReturnedStateFolder(row);
+    const sectorKey = getReturnedSectorFolder(row);
+    if (!byState.has(stateKey)) byState.set(stateKey, new Map());
+    const bySector = byState.get(stateKey);
+    if (!bySector.has(sectorKey)) bySector.set(sectorKey, []);
+    bySector.get(sectorKey).push(row);
+  }
+  return byState;
+};
+
 const formatMaybeDate = (value) => {
   if (!value) return '';
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return String(value);
   return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
+};
+
+const formatPdfExportDate = (date = new Date()) =>
+  date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
+
+const buildReturnedReportPdfArrayBuffer = (rows, { title, logoDataUrl, totalReturned }) => {
+  const exportDate = new Date();
+  const list = Array.isArray(rows) ? rows : [];
+  const doc = new jsPDF({ unit: 'pt', format: 'a4', orientation: 'landscape' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const startX = 32;
+  const tableX = startX;
+  const tableWidth = pageWidth - startX * 2;
+  const rowH = 18;
+  const headerDark = [55, 65, 81];
+  let tableY = 0;
+
+  const header = ['S.No', 'Site', 'State', 'Sector', 'Form Name', 'Act', 'Description', 'Due Date', 'Status', 'Remarks'];
+  const colPct = [0.05, 0.09, 0.08, 0.1, 0.09, 0.12, 0.2, 0.08, 0.08, 0.11];
+  const colW = colPct.map((p) => Math.floor(tableWidth * p));
+  const colWidthTotal = colW.reduce((a, b) => a + b, 0);
+  if (colWidthTotal < tableWidth) colW[6] += tableWidth - colWidthTotal;
+
+  const drawPageHeader = () => {
+    if (logoDataUrl) {
+      try {
+        const logoFormat = logoDataUrl.includes('image/png')
+          ? 'PNG'
+          : logoDataUrl.includes('image/webp')
+            ? 'WEBP'
+            : 'JPEG';
+        doc.addImage(logoDataUrl, logoFormat, startX, 16, 74, 26);
+      } catch (_) {
+        /* optional logo */
+      }
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(16);
+    doc.setTextColor(17, 24, 39);
+    doc.text(title, pageWidth / 2, 36, { align: 'center' });
+
+    const boxW = 180;
+    const boxH = 56;
+    const y = 58;
+    doc.setDrawColor(34, 197, 94);
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(startX, y, boxW, boxH, 8, 8, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(31, 41, 55);
+    doc.text('Total Returned', startX + 12, y + 20);
+    doc.setFontSize(20);
+    doc.setTextColor(34, 197, 94);
+    doc.text(String(totalReturned), startX + 12, y + 44);
+    return y + boxH + 14;
+  };
+
+  const getCellLines = (value, colIndex) => {
+    const text = String(value ?? '');
+    if (colIndex === 0) return [text];
+    const wrapped = doc.splitTextToSize(text || '-', colW[colIndex] - 8);
+    return Array.isArray(wrapped) && wrapped.length > 0 ? wrapped : ['-'];
+  };
+
+  const drawTableHeader = () => {
+    doc.setFillColor(...headerDark);
+    doc.rect(tableX, tableY, tableWidth, rowH, 'F');
+    doc.setLineWidth(1.1);
+    doc.setDrawColor(120, 120, 120);
+    doc.rect(tableX, tableY, tableWidth, rowH);
+    let x = tableX;
+    let dividerX = tableX;
+    for (let i = 0; i < colW.length - 1; i += 1) {
+      dividerX += colW[i];
+      doc.line(dividerX, tableY, dividerX, tableY + rowH);
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(255, 255, 255);
+    header.forEach((h, i) => {
+      doc.text(h, x + 4, tableY + 12);
+      x += colW[i];
+    });
+    tableY += rowH;
+  };
+
+  tableY = drawPageHeader();
+  drawTableHeader();
+
+  const pdfRows = list.length
+    ? list.map((row, idx) => [
+        String(idx + 1),
+        String(row?.site || '').trim() || '—',
+        String(row?.state || '').trim() || '—',
+        String(row?.sector || '').trim() || '—',
+        String(row?.formName || '').trim() || '—',
+        String(row?.act || '').trim() || '—',
+        String(row?.description || '').trim() || '—',
+        String(row?.dueDate || '').trim() || '—',
+        String(row?.status || 'Returned').trim() || 'Returned',
+        String(row?.remarks || '').trim() || '—'
+      ])
+    : [['', '', '', '', '', '', 'No returned forms for this selection.', '', '', '']];
+
+  pdfRows.forEach((r) => {
+    const lineHeight = 10;
+    const rowPaddingTop = 11;
+    const cellLinesByCol = r.map((cell, i) => getCellLines(cell, i));
+    const maxLines = Math.max(...cellLinesByCol.map((lines) => lines.length));
+    const dynamicRowH = Math.max(rowH, rowPaddingTop + (maxLines - 1) * lineHeight + 6);
+
+    if (tableY + dynamicRowH > pageHeight - 28) {
+      doc.addPage();
+      tableY = drawPageHeader();
+      drawTableHeader();
+    }
+
+    let x = tableX;
+    doc.setLineWidth(1);
+    doc.setDrawColor(130, 130, 130);
+    doc.rect(tableX, tableY, tableWidth, dynamicRowH);
+    let dividerX = tableX;
+    for (let i = 0; i < colW.length - 1; i += 1) {
+      dividerX += colW[i];
+      doc.line(dividerX, tableY, dividerX, tableY + dynamicRowH);
+    }
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    r.forEach((cell, i) => {
+      if (i === 8) doc.setTextColor(185, 28, 28);
+      else doc.setTextColor(55, 65, 81);
+      cellLinesByCol[i].forEach((line, lineIdx) => {
+        doc.text(String(line), x + 4, tableY + rowPaddingTop + lineIdx * lineHeight, {
+          maxWidth: colW[i] - 8
+        });
+      });
+      x += colW[i];
+    });
+    tableY += dynamicRowH;
+  });
+
+  const totalPdfPages = doc.getNumberOfPages();
+  const exportDateText = `Export Date: ${formatPdfExportDate(exportDate)}`;
+  for (let p = 1; p <= totalPdfPages; p += 1) {
+    doc.setPage(p);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text(exportDateText, pageWidth - startX, 30, { align: 'right' });
+    doc.text(`Page ${p} of ${totalPdfPages}`, pageWidth - 32, pageHeight - 14, { align: 'right' });
+  }
+
+  return doc.output('arraybuffer');
 };
 
 const ReturnedReport = ({ userEmail: userEmailProp }) => {
@@ -67,6 +262,7 @@ const ReturnedReport = ({ userEmail: userEmailProp }) => {
   const [tableRows, setTableRows] = useState([]);
   const [siteNames, setSiteNames] = useState([]);
   const [tableLoading, setTableLoading] = useState(false);
+  const [consolidatedZipLoading, setConsolidatedZipLoading] = useState(false);
   const selectedYear = yearFromUrl ? String(yearFromUrl).trim() : '';
   const selectedMonth = monthFromUrl ? String(monthFromUrl).trim() : '';
   const selectedSite = siteFromUrl ? String(siteFromUrl).trim() : '';
@@ -99,6 +295,142 @@ const ReturnedReport = ({ userEmail: userEmailProp }) => {
   }, [years, calendarYearStr, selectedYear, draftYear]);
 
   const lastUrlFilterKeyRef = useRef('');
+  const reportLogoDataUrlRef = useRef(null);
+
+  const hasAppliedFilters = Boolean(selectedYear && selectedMonth);
+
+  const getReportLogoDataUrl = useCallback(async () => {
+    if (reportLogoDataUrlRef.current) return reportLogoDataUrlRef.current;
+    try {
+      const res = await fetch('/server/settings_function/settings/logo');
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      if (!blob || !blob.type.startsWith('image/')) return null;
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(String(reader.result || ''));
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      reportLogoDataUrlRef.current = dataUrl || null;
+      return reportLogoDataUrlRef.current;
+    } catch (_) {
+      return null;
+    }
+  }, []);
+
+  const downloadReturnedPdf = useCallback(async () => {
+    if (!hasAppliedFilters) {
+      setError('Apply filters before downloading the report.');
+      return;
+    }
+    if (!tableRows.length) {
+      setError('No returned forms to download for this selection.');
+      return;
+    }
+    try {
+      const logoDataUrl = await getReportLogoDataUrl();
+      const siteSuffix = selectedSite ? ` (${selectedSite})` : ' (All sites)';
+      const title = `Returned Report - ${selectedMonth} ${selectedYear}${siteSuffix}`;
+      const buf = buildReturnedReportPdfArrayBuffer(tableRows, {
+        title,
+        logoDataUrl,
+        totalReturned: tableRows.length
+      });
+      const fname = `Returned_Report_${selectedYear}_${selectedMonth}_${selectedSite || 'All'}.pdf`;
+      const blob = new Blob([buf], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fname.replace(/\s+/g, '_');
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.message || 'Failed to download returned report PDF.');
+    }
+  }, [hasAppliedFilters, selectedYear, selectedMonth, selectedSite, tableRows, getReportLogoDataUrl]);
+
+  const downloadConsolidatedZip = useCallback(async () => {
+    if (!hasAppliedFilters || !tableRows.length) {
+      setError('Apply filters and load returned forms before downloading.');
+      return;
+    }
+    setConsolidatedZipLoading(true);
+    setError('');
+    try {
+      const logoDataUrl = await getReportLogoDataUrl();
+      const siteSuffix = selectedSite ? ` (${selectedSite})` : ' (All sites)';
+      const periodLabel = `${selectedMonth} ${selectedYear}${siteSuffix}`;
+
+      const byState = groupReturnedRowsByStateAndSector(tableRows);
+      const zip = new JSZip();
+      let foldersAdded = 0;
+
+      const statesSorted = [...byState.keys()].sort((a, b) =>
+        a.localeCompare(b, undefined, { sensitivity: 'base' })
+      );
+
+      for (const stateFolder of statesSorted) {
+        const bySector = byState.get(stateFolder);
+        if (!bySector) continue;
+
+        const sectorOrder = [
+          ...CONSOLIDATED_SECTOR_FOLDERS,
+          ...[...bySector.keys()].filter((k) => !CONSOLIDATED_SECTOR_FOLDERS.includes(k))
+        ];
+
+        for (const sectorFolder of sectorOrder) {
+          const sectorRows = bySector.get(sectorFolder);
+          if (!sectorRows?.length) continue;
+
+          const stateDir = zip.folder(stateFolder);
+          const sectorDir = stateDir?.folder(sectorFolder);
+          if (!sectorDir) continue;
+
+          const pdfTitle = `Returned Report — ${stateFolder} — ${sectorFolder} - ${periodLabel}`;
+          const pdfBuf = buildReturnedReportPdfArrayBuffer(sectorRows, {
+            title: pdfTitle,
+            logoDataUrl,
+            totalReturned: sectorRows.length
+          });
+          sectorDir.file(`${sectorFolder.replace(/\s+/g, '_')}_Returned_Report.pdf`, pdfBuf, {
+            binary: true
+          });
+          foldersAdded += 1;
+        }
+      }
+
+      if (!foldersAdded) throw new Error('No state/sector data found for the current filters.');
+
+      const monthLabel = String(selectedMonth || '').replace(/\s+/g, '_');
+      const siteLabel = String(selectedSite || 'All').replace(/\s+/g, '_');
+      const fname = `Returned_Consolidated_Report_${selectedYear}_${monthLabel}_${siteLabel}.zip`;
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fname;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.message || 'Failed to download consolidated returned report ZIP.');
+    } finally {
+      setConsolidatedZipLoading(false);
+    }
+  }, [
+    hasAppliedFilters,
+    selectedYear,
+    selectedMonth,
+    selectedSite,
+    tableRows,
+    getReportLogoDataUrl
+  ]);
 
   const loadSummary = useCallback(async () => {
     setError('');
@@ -214,8 +546,6 @@ const ReturnedReport = ({ userEmail: userEmailProp }) => {
   useEffect(() => {
     setCurrentPage((p) => Math.min(p, totalPages));
   }, [totalPages]);
-
-  const draftHasYearMonth = Boolean(draftYear && draftMonth);
 
   return (
     <div className="mainreport-page">
@@ -351,6 +681,40 @@ const ReturnedReport = ({ userEmail: userEmailProp }) => {
                   <div>
                     <div className="mr-table-title">Returned Forms</div>
                   </div>
+                  <div className="mr-table-actions">
+                    <button
+                      type="button"
+                      className="mr-seg mr-seg--active"
+                      onClick={downloadConsolidatedZip}
+                      disabled={!hasAppliedFilters || consolidatedZipLoading || !tableRows.length}
+                      title={
+                        !hasAppliedFilters
+                          ? 'Apply filters first'
+                          : consolidatedZipLoading
+                            ? 'Preparing ZIP…'
+                            : !tableRows.length
+                              ? 'No data to download'
+                              : 'ZIP by State → Sector with returned forms PDF in each sector folder'
+                      }
+                    >
+                      {consolidatedZipLoading ? 'Preparing ZIP…' : 'Consolidated Report'}
+                    </button>
+                    <button
+                      type="button"
+                      className="mr-btn mr-btn-primary"
+                      onClick={downloadReturnedPdf}
+                      disabled={!hasAppliedFilters || !tableRows.length}
+                      title={
+                        !hasAppliedFilters
+                          ? 'Apply filters first'
+                          : !tableRows.length
+                            ? 'No data to download'
+                            : 'Download returned forms as PDF'
+                      }
+                    >
+                      Download Report
+                    </button>
+                  </div>
                 </div>
 
                 <div className="mr-table-wrap">
@@ -358,42 +722,41 @@ const ReturnedReport = ({ userEmail: userEmailProp }) => {
                     <thead>
                       <tr>
                         <th style={{ width: 70 }}>S.No</th>
+                        <th style={{ width: 140 }}>Site</th>
+                        <th style={{ width: 100, minWidth: 100 }}>State</th>
+                        <th style={{ width: 120, minWidth: 120 }}>Sector</th>
                         <th style={{ maxWidth: 160, width: 160 }}>Form Name</th>
                         <th style={{ maxWidth: 200, width: 200 }}>Act</th>
                         <th style={{ maxWidth: 280, width: 280 }}>Description</th>
-                        <th style={{ width: 110, minWidth: 110 }}>Month</th>
-                        <th style={{ width: 140 }}>Site</th>
+                        <th style={{ width: 120 }}>Due Date</th>
                         <th style={{ width: 100 }}>Status</th>
                         <th>Remarks</th>
-                        <th style={{ width: 120 }}>Due Date</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {!draftHasYearMonth ? (
+                      {!hasAppliedFilters ? (
                         <tr>
-                          <td colSpan={9} className="mr-empty">
-                            Select year and month, then click <strong>Apply Filters</strong>.
+                          <td colSpan={10} className="mr-empty">
+                            Select year, month, and site, then click Apply Filters to load returned forms.
                           </td>
                         </tr>
                       ) : tableLoading && tableRows.length === 0 ? (
                         <tr aria-hidden="true">
-                          <td colSpan={9} className="mr-table-placeholder" />
+                          <td colSpan={10} className="mr-table-placeholder" />
                         </tr>
                       ) : tableRows.length === 0 ? (
                         <tr>
-                          <td colSpan={9} className="mr-empty">
+                          <td colSpan={10} className="mr-empty">
                             No returned forms for this selection.
                           </td>
                         </tr>
                       ) : (
-                        pagedRows.map((row, idx) => {
-                          const monthCell =
-                            String(
-                              row?.monthFilter || selectedMonth || draftMonth || ''
-                            ).trim() || '—';
-                          return (
+                        pagedRows.map((row, idx) => (
                             <tr key={row?.rowId != null ? String(row.rowId) : `${effectivePage}-${idx}`}>
                               <td>{(effectivePage - 1) * PAGE_SIZE + idx + 1}</td>
+                              <td title={row?.site || ''}>{row?.site || '—'}</td>
+                              <td title={row?.state || ''}>{row?.state || '—'}</td>
+                              <td title={row?.sector || ''}>{row?.sector || '—'}</td>
                               <td
                                 className="mr-strong"
                                 style={{ maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
@@ -421,20 +784,15 @@ const ReturnedReport = ({ userEmail: userEmailProp }) => {
                               >
                                 {row?.description || ''}
                               </td>
-                              <td className="mr-month-filter-cell" title={monthCell}>
-                                {monthCell}
-                              </td>
-                              <td title={row?.site || ''}>{row?.site || '—'}</td>
+                              <td>{row?.dueDate || '—'}</td>
                               <td>
                                 <span className="mr-status mr-status--returned">
                                   {row?.status || 'Returned'}
                                 </span>
                               </td>
                               <td title={row?.remarks || ''}>{row?.remarks || '—'}</td>
-                              <td>{row?.dueDate || '—'}</td>
                             </tr>
-                          );
-                        })
+                          ))
                       )}
                     </tbody>
                   </table>

@@ -1423,11 +1423,16 @@ const ActDescription = ({ userRole, userEmail }) => {
             <div className="act-description-modal-body">
               <div className="act-details-layout">
                 <div className="act-details-cover">
-                  <div className="act-details-cover__badge">Act Overview</div>
+                  {(() => {
+                    const stateLabel = String(actDetailsModalAct.states || actDetailsModalAct.state || '').trim();
+                    return stateLabel ? (
+                      <p className="act-details-cover__state">{stateLabel}</p>
+                    ) : null;
+                  })()}
                   <h3 className="act-details-cover__title">{actDetailsModalAct.acts || '—'}</h3>
-                  <p className="act-details-cover__desc">
-                    {actDetailsModalAct.description || 'Comprehensive legal requirements and compliance highlights.'}
-                  </p>
+                  {String(actDetailsModalAct.description || '').trim() ? (
+                    <p className="act-details-cover__desc">{actDetailsModalAct.description.trim()}</p>
+                  ) : null}
                 </div>
                 <div className="act-details-list">
                   <div className="act-details-item act-details-item--violet">

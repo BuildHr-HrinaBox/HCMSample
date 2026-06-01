@@ -14,6 +14,7 @@ import {
 import '../Pages/newdashboard.css';
 import vayonaBrandLogo from './Yanona Logo.png';
 import { fetchAllowedActCategoriesFromSites } from '../utils/siteInchargeScope';
+import { prefetchSettings } from '../utils/settingsCache';
 
 /** Must match CompanyDetails.js COMPANY_DETAILS_CLOSE_MODAL_EVENT */
 const COMPANY_DETAILS_CLOSE_MODAL_EVENT = 'company-details-close-modal';
@@ -83,6 +84,10 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
   const location = useLocation();
   // null = scope not loaded yet: hide site-restricted items so they never flash on screen for site users
   const [isSiteLoginUser, setIsSiteLoginUser] = useState(null);
+
+  useEffect(() => {
+    prefetchSettings();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -188,6 +193,9 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
                   to={item.to}
                   title={item.label}
                   className={`nd-nav-item nd-nav-item--leaf${item.id === 'calendar' ? ' nd-nav-item--calendar-centered' : ''}${item.id === 'returned-report' ? ' nd-nav-item--returned-report' : ''}${active ? ' nd-nav-item--active' : ''}`}
+                  onMouseEnter={item.id === 'settings' ? prefetchSettings : undefined}
+                  onFocus={item.id === 'settings' ? prefetchSettings : undefined}
+                  onClick={item.id === 'settings' ? prefetchSettings : undefined}
                 >
                   <Icon size={20} strokeWidth={2} aria-hidden />
                   <span className="nd-nav-item-label">{item.label}</span>

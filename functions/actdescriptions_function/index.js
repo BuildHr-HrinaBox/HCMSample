@@ -40,12 +40,12 @@ function parseNumeric(value) {
 }
 
 // ===== Act Descriptions CRUD =====
-// Table: ActDescription – column names (all text): ActName, Description, Type, State, Sector, Applicability, KeyComplianceRequirements, DueDate, PenaltyforNonCompliance, Registers, Status
+// Table: ActDescription – column names (all text): ActName, Description, Type, State, Sector, Applicability, KeyComplianceRequirements, DueDate, PenaltyforNonCompliance, Registers, Status, Checkbox
 
 // Create Act Description
 app.post('/act-descriptions', async (req, res) => {
 	try {
-		const { actName, description, type, state, sector, applicability, keyComplianceRequirements, dueDate, penaltyforNonCompliance, registers, status } = req.body;
+		const { actName, description, type, state, sector, applicability, keyComplianceRequirements, dueDate, penaltyforNonCompliance, registers, status, checkbox } = req.body;
 		if (!actName || !String(actName).trim()) {
 			return res.status(400).json({ status: 'failure', message: 'Act name is required.' });
 		}
@@ -63,6 +63,7 @@ app.post('/act-descriptions', async (req, res) => {
 			PenaltyforNonCompliance: penaltyforNonCompliance || null,
 			Registers: registers || null,
 			Status: status || 'yet to start',
+			Checkbox: checkbox != null ? String(checkbox) : null,
 		});
 		const created = await table.getRow(insertResp.ROWID);
 		res.status(200).json({ status: 'success', data: { actDescription: created } });
@@ -106,7 +107,7 @@ app.get('/act-descriptions', async (req, res) => {
 		const countRows = await zcql.executeZCQLQuery(countQuery);
 		const total = parseInt(countRows[0].ActDescription.count, 10) || 0;
 		
-		const selectQuery = `SELECT ROWID, ActName, Description, Type, State, Sector, Applicability, KeyComplianceRequirements, DueDate, PenaltyforNonCompliance, Registers, Status, CREATEDTIME, MODIFIEDTIME FROM ActDescription ${whereClause} ORDER BY ROWID DESC ${limitClause}`;
+		const selectQuery = `SELECT ROWID, ActName, Description, Type, State, Sector, Applicability, KeyComplianceRequirements, DueDate, PenaltyforNonCompliance, Registers, Status, Checkbox, CREATEDTIME, MODIFIEDTIME FROM ActDescription ${whereClause} ORDER BY ROWID DESC ${limitClause}`;
 		const rows = await zcql.executeZCQLQuery(selectQuery);
 		
 		const actDescriptions = rows.map(r => ({
@@ -122,6 +123,7 @@ app.get('/act-descriptions', async (req, res) => {
 			penaltyforNonCompliance: r.ActDescription.PenaltyforNonCompliance,
 			registers: r.ActDescription.Registers,
 			status: r.ActDescription.Status || 'yet to start',
+			checkbox: r.ActDescription.Checkbox || '',
 			createdTime: r.ActDescription.CREATEDTIME,
 			modifiedTime: r.ActDescription.MODIFIEDTIME
 		}));
@@ -158,7 +160,7 @@ app.get('/act-descriptions/:ROWID', async (req, res) => {
 app.put('/act-descriptions/:ROWID', async (req, res) => {
 	try {
 		const { ROWID } = req.params;
-		const { actName, description, type, state, sector, applicability, keyComplianceRequirements, dueDate, penaltyforNonCompliance, registers, status } = req.body;
+		const { actName, description, type, state, sector, applicability, keyComplianceRequirements, dueDate, penaltyforNonCompliance, registers, status, checkbox } = req.body;
 		if (!actName || !String(actName).trim()) {
 			return res.status(400).json({ status: 'failure', message: 'Act name is required.' });
 		}
@@ -177,6 +179,7 @@ app.put('/act-descriptions/:ROWID', async (req, res) => {
 			PenaltyforNonCompliance: penaltyforNonCompliance || null,
 			Registers: registers || null,
 			Status: status || 'yet to start',
+			Checkbox: checkbox != null ? String(checkbox) : null,
 		});
 		const updated = await table.getRow(ROWID);
 		res.status(200).json({ status: 'success', data: { actDescription: updated } });
@@ -237,10 +240,14 @@ app.post('/act-descriptions/sync-from-bulk', async (req, res) => {
 					const ROWID = existing[0].ActDescription.ROWID;
 					const existingRow = await table.getRow(ROWID);
 					const existingStatus = existingRow && (existingRow.Status || existingRow.status);
+					const existingCheckbox = existingRow && (existingRow.Checkbox || existingRow.checkbox);
 					if (existingStatus) {
 						rowData.Status = existingStatus;
 					} else if (!hasMeaningfulStatus) {
 						rowData.Status = 'yet to start';
+					}
+					if (existingCheckbox != null && String(existingCheckbox).trim() !== '') {
+						rowData.Checkbox = existingCheckbox;
 					}
 					await table.updateRow({ ROWID, ...rowData });
 				} else {
@@ -261,10 +268,88 @@ app.post('/act-descriptions/sync-from-bulk', async (req, res) => {
 	}
 });
 
+// Update Mark as Read – saves only the Checkbox column in ActDescription table
+app.patch('/act-descriptions/mark-read', async (req, res) => {
+	try {
+		const { actName, checkbox, read } = req.body;
+		const name = actName != null ? String(actName).trim() : '';
+		if (!name) {
+			return res.status(400).json({ status: 'failure', message: 'Act name is required.' });
+		}
+		let checkboxVal = '';
+		if (checkbox !== undefined) {
+			checkboxVal = checkbox != null ? String(checkbox) : '';
+		} else if (read !== undefined) {
+			checkboxVal = read ? 'read' : '';
+		} else {
+			return res.status(400).json({ status: 'failure', message: 'checkbox or read is required.' });
+		}
+
+		const { catalyst } = res.locals;
+		const table = catalyst.datastore().table('ActDescription');
+		const zcql = catalyst.zcql();
+
+		let ROWID = null;
+		const findQuery = `SELECT ROWID FROM ActDescription WHERE ActName = '${name.replace(/'/g, "''")}'`;
+		const existing = await zcql.executeZCQLQuery(findQuery);
+		if (existing && existing.length > 0) {
+			ROWID = existing[0].ActDescription.ROWID;
+		}
+		if (!ROWID) {
+			const allRows = await zcql.executeZCQLQuery('SELECT ROWID, ActName FROM ActDescription');
+			const nameLower = name.toLowerCase();
+			for (const r of allRows || []) {
+				const stored = (r.ActDescription.ActName || '').trim().toLowerCase();
+				if (stored === nameLower) {
+					ROWID = r.ActDescription.ROWID;
+					break;
+				}
+			}
+		}
+
+		if (ROWID) {
+			await table.updateRow({ ROWID, Checkbox: checkboxVal });
+			const updated = await table.getRow(ROWID);
+			return res.status(200).json({
+				status: 'success',
+				data: { actDescription: updated, checkbox: updated.Checkbox || checkboxVal },
+			});
+		}
+
+		const insertResp = await table.insertRow({
+			ActName: name,
+			Status: 'yet to start',
+			Checkbox: checkboxVal,
+		});
+		const created = await table.getRow(insertResp.ROWID);
+		res.status(200).json({
+			status: 'success',
+			data: { actDescription: created, checkbox: created.Checkbox || checkboxVal },
+			created: true,
+		});
+	} catch (err) {
+		console.error('Error saving mark as read:', err);
+		if (err.statusCode === 401 || err.code === 'NO_ACCESS') {
+			return res.status(401).json({
+				status: 'failure',
+				statusCode: err.statusCode || 401,
+				code: err.code || 'NO_ACCESS',
+				message: err.message || 'No privileges to perform this action.',
+			});
+		}
+		const statusCode = err.statusCode || 400;
+		res.status(statusCode).json({
+			status: 'failure',
+			message: err.message || 'Failed to save mark as read.',
+			error: err.toString(),
+		});
+	}
+});
+
 // Upsert Act Description by act name (create or update) – so status change is saved in backend Data Store
 app.post('/act-descriptions/upsert', async (req, res) => {
 	try {
-		const { actName, description, type, state, sector, applicability, keyComplianceRequirements, dueDate, penaltyforNonCompliance, registers, status } = req.body;
+		const { actName, description, type, state, sector, applicability, keyComplianceRequirements, dueDate, penaltyforNonCompliance, registers, status, checkbox } = req.body;
 		const name = actName != null ? String(actName).trim() : '';
 		if (!name) {
 			return res.status(400).json({ status: 'failure', message: 'Act name is required.' });
@@ -287,6 +372,9 @@ app.post('/act-descriptions/upsert', async (req, res) => {
 			Registers: registers || null,
 			Status: statusVal || 'yet to start',
 		};
+		if (checkbox !== undefined) {
+			rowData.Checkbox = checkbox != null ? String(checkbox) : '';
+		}
 
 		let ROWID = null;
 		const findQuery = `SELECT ROWID FROM ActDescription WHERE ActName = '${name.replace(/'/g, "''")}'`;
@@ -307,6 +395,11 @@ app.post('/act-descriptions/upsert', async (req, res) => {
 		}
 		if (ROWID) {
 			rowData.Status = statusVal || 'yet to start';
+			if (checkbox === undefined) {
+				const existingRow = await table.getRow(ROWID);
+				const existingCheckbox = existingRow && (existingRow.Checkbox || existingRow.checkbox);
+				if (existingCheckbox != null) rowData.Checkbox = existingCheckbox;
+			}
 			await table.updateRow({ ROWID, ...rowData });
 			const updated = await table.getRow(ROWID);
 			return res.status(200).json({ status: 'success', data: { actDescription: updated }, updated: true });

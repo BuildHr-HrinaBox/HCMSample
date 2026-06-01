@@ -14,6 +14,17 @@ import {
   statesFieldMatchesInchargeSiteStates
 } from '../utils/siteInchargeScope';
 import { resolveLoginEmailString } from '../utils/resolveLoginEmail';
+import {
+  fetchFormTemplateArrayBuffer,
+  fetchPayrollBulkRows,
+  fetchPeopleData,
+  fetchSiteDetails,
+  getFormTemplateCacheKey,
+  prefetchFormTemplate,
+  prefetchStatutoryAutofillData,
+  readSiteDetailsCache,
+  writeSiteDetailsCache
+} from '../utils/statutoryAutofillCache';
 
 /** @returns {(number | 'ellipsis')[]} */
 function buildPaginationItems(currentPage, totalPages) {
@@ -361,6 +372,65 @@ function resolveFormXLeaveSectionHeaders(headers, groupLabels) {
 }
 
 /** Extract full month name from a due date string (e.g. "15-Mar", "March 2024", "15-03-2024") for saving into month filter */
+const todayStatutoryIsoDate = () => new Date().toISOString().substring(0, 10);
+
+const formatStatutoryDateDisplay = (value) => {
+  if (value == null || String(value).trim() === '') return '';
+  const s = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+    const d = new Date(`${s.substring(0, 10)}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    }
+  }
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+  return s;
+};
+
+/** Submitted Date = date the site submitted the form (Send for approval), with legacy fallback from row modified time. */
+const resolveStatutorySubmittedDateDisplay = (item, monthWorkflowMeta, draftSourceItem) => {
+  const storedCandidates = [
+    monthWorkflowMeta?.submittedDate,
+    monthWorkflowMeta?.SubmittedDate,
+    monthWorkflowMeta?.draftDate,
+    monthWorkflowMeta?.DraftDate,
+    draftSourceItem?.submittedDate,
+    draftSourceItem?.SubmittedDate,
+    draftSourceItem?.draftDate,
+    draftSourceItem?.DraftDate,
+    item?.submittedDate,
+    item?.SubmittedDate,
+    item?.draftDate,
+    item?.DraftDate
+  ];
+  for (const c of storedCandidates) {
+    const formatted = formatStatutoryDateDisplay(c);
+    if (formatted) return formatted;
+  }
+  const sfaSent = /^sent$/i.test(
+    String(
+      monthWorkflowMeta?.sendForApproval ??
+        monthWorkflowMeta?.SendForApproval ??
+        item?.sendForApproval ??
+        item?.SendForApproval ??
+        ''
+    ).trim()
+  );
+  const hasDraft = hasStatutoryDraftFileRef(draftSourceItem || item);
+  if (!sfaSent && !hasDraft) return '';
+  const modifiedRaw =
+    draftSourceItem?.modifiedTime ??
+    draftSourceItem?.MODIFIEDTIME ??
+    item?.modifiedTime ??
+    item?.MODIFIEDTIME ??
+    monthWorkflowMeta?.modifiedTime ??
+    monthWorkflowMeta?.MODIFIEDTIME;
+  return formatStatutoryDateDisplay(modifiedRaw) || '';
+};
+
 const getMonthFromDueDate = (dueDateStr) => {
   if (!dueDateStr || typeof dueDateStr !== 'string') return null;
   const s = dueDateStr.trim().toLowerCase();
@@ -2162,6 +2232,8 @@ const initialForm = {
   status: '',
   sendForApproval: '',
   remarks: '',
+  submittedDate: '',
+  approvedDate: '',
   originalMonthFilter: null
 };
 
@@ -2218,6 +2290,7 @@ const Statutory = ({ userEmail, userRole }) => {
   const [isFormFileModalOpen, setIsFormFileModalOpen] = useState(false);
   const [formFileModalData, setFormFileModalData] = useState(null);
   const [formFileLoading, setFormFileLoading] = useState(false);
+  const [tableAutofillLoading, setTableAutofillLoading] = useState(false);
   const [formHeader, setFormHeader] = useState(null);
   const [headerFormData, setHeaderFormData] = useState({});
   const [formTableData, setFormTableData] = useState([]);
@@ -2555,6 +2628,9 @@ const Statutory = ({ userEmail, userRole }) => {
         setInchargeSitesMeta(Array.isArray(siteMeta?.inchargeSites) ? siteMeta.inchargeSites : []);
         setOrganizationSitesMeta(Array.isArray(siteMeta?.organizationSites) ? siteMeta.organizationSites : []);
         setSiteDetailsList(Array.isArray(siteMeta?.siteDetails) ? siteMeta.siteDetails : []);
+        if (Array.isArray(siteMeta?.siteDetails) && siteMeta.siteDetails.length > 0) {
+          writeSiteDetailsCache(siteMeta.siteDetails);
+        }
         setAllowedInchargeStateLabels(siteMeta?.inchargeStates ?? null);
         if (data.status === 'success' && data.data && data.data.statutoryData) {
           baseStatutoryData = data.data.statutoryData;
@@ -2582,7 +2658,11 @@ const Statutory = ({ userEmail, userRole }) => {
             approval: item.approval || item.Approval || '',
             status: item.status != null && item.status !== '' ? item.status : item.Status != null ? item.Status : '',
             sendForApproval: item.sendForApproval || item.SendForApproval || '',
-            remarks: item.remarks || item.Remarks || ''
+            remarks: item.remarks || item.Remarks || '',
+            submittedDate:
+              item.submittedDate || item.SubmittedDate || item.draftDate || item.DraftDate || '',
+            approvedDate:
+              item.approvedDate || item.ApprovedDate || item.approvalDate || item.ApprovalDate || ''
           }));
 
           // Keep rendering consistent: avoid partial first paint; show final merged dataset once ready.
@@ -2991,6 +3071,10 @@ const Statutory = ({ userEmail, userRole }) => {
               Status: '',
               remarks: '',
               Remarks: '',
+              submittedDate: '',
+              SubmittedDate: '',
+              approvedDate: '',
+              ApprovedDate: '',
               monthFilter: uiMonthOnlyLabel,
               MonthFilter: uiMonthOnlyLabel,
               monthfilter: uiMonthOnlyLabel,
@@ -3021,6 +3105,46 @@ const Statutory = ({ userEmail, userRole }) => {
             Status: donor?.status ?? donor?.Status ?? bulkRow.Status ?? '',
             remarks: donor?.remarks ?? donor?.Remarks ?? bulkRow.remarks ?? '',
             Remarks: donor?.remarks ?? donor?.Remarks ?? bulkRow.Remarks ?? '',
+            submittedDate:
+              donor?.submittedDate ??
+              donor?.SubmittedDate ??
+              donor?.draftDate ??
+              donor?.DraftDate ??
+              bulkRow.submittedDate ??
+              bulkRow.SubmittedDate ??
+              bulkRow.draftDate ??
+              bulkRow.DraftDate ??
+              '',
+            SubmittedDate:
+              donor?.submittedDate ??
+              donor?.SubmittedDate ??
+              donor?.draftDate ??
+              donor?.DraftDate ??
+              bulkRow.submittedDate ??
+              bulkRow.SubmittedDate ??
+              bulkRow.draftDate ??
+              bulkRow.DraftDate ??
+              '',
+            approvedDate:
+              donor?.approvedDate ??
+              donor?.ApprovedDate ??
+              donor?.approvalDate ??
+              donor?.ApprovalDate ??
+              bulkRow.approvedDate ??
+              bulkRow.ApprovedDate ??
+              bulkRow.approvalDate ??
+              bulkRow.ApprovalDate ??
+              '',
+            ApprovedDate:
+              donor?.approvedDate ??
+              donor?.ApprovedDate ??
+              donor?.approvalDate ??
+              donor?.ApprovalDate ??
+              bulkRow.approvedDate ??
+              bulkRow.ApprovedDate ??
+              bulkRow.approvalDate ??
+              bulkRow.ApprovalDate ??
+              '',
             // Preserve backend-saved month mapping so month filter shows the record only in its stored month.
             monthFilter: donor?.monthFilter ?? donor?.MonthFilter ?? donor?.monthfilter ?? bulkRow.monthFilter ?? null,
             MonthFilter: donor?.monthFilter ?? donor?.MonthFilter ?? donor?.monthfilter ?? bulkRow.MonthFilter ?? null,
@@ -3213,6 +3337,7 @@ const Statutory = ({ userEmail, userRole }) => {
   useEffect(() => {
     // On re-entering Statutory, show cached data immediately and refresh in background.
     fetchStatutoryData({ useCacheFirst: true, silentRefresh: true });
+    prefetchStatutoryAutofillData();
   }, [userEmail]);
 
   // Listen for storage changes to detect when checklistBulkData is updated
@@ -3873,7 +3998,11 @@ const Statutory = ({ userEmail, userRole }) => {
       draftFileName: null,
       DraftFileName: null,
       draft: '',
-      Draft: ''
+      Draft: '',
+      submittedDate: '',
+      SubmittedDate: '',
+      approvedDate: '',
+      ApprovedDate: ''
     };
     if (!item) return emptyMeta;
 
@@ -3895,7 +4024,17 @@ const Statutory = ({ userEmail, userRole }) => {
       draftFileName: row?.draftFileName ?? row?.DraftFileName ?? null,
       DraftFileName: row?.draftFileName ?? row?.DraftFileName ?? null,
       draft: row?.draft ?? row?.Draft ?? '',
-      Draft: row?.draft ?? row?.Draft ?? ''
+      Draft: row?.draft ?? row?.Draft ?? '',
+      submittedDate:
+        row?.submittedDate ?? row?.SubmittedDate ?? row?.draftDate ?? row?.DraftDate ?? '',
+      SubmittedDate:
+        row?.submittedDate ?? row?.SubmittedDate ?? row?.draftDate ?? row?.DraftDate ?? '',
+      approvedDate:
+        row?.approvedDate ?? row?.ApprovedDate ?? row?.approvalDate ?? row?.ApprovalDate ?? '',
+      ApprovedDate:
+        row?.approvedDate ?? row?.ApprovedDate ?? row?.approvalDate ?? row?.ApprovalDate ?? '',
+      modifiedTime: row?.modifiedTime ?? row?.MODIFIEDTIME ?? '',
+      MODIFIEDTIME: row?.modifiedTime ?? row?.MODIFIEDTIME ?? ''
     });
 
     const rowMonthNorm = statutoryDedupeMonthNorm(item, selectedMonth);
@@ -4006,6 +4145,7 @@ const Statutory = ({ userEmail, userRole }) => {
           ...buildStatutoryRowSyncPayload(rowItem),
           approval: payloadApproval,
           ...(payloadStatus ? { status: payloadStatus } : {}),
+          ...(isApproveDecision ? { approvedDate: todayStatutoryIsoDate() } : {}),
           ...(isRejectDecision ? { remarks: rejectRemarks } : {}),
           ...(isApproveDecision ? { remarks: null } : {})
         })
@@ -4094,6 +4234,7 @@ const Statutory = ({ userEmail, userRole }) => {
           ...buildMonthFilterPayload(rowItem),
           SendForApproval: 'Sent',
           sendForApproval: 'Sent',
+          submittedDate: todayStatutoryIsoDate(),
           // Re-send flow: clear prior approver decision so site sees "Sent" after re-submit.
           approval: null,
           status: 'Pending',
@@ -4131,10 +4272,13 @@ const Statutory = ({ userEmail, userRole }) => {
                 const targetRow = sameId ? row : prev.find((r) => String(r?.id ?? '') === String(targetId));
                 const syncDraftFile = targetRow?.draftFile ?? targetRow?.DraftFile ?? null;
                 const syncDraftFileName = targetRow?.draftFileName ?? targetRow?.DraftFileName ?? null;
+                const submitDate = todayStatutoryIsoDate();
                 return {
                   ...row,
                   sendForApproval: 'Sent',
                   SendForApproval: 'Sent',
+                  submittedDate: submitDate,
+                  SubmittedDate: submitDate,
                   approval: '',
                   Approval: '',
                   status: 'Pending',
@@ -4313,9 +4457,20 @@ const Statutory = ({ userEmail, userRole }) => {
     }
   };
   const handleAutofill = async (item, options = {}) => {
-    // Open editable Excel-style modal on Autofill click
     setIsAutofillMode(true);
     setAutofillItem(item);
+    setFormFileLoading(true);
+    setError('');
+    setIsFormFileModalOpen(true);
+    setFormFileModalData({
+      fileName:
+        (item?.formFileName && !formFileNameLooksLikePlaceholder(item.formFileName)
+          ? item.formFileName
+          : defaultFormTemplateFileName(item)) || 'Form',
+      fileType: 'excel-form',
+      loading: true,
+      item
+    });
     await handleViewFormFile(item, true, options);
   };
 
@@ -7958,7 +8113,7 @@ const Statutory = ({ userEmail, userRole }) => {
     const modalData = options.formFileModalData || formFileModalData;
     try {
       if (!returnMappedData) {
-        setFormFileLoading(true);
+        setTableAutofillLoading(true);
         setError('');
         setSuccess('');
       }
@@ -7969,7 +8124,7 @@ const Statutory = ({ userEmail, userRole }) => {
       if (!currentHeaders || currentHeaders.length === 0) {
         console.error('⚠️ Table headers not available');
         if (!returnMappedData) setError('Table headers not available. Please try again.');
-        if (!returnMappedData) setFormFileLoading(false);
+        if (!returnMappedData) setTableAutofillLoading(false);
         if (returnMappedData) return [];
         return;
       }
@@ -7977,7 +8132,7 @@ const Statutory = ({ userEmail, userRole }) => {
       // Form C / similar: template rows come from Excel — do not replace with one row per employee (that clears the grid).
       if (isFixedRowAggregateComplianceTable(currentHeaders)) {
         if (!returnMappedData) {
-          setFormFileLoading(false);
+          setTableAutofillLoading(false);
           setSuccess(
             'This form uses fixed rows from your Excel template (not per-employee autofill). Edit values directly or Import.'
           );
@@ -7989,25 +8144,33 @@ const Statutory = ({ userEmail, userRole }) => {
      
       console.log('Using table headers:', currentHeaders);
      
-      // Fetch employee data from peopledata_function
-      const response = await fetch('/server/peopledata_function?form=employee&limit=100');
-      let result = {};
+      // Fetch employee data from peopledata_function (cached when prefetched on Statutory load)
+      let result;
       try {
-        result = await response.json();
-      } catch (parseErr) {
-        console.warn('peopledata_function response was not JSON:', parseErr);
-      }
-
-      console.log('Zoho People API Response:', result);
-
-      if (!response.ok || !result.success) {
-        const friendly = friendlyZohoPeopleAutofillError(result.error, response.status);
+        result = await fetchPeopleData();
+      } catch (peopleErr) {
+        const friendly = friendlyZohoPeopleAutofillError(peopleErr?.message);
         console.warn('Zoho People autofill skipped:', friendly);
         if (!returnMappedData) {
           setError(
             `${friendly} The form template is still open — fill contractor/header fields manually or retry after fixing Zoho People connection.`
           );
-          setFormFileLoading(false);
+          setTableAutofillLoading(false);
+        }
+        if (returnMappedData) return [];
+        return;
+      }
+
+      console.log('Zoho People API Response:', result);
+
+      if (!result?.success) {
+        const friendly = friendlyZohoPeopleAutofillError(result.error);
+        console.warn('Zoho People autofill skipped:', friendly);
+        if (!returnMappedData) {
+          setError(
+            `${friendly} The form template is still open — fill contractor/header fields manually or retry after fixing Zoho People connection.`
+          );
+          setTableAutofillLoading(false);
         }
         if (returnMappedData) return [];
         return;
@@ -8017,7 +8180,7 @@ const Statutory = ({ userEmail, userRole }) => {
         const friendly = 'No employee data received from Zoho People API';
         if (!returnMappedData) {
           setError(friendly);
-          setFormFileLoading(false);
+          setTableAutofillLoading(false);
         }
         if (returnMappedData) return [];
         return;
@@ -10176,64 +10339,50 @@ const Statutory = ({ userEmail, userRole }) => {
         : new Set();
       const payrollOrgIdForForms =
         process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
-      if (formTSEAutofillContext || formXVIIIAutofillContext) {
+      const needsPayrollBulkPreload =
+        isLikelyFormW ||
+        isLikelyForm10 ||
+        formBAutofillContext ||
+        formDAutofillContext ||
+        formTSEAutofillContext ||
+        formXVIIIAutofillContext;
+
+      if (isLikelyFormW) {
+        formWHeadersResolved = resolveFormWTableHeaders(currentHeaders);
+      }
+
+      if (needsPayrollBulkPreload) {
         try {
-          const payrollOrgId =
-            process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
-          const allPayrollQs = new URLSearchParams({
-            all_salaries: '1',
-            organization_id: payrollOrgId,
-          });
-          const allPayrollRes = await fetch(`/server/payroll_function?${allPayrollQs.toString()}`);
-          const allPayrollJson = await allPayrollRes.json();
-          if (allPayrollRes.ok && allPayrollJson?.success && Array.isArray(allPayrollJson.data)) {
-            statutoryPayrollRows = allPayrollJson.data;
-            console.log(
-              `Statutory payroll preload: ${statutoryPayrollRows.length} salary row(s) for Form T / Form XVIII`
-            );
+          const bulkPayrollRows = await fetchPayrollBulkRows();
+          if (Array.isArray(bulkPayrollRows) && bulkPayrollRows.length > 0) {
+            if (formTSEAutofillContext || formXVIIIAutofillContext) {
+              statutoryPayrollRows = bulkPayrollRows;
+            }
+            if (
+              isLikelyFormW ||
+              isLikelyForm10 ||
+              formBAutofillContext ||
+              formDAutofillContext
+            ) {
+              formWPayrollLookup = buildPayrollLookupFromRows(bulkPayrollRows);
+            }
           } else if (formTSEAutofillContext) {
             const listQs = new URLSearchParams({
               list_employees: '1',
-              organization_id: payrollOrgId,
+              organization_id: payrollOrgIdForForms,
             });
             const listRes = await fetch(`/server/payroll_function?${listQs.toString()}`);
             const listJson = await listRes.json();
             if (listRes.ok && listJson?.success && Array.isArray(listJson.data)) {
               statutoryPayrollRows = listJson.data;
-              console.log(
-                `Form T: using ${statutoryPayrollRows.length} payroll employee(s) (salary loaded per row)`
-              );
             }
           }
         } catch (payPreloadErr) {
           console.warn('Statutory payroll preload skipped:', payPreloadErr?.message || payPreloadErr);
         }
       }
-      if (isLikelyFormW) {
-        formWHeadersResolved = resolveFormWTableHeaders(currentHeaders);
-        try {
-          const payrollOrgId =
-            process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
-          const allPayrollQs = new URLSearchParams({
-            all_salaries: '1',
-            organization_id: payrollOrgId,
-          });
-          const allPayrollRes = await fetch(`/server/payroll_function?${allPayrollQs.toString()}`);
-          const allPayrollJson = await allPayrollRes.json();
-          if (allPayrollRes.ok && allPayrollJson?.success && Array.isArray(allPayrollJson.data)) {
-            formWPayrollLookup = buildPayrollLookupFromRows(allPayrollJson.data);
-            console.log(
-              `Form W: indexed ${allPayrollJson.data.length} payroll row(s) for wage autofill`
-            );
-          } else {
-            console.warn('Form W payroll all_salaries preload failed:', allPayrollJson);
-          }
-        } catch (formWPayPreloadErr) {
-          console.warn('Form W payroll preload skipped:', formWPayPreloadErr?.message || formWPayPreloadErr);
-        }
-      }
 
-      const mappedData = await Promise.all(employees.map(async (empItem, index) => {
+      const mappedData = employees.map((empItem, index) => {
         // Initialize all headers with empty strings to ensure no undefined/null values
         const row = {};
         currentHeaders.forEach((header) => {
@@ -10248,9 +10397,6 @@ const Statutory = ({ userEmail, userRole }) => {
           getFallbackEmployeeId(emp),
           getFallbackWorkerId(emp)
         );
-       
-        console.log(`Processing employee ${index + 1}:`, emp);
-        console.log(`Available fields in employee ${index + 1}:`, Object.keys(emp));
        
         // Map to table headers if they exist
         currentHeaders.forEach((header, colIndex) => {
@@ -11418,15 +11564,13 @@ const Statutory = ({ userEmail, userRole }) => {
         }
 
         if (formTSEAutofillContext && formTSEHeadersResolved) {
-          let pr = statutoryPayrollRows?.length
+          const pr = statutoryPayrollRows?.length
             ? resolvePayrollRowForPeople(emp, statutoryPayrollRows)
             : null;
           const payrollPayload =
-            pr && !pr.fetch_error && getEarningsArray(pr).length > 0
+            pr && !pr.fetch_error && getEarningsArray(getPayrollPayloadObject(pr)).length > 0
               ? pr
-              : pr?.employee_id
-                ? await fetchPayrollRowForEmployee(pr.employee_id, payrollOrgIdForForms)
-                : null;
+              : null;
           if (payrollPayload) {
             applyFormTSEPayrollToRow(row, payrollPayload, formTSEHeadersResolved);
           }
@@ -11454,99 +11598,66 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
 
-        if (isLikelyFormW || isLikelyForm10 || formBAutofillContext || formDAutofillContext) {
+        if ((isLikelyForm10 || formDAutofillContext) && formWPayrollLookup) {
           try {
-            const payrollEmployeeId = getPayrollEmployeeId(emp);
-            if (payrollEmployeeId) {
-              const payrollOrgId =
-                process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
-              const payrollQs = new URLSearchParams({
-                employee_id: String(payrollEmployeeId),
-                organization_id: payrollOrgId,
-              });
-              const payrollRes = await fetch(`/server/payroll_function?${payrollQs.toString()}`);
-              const payrollJson = await payrollRes.json();
-              if (payrollRes.ok && payrollJson && payrollJson.success) {
-                if (isLikelyFormW && formWHeadersResolved) {
-                  applyFormWPayrollToRow(
-                    row,
-                    buildFormWPayrollMap(payrollJson.data || {}),
-                    formWHeadersResolved
-                  );
-                }
-
-                if (formBAutofillContext) {
-                  const p = getPayrollPayloadObject(payrollJson.data || {});
-                  const earnings = getEarningsArray(p);
-                  const basicEarningsAmt = pickFormBBasicEarningsAmount(earnings);
-                  const otherAllowanceAmt = pickFormBOtherAllowanceAmount(earnings);
-                  currentHeaders.forEach((header) => {
-                    if (isFormBTotalEmolumentsBasicEarningsHeader(header)) {
-                      if (basicEarningsAmt !== '' && basicEarningsAmt !== null && basicEarningsAmt !== undefined) {
-                        row[header] = sanitizeValue(basicEarningsAmt);
-                      }
+            const matchedPayrollRow = resolvePayrollRowForEmployee(
+              formWPayrollLookup.byPayrollPayload,
+              emp,
+              row,
+              []
+            );
+            if (matchedPayrollRow && !matchedPayrollRow.fetch_error) {
+              if (formDAutofillContext) {
+                const formDPayrollMap = buildFormDPayrollMap(matchedPayrollRow);
+                currentHeaders.forEach((header) => {
+                  if (isFormDBasicSalaryHeader(header)) {
+                    if (formDPayrollMap.basicSalary !== '' && formDPayrollMap.basicSalary != null) {
+                      row[header] = sanitizeValue(formDPayrollMap.basicSalary);
                     }
-                    if (isFormBOtherDeductionsOtherAllowanceHeader(header)) {
-                      if (otherAllowanceAmt !== '' && otherAllowanceAmt !== null && otherAllowanceAmt !== undefined) {
-                        row[header] = sanitizeValue(otherAllowanceAmt);
-                      }
+                  } else if (isFormDDearnessAllowanceHeader(header)) {
+                    if (formDPayrollMap.dearnessAllowance !== '' && formDPayrollMap.dearnessAllowance != null) {
+                      row[header] = sanitizeValue(formDPayrollMap.dearnessAllowance);
                     }
-                  });
-                }
-
-                if (formDAutofillContext) {
-                  const formDPayrollMap = buildFormDPayrollMap(payrollJson.data || {});
-                  currentHeaders.forEach((header) => {
-                    if (isFormDBasicSalaryHeader(header)) {
-                      if (formDPayrollMap.basicSalary !== '' && formDPayrollMap.basicSalary != null) {
-                        row[header] = sanitizeValue(formDPayrollMap.basicSalary);
-                      }
-                    } else if (isFormDDearnessAllowanceHeader(header)) {
-                      if (formDPayrollMap.dearnessAllowance !== '' && formDPayrollMap.dearnessAllowance != null) {
-                        row[header] = sanitizeValue(formDPayrollMap.dearnessAllowance);
-                      }
-                    } else if (isFormDHouseRentAllowanceHeader(header)) {
-                      if (formDPayrollMap.houseRentAllowance !== '' && formDPayrollMap.houseRentAllowance != null) {
-                        row[header] = sanitizeValue(formDPayrollMap.houseRentAllowance);
-                      }
-                    } else if (isFormDOtherAllowanceHeader(header)) {
-                      if (formDPayrollMap.otherAllowance !== '' && formDPayrollMap.otherAllowance != null) {
-                        row[header] = sanitizeValue(formDPayrollMap.otherAllowance);
-                      }
+                  } else if (isFormDHouseRentAllowanceHeader(header)) {
+                    if (formDPayrollMap.houseRentAllowance !== '' && formDPayrollMap.houseRentAllowance != null) {
+                      row[header] = sanitizeValue(formDPayrollMap.houseRentAllowance);
                     }
-                  });
-                }
-
-                if (isLikelyForm10) {
-                  const form10PayrollMap = buildForm10PayrollMap(payrollJson.data || {});
-                  currentHeaders.forEach((header) => {
-                    const headerLower = String(header || '').toLowerCase();
-                    let payrollVal = '';
-                    if (
-                      (headerLower.includes('total') && headerLower.includes('earning')) ||
-                      headerLower.includes('total earnings')
-                    ) {
-                      payrollVal = form10PayrollMap.totalEarnings;
-                    } else if (headerLower.includes('normal') && headerLower.includes('earning')) {
-                      payrollVal = form10PayrollMap.normalEarnings;
-                    } else if (
-                      (headerLower.includes('total') && headerLower.includes('overtime') && headerLower.includes('worked')) ||
-                      (headerLower.includes('overtime') && headerLower.includes('production'))
-                    ) {
-                      payrollVal = form10PayrollMap.totalOvertimeWorked;
-                    } else if (headerLower.includes('date of which overtime') || (headerLower.includes('date') && headerLower.includes('overtime'))) {
-                      const hasOvertime = toNumber(form10PayrollMap.totalOvertimeWorked) > 0;
-                      if (hasOvertime && !row[header]) {
-                        payrollVal = new Date().toISOString().slice(0, 10);
-                      }
+                  } else if (isFormDOtherAllowanceHeader(header)) {
+                    if (formDPayrollMap.otherAllowance !== '' && formDPayrollMap.otherAllowance != null) {
+                      row[header] = sanitizeValue(formDPayrollMap.otherAllowance);
                     }
+                  }
+                });
+              }
 
-                    if (payrollVal !== '' && payrollVal !== null && payrollVal !== undefined) {
-                      row[header] = sanitizeValue(payrollVal);
+              if (isLikelyForm10) {
+                const form10PayrollMap = buildForm10PayrollMap(matchedPayrollRow);
+                currentHeaders.forEach((header) => {
+                  const headerLower = String(header || '').toLowerCase();
+                  let payrollVal = '';
+                  if (
+                    (headerLower.includes('total') && headerLower.includes('earning')) ||
+                    headerLower.includes('total earnings')
+                  ) {
+                    payrollVal = form10PayrollMap.totalEarnings;
+                  } else if (headerLower.includes('normal') && headerLower.includes('earning')) {
+                    payrollVal = form10PayrollMap.normalEarnings;
+                  } else if (
+                    (headerLower.includes('total') && headerLower.includes('overtime') && headerLower.includes('worked')) ||
+                    (headerLower.includes('overtime') && headerLower.includes('production'))
+                  ) {
+                    payrollVal = form10PayrollMap.totalOvertimeWorked;
+                  } else if (headerLower.includes('date of which overtime') || (headerLower.includes('date') && headerLower.includes('overtime'))) {
+                    const hasOvertime = toNumber(form10PayrollMap.totalOvertimeWorked) > 0;
+                    if (hasOvertime && !row[header]) {
+                      payrollVal = new Date().toISOString().slice(0, 10);
                     }
-                  });
-                }
+                  }
 
+                  if (payrollVal !== '' && payrollVal !== null && payrollVal !== undefined) {
+                    row[header] = sanitizeValue(payrollVal);
+                  }
+                });
               }
             }
           } catch (payErr) {
@@ -11555,24 +11666,23 @@ const Statutory = ({ userEmail, userRole }) => {
         }
 
         return row;
-      }));
+      });
 
       // Form B: Zoho Payroll `employee_id` often differs from People `EmployeeID` — merge earnings from all_salaries by mail/name.
       if (formBAutofillContext) {
         try {
-          const formBPayrollOrgId =
-            process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
-          const formBAllPayrollQs = new URLSearchParams({
-            all_salaries: '1',
-            organization_id: formBPayrollOrgId,
-          });
-          const allPayrollRes = await fetch(`/server/payroll_function?${formBAllPayrollQs.toString()}`);
-          const allPayrollJson = await allPayrollRes.json();
-          if (allPayrollRes.ok && allPayrollJson && allPayrollJson.success && Array.isArray(allPayrollJson.data)) {
-            const payrollRows = allPayrollJson.data;
+          const payrollRows =
+            (Array.isArray(statutoryPayrollRows) && statutoryPayrollRows.length > 0
+              ? statutoryPayrollRows
+              : null) ||
+            (formWPayrollLookup
+              ? Array.from(formWPayrollLookup.byPayrollPayload.values())
+              : null) ||
+            (await fetchPayrollBulkRows());
+          if (Array.isArray(payrollRows) && payrollRows.length > 0) {
             const emolHeader = currentHeaders.find((h) => isFormBTotalEmolumentsBasicEarningsHeader(h));
             const otherDedHeader = currentHeaders.find((h) => isFormBOtherDeductionsOtherAllowanceHeader(h));
-            if ((emolHeader || otherDedHeader) && payrollRows.length > 0) {
+            if (emolHeader || otherDedHeader) {
               const resolvePayrollRowForPeople = (em) => {
                 if (!em) return null;
                 const zid = String(em.Zoho_ID || em['Zoho_ID'] || em.ZohoID || '').trim();
@@ -11623,17 +11733,7 @@ const Statutory = ({ userEmail, userRole }) => {
         try {
           let payrollRows = statutoryPayrollRows;
           if (!Array.isArray(payrollRows) || payrollRows.length === 0) {
-            const payrollOrgId =
-              process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
-            const allPayrollQs = new URLSearchParams({
-              all_salaries: '1',
-              organization_id: payrollOrgId,
-            });
-            const allPayrollRes = await fetch(`/server/payroll_function?${allPayrollQs.toString()}`);
-            const allPayrollJson = await allPayrollRes.json();
-            if (allPayrollRes.ok && allPayrollJson?.success && Array.isArray(allPayrollJson.data)) {
-              payrollRows = allPayrollJson.data;
-            }
+            payrollRows = await fetchPayrollBulkRows();
           }
           if (Array.isArray(payrollRows) && payrollRows.length > 0) {
             for (let rowIndex = 0; rowIndex < mappedData.length; rowIndex++) {
@@ -11693,16 +11793,9 @@ const Statutory = ({ userEmail, userRole }) => {
         try {
           let byPayrollPayload = formWPayrollLookup?.byPayrollPayload;
           if (!byPayrollPayload || byPayrollPayload.size === 0) {
-            const payrollOrgId =
-              process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
-            const allPayrollQs = new URLSearchParams({
-              all_salaries: '1',
-              organization_id: payrollOrgId,
-            });
-            const allPayrollRes = await fetch(`/server/payroll_function?${allPayrollQs.toString()}`);
-            const allPayrollJson = await allPayrollRes.json();
-            if (allPayrollRes.ok && allPayrollJson?.success && Array.isArray(allPayrollJson.data)) {
-              byPayrollPayload = buildPayrollLookupFromRows(allPayrollJson.data).byPayrollPayload;
+            const bulkRows = await fetchPayrollBulkRows();
+            if (Array.isArray(bulkRows) && bulkRows.length > 0) {
+              byPayrollPayload = buildPayrollLookupFromRows(bulkRows).byPayrollPayload;
             }
           }
 
@@ -11755,17 +11848,14 @@ const Statutory = ({ userEmail, userRole }) => {
 
       if (formDAutofillContext) {
         try {
-          const payrollOrgId =
-            process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
-          const allPayrollQs = new URLSearchParams({
-            all_salaries: '1',
-            organization_id: payrollOrgId,
-          });
-          const allPayrollRes = await fetch(`/server/payroll_function?${allPayrollQs.toString()}`);
-          const allPayrollJson = await allPayrollRes.json();
-          if (allPayrollRes.ok && allPayrollJson?.success && Array.isArray(allPayrollJson.data)) {
-            const byPayrollPayload = buildPayrollLookupFromRows(allPayrollJson.data).byPayrollPayload;
-            if (byPayrollPayload && byPayrollPayload.size > 0) {
+          let byPayrollPayload = formWPayrollLookup?.byPayrollPayload;
+          if (!byPayrollPayload || byPayrollPayload.size === 0) {
+            const bulkRows = await fetchPayrollBulkRows();
+            if (Array.isArray(bulkRows) && bulkRows.length > 0) {
+              byPayrollPayload = buildPayrollLookupFromRows(bulkRows).byPayrollPayload;
+            }
+          }
+          if (byPayrollPayload && byPayrollPayload.size > 0) {
               mappedData.forEach((row, rowIndex) => {
                 const empItem = employees[rowIndex];
                 const emp = empItem && (empItem.Employee || empItem.employee || empItem);
@@ -11805,16 +11895,12 @@ const Statutory = ({ userEmail, userRole }) => {
                   }
                 });
               });
-            }
           }
         } catch (formDPayErr) {
           console.warn('Form D all_salaries payroll fallback skipped:', formDPayErr?.message || formDPayErr);
         }
       }
      
-      console.log('Mapped data:', mappedData);
-      console.log('Sample mapped row:', mappedData[0]);
-
       // Fetch attendance data and populate Total Hours / Daily worked hours columns
       let attendanceHoursPopulated = 0;
       let hasTotalHoursColumn = false;
@@ -13698,7 +13784,7 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (returnMappedData) throw err;
     } finally {
-      if (!returnMappedData) setFormFileLoading(false);
+      if (!returnMappedData) setTableAutofillLoading(false);
     }
   };
 
@@ -15553,23 +15639,81 @@ const Statutory = ({ userEmail, userRole }) => {
     return u8[0] === 0x25 && u8[1] === 0x50 && u8[2] === 0x44 && u8[3] === 0x46;
   };
 
-  // Build direct download URL for form file (so "View File" can open Excel in new tab)
+  const getFormFileDownloadFileName = (item) => {
+    const rawName = formFileNameLooksLikePlaceholder(item?.formFileName)
+      ? defaultFormTemplateFileName(item)
+      : item?.formFileName;
+    return String(rawName || defaultFormTemplateFileName(item)).replace(/[^a-zA-Z0-9._-]/g, '_');
+  };
+
+  const withAttachmentDisposition = (url) => {
+    if (!url) return null;
+    try {
+      const parsed = new URL(url, window.location.origin);
+      parsed.searchParams.set('disposition', 'attachment');
+      return parsed.toString();
+    } catch {
+      const sep = url.includes('?') ? '&' : '?';
+      return `${url}${sep}disposition=attachment`;
+    }
+  };
+
+  // Build direct download URL for form file (View File triggers Excel download)
   const getFormFileDownloadUrl = (item) => {
     if (!item || !item.formFile || item.formFile === 'null' || String(item.formFile).trim() === '') return null;
     const isFromFormmaster = item.isFromFormmaster && item.formFile;
     const isFromChecklist = item.isFromChecklist || (item.id && String(item.id).startsWith('checklist_'));
     if (isFromFormmaster) {
-      const rawName = formFileNameLooksLikePlaceholder(item.formFileName)
-        ? defaultFormTemplateFileName(item)
-        : item.formFileName;
-      const fileName = String(rawName).replace(/[^a-zA-Z0-9._-]/g, '_');
-      return `${window.location.origin}/server/formmaster_function/templates/download/${item.formFile}?fileName=${encodeURIComponent(fileName)}&disposition=attachment`;
+      const fileName = getFormFileDownloadFileName(item);
+      return withAttachmentDisposition(
+        `${window.location.origin}/server/formmaster_function/templates/download/${item.formFile}?fileName=${encodeURIComponent(fileName)}`
+      );
     }
     if (isFromChecklist) {
       const checklistId = item.checklistId || String(item.id).replace(/^checklist_/, '');
-      return `${window.location.origin}/server/checklist_function/checklist/${checklistId}/file/Form`;
+      return withAttachmentDisposition(
+        `${window.location.origin}/server/checklist_function/checklist/${checklistId}/file/Form`
+      );
     }
-    return `${window.location.origin}/server/statutoryreg_function/statutory/${item.id}/file/Form`;
+    return withAttachmentDisposition(
+      `${window.location.origin}/server/statutoryreg_function/statutory/${item.id}/file/Form`
+    );
+  };
+
+  const handleDownloadFormFile = async (item, e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    if (!item?.formFile || item.formFile === 'null' || String(item.formFile).trim() === '') return;
+
+    const baseName = getFormFileDownloadFileName(item);
+    const downloadName = /\.(xlsx|xls)$/i.test(baseName) ? baseName : `${baseName}.xlsx`;
+
+    try {
+      setFormFileLoading(true);
+      setError('');
+      const urls = getFormFileFetchUrlCandidates(item);
+      const cacheKey = getFormTemplateCacheKey(item);
+      const { arrayBuffer, contentType } = await fetchFormTemplateArrayBuffer(urls, cacheKey);
+      const blob = new Blob([arrayBuffer], {
+        type: contentType || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = downloadName;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      console.error('Form file download error:', err);
+      setError(err?.message || 'Failed to download form file.');
+    } finally {
+      setFormFileLoading(false);
+    }
   };
 
   /** Same resource as "View File" — Autofill must load this URL so the modal matches the Form File column */
@@ -15599,6 +15743,14 @@ const Statutory = ({ userEmail, userRole }) => {
     }
     return Array.from(new Set(urls.filter(Boolean)));
   };
+
+  const prefetchAutofillForRow = useCallback((item) => {
+    if (!item) return;
+    prefetchStatutoryAutofillData();
+    const urls = getFormFileFetchUrlCandidates(item);
+    const cacheKey = getFormTemplateCacheKey(item);
+    if (urls.length && cacheKey) prefetchFormTemplate(urls, cacheKey);
+  }, []);
 
   const handleViewFormFile = async (item, forceAutofill = false, options = {}) => {
     try {
@@ -15642,32 +15794,19 @@ const Statutory = ({ userEmail, userRole }) => {
       if (!fileUrls.length) {
         throw new Error('No form file linked for this row');
       }
-      let response = null;
-      let selectedFileUrl = null;
-      let lastFetchError = null;
-      for (let i = 0; i < fileUrls.length; i++) {
-        try {
-          const candidateResp = await fetch(fileUrls[i]);
-          if (candidateResp.ok) {
-            response = candidateResp;
-            selectedFileUrl = fileUrls[i];
-            break;
-          }
-          const errorData = await candidateResp.json().catch(() => ({ message: 'Failed to load file' }));
-          const apiMsg = String(errorData.message || errorData.error || '').trim();
-          lastFetchError = new Error(
-            apiMsg || `Failed to load form file (HTTP ${candidateResp.status})`
-          );
-        } catch (fetchErr) {
-          lastFetchError = fetchErr instanceof Error ? fetchErr : new Error('Failed to load form file');
-        }
-      }
-      if (!response) {
-        throw lastFetchError || new Error('Failed to load form file');
-      }
+      const siteDetailsPromise =
+        Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+          ? Promise.resolve(siteDetailsList)
+          : fetchSiteDetails();
+      const templateCacheKey = getFormTemplateCacheKey(item);
+      const [{ arrayBuffer, contentType: cachedContentType, contentDisposition: cachedCd, url: selectedFileUrl }, sitesForContractorPrefetch] =
+        await Promise.all([
+          fetchFormTemplateArrayBuffer(fileUrls, templateCacheKey),
+          siteDetailsPromise
+        ]);
 
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      const cdName = parseContentDispositionFilename(response.headers.get('content-disposition'));
+      const contentType = String(cachedContentType || '').toLowerCase();
+      const cdName = parseContentDispositionFilename(cachedCd || '');
       const openedDirectDraftFile = !!(directDraftUrl && selectedFileUrl === directDraftUrl);
       const nameFromItem = openedDirectDraftFile
         ? (savedDraftSourceItem?.draftFileName || savedDraftSourceItem?.DraftFileName || 'draft_file.xlsx')
@@ -15681,7 +15820,6 @@ const Statutory = ({ userEmail, userRole }) => {
         displayFileName = defaultFormTemplateFileName(item);
       }
 
-      const arrayBuffer = await response.arrayBuffer();
       const extFromName = displayFileName.includes('.') ? displayFileName.split('.').pop().toLowerCase() : '';
       const typeSaysExcel = contentType.includes('spreadsheetml') || contentType.includes('ms-excel') || contentType.includes('vnd.ms-excel');
       const isExcel = extFromName === 'xlsx' || extFromName === 'xls' || typeSaysExcel || arrayBufferLooksLikeExcel(arrayBuffer);
@@ -15807,25 +15945,15 @@ const Statutory = ({ userEmail, userRole }) => {
               typeof resolveSiteDisplayName === 'function' ? resolveSiteDisplayName : null
           });
           if (resolvedSiteForContractor) {
-            let sitesForContractor = siteDetailsList;
+            let sitesForContractor =
+              Array.isArray(sitesForContractorPrefetch) && sitesForContractorPrefetch.length > 0
+                ? sitesForContractorPrefetch
+                : siteDetailsList;
             if (!Array.isArray(sitesForContractor) || sitesForContractor.length === 0) {
-              try {
-                const siteResp = await fetch('/server/sitemanagement_function/sitemanagement', {
-                  cache: 'no-store'
-                });
-                if (siteResp.ok) {
-                  const siteJson = await siteResp.json().catch(() => ({}));
-                  const fetched = Array.isArray(siteJson?.data?.siteDetails)
-                    ? siteJson.data.siteDetails
-                    : [];
-                  if (fetched.length > 0) {
-                    sitesForContractor = fetched;
-                    setSiteDetailsList(fetched);
-                  }
-                }
-              } catch (siteErr) {
-                console.warn('Could not load Site Management for contractor autofill:', siteErr);
-              }
+              sitesForContractor = readSiteDetailsCache() || [];
+            }
+            if (Array.isArray(sitesForContractor) && sitesForContractor.length > 0) {
+              setSiteDetailsList(sitesForContractor);
             }
             const withSiteHeaders = applySiteManagementToHeaderFormData(
               initialHeaderFormData,
@@ -15867,6 +15995,8 @@ const Statutory = ({ userEmail, userRole }) => {
           originalHeaderRowIndex: parsed.originalHeaderRowIndex ?? parsed.headerRowIndex
         };
         setFormFileModalData(modalPayloadForAutofill);
+        setIsFormFileModalOpen(true);
+        setFormFileLoading(false);
 
         const shouldAutofill = forceAutofill || isAutofillMode;
 
@@ -15993,6 +16123,7 @@ const Statutory = ({ userEmail, userRole }) => {
               if (shouldPreferSavedDraftData) {
                 setError('Could not load the site saved draft. Use Download Draft File or try again.');
               } else {
+                setTableAutofillLoading(true);
                 fetchAndPopulateEmployeeData(parsed.headers, {
                   columnGroupLabels: parsed.columnGroupLabels ?? null,
                   formFileModalData: {
@@ -16015,6 +16146,7 @@ const Statutory = ({ userEmail, userRole }) => {
               }
             }
           } else {
+            setTableAutofillLoading(true);
             fetchAndPopulateEmployeeData(parsed.headers, {
               columnGroupLabels: parsed.columnGroupLabels ?? null,
               formFileModalData: modalPayloadForAutofill
@@ -16042,10 +16174,13 @@ const Statutory = ({ userEmail, userRole }) => {
         });
       }
 
-      setIsFormFileModalOpen(true);
+      if (!isExcel) {
+        setIsFormFileModalOpen(true);
+      }
     } catch (err) {
       console.error('Error loading form file:', err);
       setError(err.message || 'Failed to load form file');
+      setFormFileLoading(false);
     } finally {
       setFormFileLoading(false);
     }
@@ -16055,6 +16190,7 @@ const Statutory = ({ userEmail, userRole }) => {
     setIsFormFileModalOpen(false);
     setIsAutofillMode(false);
     setAutofillItem(null);
+    setTableAutofillLoading(false);
     setError('');
     setSuccess('');
     // Clean up blob URLs if any
@@ -16490,6 +16626,7 @@ const Statutory = ({ userEmail, userRole }) => {
     hasSiteBasedActScope ||
     isNonDefaultRoleLogin;
   const showApprovalColumn = !showSendForApprovalColumn;
+  const showApprovedDateColumn = showSendForApprovalColumn || showApprovalColumn;
   /** Single-site contexts (?site= or Site Management lists one site): Site column is redundant — hide it.
    *  Until the first statutory fetch completes, hide the Site column so `useCacheFirst` + `silentRefresh` cannot paint
    *  cached rows before `allowedSiteNameList` / `allowedActCategoryList` exist (that mismatch caused the column to flash).
@@ -16513,9 +16650,12 @@ const Statutory = ({ userEmail, userRole }) => {
   const tableColSpan =
     2 +
     (showSiteColumn ? 1 : 0) +
-    8 +
+    6 +
+    (!showApprovalColumn ? 1 : 0) +
+    2 +
     (showSendForApprovalColumn ? 1 : 0) +
     (showApprovalColumn ? 1 : 0) +
+    (showApprovedDateColumn ? 1 : 0) +
     1 +
     (showRemarksColumn ? 1 : 0);
   const renderRemarksDisplay = (rawRemarks) => {
@@ -17574,8 +17714,10 @@ const Statutory = ({ userEmail, userRole }) => {
                       <th>Month Filter</th>
                       {!showApprovalColumn ? <th>Autofill</th> : null}
                       <th>Draft</th>
+                      <th>Submitted Date</th>
                       {showSendForApprovalColumn ? <th className="statutory-col-send-for-approval">Send for approval</th> : null}
                       {showApprovalColumn ? <th className="statutory-col-approval">Approval</th> : null}
+                      {showApprovedDateColumn ? <th>Approved Date</th> : null}
                       <th>Status</th>
                       {showRemarksColumn ? <th>Remarks</th> : null}
                     </tr>
@@ -17819,20 +17961,17 @@ const Statutory = ({ userEmail, userRole }) => {
                                   const fileNameNorm = (resolvedFormFileItem.formFileName || '').trim().toUpperCase().replace(/\s+/g, ' ');
                                   const fileNameRedundantWithFormName = formNameNorm && fileNameNorm && fileNameNorm.startsWith(formNameNorm);
                                   const formFileLabel = fileNameRedundantWithFormName ? 'View File' : (resolvedFormFileItem.formFileName || 'View File');
-                                  const fileUrl = getFormFileDownloadUrl(resolvedFormFileItem);
                                   return (
                                     <a
-                                      href={fileUrl || '#'}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      onClick={(e) => e.stopPropagation()}
+                                      href="#"
+                                      onClick={(e) => handleDownloadFormFile(resolvedFormFileItem, e)}
                                       style={{
                                         color: '#3b82f6',
                                         textDecoration: 'underline',
                                         cursor: 'pointer',
                                         fontWeight: '500'
                                       }}
-                                      title="Open Excel file in new tab"
+                                      title={`Download ${formFileLabel}`}
                                     >
                                       <span className="statutory-file-link">View File</span>
                                     </a>
@@ -17868,6 +18007,8 @@ const Statutory = ({ userEmail, userRole }) => {
                                   return (
                                     <button
                                       className="statutory-autofill-btn-ui"
+                                      onMouseEnter={() => prefetchAutofillForRow(resolvedFormFileItem)}
+                                      onFocus={() => prefetchAutofillForRow(resolvedFormFileItem)}
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         if (hasFormFileForRow && !rowLocked) {
@@ -18003,6 +18144,9 @@ const Statutory = ({ userEmail, userRole }) => {
                               );
                               })()}
                             </td>
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              {resolveStatutorySubmittedDateDisplay(item, monthWorkflowMeta, draftSourceItem) || '-'}
+                            </td>
                             {showSendForApprovalColumn ? (
                               <td className="statutory-col-send-for-approval" style={{ textAlign: 'center' }}>
                                 {(() => {
@@ -18136,6 +18280,20 @@ const Statutory = ({ userEmail, userRole }) => {
                                     </div>
                                   );
                                 })()}
+                              </td>
+                            ) : null}
+                            {showApprovedDateColumn ? (
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                {formatStatutoryDateDisplay(
+                                  monthWorkflowMeta.approvedDate ??
+                                    monthWorkflowMeta.ApprovedDate ??
+                                    monthWorkflowMeta.approvalDate ??
+                                    monthWorkflowMeta.ApprovalDate ??
+                                    item.approvedDate ??
+                                    item.ApprovedDate ??
+                                    item.approvalDate ??
+                                    item.ApprovalDate
+                                ) || '-'}
                               </td>
                             ) : null}
                             <td style={{ textAlign: 'center' }}>
@@ -18737,7 +18895,7 @@ const Statutory = ({ userEmail, userRole }) => {
               flex: 1,
               backgroundColor: '#f9fafb'
             }}>
-              {formFileLoading ? (
+              {formFileLoading && !formFileModalData?.parsedTableHeaders?.length ? (
                 <div style={{
                   display: 'flex',
                   justifyContent: 'center',
@@ -19136,34 +19294,34 @@ const Statutory = ({ userEmail, userRole }) => {
                             { formFileModalData: formFileModalData || undefined }
                           )
                         }
-                        disabled={formFileLoading}
+                        disabled={formFileLoading || tableAutofillLoading}
                         style={{
                           padding: '10px 20px',
-                          backgroundColor: formFileLoading ? '#9ca3af' : STAT_FORM_FILE_ACCENT_BG,
+                          backgroundColor: formFileLoading || tableAutofillLoading ? '#9ca3af' : STAT_FORM_FILE_ACCENT_BG,
                           color: 'white',
                           border: 'none',
                           borderRadius: '6px',
                           fontSize: '14px',
                           fontWeight: '500',
-                          cursor: formFileLoading ? 'not-allowed' : 'pointer',
+                          cursor: formFileLoading || tableAutofillLoading ? 'not-allowed' : 'pointer',
                           display: 'flex',
                           alignItems: 'center',
                           gap: '8px',
                           transition: 'all 0.2s ease'
                         }}
                         onMouseOver={(e) => {
-                          if (!formFileLoading) {
+                          if (!formFileLoading && !tableAutofillLoading) {
                             e.currentTarget.style.backgroundColor = STAT_FORM_FILE_ACCENT_BG_HOVER;
                           }
                         }}
                         onMouseOut={(e) => {
-                          if (!formFileLoading) {
+                          if (!formFileLoading && !tableAutofillLoading) {
                             e.currentTarget.style.backgroundColor = STAT_FORM_FILE_ACCENT_BG;
                           }
                         }}
                         title="Fetch employee data from Zoho People and populate the form"
                       >
-                        {formFileLoading ? 'Loading...' : 'Autofill'}
+                        {formFileLoading || tableAutofillLoading ? 'Loading...' : 'Autofill'}
                       </button>
                     )}
                     {/* Import button (after Autofill) */}
@@ -19294,7 +19452,21 @@ const Statutory = ({ userEmail, userRole }) => {
                   </div>
 
                   {/* Form table + employer / signatory footer (Form I layout and all statutory excel forms) */}
-                  {formTableData.length > 0 && displayTableHeaders.length > 0 && (
+                  {tableAutofillLoading ? (
+                    <div style={{
+                      marginBottom: '12px',
+                      padding: '10px 14px',
+                      backgroundColor: '#eff6ff',
+                      border: '1px solid #bfdbfe',
+                      borderRadius: '6px',
+                      color: '#1d4ed8',
+                      fontSize: '14px'
+                    }}>
+                      Loading employee rows…
+                    </div>
+                  ) : null}
+
+                  {displayTableHeaders.length > 0 && (formTableData.length > 0 || tableAutofillLoading) && (
                     <>
                     <div className="form-file-modal-table-wrap" style={{
                       overflowX: 'auto',

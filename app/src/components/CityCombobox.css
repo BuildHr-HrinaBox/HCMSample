@@ -1,0 +1,133 @@
+.city-combobox {
+  position: relative;
+  width: 100%;
+}
+
+/* Keep suggestion list visible inside scrollable form sections */
+.company-details-field:has(.city-combobox) {
+  overflow: visible;
+}
+
+.city-combobox-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 0;
+  font-size: 0.875rem;
+  font-family: inherit;
+  background: #fff;
+  color: #0f172a;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.city-combobox-input:focus {
+  outline: none;
+  border-color: #22c55e;
+  box-shadow: 0 0 0 3px rgba(46, 204, 113, 0.2);
+}
+
+.city-combobox-input:disabled {
+  background: #f8fafc;
+  color: #64748b;
+  cursor: not-allowed;
+}
+
+.city-combobox-list {
+  position: absolute;
+  z-index: 200;
+  left: 0;
+  right: 0;
+  top: calc(100% + 2px);
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+
+.city-combobox-option {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font-size: 0.875rem;
+  font-family: inherit;
+  color: #0f172a;
+  cursor: pointer;
+}
+
+.city-combobox-option:hover,
+.city-combobox-option:focus {
+  background: #f0fdf4;
+  outline: none;
+}
+
+.city-combobox-hint {
+  padding: 8px 12px;
+  font-size: 0.8125rem;
+  color: #64748b;
+}
+
+.city-combobox-other-row {
+  border-top: 1px solid #e2e8f0;
+}
+
+.city-combobox-option--other {
+  font-weight: 600;
+  color: #0f766e;
+}
+
+.city-combobox--other {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.city-combobox-back {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 0.8125rem;
+  font-family: inherit;
+  color: #0f766e;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.city-combobox-back:hover {
+  color: #115e59;
+}
+
+.city-combobox-back:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.city-combobox-more {
+  padding: 8px 12px;
+  font-size: 0.75rem;
+  color: #64748b;
+  background: #f8fafc;
+  border-top: 1px solid #e2e8f0;
+}
+
+.city-combobox-empty {
+  position: absolute;
+  z-index: 200;
+  left: 0;
+  right: 0;
+  top: calc(100% + 2px);
+  padding: 10px 12px;
+  font-size: 0.8125rem;
+  color: #64748b;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}

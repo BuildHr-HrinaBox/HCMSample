@@ -109,6 +109,44 @@ const getFormNameLabel = (row) => {
 
 const getReportStateLabel = (row) => String(row?.state || row?.zState || '').trim() || '—';
 
+const formatReportDateDisplay = (value) => {
+  if (value == null || String(value).trim() === '') return '';
+  const s = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+    const d = new Date(`${s.substring(0, 10)}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    }
+  }
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+  return s;
+};
+
+const getDraftDateLabel = (row) => {
+  const raw =
+    row?.submittedDate ??
+    row?.SubmittedDate ??
+    row?.draftDate ??
+    row?.DraftDate ??
+    '';
+  const formatted = formatReportDateDisplay(raw);
+  return formatted || '—';
+};
+
+const getApprovedDateLabel = (row) => {
+  const raw =
+    row?.approvedDate ??
+    row?.ApprovedDate ??
+    row?.approvalDate ??
+    row?.ApprovalDate ??
+    '';
+  const formatted = formatReportDateDisplay(raw);
+  return formatted || '—';
+};
+
 const sortRowsSectorWise = (rows) =>
   [...(Array.isArray(rows) ? rows : [])].sort((a, b) => {
     const sa = getSectorGroupLabel(a).toLowerCase();
@@ -462,8 +500,8 @@ const buildReportPdfArrayBuffer = (sourceRows, { title, logoDataUrl }) => {
     return y + bodyH + 16;
   };
 
-  const detailHeader = ['S.NO', 'State', 'Sector', 'Act', 'Form Number', 'Form Name', 'Status'];
-  const colPct = [0.06, 0.12, 0.14, 0.24, 0.12, 0.24, 0.08];
+  const detailHeader = ['S.NO', 'State', 'Sector', 'Act', 'Form Number', 'Form Name', 'Submitted Date', 'Approved Date', 'Status'];
+  const colPct = [0.05, 0.1, 0.12, 0.2, 0.1, 0.18, 0.09, 0.09, 0.07];
   const colW = colPct.map((p) => Math.floor(tableWidth * p));
   const colWidthTotal = colW.reduce((a, b) => a + b, 0);
   if (colWidthTotal < tableWidth) colW[5] += tableWidth - colWidthTotal;
@@ -510,9 +548,11 @@ const buildReportPdfArrayBuffer = (sourceRows, { title, logoDataUrl }) => {
         String(row.act || '-'),
         getFormNumberLabel(row),
         getFormNameLabel(row),
+        getDraftDateLabel(row),
+        getApprovedDateLabel(row),
         getStatusLabel(row)
       ])
-    : [['', '', '', '', 'No rows for this selection.', '', '']];
+    : [['', '', '', '', 'No rows for this selection.', '', '', '', '']];
 
   rows.forEach((r) => {
     const lineHeight = 10;
@@ -536,7 +576,7 @@ const buildReportPdfArrayBuffer = (sourceRows, { title, logoDataUrl }) => {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
     r.forEach((cell, i) => {
-      if (i === 6) {
+      if (i === 8) {
         const sl = String(cell || '').toLowerCase();
         if (sl.includes('approved')) doc.setTextColor(22, 163, 74);
         else if (sl.includes('yet')) doc.setTextColor(234, 179, 8);
@@ -1155,23 +1195,25 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                       <th style={{ maxWidth: 260, width: 260 }}>Act</th>
                       <th style={{ maxWidth: 120, width: 120 }}>Form Number</th>
                       <th style={{ maxWidth: 280, width: 280 }}>Form Name</th>
+                      <th style={{ width: 110, minWidth: 110 }}>Submitted Date</th>
+                      <th style={{ width: 110, minWidth: 110 }}>Approved Date</th>
                       <th style={{ width: 180 }}>Status</th>
                     </tr>
                   </thead>
                   <tbody>
                     {!hasAppliedFilters ? (
                       <tr>
-                        <td colSpan={7} className="mr-empty">
+                        <td colSpan={9} className="mr-empty">
                           Select year, month, and site, then click Apply Filters to load the report.
                         </td>
                       </tr>
                     ) : tableLoading && filteredRows.length === 0 ? (
                       <tr aria-hidden="true">
-                        <td colSpan={7} className="mr-table-placeholder" />
+                        <td colSpan={9} className="mr-table-placeholder" />
                       </tr>
                     ) : filteredRows.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="mr-empty">No rows for this selection.</td>
+                        <td colSpan={9} className="mr-empty">No rows for this selection.</td>
                       </tr>
                     ) : (
                       pagedRows.map((row, idx) => {
@@ -1187,6 +1229,8 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                         const formNumber = getFormNumberLabel(row);
                         const formName = getFormNameLabel(row);
                         const stateLabel = getReportStateLabel(row);
+                        const draftDateLabel = getDraftDateLabel(row);
+                        const approvedDateLabel = getApprovedDateLabel(row);
                         return (
                           <tr key={key}>
                             <td>{seq}</td>
@@ -1227,6 +1271,12 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                               title={formName !== '—' ? formName : ''}
                             >
                               {formName}
+                            </td>
+                            <td style={{ whiteSpace: 'nowrap' }} title={draftDateLabel !== '—' ? draftDateLabel : ''}>
+                              {draftDateLabel}
+                            </td>
+                            <td style={{ whiteSpace: 'nowrap' }} title={approvedDateLabel !== '—' ? approvedDateLabel : ''}>
+                              {approvedDateLabel}
                             </td>
                             <td>
                               <span className={`mr-status ${statusClass}`}>{status}</span>

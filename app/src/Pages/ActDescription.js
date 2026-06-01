@@ -11,7 +11,6 @@ import {
   FileText,
   Filter,
   RefreshCw,
-  MoreVertical,
   ChevronRight,
   LayoutGrid,
   Table2,
@@ -121,6 +120,11 @@ function sectorPillTone(sector) {
   return 'slate';
 }
 
+function isMarkAsReadChecked(value) {
+  const v = String(value ?? '').trim().toLowerCase();
+  return v === 'read' || v === 'true' || v === '1' || v === 'yes' || v === 'checked';
+}
+
 function buildPaginationItems(currentPage, totalPages) {
   if (totalPages <= 0) return [];
   if (totalPages <= 9) {
@@ -172,13 +176,14 @@ const ActDescription = ({ userRole, userEmail }) => {
   const [actDetailsModalAct, setActDetailsModalAct] = useState(null); // row object when modal open
   const [selectedLibraryIds, setSelectedLibraryIds] = useState(new Set()); // act card checkboxes
   const [statusFromActDescription, setStatusFromActDescription] = useState({}); // actName -> 'Completed'|'Pending'|'Yet to Start' from backend
+  const [readCheckboxMap, setReadCheckboxMap] = useState({}); // actName -> Checkbox value from backend
+  const [markReadMessage, setMarkReadMessage] = useState('');
   const [viewMode, setViewMode] = useState('card');
   const [libraryPage, setLibraryPage] = useState(1);
   const [libraryPageSize, setLibraryPageSize] = useState(8);
   const [filterSector, setFilterSector] = useState('');
   const [filterState, setFilterState] = useState('');
   const [filterType, setFilterType] = useState('all');
-  const [openCardMenuId, setOpenCardMenuId] = useState(null);
   const [filterPanelOpen, setFilterPanelOpen] = useState(true);
   const [tableSearch, setTableSearch] = useState('');
   const [tableSortKey, setTableSortKey] = useState(null);
@@ -283,6 +288,7 @@ const ActDescription = ({ userRole, userEmail }) => {
           const descData = await descRes.json();
           if (descData.status === 'success' && Array.isArray(descData.data?.actDescriptions)) {
             const map = {};
+            const readMap = {};
             descData.data.actDescriptions.forEach((ad) => {
               const s = (ad.status || '').toLowerCase();
               const displayStatus = s === 'completed' ? 'Completed' : s === 'in progress' ? 'Pending' : 'Yet to Start';
@@ -291,22 +297,30 @@ const ActDescription = ({ userRole, userEmail }) => {
               map[key] = displayStatus;
               map[keyLower] = displayStatus;
               if (key !== ad.actName) map[ad.actName] = displayStatus;
+              readMap[key] = ad.checkbox || '';
+              readMap[keyLower] = ad.checkbox || '';
+              if (key !== ad.actName) readMap[ad.actName] = ad.checkbox || '';
             });
             setStatusFromActDescription(map);
+            setReadCheckboxMap(readMap);
           } else {
             setStatusFromActDescription({});
+            setReadCheckboxMap({});
           }
         } catch (descErr) {
           console.error('Fetch act descriptions for status:', descErr);
           setStatusFromActDescription({});
+          setReadCheckboxMap({});
         }
       } else {
         setActsBulkList([]);
         setStatusFromActDescription({});
+        setReadCheckboxMap({});
       }
     } catch (err) {
       setActsBulkList([]);
       setStatusFromActDescription({});
+      setReadCheckboxMap({});
     } finally {
       if (!silentRefresh) setActsBulkLoading(false);
     }
@@ -328,15 +342,98 @@ const ActDescription = ({ userRole, userEmail }) => {
     });
   }, [actsBulkList, statusFromActDescription]);
 
-  useEffect(() => {
-    if (openCardMenuId == null) return;
-    const close = () => setOpenCardMenuId(null);
-    document.addEventListener('click', close);
-    return () => document.removeEventListener('click', close);
-  }, [openCardMenuId]);
-
   const getStatus = (id) => statusMap[id] || 'Yet to Start';
   const setStatus = (id, status) => setStatusMap((prev) => ({ ...prev, [id]: status }));
+
+  const getActNameKey = (row) => String(row?.acts || row?.actName || '').trim();
+
+  const isActMarkedRead = (row) => {
+    const key = getActNameKey(row);
+    if (!key) return false;
+    const val = readCheckboxMap[key] ?? readCheckboxMap[key.toLowerCase()];
+    return isMarkAsReadChecked(val);
+  };
+
+  const toggleMarkAsRead = async (row, checked) => {
+    const actName = getActNameKey(row);
+    if (!actName) return;
+    const checkboxVal = checked ? 'read' : '';
+    const keyLower = actName.toLowerCase();
+    setReadCheckboxMap((prev) => ({
+      ...prev,
+      [actName]: checkboxVal,
+      [keyLower]: checkboxVal,
+    }));
+    if (actDetailsModalAct && getActNameKey(actDetailsModalAct) === actName) {
+      setActDetailsModalAct((prev) => (prev ? { ...prev, checkbox: checkboxVal } : prev));
+    }
+    try {
+      const res = await fetch(`${API_BASE}/act-descriptions/mark-read`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          actName,
+          checkbox: checkboxVal,
+        }),
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        const saved = data.data?.checkbox ?? checkboxVal;
+        setReadCheckboxMap((prev) => ({
+          ...prev,
+          [actName]: saved,
+          [keyLower]: saved,
+        }));
+        if (checked && row.id && getStatus(row.id) === 'Pending') {
+          await updateLibraryStatus(row.id, 'Completed', row);
+          setStatusFromActDescription((prev) => ({
+            ...prev,
+            [actName]: 'Completed',
+            [keyLower]: 'Completed',
+          }));
+          setMarkReadMessage('Marked as read. Status updated to Completed.');
+        } else if (checked) {
+          setMarkReadMessage('Marked as read saved to backend.');
+        } else {
+          setMarkReadMessage('Mark as read cleared.');
+        }
+        window.setTimeout(() => setMarkReadMessage(''), 3000);
+      } else {
+        setMarkReadMessage(data.message || 'Failed to save mark as read.');
+      }
+    } catch (err) {
+      console.error('Failed to save mark as read:', err);
+      setMarkReadMessage('Failed to save mark as read.');
+    }
+  };
+
+  useEffect(() => {
+    if (!actDetailsModalAct) return;
+    const actName = getActNameKey(actDetailsModalAct);
+    if (!actName) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/act-descriptions?actName=${encodeURIComponent(actName)}`);
+        const data = await res.json();
+        if (cancelled || data.status !== 'success' || !Array.isArray(data.data?.actDescriptions)) return;
+        const nameLower = actName.toLowerCase();
+        const match =
+          data.data.actDescriptions.find((ad) => String(ad.actName || '').trim().toLowerCase() === nameLower) ||
+          data.data.actDescriptions[0];
+        if (!match) return;
+        const checkboxVal = match.checkbox || '';
+        setReadCheckboxMap((prev) => ({
+          ...prev,
+          [actName]: checkboxVal,
+          [nameLower]: checkboxVal,
+        }));
+      } catch (_) {}
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [actDetailsModalAct]);
 
   const updateLibraryStatus = async (id, status, row) => {
     const actRow = row || actsBulkList.find((r) => r.id === id);
@@ -723,6 +820,9 @@ const ActDescription = ({ userRole, userEmail }) => {
       {!showForm && message ? (
         <div className="company-details-message company-details-message--flush">{message}</div>
       ) : null}
+      {actDetailsModalAct && markReadMessage ? (
+        <div className="act-details-modal-toast" role="status">{markReadMessage}</div>
+      ) : null}
       <header className="company-details-page-heading">
         <h1 className="company-details-page-title">Applicable Acts Library</h1>
         <nav className="company-details-breadcrumb" aria-label="Breadcrumb">
@@ -1062,60 +1162,6 @@ const ActDescription = ({ userRole, userEmail }) => {
                               </div>
                               <div className="ad-lib-card__top-right">
                                 <span className={`ad-lib-card__badge ad-lib-card__badge--${sk}`}>{status}</span>
-                                <div className="ad-lib-card__menu-wrap">
-                                  <button
-                                    type="button"
-                                    className="ad-lib-card__kebab"
-                                    aria-label="More actions"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setOpenCardMenuId(openCardMenuId === row.id ? null : row.id);
-                                    }}
-                                  >
-                                    <MoreVertical size={18} strokeWidth={2} />
-                                  </button>
-                                  {openCardMenuId === row.id ? (
-                                    <div className="ad-lib-card__dropdown" onClick={(e) => e.stopPropagation()}>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          updateLibraryStatus(row.id, 'Completed', row);
-                                          setOpenCardMenuId(null);
-                                        }}
-                                      >
-                                        Mark Completed
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          updateLibraryStatus(row.id, 'Pending', row);
-                                          setOpenCardMenuId(null);
-                                        }}
-                                      >
-                                        Mark Pending
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          updateLibraryStatus(row.id, 'Yet to Start', row);
-                                          setOpenCardMenuId(null);
-                                        }}
-                                      >
-                                        Mark Yet to Start
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="ad-lib-card__dropdown-divider"
-                                        onClick={() => {
-                                          setActDetailsModalAct(row);
-                                          setOpenCardMenuId(null);
-                                        }}
-                                      >
-                                        View details
-                                      </button>
-                                    </div>
-                                  ) : null}
-                                </div>
                               </div>
                             </div>
                             <button
@@ -1418,7 +1464,18 @@ const ActDescription = ({ userRole, userEmail }) => {
           <div className="act-description-modal" onClick={(e) => e.stopPropagation()}>
             <div className="act-description-modal-header">
               <h2 className="act-description-modal-title">Act Details</h2>
-              <button type="button" className="act-description-modal-close" onClick={() => setActDetailsModalAct(null)} aria-label="Close">×</button>
+              <div className="act-description-modal-header-actions">
+                <label className="act-details-mark-read">
+                  <input
+                    type="checkbox"
+                    checked={isActMarkedRead(actDetailsModalAct)}
+                    onChange={(e) => toggleMarkAsRead(actDetailsModalAct, e.target.checked)}
+                    aria-label="Mark as Read"
+                  />
+                  <span>Mark as Read</span>
+                </label>
+                <button type="button" className="act-description-modal-close" onClick={() => setActDetailsModalAct(null)} aria-label="Close">×</button>
+              </div>
             </div>
             <div className="act-description-modal-body">
               <div className="act-details-layout">

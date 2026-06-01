@@ -580,3 +580,8 @@
   display: flex;
   justify-content: flex-end;
 }
+
+/* Combobox dropdowns must not be clipped in the 4-column grid */
+.company-details-fields-grid .company-details-field:has(.city-combobox) {
+  overflow: visible;
+}

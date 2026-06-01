@@ -1118,6 +1118,14 @@ main.nd-content.nd-content--embedded-page > .company-details-page:not(.company-d
   color: #ef4444;
   font-weight: 800;
   margin-left: 2px;
+  white-space: nowrap;
+}
+
+/* Long label in 4-column owner row — keep text and * on one line */
+.company-details-field--owner-designation label {
+  white-space: nowrap;
+  font-size: clamp(0.5625rem, 0.65vw + 0.5rem, 0.6875rem);
+  letter-spacing: 0.04em;
 }
 
 .company-details-section-card {

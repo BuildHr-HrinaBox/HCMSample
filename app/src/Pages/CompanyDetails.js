@@ -2,6 +2,9 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom';
 import { Calendar, CheckCircle2, Trash2, Upload } from 'lucide-react';
 import './CompanyDetails.css';
+import { INDIAN_CITIES } from '../utils/indianCities';
+import { INDIAN_STATES } from '../utils/indianStates';
+import CityCombobox, { StateCombobox } from '../components/CityCombobox';
 
 const API_BASE = '/server/company_function';
 
@@ -34,6 +37,9 @@ function buildPaginationItems(currentPage, totalPages) {
 const initialForm = {
   companyName: '',
   companyAddress: '',
+  city: '',
+  state: '',
+  postalcode: '',
   incorporationNo: '',
   pfNo: '',
   companyMail: '',
@@ -83,6 +89,9 @@ const COMPANY_FORM_FIELD_ORDER = [
   'companyMail',
   'companyPhoneNumber',
   'companyAddress',
+  'city',
+  'state',
+  'postalcode',
   'incorprationDate',
   'incorporationNo',
   'companyPANNumber',
@@ -102,7 +111,7 @@ const COMPANY_FORM_FIELD_ORDER = [
 ];
 
 const SECTION_FIELD_GROUPS = [
-  { keys: ['companyName', 'companyMail', 'companyPhoneNumber', 'companyAddress'] },
+  { keys: ['companyName', 'companyMail', 'companyPhoneNumber', 'companyAddress', 'city', 'state', 'postalcode'] },
   { keys: ['incorprationDate', 'incorporationNo', 'companyPANNumber', 'gstNo', 'pfNo', 'esiNo'] },
   { keys: ['directorName', 'directorMail', 'directorPhoneNumber', 'directorAddress'] },
   { keys: ['ownerName', 'ownerPAN', 'ownerAaadhar', 'ownerDesignation', 'safetyOfficerName', 'safetyOfficerPhone'] }
@@ -256,6 +265,9 @@ function sanitizeCompanyFormField(name, raw) {
       return v.replace(/\s/g, '').slice(0, 254);
     case 'incorprationDate':
       return sanitizeIncorporationDateInput(v);
+    case 'city':
+    case 'state':
+      return v.slice(0, 120);
     default:
       return v;
   }
@@ -361,6 +373,64 @@ function companyRowId(c) {
   return String(c.id ?? c.ROWID ?? c.rowid ?? c.Company?.ROWID ?? '').trim();
 }
 
+/** Normalize location fields from API list row or Datastore payload (PascalCase or camelCase). */
+function normalizeCompanyRecord(company) {
+  if (!company || typeof company !== 'object') return company;
+  return {
+    ...company,
+    city: String(company.city ?? company.City ?? '').trim(),
+    state: String(company.state ?? company.State ?? '').trim(),
+    postalcode: String(company.postalcode ?? company.Postalcode ?? company.PostalCode ?? '').trim()
+  };
+}
+
+function buildFormFromCompany(company) {
+  const c = normalizeCompanyRecord(company);
+  return {
+    companyName: c.companyName || '',
+    companyAddress: c.companyAddress || '',
+    city: c.city || '',
+    state: c.state || '',
+    postalcode: c.postalcode || '',
+    incorporationNo: c.incorporationNo || '',
+    pfNo: c.pfNo || '',
+    companyMail: c.companyMail || '',
+    directorName: c.directorName || '',
+    directorMail: c.directorMail || '',
+    directorAddress: c.directorAddress || '',
+    companyPANNumber: c.companyPANNumber || '',
+    incorprationDate: normalizeStoredIncorporationDateForForm(c.incorprationDate || c.incorporationDate || ''),
+    gstNo: c.gstNo || '',
+    esiNo: c.esiNo || '',
+    companyPhoneNumber: c.companyPhoneNumber || '',
+    directorPhoneNumber: c.directorPhoneNumber || '',
+    ownerName: c.ownerName || '',
+    ownerPAN: c.ownerPAN || '',
+    ownerAaadhar: c.ownerAaadhar || '',
+    ownerDesignation: c.ownerDesignation || '',
+    safetyOfficerName: c.safetyOfficerName || '',
+    safetyOfficerPhone: c.safetyOfficerPhone || ''
+  };
+}
+
+async function enrichCompanyForForm(company) {
+  const normalized = normalizeCompanyRecord(company);
+  const id = companyRowId(normalized);
+  if (!id || normalized.city || normalized.state || normalized.postalcode) {
+    return normalized;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/company/${encodeURIComponent(id)}`);
+    const data = await res.json();
+    if (data.status === 'success' && data.data?.company) {
+      return normalizeCompanyRecord({ ...normalized, ...data.data.company });
+    }
+  } catch (_) {
+    // keep list row if single-record fetch fails
+  }
+  return normalized;
+}
+
 const CompanyDetails = ({ userRole, userEmail }) => {
   const [companies, setCompanies] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -414,7 +484,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
 
     if (useCacheFirst) {
       try {
-        const cached = localStorage.getItem('companyDetailsData_v2');
+        const cached = localStorage.getItem('companyDetailsData_v3');
         if (cached) {
           const parsed = JSON.parse(cached);
           if (Array.isArray(parsed) && parsed.length > 0) {
@@ -430,7 +500,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
       const res = await fetch(`${API_BASE}/company`);
       const data = await res.json();
       if (data.status === 'success' && data.data && Array.isArray(data.data.companyDetails)) {
-        const list = [...data.data.companyDetails];
+        const list = data.data.companyDetails.map(normalizeCompanyRecord);
         if (prioritizeId != null && prioritizeId !== '') {
           const key = String(prioritizeId).trim();
           const idx = list.findIndex((c) => companyRowId(c) === key);
@@ -440,7 +510,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
           }
         }
         setCompanies(list);
-        localStorage.setItem('companyDetailsData_v2', JSON.stringify(list));
+        localStorage.setItem('companyDetailsData_v3', JSON.stringify(list));
       } else {
         setCompanies([]);
       }
@@ -479,70 +549,30 @@ const CompanyDetails = ({ userRole, userEmail }) => {
     setShowForm(true);
   };
 
-  const openView = (company) => {
+  const openView = async (company) => {
+    const record = await enrichCompanyForForm(company);
     setViewOnly(true);
-    setEditingId(companyRowId(company) || company.id);
-    setEditingCompany(company);
-    setForm({
-      companyName: company.companyName || '',
-      companyAddress: company.companyAddress || '',
-      incorporationNo: company.incorporationNo || '',
-      pfNo: company.pfNo || '',
-      companyMail: company.companyMail || '',
-      directorName: company.directorName || '',
-      directorMail: company.directorMail || '',
-      directorAddress: company.directorAddress || '',
-      companyPANNumber: company.companyPANNumber || '',
-      incorprationDate: normalizeStoredIncorporationDateForForm(company.incorprationDate || company.incorporationDate || ''),
-      gstNo: company.gstNo || '',
-      esiNo: company.esiNo || '',
-      companyPhoneNumber: company.companyPhoneNumber || '',
-      directorPhoneNumber: company.directorPhoneNumber || '',
-      ownerName: company.ownerName || '',
-      ownerPAN: company.ownerPAN || '',
-      ownerAaadhar: company.ownerAaadhar || '',
-      ownerDesignation: company.ownerDesignation || '',
-      safetyOfficerName: company.safetyOfficerName || '',
-      safetyOfficerPhone: company.safetyOfficerPhone || ''
-    });
+    setEditingId(companyRowId(record) || record.id);
+    setEditingCompany(record);
+    setForm(buildFormFromCompany(record));
     setPendingDocFiles({});
-    setUploadedDocNames(company?.documentFileNames || {});
+    setUploadedDocNames(record?.documentFileNames || {});
     setFormErrors({});
     setShowForm(true);
-    loadDocNamesForCompany(company);
+    loadDocNamesForCompany(record);
   };
 
-  const openEdit = (company) => {
+  const openEdit = async (company) => {
+    const record = await enrichCompanyForForm(company);
     setViewOnly(false);
-    setEditingId(companyRowId(company) || company.id);
-    setEditingCompany(company);
+    setEditingId(companyRowId(record) || record.id);
+    setEditingCompany(record);
     setPendingDocFiles({});
-    setForm({
-      companyName: company.companyName || '',
-      companyAddress: company.companyAddress || '',
-      incorporationNo: company.incorporationNo || '',
-      pfNo: company.pfNo || '',
-      companyMail: company.companyMail || '',
-      directorName: company.directorName || '',
-      directorMail: company.directorMail || '',
-      directorAddress: company.directorAddress || '',
-      companyPANNumber: company.companyPANNumber || '',
-      incorprationDate: normalizeStoredIncorporationDateForForm(company.incorprationDate || company.incorporationDate || ''),
-      gstNo: company.gstNo || '',
-      esiNo: company.esiNo || '',
-      companyPhoneNumber: company.companyPhoneNumber || '',
-      directorPhoneNumber: company.directorPhoneNumber || '',
-      ownerName: company.ownerName || '',
-      ownerPAN: company.ownerPAN || '',
-      ownerAaadhar: company.ownerAaadhar || '',
-      ownerDesignation: company.ownerDesignation || '',
-      safetyOfficerName: company.safetyOfficerName || '',
-      safetyOfficerPhone: company.safetyOfficerPhone || ''
-    });
+    setForm(buildFormFromCompany(record));
     setFormErrors({});
-    setUploadedDocNames(company?.documentFileNames || {});
+    setUploadedDocNames(record?.documentFileNames || {});
     setShowForm(true);
-    loadDocNamesForCompany(company);
+    loadDocNamesForCompany(record);
   };
 
   const closeForm = useCallback(() => {
@@ -797,6 +827,9 @@ const CompanyDetails = ({ userRole, userEmail }) => {
         companyName: form.companyName.trim(),
         companyPANNumber: form.companyPANNumber.trim(),
         companyAddress: form.companyAddress.trim(),
+        city: form.city.trim(),
+        state: form.state.trim(),
+        postalcode: form.postalcode.trim(),
         incorprationDate: incParsed || null,
         incorporationNo: form.incorporationNo.trim(),
         gstNo: form.gstNo.trim(),
@@ -921,6 +954,30 @@ const CompanyDetails = ({ userRole, userEmail }) => {
     }
   };
 
+  /** City list for search — master list + cities already saved on companies. */
+  const citySelectOptions = useMemo(() => {
+    const set = new Set(INDIAN_CITIES);
+    companies.forEach((c) => {
+      const savedCity = String(c.city ?? '').trim();
+      if (savedCity) set.add(savedCity);
+    });
+    const cur = String(form.city || '').trim();
+    if (cur) set.add(cur);
+    return [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }, [companies, form.city]);
+
+  /** State list — standard list + states already saved on companies. */
+  const stateSelectOptions = useMemo(() => {
+    const set = new Set(INDIAN_STATES);
+    companies.forEach((c) => {
+      const savedState = String(c.state ?? '').trim();
+      if (savedState) set.add(savedState);
+    });
+    const cur = String(form.state || '').trim();
+    if (cur) set.add(cur);
+    return [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }, [companies, form.state]);
+
   const filteredCompanies = useMemo(() => {
     const q = tableSearch.trim().toLowerCase();
     if (!q) return companies;
@@ -1004,6 +1061,9 @@ const CompanyDetails = ({ userRole, userEmail }) => {
       { key: 'companyMail', label: 'Mail Id' },
       { key: 'companyPhoneNumber', label: 'Moblie Number' },
       { key: 'companyAddress', label: 'Address' },
+      { key: 'city', label: 'City' },
+      { key: 'state', label: 'State' },
+      { key: 'postalcode', label: 'Postal code' },
       { key: 'incorprationDate', label: 'Incorporation date' },
       { key: 'incorporationNo', label: 'Incorporation number' },
       { key: 'companyPANNumber', label: 'PAN' },
@@ -1035,6 +1095,7 @@ const CompanyDetails = ({ userRole, userEmail }) => {
       'gstNo',
       'pfNo',
       'esiNo',
+      'postalcode',
     ]);
     const escCsvCell = (raw, colKey) => {
       const s = String(raw ?? '').replace(/"/g, '""');
@@ -1233,6 +1294,47 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                           <span aria-hidden="true">⚠️</span> {formErrors.companyAddress}
                         </p>
                       ) : null}
+                    </div>
+                    <div className="company-details-field">
+                      <label htmlFor="cd-city">City</label>
+                      <CityCombobox
+                        id="cd-city"
+                        name="city"
+                        value={form.city}
+                        options={citySelectOptions}
+                        onChange={handleChange}
+                        onBlur={handleFieldBlur}
+                        disabled={viewOnly}
+                        placeholder="Type letter to filter cities"
+                        otherPlaceholder="Enter your city name"
+                      />
+                    </div>
+                    <div className="company-details-field">
+                      <label htmlFor="cd-state">State</label>
+                      <StateCombobox
+                        id="cd-state"
+                        name="state"
+                        value={form.state}
+                        options={stateSelectOptions}
+                        onChange={handleChange}
+                        onBlur={handleFieldBlur}
+                        disabled={viewOnly}
+                        placeholder="Type letter to filter states"
+                        otherPlaceholder="Enter your state name"
+                      />
+                    </div>
+                    <div className="company-details-field">
+                      <label htmlFor="cd-postalcode">Postal code</label>
+                      <input
+                        id="cd-postalcode"
+                        name="postalcode"
+                        value={form.postalcode}
+                        onChange={handleChange}
+                        placeholder="Enter postal code"
+                        disabled={viewOnly}
+                        inputMode="numeric"
+                        maxLength={10}
+                      />
                     </div>
                   </div>
                 </section>
@@ -1525,9 +1627,11 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                         </p>
                       ) : null}
                     </div>
-                    <div className={`company-details-field${formErrors.ownerDesignation ? ' company-details-field--error' : ''}`}>
+                    <div
+                      className={`company-details-field company-details-field--owner-designation${formErrors.ownerDesignation ? ' company-details-field--error' : ''}`}
+                    >
                       <label htmlFor="cd-ownerDesignation">
-                        Owner / In-charge designation <span className="required" aria-hidden="true">*</span>
+                        Owner / In-charge designation<span className="required" aria-hidden="true">*</span>
                       </label>
                       <input
                         id="cd-ownerDesignation"

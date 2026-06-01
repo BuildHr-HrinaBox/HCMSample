@@ -4,6 +4,9 @@ import { CheckCircle2, Trash2 } from 'lucide-react';
 import './SiteManagement.css';
 import './CompanyDetails.css';
 import { resolveLoginEmailString, stringifyUserEmail } from '../utils/resolveLoginEmail';
+import { INDIAN_CITIES } from '../utils/indianCities';
+import { INDIAN_STATES } from '../utils/indianStates';
+import CityCombobox, { StateCombobox } from '../components/CityCombobox';
 
 const API_BASE = '/server/sitemanagement_function';
 const CHECKLISTBULK_API = '/server/checklistbulk_function';
@@ -521,6 +524,38 @@ const SiteManagement = ({ userEmail }) => {
     return list;
   }, [checklistSectors, form.industry]);
 
+  /** City list — same model as Company Details: master list + saved site values + current form. */
+  const citySelectOptions = useMemo(() => {
+    const set = new Set(INDIAN_CITIES);
+    sites.forEach((s) => {
+      const siteCity = String(s.siteCity ?? s.SiteCity ?? '').trim();
+      const contractorCity = String(s.contractorCity ?? s.ContractorCity ?? '').trim();
+      if (siteCity) set.add(siteCity);
+      if (contractorCity) set.add(contractorCity);
+    });
+    [form.siteCity, form.contractorCity].forEach((c) => {
+      const v = String(c || '').trim();
+      if (v) set.add(v);
+    });
+    return [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }, [sites, form.siteCity, form.contractorCity]);
+
+  /** State list — same model as Company Details: master list + saved site values + current form. */
+  const stateSelectOptions = useMemo(() => {
+    const set = new Set(INDIAN_STATES);
+    sites.forEach((s) => {
+      const siteState = String(s.siteState ?? s.SiteState ?? '').trim();
+      const contractorState = String(s.contractorState ?? s.ContractorState ?? '').trim();
+      if (siteState) set.add(siteState);
+      if (contractorState) set.add(contractorState);
+    });
+    [form.siteState, form.contractorState].forEach((st) => {
+      const v = String(st || '').trim();
+      if (v) set.add(v);
+    });
+    return [...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }, [sites, form.siteState, form.contractorState]);
+
   const openAdd = () => {
     setViewOnly(false);
     setEditingId(null);
@@ -869,16 +904,17 @@ const SiteManagement = ({ userEmail }) => {
                           <label htmlFor="sm-siteCity">
                             City <span className="required" aria-hidden="true">*</span>
                           </label>
-                          <input
+                          <CityCombobox
                             id="sm-siteCity"
                             name="siteCity"
                             value={form.siteCity}
+                            options={citySelectOptions}
                             onChange={handleChange}
                             onBlur={handleSiteFieldBlur}
-                            placeholder="Enter city"
                             disabled={viewOnly}
-                            maxLength={120}
                             required
+                            placeholder="Type letter to filter cities"
+                            otherPlaceholder="Enter your city name"
                           />
                           {formErrors.siteCity && (
                             <div style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>{formErrors.siteCity}</div>
@@ -888,16 +924,17 @@ const SiteManagement = ({ userEmail }) => {
                           <label htmlFor="sm-siteState">
                             State <span className="required" aria-hidden="true">*</span>
                           </label>
-                          <input
+                          <StateCombobox
                             id="sm-siteState"
                             name="siteState"
                             value={form.siteState}
+                            options={stateSelectOptions}
                             onChange={handleChange}
                             onBlur={handleSiteFieldBlur}
-                            placeholder="Enter state"
                             disabled={viewOnly}
-                            maxLength={120}
                             required
+                            placeholder="Type letter to filter states"
+                            otherPlaceholder="Enter your state name"
                           />
                           {formErrors.siteState && (
                             <div style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>{formErrors.siteState}</div>
@@ -1167,26 +1204,30 @@ const SiteManagement = ({ userEmail }) => {
                         </div>
                         <div className="company-details-field">
                           <label htmlFor="sm-contractorCity">City</label>
-                          <input
+                          <CityCombobox
                             id="sm-contractorCity"
                             name="contractorCity"
                             value={form.contractorCity}
+                            options={citySelectOptions}
                             onChange={handleChange}
-                            placeholder="Enter contractor city"
+                            onBlur={handleSiteFieldBlur}
                             disabled={viewOnly}
-                            maxLength={120}
+                            placeholder="Type letter to filter cities"
+                            otherPlaceholder="Enter your city name"
                           />
                         </div>
                         <div className="company-details-field">
                           <label htmlFor="sm-contractorState">State</label>
-                          <input
+                          <StateCombobox
                             id="sm-contractorState"
                             name="contractorState"
                             value={form.contractorState}
+                            options={stateSelectOptions}
                             onChange={handleChange}
-                            placeholder="Enter contractor state"
+                            onBlur={handleSiteFieldBlur}
                             disabled={viewOnly}
-                            maxLength={120}
+                            placeholder="Type letter to filter states"
+                            otherPlaceholder="Enter your state name"
                           />
                         </div>
                       </div>

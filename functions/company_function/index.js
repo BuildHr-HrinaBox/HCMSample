@@ -293,6 +293,9 @@ app.post('/company', async (req, res) => {
       companyName,
       companyPANNumber,
       companyAddress,
+      city,
+      state,
+      postalcode,
       incorprationDate,
       incorporationNo,
       gstNo,
@@ -328,6 +331,9 @@ app.post('/company', async (req, res) => {
       CompanyName: companyName,
       CompanyPANNumber: companyPANNumber,
       CompanyAddress: companyAddress,
+      City: city,
+      State: state,
+      Postalcode: postalcode,
       IncorprationDate: incorprationDate,
       IncorporationNo: incorporationNo,
       GSTNo: gstNo,
@@ -370,6 +376,75 @@ app.post('/company', async (req, res) => {
   }
 });
 
+/** Read first non-empty column from a ZCQL or Datastore row. */
+function pickCol(row, ...keys) {
+  if (!row || typeof row !== 'object') return undefined;
+  for (const key of keys) {
+    const v = row[key];
+    if (v != null && String(v).trim() !== '') return v;
+  }
+  return undefined;
+}
+
+/** Map a ZCQL result row or Datastore getRow payload to API camelCase. */
+function mapCompanyFromRow(r) {
+  const c = r?.Company ?? r ?? {};
+  return {
+    id: pickCol(c, 'ROWID', 'rowid', 'id'),
+    companyName: pickCol(c, 'CompanyName', 'companyName') ?? '',
+    companyPANNumber: pickCol(c, 'CompanyPANNumber', 'companyPANNumber') ?? '',
+    companyAddress: pickCol(c, 'CompanyAddress', 'companyAddress') ?? '',
+    city: pickCol(c, 'City', 'city') ?? '',
+    state: pickCol(c, 'State', 'state') ?? '',
+    postalcode: pickCol(c, 'Postalcode', 'PostalCode', 'postalcode') ?? '',
+    incorprationDate: pickCol(c, 'IncorprationDate', 'incorprationDate', 'incorporationDate') ?? '',
+    incorporationNo: pickCol(c, 'IncorporationNo', 'incorporationNo') ?? '',
+    gstNo: pickCol(c, 'GSTNo', 'gstNo') ?? '',
+    pfNo: pickCol(c, 'PFNo', 'pfNo') ?? '',
+    esiNo: pickCol(c, 'ESINo', 'esiNo') ?? '',
+    companyMail: pickCol(c, 'CompanyMail', 'companyMail') ?? '',
+    companyPhoneNumber: pickCol(c, 'CompanyPhoneNumber', 'companyPhoneNumber') ?? '',
+    directorName: pickCol(c, 'DirectorName', 'directorName') ?? '',
+    directorPhoneNumber: pickCol(c, 'DirectorPhoneNumber', 'directorPhoneNumber') ?? '',
+    directorMail: pickCol(c, 'DirectorMail', 'directorMail') ?? '',
+    directorAddress: pickCol(c, 'DirectorAddress', 'directorAddress') ?? '',
+    ownerName: pickCol(c, 'OwnerName', 'ownerName') ?? '',
+    ownerPAN: pickCol(c, 'OwnerPAN', 'ownerPAN') ?? '',
+    ownerAaadhar: pickCol(c, 'OwnerAaadhar', 'ownerAaadhar') ?? '',
+    ownerDesignation: pickCol(c, 'OwnerDesignation', 'ownerDesignation') ?? '',
+    safetyOfficerName: pickCol(c, 'SafetyOfficerName', 'safetyOfficerName') ?? '',
+    safetyOfficerPhone: pickCol(c, 'SafetyOfficerPhone', 'safetyOfficerPhone') ?? '',
+    doctroName: pickCol(c, 'DoctroName', 'doctroName') ?? '',
+    doctroPhone: pickCol(c, 'DoctroPhone', 'doctroPhone') ?? '',
+    safetyOfficerAppoitnmentorder: pickCol(c, 'SafetyOfficerAppoitnmentorder', 'safetyOfficerAppoitnmentorder') ?? '',
+    safetyOfficerApporvalcopy: pickCol(c, 'SafetyOfficerApporvalcopy', 'safetyOfficerApporvalcopy') ?? '',
+    doctroAppoitnmentorder: pickCol(c, 'DoctroAppoitnmentorder', 'doctroAppoitnmentorder') ?? '',
+    doctroApporvalcopy: pickCol(c, 'DoctroApporvalcopy', 'doctroApporvalcopy') ?? '',
+    headHRSign: pickCol(c, 'HeadHRSign', 'headHRSign') ?? '',
+    headHRSeal: pickCol(c, 'HeadHRSeal', 'headHRSeal') ?? '',
+    createdTime: pickCol(c, 'CREATEDTIME', 'createdTime') ?? '',
+    modifiedTime: pickCol(c, 'MODIFIEDTIME', 'modifiedTime') ?? ''
+  };
+}
+
+// Get single company (for edit form — includes City/State/Postalcode from Datastore)
+app.get('/company/:ROWID', async (req, res) => {
+  try {
+    const { ROWID } = req.params;
+    const { catalyst } = res.locals;
+    const table = catalyst.datastore().table('Company');
+    const row = await table.getRow(ROWID);
+    if (!row) {
+      res.status(404).send({ status: 'failure', message: 'Company not found.' });
+      return;
+    }
+    res.status(200).send({ status: 'success', data: { company: mapCompanyFromRow(row) } });
+  } catch (err) {
+    console.error('Error fetching company:', err);
+    res.status(400).send({ status: 'failure', message: err.message || 'Failed to fetch company.' });
+  }
+});
+
 // List Company with optional pagination
 app.get('/company', async (req, res) => {
   try {
@@ -387,54 +462,32 @@ app.get('/company', async (req, res) => {
     console.log('Total records:', total);
     
     console.log('Executing data query...');
-    let rows = [];
-    try {
-      // Preferred query (new schema with HeadHRSign/HeadHRSeal).
-      rows = await zcql.executeZCQLQuery(
-        `SELECT ROWID, CompanyName, CompanyPANNumber, CompanyAddress, IncorprationDate, IncorporationNo, GSTNo, PFNo, ESINo, CompanyMail, CompanyPhoneNumber, DirectorName, DirectorPhoneNumber, DirectorMail, DirectorAddress, OwnerName, OwnerPAN, OwnerAaadhar, OwnerDesignation, SafetyOfficerName, SafetyOfficerPhone, DoctroName, DoctroPhone, SafetyOfficerAppoitnmentorder, SafetyOfficerApporvalcopy, DoctroAppoitnmentorder, DoctroApporvalcopy, HeadHRSign, HeadHRSeal, CREATEDTIME, MODIFIEDTIME FROM Company ORDER BY ROWID DESC ${limitClause}`
-      );
-    } catch (schemaErr) {
-      // Backward-compatible fallback for environments where new columns are not added yet.
-      console.warn('Company list query fallback (legacy schema):', schemaErr.message || schemaErr);
-      rows = await zcql.executeZCQLQuery(
-        `SELECT ROWID, CompanyName, CompanyPANNumber, CompanyAddress, IncorprationDate, IncorporationNo, GSTNo, PFNo, ESINo, CompanyMail, CompanyPhoneNumber, DirectorName, DirectorPhoneNumber, DirectorMail, DirectorAddress, OwnerName, OwnerPAN, OwnerAaadhar, OwnerDesignation, SafetyOfficerName, SafetyOfficerPhone, DoctroName, DoctroPhone, SafetyOfficerAppoitnmentorder, SafetyOfficerApporvalcopy, DoctroAppoitnmentorder, DoctroApporvalcopy, CREATEDTIME, MODIFIEDTIME FROM Company ORDER BY ROWID DESC ${limitClause}`
-      );
+    const orderSql = `ORDER BY ROWID DESC ${limitClause}`;
+    const listQueries = [
+      `SELECT ROWID, CompanyName, CompanyPANNumber, CompanyAddress, City, State, Postalcode, IncorprationDate, IncorporationNo, GSTNo, PFNo, ESINo, CompanyMail, CompanyPhoneNumber, DirectorName, DirectorPhoneNumber, DirectorMail, DirectorAddress, OwnerName, OwnerPAN, OwnerAaadhar, OwnerDesignation, SafetyOfficerName, SafetyOfficerPhone, DoctroName, DoctroPhone, SafetyOfficerAppoitnmentorder, SafetyOfficerApporvalcopy, DoctroAppoitnmentorder, DoctroApporvalcopy, HeadHRSign, HeadHRSeal, CREATEDTIME, MODIFIEDTIME FROM Company ${orderSql}`,
+      `SELECT ROWID, CompanyName, CompanyPANNumber, CompanyAddress, City, State, Postalcode, IncorprationDate, IncorporationNo, GSTNo, PFNo, ESINo, CompanyMail, CompanyPhoneNumber, DirectorName, DirectorPhoneNumber, DirectorMail, DirectorAddress, OwnerName, OwnerPAN, OwnerAaadhar, OwnerDesignation, SafetyOfficerName, SafetyOfficerPhone, DoctroName, DoctroPhone, SafetyOfficerAppoitnmentorder, SafetyOfficerApporvalcopy, DoctroAppoitnmentorder, DoctroApporvalcopy, CREATEDTIME, MODIFIEDTIME FROM Company ${orderSql}`,
+      `SELECT ROWID, CompanyName, CompanyPANNumber, CompanyAddress, City, State, Postalcode, IncorprationDate, IncorporationNo, GSTNo, PFNo, ESINo, CompanyMail, CompanyPhoneNumber, DirectorName, DirectorPhoneNumber, DirectorMail, DirectorAddress, OwnerName, OwnerPAN, OwnerAaadhar, OwnerDesignation, SafetyOfficerName, SafetyOfficerPhone, CREATEDTIME, MODIFIEDTIME FROM Company ${orderSql}`
+    ];
+    let rows = null;
+    let lastQueryErr = null;
+    for (let i = 0; i < listQueries.length; i += 1) {
+      try {
+        rows = await zcql.executeZCQLQuery(listQueries[i]);
+        if (i > 0) {
+          console.warn(`Company list query used fallback tier ${i + 1}`);
+        }
+        break;
+      } catch (schemaErr) {
+        lastQueryErr = schemaErr;
+        console.warn(`Company list query tier ${i + 1} failed:`, schemaErr.message || schemaErr);
+      }
+    }
+    if (rows === null) {
+      throw lastQueryErr || new Error('Failed to query Company table');
     }
     console.log('Raw rows from database:', JSON.stringify(rows, null, 2));
-    
-    let companyDetails = rows.map(r => ({
-      id: r.Company.ROWID,
-      companyName: r.Company.CompanyName,
-      companyPANNumber: r.Company.CompanyPANNumber,
-      companyAddress: r.Company.CompanyAddress,
-      incorprationDate: r.Company.IncorprationDate,
-      incorporationNo: r.Company.IncorporationNo,
-      gstNo: r.Company.GSTNo,
-      pfNo: r.Company.PFNo,
-      esiNo: r.Company.ESINo,
-      companyMail: r.Company.CompanyMail,
-      companyPhoneNumber: r.Company.CompanyPhoneNumber,
-      directorName: r.Company.DirectorName,
-      directorPhoneNumber: r.Company.DirectorPhoneNumber,
-      directorMail: r.Company.DirectorMail,
-      directorAddress: r.Company.DirectorAddress,
-      ownerName: r.Company.OwnerName,
-      ownerPAN: r.Company.OwnerPAN,
-      ownerAaadhar: r.Company.OwnerAaadhar,
-      ownerDesignation: r.Company.OwnerDesignation,
-      safetyOfficerName: r.Company.SafetyOfficerName,
-      safetyOfficerPhone: r.Company.SafetyOfficerPhone,
-      doctroName: r.Company.DoctroName,
-      doctroPhone: r.Company.DoctroPhone,
-      safetyOfficerAppoitnmentorder: r.Company.SafetyOfficerAppoitnmentorder,
-      safetyOfficerApporvalcopy: r.Company.SafetyOfficerApporvalcopy,
-      doctroAppoitnmentorder: r.Company.DoctroAppoitnmentorder,
-      doctroApporvalcopy: r.Company.DoctroApporvalcopy,
-      headHRSign: r.Company.HeadHRSign,
-      headHRSeal: r.Company.HeadHRSeal,
-      createdTime: r.Company.CREATEDTIME,
-      modifiedTime: r.Company.MODIFIEDTIME
-    }));
+
+    let companyDetails = rows.map((r) => mapCompanyFromRow(r));
 
     const docTypes = Object.keys(DOC_TYPE_TO_FOLDER_ID);
     companyDetails = await Promise.all(
@@ -468,6 +521,9 @@ app.put('/company/:ROWID', async (req, res) => {
       companyName,
       companyPANNumber,
       companyAddress,
+      city,
+      state,
+      postalcode,
       incorprationDate,
       incorporationNo,
       gstNo,
@@ -502,6 +558,9 @@ app.put('/company/:ROWID', async (req, res) => {
       CompanyName: companyName,
       CompanyPANNumber: companyPANNumber,
       CompanyAddress: companyAddress,
+      City: city,
+      State: state,
+      Postalcode: postalcode,
       IncorprationDate: incorprationDate,
       IncorporationNo: incorporationNo,
       GSTNo: gstNo,

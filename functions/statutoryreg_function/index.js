@@ -60,12 +60,80 @@ function isDatastoreColumnError(err) {
 }
 
 const OPTIONAL_STATUTORY_COLUMN_LAYERS = [
+  ['SubmittedDate', 'ApprovedDate'],
   ['MonthFilter', 'Sector', 'State', 'Site'],
   ['SampleFile', 'SampleFileName'],
   ['Autofill', 'Draft'],
   ['Approval', 'Status'],
   ['SendForApproval', 'Remarks']
 ];
+
+/** Normalize Catalyst date column values to YYYY-MM-DD. */
+function normalizeStatutoryDateValue(v) {
+  if (v == null || String(v).trim() === '') return null;
+  const s = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.substring(0, 10);
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) return d.toISOString().substring(0, 10);
+  return s;
+}
+
+function todayIsoDate() {
+  return new Date().toISOString().substring(0, 10);
+}
+
+/** Accept submittedDate (preferred) or legacy draftDate from API clients. */
+function submittedDateFromBody(body) {
+  if (!body || typeof body !== 'object') return undefined;
+  if (body.submittedDate !== undefined) return body.submittedDate;
+  if (body.SubmittedDate !== undefined) return body.SubmittedDate;
+  if (body.draftDate !== undefined) return body.draftDate;
+  if (body.DraftDate !== undefined) return body.DraftDate;
+  return undefined;
+}
+
+/** Accept approvedDate (preferred) or legacy approvalDate from API clients. */
+function approvedDateFromBody(body) {
+  if (!body || typeof body !== 'object') return undefined;
+  if (body.approvedDate !== undefined) return body.approvedDate;
+  if (body.ApprovedDate !== undefined) return body.ApprovedDate;
+  if (body.approvalDate !== undefined) return body.approvalDate;
+  if (body.ApprovalDate !== undefined) return body.ApprovalDate;
+  return undefined;
+}
+
+function mapStatutoryRowToApi(row) {
+  if (!row) return null;
+  return {
+    id: row.ROWID,
+    formName: row.FormName || '',
+    act: row.Act || '',
+    description: row.Description || '',
+    dueDate: row.DueDate || '',
+    sector: row.Sector || '',
+    state: row.State || '',
+    site: row.Site || '',
+    monthfilter: row.MonthFilter || '',
+    autofill: row.Autofill || '',
+    draft: row.Draft || '',
+    formFile: row.FormFile || null,
+    formFileName: row.FormFileName || null,
+    sampleFile: row.SampleFile || row.FormFile || null,
+    sampleFileName: row.SampleFileName || row.FormFileName || null,
+    proofSubmissionFile: row.ProofSubmissionFile || null,
+    proofSubmissionFileName: row.ProofSubmissionFileName || null,
+    draftFile: row.DraftFile || null,
+    draftFileName: row.DraftFileName || null,
+    submittedDate: row.SubmittedDate || row.DraftDate || '',
+    approvedDate: row.ApprovedDate || row.ApprovalDate || '',
+    approval: row.Approval || '',
+    status: row.Status || '',
+    sendForApproval: row.SendForApproval || '',
+    remarks: row.Remarks || '',
+    createdTime: row.CREATEDTIME,
+    modifiedTime: row.MODIFIEDTIME
+  };
+}
 
 async function insertStatutoryRow(table, insertData) {
   const data = { ...insertData };
@@ -949,33 +1017,7 @@ app.get('/statutory', async (req, res) => {
     // Use getAllRows() method to get all rows
     const rows = await table.getAllRows();
     
-    const statutoryData = rows.map(row => ({
-      id: row.ROWID,
-      formName: row.FormName || '',
-      act: row.Act || '',
-      description: row.Description || '',
-      dueDate: row.DueDate || '',
-      sector: row.Sector || '',
-      state: row.State || '',
-      site: row.Site || '',
-      monthfilter: row.MonthFilter || '',
-      autofill: row.Autofill || '',
-      draft: row.Draft || '',
-      formFile: row.FormFile || null,
-      formFileName: row.FormFileName || null,
-      sampleFile: row.SampleFile || row.FormFile || null,
-      sampleFileName: row.SampleFileName || row.FormFileName || null,
-      proofSubmissionFile: row.ProofSubmissionFile || null,
-      proofSubmissionFileName: row.ProofSubmissionFileName || null,
-      draftFile: row.DraftFile || null,
-      draftFileName: row.DraftFileName || null,
-      approval: row.Approval || '',
-      status: row.Status || '',
-      sendForApproval: row.SendForApproval || '',
-      remarks: row.Remarks || '',
-      createdTime: row.CREATEDTIME,
-      modifiedTime: row.MODIFIEDTIME
-    }));
+    const statutoryData = rows.map((row) => mapStatutoryRowToApi(row));
     
     res.status(200).json({
       status: 'success',
@@ -1001,33 +1043,7 @@ app.get('/statutory/:id', async (req, res) => {
       return res.status(404).json({ status: 'failure', message: 'Statutory record not found.' });
     }
     
-    const statutory = {
-      id: row.ROWID,
-      formName: row.FormName || '',
-      act: row.Act || '',
-      description: row.Description || '',
-      dueDate: row.DueDate || '',
-      sector: row.Sector || '',
-      state: row.State || '',
-      site: row.Site || '',
-      monthfilter: row.MonthFilter || '',
-      autofill: row.Autofill || '',
-      draft: row.Draft || '',
-      formFile: row.FormFile || null,
-      formFileName: row.FormFileName || null,
-      sampleFile: row.SampleFile || row.FormFile || null,
-      sampleFileName: row.SampleFileName || row.FormFileName || null,
-      proofSubmissionFile: row.ProofSubmissionFile || null,
-      proofSubmissionFileName: row.ProofSubmissionFileName || null,
-      draftFile: row.DraftFile || null,
-      draftFileName: row.DraftFileName || null,
-      approval: row.Approval || '',
-      status: row.Status || '',
-      sendForApproval: row.SendForApproval || '',
-      remarks: row.Remarks || '',
-      createdTime: row.CREATEDTIME,
-      modifiedTime: row.MODIFIEDTIME
-    };
+    const statutory = mapStatutoryRowToApi(row);
     
     res.status(200).json({
       status: 'success',
@@ -1140,10 +1156,14 @@ app.post('/statutory', async (req, res) => {
       status,
       sendForApproval,
       remarks,
+      submittedDate,
+      approvedDate,
       sampleDataHeader,
       sampleHeaderFormData,
       sampleData
     } = req.body;
+    const submittedDateRaw = submittedDateFromBody(req.body);
+    const approvedDateRaw = approvedDateFromBody(req.body);
 
     const monthfilterRaw = normalizeMonthFilterValue(req.body);
 
@@ -1158,6 +1178,10 @@ app.post('/statutory', async (req, res) => {
     let effectiveProofFile = (proofSubmissionFile != null && proofSubmissionFile !== '') ? String(proofSubmissionFile).trim() : null;
     let effectiveProofFileName = (proofSubmissionFileName != null && proofSubmissionFileName !== '') ? String(proofSubmissionFileName).trim() : null;
     // Proof Submission is only populated by explicit PDF/image upload — never copy from Draft automatically.
+
+    const normalizedDraftFile = normalizeFileRef(draftFile);
+    const approvalNorm =
+      approval != null && String(approval).trim() !== '' ? String(approval).trim().toLowerCase() : '';
 
     const insertData = {
       FormName: formName.trim(),
@@ -1176,8 +1200,20 @@ app.post('/statutory', async (req, res) => {
       SampleFileName: sampleFileName || formFileName || null,
       ProofSubmissionFile: normalizeFileRef(effectiveProofFile),
       ProofSubmissionFileName: effectiveProofFileName || null,
-      DraftFile: normalizeFileRef(draftFile),
+      DraftFile: normalizedDraftFile,
       DraftFileName: draftFileName || null,
+      SubmittedDate:
+        submittedDateRaw !== undefined
+          ? normalizeStatutoryDateValue(submittedDateRaw)
+          : String(sendForApproval || '').trim().toLowerCase() === 'sent'
+            ? todayIsoDate()
+            : null,
+      ApprovedDate:
+        approvedDateRaw !== undefined
+          ? normalizeStatutoryDateValue(approvedDateRaw)
+          : approvalNorm === 'approved' || approvalNorm === 'approve'
+            ? todayIsoDate()
+            : null,
       Approval: approval != null && String(approval).trim() !== '' ? String(approval).trim() : null,
       Status: status != null && String(status).trim() !== '' ? String(status).trim() : null,
       SendForApproval:
@@ -1193,34 +1229,7 @@ app.post('/statutory', async (req, res) => {
     const created = await table.getRow(insertResp.ROWID);
     console.log('Created record:', JSON.stringify(created, null, 2));
     
-    // Map to frontend expected format
-    const mappedRecord = {
-      id: created.ROWID,
-      formName: created.FormName || '',
-      act: created.Act || '',
-      description: created.Description || '',
-      dueDate: created.DueDate || '',
-      sector: created.Sector || '',
-      state: created.State || '',
-      site: created.Site || '',
-      monthfilter: created.MonthFilter || '',
-      autofill: created.Autofill || '',
-      draft: created.Draft || '',
-      formFile: created.FormFile || null,
-      formFileName: created.FormFileName || null,
-      sampleFile: created.SampleFile || created.FormFile || null,
-      sampleFileName: created.SampleFileName || created.FormFileName || null,
-      proofSubmissionFile: created.ProofSubmissionFile || null,
-      proofSubmissionFileName: created.ProofSubmissionFileName || null,
-      draftFile: created.DraftFile || null,
-      draftFileName: created.DraftFileName || null,
-      approval: created.Approval || '',
-      status: created.Status || '',
-      sendForApproval: created.SendForApproval || '',
-      remarks: created.Remarks || '',
-      createdTime: created.CREATEDTIME,
-      modifiedTime: created.MODIFIEDTIME
-    };
+    const mappedRecord = mapStatutoryRowToApi(created);
 
     await persistSampleDataSnapshot(catalyst, {
       statutoryId: created.ROWID,
@@ -1351,10 +1360,14 @@ app.put('/statutory/:id', async (req, res) => {
       status,
       sendForApproval,
       remarks,
+      submittedDate,
+      approvedDate,
       sampleDataHeader,
       sampleHeaderFormData,
       sampleData
     } = req.body;
+    const submittedDateRaw = submittedDateFromBody(req.body);
+    const approvedDateRaw = approvedDateFromBody(req.body);
     const monthfilterRaw = normalizeMonthFilterValue(req.body);
     // Support camelCase, PascalCase, and lowercase for proof (in case client or proxy normalizes keys)
     const proofSubmissionFile = req.body.proofSubmissionFile ?? req.body.ProofSubmissionFile ?? req.body.proofsubmissionfile;
@@ -1441,12 +1454,28 @@ app.put('/statutory/:id', async (req, res) => {
         sendForApproval != null && String(sendForApproval).trim() !== ''
           ? String(sendForApproval).trim()
           : null;
+      const sfaNorm = String(sendForApproval || '').trim().toLowerCase();
+      if (sfaNorm === 'sent' && submittedDateRaw === undefined) {
+        updateData.SubmittedDate = todayIsoDate();
+      }
     }
     if (remarks !== undefined) {
       updateData.Remarks =
         remarks != null && String(remarks).trim() !== ''
           ? String(remarks).trim()
           : null;
+    }
+    if (submittedDateRaw !== undefined) {
+      updateData.SubmittedDate = normalizeStatutoryDateValue(submittedDateRaw);
+    }
+    if (approvedDateRaw !== undefined) {
+      updateData.ApprovedDate = normalizeStatutoryDateValue(approvedDateRaw);
+    }
+    if (updateData.Approval !== undefined) {
+      const aNorm = String(updateData.Approval || '').trim().toLowerCase();
+      if ((aNorm === 'approved' || aNorm === 'approve') && approvedDateRaw === undefined) {
+        updateData.ApprovedDate = todayIsoDate();
+      }
     }
     
     console.log('Updating Statutory record with data:', JSON.stringify(updateData, null, 2));
@@ -1488,33 +1517,7 @@ app.put('/statutory/:id', async (req, res) => {
     
     const updated = await table.getRow(id);
     
-    const mappedRecord = {
-      id: updated.ROWID,
-      formName: updated.FormName || '',
-      act: updated.Act || '',
-      description: updated.Description || '',
-      dueDate: updated.DueDate || '',
-      sector: updated.Sector || '',
-      state: updated.State || '',
-      site: updated.Site || '',
-      monthfilter: updated.MonthFilter || '',
-      autofill: updated.Autofill || '',
-      draft: updated.Draft || '',
-      formFile: updated.FormFile || null,
-      formFileName: updated.FormFileName || null,
-      sampleFile: updated.SampleFile || updated.FormFile || null,
-      sampleFileName: updated.SampleFileName || updated.FormFileName || null,
-      proofSubmissionFile: updated.ProofSubmissionFile || null,
-      proofSubmissionFileName: updated.ProofSubmissionFileName || null,
-      draftFile: updated.DraftFile || null,
-      draftFileName: updated.DraftFileName || null,
-      approval: updated.Approval || '',
-      status: updated.Status || '',
-      sendForApproval: updated.SendForApproval || '',
-      remarks: updated.Remarks || '',
-      createdTime: updated.CREATEDTIME,
-      modifiedTime: updated.MODIFIEDTIME
-    };
+    const mappedRecord = mapStatutoryRowToApi(updated);
 
     await persistSampleDataSnapshot(catalyst, {
       statutoryId: updated.ROWID || id,

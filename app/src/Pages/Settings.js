@@ -1,18 +1,29 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import './CompanyDetails.css';
 import './Settings.css';
+import {
+  clearSettingsCache,
+  fetchSettings,
+  readSettingsCache,
+  writeSettingsCache
+} from '../utils/settingsCache';
 
 const API_BASE = '/server/settings_function';
 
 export default function Settings() {
+  const cachedOnMount = readSettingsCache();
   const [showForm, setShowForm] = useState(false);
-  const [savedCompanyName, setSavedCompanyName] = useState('');
-  const [savedLogoName, setSavedLogoName] = useState('');
+  const [savedCompanyName, setSavedCompanyName] = useState(() =>
+    cachedOnMount ? cachedOnMount.companyName : ''
+  );
+  const [savedLogoName, setSavedLogoName] = useState(() =>
+    cachedOnMount ? cachedOnMount.logoName : ''
+  );
   const [formCompanyName, setFormCompanyName] = useState('');
   const [formCurrentLogoName, setFormCurrentLogoName] = useState('');
   const [selectedLogo, setSelectedLogo] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !cachedOnMount);
   const [message, setMessage] = useState('');
   const [selectedRowIds, setSelectedRowIds] = useState([]);
 
@@ -21,32 +32,32 @@ export default function Settings() {
     return selectedLogo.name || '';
   }, [selectedLogo]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadSettings() {
-      setLoading(true);
-      try {
-        const res = await fetch(`${API_BASE}/settings`);
-        const data = await res.json();
-        if (!res.ok || data?.status !== 'success') {
-          throw new Error(data?.message || 'Failed to load settings');
-        }
-        if (cancelled) return;
-        const nextCompanyName = String(data?.data?.companyName || '');
-        const nextLogoName = String(data?.data?.logoName || '');
-        setSavedCompanyName(nextCompanyName);
-        setSavedLogoName(nextLogoName);
-      } catch (err) {
-        if (!cancelled) setMessage(err?.message || 'Unable to load settings.');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-    loadSettings();
-    return () => {
-      cancelled = true;
-    };
+  const applySettings = useCallback((data) => {
+    if (!data) return;
+    setSavedCompanyName(String(data.companyName || ''));
+    setSavedLogoName(String(data.logoName || ''));
   }, []);
+
+  const loadSettings = useCallback(async () => {
+    const cached = readSettingsCache();
+    if (cached) {
+      applySettings(cached);
+      setLoading(false);
+    }
+
+    try {
+      const fresh = await fetchSettings({ force: !cached });
+      if (fresh) applySettings(fresh);
+    } catch (err) {
+      if (!cached) setMessage(err?.message || 'Unable to load settings.');
+    } finally {
+      setLoading(false);
+    }
+  }, [applySettings]);
+
+  useEffect(() => {
+    loadSettings();
+  }, [loadSettings]);
 
   const openAddForm = () => {
     setShowForm(true);
@@ -97,6 +108,7 @@ export default function Settings() {
       const nextLogoName = String(data?.data?.logoName || '');
       setSavedCompanyName(nextCompanyName);
       setSavedLogoName(nextLogoName);
+      writeSettingsCache(data?.data);
       setFormCurrentLogoName(nextLogoName);
       setSelectedLogo(null);
       setMessage('');
@@ -119,6 +131,7 @@ export default function Settings() {
       ]
     : [];
   const allSelected = settingsRows.length > 0 && selectedRowIds.length === settingsRows.length;
+  const showLoadingPlaceholder = loading && settingsRows.length === 0;
 
   const toggleSelectAll = (checked) => {
     if (checked) {
@@ -148,6 +161,7 @@ export default function Settings() {
       }
       setSavedCompanyName('');
       setSavedLogoName('');
+      clearSettingsCache();
       setFormCompanyName('');
       setFormCurrentLogoName('');
       setSelectedLogo(null);
@@ -167,6 +181,7 @@ export default function Settings() {
       }
       setSavedCompanyName('');
       setSavedLogoName('');
+      clearSettingsCache();
       setFormCompanyName('');
       setFormCurrentLogoName('');
       setSelectedLogo(null);
@@ -191,7 +206,7 @@ export default function Settings() {
               </div>
             </div>
             <div className="settings-list-body">
-              {loading ? (
+              {showLoadingPlaceholder ? (
                 <p className="settings-list-empty">Loading...</p>
               ) : (
                 <div className="company-details-table-wrap">
@@ -309,7 +324,7 @@ export default function Settings() {
                             value={formCompanyName}
                             onChange={(e) => setFormCompanyName(e.target.value)}
                             placeholder="Enter company name"
-                            disabled={saving || loading}
+                            disabled={saving}
                             required
                           />
                         </div>
@@ -331,7 +346,7 @@ export default function Settings() {
                               className="company-details-doc-file-input"
                               accept=".png,.jpg,.jpeg,.webp,.svg"
                               onChange={(e) => setSelectedLogo(e.target.files?.[0] || null)}
-                              disabled={saving || loading}
+                              disabled={saving}
                             />
                           </div>
                           {selectedLogoName ? (
@@ -360,7 +375,7 @@ export default function Settings() {
                   <button
                     type="submit"
                     className="settings-btn company-details-btn company-details-btn-primary company-details-btn-submit-modal"
-                    disabled={saving || loading}
+                    disabled={saving}
                   >
                     {saving ? 'Submitting...' : 'Submit'}
                   </button>

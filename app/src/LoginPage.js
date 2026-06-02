@@ -65,7 +65,7 @@ function LoginPage() {
   }
 
   if (isAuthenticated) {
-    window.location.href = "/";
+    window.location.href = "/#/";
     return null;
   }
 

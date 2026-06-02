@@ -57,6 +57,34 @@ function baseFormNameKey(name) {
   return m ? m[0] : n;
 }
 
+/** Cross-tab signal: site submit / admin approval updates Statutory in other open tabs without full page reload. */
+const STATUTORY_DATA_REVISION_KEY = 'statutoryDataRevision';
+const STATUTORY_BROADCAST_CHANNEL_NAME = 'hcm-statutory-sync';
+/** Max wait for admin to see site submit on another device (background poll, no page reload). */
+const STATUTORY_LIVE_POLL_MS = 1000;
+
+let statutoryBroadcastChannel = null;
+try {
+  if (typeof BroadcastChannel !== 'undefined') {
+    statutoryBroadcastChannel = new BroadcastChannel(STATUTORY_BROADCAST_CHANNEL_NAME);
+  }
+} catch (_) {
+  statutoryBroadcastChannel = null;
+}
+
+function broadcastStatutoryDataChange(detail = {}) {
+  const payload = { ts: Date.now(), ...detail };
+  try {
+    localStorage.setItem(STATUTORY_DATA_REVISION_KEY, JSON.stringify(payload));
+  } catch (_) {}
+  try {
+    statutoryBroadcastChannel?.postMessage(payload);
+  } catch (_) {}
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('statutoryDataUpdated', { detail: payload }));
+  }
+}
+
 /** Align Statutory rows with ChecklistBulk master (Sector, State, Act, Form Name, Description). */
 function checklistBulkRowIdentityKey(row) {
   const norm = (v) =>
@@ -391,44 +419,26 @@ const formatStatutoryDateDisplay = (value) => {
 };
 
 /** Submitted Date = date the site submitted the form (Send for approval), with legacy fallback from row modified time. */
-const resolveStatutorySubmittedDateDisplay = (item, monthWorkflowMeta, draftSourceItem) => {
-  const storedCandidates = [
-    monthWorkflowMeta?.submittedDate,
-    monthWorkflowMeta?.SubmittedDate,
-    monthWorkflowMeta?.draftDate,
-    monthWorkflowMeta?.DraftDate,
-    draftSourceItem?.submittedDate,
-    draftSourceItem?.SubmittedDate,
-    draftSourceItem?.draftDate,
-    draftSourceItem?.DraftDate,
-    item?.submittedDate,
-    item?.SubmittedDate,
-    item?.draftDate,
-    item?.DraftDate
-  ];
-  for (const c of storedCandidates) {
-    const formatted = formatStatutoryDateDisplay(c);
+const resolveStatutorySubmittedDateDisplay = (
+  item,
+  monthWorkflowMeta,
+  draftSourceItem,
+  linkedDbRow = null
+) => {
+  const sources = [item, monthWorkflowMeta, linkedDbRow, draftSourceItem].filter(Boolean);
+  for (const src of sources) {
+    const formatted = formatStatutoryDateDisplay(resolveStatutorySubmittedDateStored(src));
     if (formatted) return formatted;
   }
-  const sfaSent = /^sent$/i.test(
-    String(
-      monthWorkflowMeta?.sendForApproval ??
-        monthWorkflowMeta?.SendForApproval ??
-        item?.sendForApproval ??
-        item?.SendForApproval ??
-        ''
-    ).trim()
-  );
-  const hasDraft = hasStatutoryDraftFileRef(draftSourceItem || item);
+  const sfaSent = sources.some((src) => statutorySendForApprovalIsSent(src));
+  const hasDraft = sources.some((src) => hasStatutoryDraftFileRef(src));
   if (!sfaSent && !hasDraft) return '';
-  const modifiedRaw =
-    draftSourceItem?.modifiedTime ??
-    draftSourceItem?.MODIFIEDTIME ??
-    item?.modifiedTime ??
-    item?.MODIFIEDTIME ??
-    monthWorkflowMeta?.modifiedTime ??
-    monthWorkflowMeta?.MODIFIEDTIME;
-  return formatStatutoryDateDisplay(modifiedRaw) || '';
+  for (const src of sources) {
+    const modifiedRaw = src?.modifiedTime ?? src?.MODIFIEDTIME ?? src?.createdTime ?? src?.CREATEDTIME;
+    const formatted = formatStatutoryDateDisplay(modifiedRaw);
+    if (formatted) return formatted;
+  }
+  return '';
 };
 
 const getMonthFromDueDate = (dueDateStr) => {
@@ -496,6 +506,66 @@ function squashStatutoryKeyPart(v) {
 function statutorySendForApprovalIsSent(row) {
   if (!row) return false;
   return /^sent$/i.test(String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim());
+}
+
+/** Raw submitted date on a row (DB or merged), with modified-time fallback when Sent. */
+function resolveStatutorySubmittedDateStored(row) {
+  if (!row) return '';
+  const direct = [
+    row.submittedDate,
+    row.SubmittedDate,
+    row.draftDate,
+    row.DraftDate
+  ];
+  for (const c of direct) {
+    if (c != null && String(c).trim() !== '' && String(c).trim().toLowerCase() !== 'null') {
+      return String(c).trim();
+    }
+  }
+  if (statutorySendForApprovalIsSent(row)) {
+    const mt = row.modifiedTime ?? row.MODIFIEDTIME ?? row.createdTime ?? row.CREATEDTIME;
+    if (mt != null && String(mt).trim() !== '') return String(mt).trim();
+  }
+  return '';
+}
+
+function statutorySubmittedDatePreserveKey(row) {
+  if (!row) return '';
+  const identity = checklistBulkRowIdentityKey(row);
+  if (identity) return `bulk:${identity}`;
+  const month = statutoryDedupeMonthNorm(row, '');
+  const site = squashStatutoryKeyPart(row?.site || row?.Site || '');
+  const act = String(row?.act || row?.Act || '')
+    .trim()
+    .toLowerCase();
+  const desc = String(row?.description || row?.Description || '')
+    .trim()
+    .toLowerCase();
+  return `line:${baseFormNameKey(row?.formName || row?.FormName)}|${act}|${desc}|${month}|${site}`;
+}
+
+/** Keep site-view submitted dates after refresh when bulk rows lose donor metadata. */
+function preserveStatutorySubmittedDatesAfterFetch(prevRows, nextRows) {
+  if (!Array.isArray(prevRows) || !Array.isArray(nextRows) || prevRows.length === 0) {
+    return nextRows;
+  }
+  const preserved = new Map();
+  prevRows.forEach((row) => {
+    if (!statutorySendForApprovalIsSent(row)) return;
+    const stored = resolveStatutorySubmittedDateStored(row);
+    if (!stored) return;
+    const key = statutorySubmittedDatePreserveKey(row);
+    if (key) preserved.set(key, stored);
+  });
+  if (preserved.size === 0) return nextRows;
+  return nextRows.map((row) => {
+    if (!statutorySendForApprovalIsSent(row)) return row;
+    if (resolveStatutorySubmittedDateStored(row)) return row;
+    const key = statutorySubmittedDatePreserveKey(row);
+    const kept = key ? preserved.get(key) : '';
+    if (!kept) return row;
+    return { ...row, submittedDate: kept, SubmittedDate: kept };
+  });
 }
 
 /** Prefer rows with draft file / proof / real Catalyst id when collapsing duplicates. */
@@ -2281,12 +2351,16 @@ const Statutory = ({ userEmail, userRole }) => {
   const [proofUploadingRowId, setProofUploadingRowId] = useState(null);
   const [approvalUpdatingRowId, setApprovalUpdatingRowId] = useState(null);
   const [sendForApprovalUpdatingRowId, setSendForApprovalUpdatingRowId] = useState(null);
+  /** Site view: submitted dates pinned on Send for approval until fetch confirms (prevents flash/disappear). */
+  const [siteSentSubmittedDates, setSiteSentSubmittedDates] = useState({});
   const [isRejectRemarksModalOpen, setIsRejectRemarksModalOpen] = useState(false);
   const [rejectRemarksValue, setRejectRemarksValue] = useState('');
   const [rejectRemarksTarget, setRejectRemarksTarget] = useState(null);
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
   const fileInputRef = useRef(null);
   const isFetchingStatutoryRef = useRef(false);
+  const fetchStatutoryDataRef = useRef(null);
+  const lastStatutorySilentRefreshRef = useRef(0);
   const [isFormFileModalOpen, setIsFormFileModalOpen] = useState(false);
   const [formFileModalData, setFormFileModalData] = useState(null);
   const [formFileLoading, setFormFileLoading] = useState(false);
@@ -2524,9 +2598,11 @@ const Statutory = ({ userEmail, userRole }) => {
       } catch (_) {}
     }
 
-    if (!silentRefresh) setLoading(true);
-    setError('');
-    setSuccess('');
+    if (!silentRefresh) {
+      setLoading(true);
+      setError('');
+      setSuccess('');
+    }
     try {
       const siteScopePromise = fetchAllowedActCategoriesFromSites(userEmail)
         .then((sc) => sc)
@@ -2613,9 +2689,16 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       })();
 
-      const response = await fetch('/server/statutoryreg_function/statutory', {
-        cache: 'no-store'
-      });
+      const response = await fetch(
+        `/server/statutoryreg_function/statutory?_=${Date.now()}`,
+        {
+          cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            Pragma: 'no-cache'
+          }
+        }
+      );
       let baseStatutoryData = [];
       let parsedBulkDataCache = null;
       let siteScopeCategories = null;
@@ -3010,6 +3093,7 @@ const Statutory = ({ userEmail, userRole }) => {
           if (row?.formFile && String(row.formFile).trim() !== '') score += 100;
           const sfa = String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim().toLowerCase();
           if (sfa === 'sent') score += 500;
+          if (resolveStatutorySubmittedDateStored(row)) score += 80;
           const approval = String(row?.approval ?? row?.Approval ?? '').trim().toLowerCase();
           if (approval === 'approved' || approval === 'rejected' || approval === 'approve' || approval === 'reject') score += 30;
           if (isNumericStatutoryBackendId(row?.id)) score += 10;
@@ -3106,25 +3190,15 @@ const Statutory = ({ userEmail, userRole }) => {
             remarks: donor?.remarks ?? donor?.Remarks ?? bulkRow.remarks ?? '',
             Remarks: donor?.remarks ?? donor?.Remarks ?? bulkRow.Remarks ?? '',
             submittedDate:
-              donor?.submittedDate ??
-              donor?.SubmittedDate ??
-              donor?.draftDate ??
-              donor?.DraftDate ??
-              bulkRow.submittedDate ??
-              bulkRow.SubmittedDate ??
-              bulkRow.draftDate ??
-              bulkRow.DraftDate ??
+              resolveStatutorySubmittedDateStored(donor) ||
+              resolveStatutorySubmittedDateStored(bulkRow) ||
               '',
             SubmittedDate:
-              donor?.submittedDate ??
-              donor?.SubmittedDate ??
-              donor?.draftDate ??
-              donor?.DraftDate ??
-              bulkRow.submittedDate ??
-              bulkRow.SubmittedDate ??
-              bulkRow.draftDate ??
-              bulkRow.DraftDate ??
+              resolveStatutorySubmittedDateStored(donor) ||
+              resolveStatutorySubmittedDateStored(bulkRow) ||
               '',
+            modifiedTime: donor?.modifiedTime ?? donor?.MODIFIEDTIME ?? bulkRow.modifiedTime ?? bulkRow.MODIFIEDTIME ?? '',
+            MODIFIEDTIME: donor?.modifiedTime ?? donor?.MODIFIEDTIME ?? bulkRow.modifiedTime ?? bulkRow.MODIFIEDTIME ?? '',
             approvedDate:
               donor?.approvedDate ??
               donor?.ApprovedDate ??
@@ -3264,11 +3338,17 @@ const Statutory = ({ userEmail, userRole }) => {
       });
       console.log(`📊 Entries by form name:`, byFormName);
      
-      setStatutoryData(mergedData);
+      setStatutoryData((prev) => {
+        const withPreservedDates = preserveStatutorySubmittedDatesAfterFetch(prev, mergedData);
+        localStorage.setItem('statutoryData', JSON.stringify(withPreservedDates));
+        return withPreservedDates;
+      });
       setLastSyncedAt(new Date());
-      localStorage.setItem('statutoryData', JSON.stringify(mergedData));
     } catch (err) {
       console.error('Error fetching statutory data:', err);
+      if (silentRefresh) {
+        return;
+      }
       const localData = localStorage.getItem('statutoryData');
       if (localData) {
         try {
@@ -3334,44 +3414,82 @@ const Statutory = ({ userEmail, userRole }) => {
     }
   };
 
+  fetchStatutoryDataRef.current = fetchStatutoryData;
+
+  const silentRefreshStatutoryTable = (options = {}) => {
+    return fetchStatutoryData({ silentRefresh: true, force: true, ...options });
+  };
+
   useEffect(() => {
     // On re-entering Statutory, show cached data immediately and refresh in background.
     fetchStatutoryData({ useCacheFirst: true, silentRefresh: true });
     prefetchStatutoryAutofillData();
   }, [userEmail]);
 
-  // Listen for storage changes to detect when checklistBulkData is updated
+  // Live sync: poll + cross-tab signals (no full page reload). Works for admin + site on same or different tabs.
   useEffect(() => {
+    const runSilentRefresh = (reason, { urgent = false } = {}) => {
+      const now = Date.now();
+      const minGap = urgent ? 0 : STATUTORY_LIVE_POLL_MS - 50;
+      if (!urgent && now - lastStatutorySilentRefreshRef.current < minGap) return;
+      lastStatutorySilentRefreshRef.current = now;
+      console.log('📋 Statutory silent refresh:', reason);
+      fetchStatutoryDataRef.current?.({ silentRefresh: true, force: true });
+    };
+
     const handleStorageChange = (e) => {
-      if (e.key === 'checklistBulkData') {
-        console.log('📦 checklistBulkData changed in localStorage, refreshing Statutory data...');
-        fetchStatutoryData();
+      if (e.key === 'checklistBulkData' || e.key === STATUTORY_DATA_REVISION_KEY) {
+        runSilentRefresh(`storage:${e.key}`, { urgent: true });
       }
     };
 
-    // Listen for storage changes
     window.addEventListener('storage', handleStorageChange);
 
-    // Also listen for custom event when ChecklistBulk clears data
     const handleBulkDataCleared = () => {
-      console.log('📦 checklistBulkData cleared event received, refreshing Statutory data...');
-      fetchStatutoryData();
+      runSilentRefresh('checklistBulkDataCleared', { urgent: true });
     };
 
     window.addEventListener('checklistBulkDataCleared', handleBulkDataCleared);
 
-    // Listen for custom event when statutory data is updated (e.g., from SEMaster)
     const handleStatutoryDataUpdated = (e) => {
-      console.log('📋 statutoryDataUpdated event received, refreshing Statutory data...', e.detail);
-      fetchStatutoryData();
+      runSilentRefresh(`statutoryDataUpdated:${e?.detail?.source || 'event'}`, { urgent: true });
     };
 
     window.addEventListener('statutoryDataUpdated', handleStatutoryDataUpdated);
+
+    const handleBroadcastMessage = () => {
+      runSilentRefresh('broadcastChannel', { urgent: true });
+    };
+
+    statutoryBroadcastChannel?.addEventListener('message', handleBroadcastMessage);
+
+    const handleWindowFocus = () => {
+      runSilentRefresh('window-focus', { urgent: true });
+    };
+
+    window.addEventListener('focus', handleWindowFocus);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        runSilentRefresh('visibility-visible', { urgent: true });
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    runSilentRefresh('mount', { urgent: true });
+    const intervalId = window.setInterval(() => {
+      runSilentRefresh('interval');
+    }, STATUTORY_LIVE_POLL_MS);
 
     return () => {
       window.removeEventListener('storage', handleStorageChange);
       window.removeEventListener('checklistBulkDataCleared', handleBulkDataCleared);
       window.removeEventListener('statutoryDataUpdated', handleStatutoryDataUpdated);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      statutoryBroadcastChannel?.removeEventListener('message', handleBroadcastMessage);
+      window.clearInterval(intervalId);
     };
   }, []);
 
@@ -4025,10 +4143,8 @@ const Statutory = ({ userEmail, userRole }) => {
       DraftFileName: row?.draftFileName ?? row?.DraftFileName ?? null,
       draft: row?.draft ?? row?.Draft ?? '',
       Draft: row?.draft ?? row?.Draft ?? '',
-      submittedDate:
-        row?.submittedDate ?? row?.SubmittedDate ?? row?.draftDate ?? row?.DraftDate ?? '',
-      SubmittedDate:
-        row?.submittedDate ?? row?.SubmittedDate ?? row?.draftDate ?? row?.DraftDate ?? '',
+      submittedDate: resolveStatutorySubmittedDateStored(row),
+      SubmittedDate: resolveStatutorySubmittedDateStored(row),
       approvedDate:
         row?.approvedDate ?? row?.ApprovedDate ?? row?.approvalDate ?? row?.ApprovalDate ?? '',
       ApprovedDate:
@@ -4157,8 +4273,8 @@ const Statutory = ({ userEmail, userRole }) => {
         return false;
       }
       setSuccess(payloadApproval == null ? 'Approval cleared.' : `Approval: ${payloadApproval}.`);
-      fetchStatutoryData();
-      window.dispatchEvent(new CustomEvent('statutoryDataUpdated', { detail: { id: targetId } }));
+      broadcastStatutoryDataChange({ id: targetId, source: 'approval' });
+      silentRefreshStatutoryTable();
       setTimeout(() => setSuccess(''), 2500);
       return true;
     } catch (err) {
@@ -4226,6 +4342,11 @@ const Statutory = ({ userEmail, userRole }) => {
     setError('');
     setSuccess('');
     setSendForApprovalUpdatingRowId(targetId);
+    const submitDateIso = todayStatutoryIsoDate();
+    const submitDateKey = statutorySubmittedDatePreserveKey(rowItem);
+    if (submitDateKey) {
+      setSiteSentSubmittedDates((prev) => ({ ...prev, [submitDateKey]: submitDateIso }));
+    }
     try {
       const resp = await fetch(`/server/statutoryreg_function/statutory/${targetId}`, {
         method: 'PUT',
@@ -4234,7 +4355,7 @@ const Statutory = ({ userEmail, userRole }) => {
           ...buildMonthFilterPayload(rowItem),
           SendForApproval: 'Sent',
           sendForApproval: 'Sent',
-          submittedDate: todayStatutoryIsoDate(),
+          submittedDate: submitDateIso,
           // Re-send flow: clear prior approver decision so site sees "Sent" after re-submit.
           approval: null,
           status: 'Pending',
@@ -4243,6 +4364,13 @@ const Statutory = ({ userEmail, userRole }) => {
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || data.status !== 'success') {
+        if (submitDateKey) {
+          setSiteSentSubmittedDates((prev) => {
+            const next = { ...prev };
+            delete next[submitDateKey];
+            return next;
+          });
+        }
         setError(data.message || 'Failed to update send for approval.');
         setTimeout(() => setError(''), 5000);
         return;
@@ -4257,8 +4385,13 @@ const Statutory = ({ userEmail, userRole }) => {
               )
                 .trim()
                 .toLowerCase();
+              const clickedRowId = String(rowItem?.id ?? '');
+              const clickedIdentityKey = checklistBulkRowIdentityKey(rowItem);
               return prev.map((row) => {
                 const sameId = String(row?.id ?? '') === String(targetId);
+                const sameClickedRow = clickedRowId && String(row?.id ?? '') === clickedRowId;
+                const sameIdentity =
+                  clickedIdentityKey && checklistBulkRowIdentityKey(row) === clickedIdentityKey;
                 const sameBaseForm = baseFormNameKey(row?.formName || row?.FormName) === baseForm;
                 const rowSiteNorm = String(
                   resolveSiteDisplayName(row, prev) || row?.site || row?.Site || ''
@@ -4268,17 +4401,18 @@ const Statutory = ({ userEmail, userRole }) => {
                 // Site-view fallback: when visible row is bulk/checklist sibling, mirror Sent to same form in same site.
                 const sameSiteFormSibling =
                   !!siteNorm && sameBaseForm && resolvedSitesOverlap(siteNorm, rowSiteNorm);
-                if (!sameId && !sameSiteFormSibling) return row;
+                if (!sameId && !sameSiteFormSibling && !sameClickedRow && !sameIdentity) return row;
                 const targetRow = sameId ? row : prev.find((r) => String(r?.id ?? '') === String(targetId));
                 const syncDraftFile = targetRow?.draftFile ?? targetRow?.DraftFile ?? null;
                 const syncDraftFileName = targetRow?.draftFileName ?? targetRow?.DraftFileName ?? null;
-                const submitDate = todayStatutoryIsoDate();
                 return {
                   ...row,
                   sendForApproval: 'Sent',
                   SendForApproval: 'Sent',
-                  submittedDate: submitDate,
-                  SubmittedDate: submitDate,
+                  submittedDate: submitDateIso,
+                  SubmittedDate: submitDateIso,
+                  modifiedTime: submitDateIso,
+                  MODIFIEDTIME: submitDateIso,
                   approval: '',
                   Approval: '',
                   status: 'Pending',
@@ -4302,10 +4436,17 @@ const Statutory = ({ userEmail, userRole }) => {
           : prev
       );
       setSuccess('Marked as sent for approval.');
-      fetchStatutoryData({ force: true });
-      window.dispatchEvent(new CustomEvent('statutoryDataUpdated', { detail: { id: targetId } }));
+      broadcastStatutoryDataChange({ id: targetId, source: 'sendForApproval' });
+      silentRefreshStatutoryTable();
       setTimeout(() => setSuccess(''), 2500);
     } catch (err) {
+      if (submitDateKey) {
+        setSiteSentSubmittedDates((prev) => {
+          const next = { ...prev };
+          delete next[submitDateKey];
+          return next;
+        });
+      }
       setError(err?.message || 'Failed to update send for approval.');
       setTimeout(() => setError(''), 5000);
     } finally {
@@ -4445,8 +4586,8 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       setSuccess('Proof submission uploaded successfully.');
-      fetchStatutoryData();
-      window.dispatchEvent(new CustomEvent('statutoryDataUpdated', { detail: { id: targetId } }));
+      broadcastStatutoryDataChange({ id: targetId, source: 'proofUpload' });
+      silentRefreshStatutoryTable();
       setTimeout(() => setSuccess(''), 3000);
     } catch (err) {
       console.error('Inline proof upload error:', err);
@@ -8087,8 +8228,12 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
        
-        // Refresh data first, then close modal
-        await fetchStatutoryData();
+        // Notify other tabs first, then refresh (admin sees update within ~1s).
+        broadcastStatutoryDataChange({
+          id: keeperStatutoryId || currentItem?.id || null,
+          source: 'draftSave'
+        });
+        await silentRefreshStatutoryTable();
         setTimeout(() => {
           handleCloseFormFileModal();
         }, 500);
@@ -16543,7 +16688,7 @@ const Statutory = ({ userEmail, userRole }) => {
         }) === selectedStatusFilter;
       return searchMatch && formMatch && statusMatch;
     });
-    // Group site-wise; within a site: non-approved with draft/sent first, then other non-approved, then approved last.
+    // Group site-wise; keep original row order within site (do not push approved rows to the bottom).
     return [...filtered].sort((a, b) => {
       const siteA = String(resolveSiteDisplayName(a, filteredStatutoryData) || '').trim().toLowerCase();
       const siteB = String(resolveSiteDisplayName(b, filteredStatutoryData) || '').trim().toLowerCase();
@@ -16552,19 +16697,6 @@ const Statutory = ({ userEmail, userRole }) => {
         if (!siteB) return -1;
         return siteA.localeCompare(siteB);
       }
-      const tierA = isRowStatusApproved({
-        ...a,
-        ...resolveStatutoryRowMetaForSelectedMonth(a)
-      })
-        ? 1
-        : 0;
-      const tierB = isRowStatusApproved({
-        ...b,
-        ...resolveStatutoryRowMetaForSelectedMonth(b)
-      })
-        ? 1
-        : 0;
-      if (tierA !== tierB) return tierA - tierB;
       const draftRankA = !isRowStatusApproved(a) && hasStatutoryDraftSubmittedForSort(a) ? 0 : 1;
       const draftRankB = !isRowStatusApproved(b) && hasStatutoryDraftSubmittedForSort(b) ? 0 : 1;
       if (draftRankA !== draftRankB) return draftRankA - draftRankB;
@@ -17855,7 +17987,11 @@ const Statutory = ({ userEmail, userRole }) => {
                             draftStoredMonthNorm !== uiMonthSelNorm;
                           const sendForApprovalEffective = (() => {
                             const v =
-                              monthWorkflowMeta.sendForApproval ?? monthWorkflowMeta.SendForApproval ?? '';
+                              monthWorkflowMeta.sendForApproval ??
+                              monthWorkflowMeta.SendForApproval ??
+                              item.sendForApproval ??
+                              item.SendForApproval ??
+                              '';
                             return v != null && String(v).trim() !== '' ? String(v).trim() : '';
                           })();
                           // Approval-flow gating: in approver view, show draft only after site marks Send for Approval as Sent.
@@ -18145,7 +18281,34 @@ const Statutory = ({ userEmail, userRole }) => {
                               })()}
                             </td>
                             <td style={{ whiteSpace: 'nowrap' }}>
-                              {resolveStatutorySubmittedDateDisplay(item, monthWorkflowMeta, draftSourceItem) || '-'}
+                              {(() => {
+                                const submittedPreserveKey = statutorySubmittedDatePreserveKey(item);
+                                const pinnedSubmitted =
+                                  submittedPreserveKey && siteSentSubmittedDates[submittedPreserveKey];
+                                if (pinnedSubmitted) {
+                                  return formatStatutoryDateDisplay(pinnedSubmitted) || '-';
+                                }
+                                const linkedDbRow =
+                                  Array.isArray(statutoryData) &&
+                                  (() => {
+                                    const lid =
+                                      item.draftStatutoryRowIdForFile ||
+                                      preferredDraftApiRowId ||
+                                      resolveNumericStatutoryIdForProofRow(item);
+                                    if (!lid) return null;
+                                    return (
+                                      statutoryData.find((r) => String(r?.id ?? '') === String(lid)) || null
+                                    );
+                                  })();
+                                return (
+                                  resolveStatutorySubmittedDateDisplay(
+                                    item,
+                                    monthWorkflowMeta,
+                                    draftSourceItem,
+                                    linkedDbRow
+                                  ) || '-'
+                                );
+                              })()}
                             </td>
                             {showSendForApprovalColumn ? (
                               <td className="statutory-col-send-for-approval" style={{ textAlign: 'center' }}>
@@ -19235,32 +19398,45 @@ const Statutory = ({ userEmail, userRole }) => {
                                 maxWidth: '100%'
                               }}>
                                 {displayFormHeader.festivalGrid.keys.map((slotKey, idx) => (
-                                  <div key={slotKey} style={{ display: 'flex', flexDirection: 'column' }}>
-                                    <label style={{
-                                      fontSize: '12px',
-                                      fontWeight: '500',
-                                      color: '#6b7280',
-                                      marginBottom: '4px'
-                                    }}>
+                                  <div
+                                    key={slotKey}
+                                    className="statutory-festival-slot"
+                                    style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '8px', minWidth: 0 }}
+                                  >
+                                    <span
+                                      className="statutory-festival-slot-num"
+                                      style={{
+                                        flexShrink: 0,
+                                        fontSize: '12px',
+                                        fontWeight: '600',
+                                        color: '#6b7280',
+                                        minWidth: '1.25rem',
+                                        textAlign: 'center'
+                                      }}
+                                      aria-hidden
+                                    >
                                       {idx + 1}
-                                    </label>
+                                    </span>
                                     <input
                                       type="text"
+                                      className="statutory-festival-slot-input"
                                       value={headerFormData[slotKey] || ''}
                                       onChange={(e) => {
                                         if (isFormFileReadOnly) return;
                                         handleHeaderFieldChange(slotKey, e.target.value);
                                       }}
                                       readOnly={isFormFileReadOnly}
+                                      aria-label={`Approved festival holiday ${idx + 1}`}
                                       style={{
+                                        flex: 1,
+                                        minWidth: 0,
                                         padding: '10px 12px',
                                         border: '1px solid #d1d5db',
                                         borderRadius: '6px',
                                         fontSize: '14px',
                                         color: '#1f2937',
                                         backgroundColor: isFormFileReadOnly ? '#f9fafb' : '#fff',
-                                        transition: 'border-color 0.2s',
-                                        minWidth: 0
+                                        transition: 'border-color 0.2s'
                                       }}
                                       onFocus={(e) => { e.target.style.borderColor = '#3b82f6'; }}
                                       onBlur={(e) => { e.target.style.borderColor = '#d1d5db'; }}

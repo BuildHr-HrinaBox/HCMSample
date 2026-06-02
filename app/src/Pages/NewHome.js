@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import './NewHome.css';
 import {
   Bell, MoreVertical, X, LayoutDashboard, Scale, BookOpen,
@@ -56,9 +56,10 @@ const NewHome = ({ userEmail, userName, userRole, sidebarOpen: sidebarOpenProp, 
     formFetch: false,
     ruleBook: false
   });
-  const location = useLocation();
+  const location = useLocation();
+  const navigate = useNavigate();
 
-  // Recent activities data
+  // Recent activities data
   const [recentActivities] = useState([
     {
       icon: <Bell size={18} />,
@@ -793,7 +794,7 @@ const NewHome = ({ userEmail, userName, userRole, sidebarOpen: sidebarOpenProp, 
                         onClick={() => {
                           setShowNotificationDropdown(false);
                           const path = item.source === 'statutory' ? '/rule-book/statutory' : '/rule-book/checklist';
-                          window.location.href = path;
+                          navigate(path);
                         }}
                       >
                         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', minWidth: 0 }}>

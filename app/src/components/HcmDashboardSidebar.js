@@ -125,12 +125,11 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
   const formFetchSectionActive = filteredNav.some(
     (i) => i.type === 'group' && i.id === 'formFetch' && (i.children || []).some((c) => location.pathname === c.to)
   );
-  // Start collapsed so route-driven open runs after paint (smooth expand animation).
   const [openGroups, setOpenGroups] = useState({
-    org: false,
-    library: false,
-    transaction: false,
-    formFetch: false,
+    org: orgSectionActive,
+    library: librarySectionActive,
+    transaction: transactionSectionActive,
+    formFetch: formFetchSectionActive,
   });
   const userCollapsedGroupsRef = useRef({});
 
@@ -139,18 +138,15 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
   }, [location.pathname]);
 
   useEffect(() => {
-    const frame = requestAnimationFrame(() => {
-      setOpenGroups((prev) => ({
-        ...prev,
-        ...(orgSectionActive && !userCollapsedGroupsRef.current.org ? { org: true } : {}),
-        ...(librarySectionActive && !userCollapsedGroupsRef.current.library ? { library: true } : {}),
-        ...(transactionSectionActive && !userCollapsedGroupsRef.current.transaction
-          ? { transaction: true }
-          : {}),
-        ...(formFetchSectionActive && !userCollapsedGroupsRef.current.formFetch ? { formFetch: true } : {}),
-      }));
-    });
-    return () => cancelAnimationFrame(frame);
+    setOpenGroups((prev) => ({
+      ...prev,
+      ...(orgSectionActive && !userCollapsedGroupsRef.current.org ? { org: true } : {}),
+      ...(librarySectionActive && !userCollapsedGroupsRef.current.library ? { library: true } : {}),
+      ...(transactionSectionActive && !userCollapsedGroupsRef.current.transaction
+        ? { transaction: true }
+        : {}),
+      ...(formFetchSectionActive && !userCollapsedGroupsRef.current.formFetch ? { formFetch: true } : {}),
+    }));
   }, [orgSectionActive, librarySectionActive, transactionSectionActive, formFetchSectionActive]);
 
   const toggleGroup = (groupId) => {

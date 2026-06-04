@@ -138,6 +138,16 @@ function isNumericStatutoryBackendId(id) {
   return /^\d+$/.test(String(id ?? '').trim());
 }
 
+function isSyntheticStatutoryRowId(id) {
+  const idStr = String(id ?? '').trim();
+  return (
+    idStr.startsWith('formmaster_') ||
+    idStr.startsWith('bulk_') ||
+    idStr.startsWith('checklist_') ||
+    idStr.startsWith('placeholder_')
+  );
+}
+
 /** When this user is logged in, Statutory is filtered by ?site= (Delphi site → sector); separate from Site Management industry scope */
 const SITE_WISE_STATUTORY_EMAIL = 'afrindinu14@gmail.com';
 /** localStorage key for persisting the statutory month filter (based on saved due date) */
@@ -162,7 +172,6 @@ const FORM_U_FORMAT2_HEADERS = [
   'Designation',
   'Present Address',
   'Permanent Address',
-  'Employee Identification No.',
   'Worker Identity No.',
   'Aadhaar',
   'Date on which joined',
@@ -171,6 +180,207 @@ const FORM_U_FORMAT2_HEADERS = [
   'Bank A/c',
   'Photo'
 ];
+
+/** Form U Rule 34 – confidential character (Sr. No. + Name of the person). */
+const FORM_U_CONFIDENTIAL_HEADERS = ['Sr. No.', 'Name of the person'];
+
+const rowHasTableSerialHeader = (rowTextLower) =>
+  /\bs\.?\s*no\.?\b/.test(rowTextLower) ||
+  /\bsr\.?\s*no\.?\b/.test(rowTextLower) ||
+  rowTextLower.includes('serial number') ||
+  rowTextLower.includes('serial no');
+
+const normalizeExcelHeaderCell = (txt) =>
+  String(txt || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+const excelCellLooksLikeSerialHeader = (rawText) => {
+  const t = normalizeExcelHeaderCell(rawText);
+  return !!(t && (rowHasTableSerialHeader(t) || t.includes('serial')));
+};
+
+function isFormUAutofillContext(hints = {}) {
+  const blob = [
+    hints.fileName,
+    hints.formFileName,
+    hints.formName,
+    hints.itemFormName,
+    hints.formHeaderTitle,
+    hints.sheetText
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  return /\bform\s*u\b/i.test(blob) || /\bform[\s_-]*u\b/i.test(blob);
+}
+
+/** Form U – employee particulars register (many columns) vs Rule 34 confidential character (2 columns). */
+function detectFormUSheetVariant(hints = {}) {
+  const blob = [
+    hints.sheetText,
+    hints.formHeaderTitle,
+    hints.fileName,
+    hints.formFileName
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  const hasEmployee =
+    /name\s+of\s+the\s+employee/.test(blob) ||
+    /employee\s+identification/.test(blob) ||
+    /father\s*\/\s*spouse/.test(blob) ||
+    /date\s+of\s+birth/.test(blob);
+  const hasConfidential =
+    /confidential\s+character/.test(blob) ||
+    /occupying\s+position\s+of\s+confidential/.test(blob) ||
+    (/see\s+rule\s*34/.test(blob) && /name\s+of\s+the\s+person/.test(blob));
+  if (hasConfidential && !hasEmployee) return 'confidential_character';
+  if (hasEmployee) return 'employee_register';
+  if (/name\s+of\s+the\s+person/.test(blob) && !hasEmployee) return 'confidential_character';
+  return 'unknown';
+}
+
+function inferFormUVariantFromRow(item) {
+  const blob = [
+    item?.description,
+    item?.Description,
+    item?.act,
+    item?.Act,
+    item?.formName,
+    item?.FormName,
+    item?.formFileName,
+    item?.FormFileName
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (/confidential|rule\s*34|confidential\s+character/.test(blob)) {
+    return 'confidential_character';
+  }
+  if (
+    /employee|particulars|register\s+of\s+employees|shops\s+and\s+establishment|wage\s+register/.test(
+      blob
+    )
+  ) {
+    return 'employee_register';
+  }
+  return null;
+}
+
+function isFormUEmployeeRegisterContext(hints = {}) {
+  const variant = detectFormUSheetVariant(hints);
+  if (variant === 'employee_register') return true;
+  if (variant === 'confidential_character') return false;
+  const rowVariant = inferFormUVariantFromRow(hints.item || hints);
+  if (rowVariant === 'employee_register') return true;
+  if (rowVariant === 'confidential_character') return false;
+  const blob = [
+    hints.sheetText,
+    hints.formHeaderTitle,
+    hints.fileName,
+    hints.formFileName
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  return (
+    isFormUAutofillContext(hints) &&
+    (/employee\s+identification/.test(blob) || /name\s+of\s+the\s+employee/.test(blob))
+  );
+}
+
+function isFormUConfidentialCharacterContext(hints = {}) {
+  const variant = detectFormUSheetVariant(hints);
+  if (variant === 'confidential_character') return true;
+  if (variant === 'employee_register') return false;
+  const rowVariant = inferFormUVariantFromRow(hints.item || hints);
+  if (rowVariant === 'confidential_character') return true;
+  if (rowVariant === 'employee_register') return false;
+  const blob = [
+    hints.sheetText,
+    hints.formHeaderTitle,
+    hints.fileName,
+    hints.formFileName
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  return (
+    isFormUAutofillContext(hints) &&
+    (/name\s+of\s+the\s+person/.test(blob) ||
+      /confidential\s+character/.test(blob) ||
+      /occupying\s+position\s+of\s+confidential/.test(blob))
+  );
+}
+
+function validateFormUTemplateForRow(item, sheetHints = {}) {
+  const expected = inferFormUVariantFromRow(item);
+  const actual = detectFormUSheetVariant(sheetHints);
+  if (actual !== 'unknown' && isFormUAutofillContext(sheetHints)) return null;
+  if (!expected || actual === 'unknown' || expected === actual) return null;
+  const label = (v) =>
+    v === 'employee_register'
+      ? 'Employee particulars register (Name of the employee, Gender, etc.)'
+      : 'Confidential character – Rule 34 (Name of the person)';
+  return (
+    `Wrong Excel template for this row. Expected Form U: ${label(expected)}. ` +
+    `The linked file is Form U: ${label(actual)}. ` +
+    `In Form Master, upload the correct template for this row's Act, Description, Sector, and State, ` +
+    `then run Link Form Files on Checklist Bulk.`
+  );
+}
+
+/** When parseExcelForm returns no headers, use canonical Form U columns for the detected variant. */
+function resolveAutofillTableHeaders(currentHeaders, hints = {}) {
+  const trimmed = (Array.isArray(currentHeaders) ? currentHeaders : [])
+    .map((h) => String(h || '').trim())
+    .filter(Boolean);
+  if (isFormUConfidentialCharacterContext(hints)) {
+    return normalizeFormUConfidentialHeaders(trimmed, hints);
+  }
+  if (trimmed.length > 0) return trimmed;
+  if (isFormUEmployeeRegisterContext(hints) && FORM_U_FORMAT2_HEADERS.length > 0) {
+    return [...FORM_U_FORMAT2_HEADERS];
+  }
+  return trimmed;
+}
+
+/** Form Q (Excel model): worker columns + Working hours / Interval for Rest / Date of the Month (1–31). */
+const buildFormQCanonicalHeaders = (daysInMonth = 31) => {
+  const headers = [
+    'Sr. No.',
+    'Full Name of the worker',
+    'Designation of the worker and nature of work',
+    'Age',
+    'Sex',
+    'Date of entry into service',
+    'Working hours_From',
+    'Working hours_To',
+    'Interval for Rest_From',
+    'Interval for Rest_To'
+  ];
+  const days = Math.min(Math.max(Number(daysInMonth) || 31, 28), 31);
+  for (let d = 1; d <= days; d += 1) {
+    headers.push(`Date of the Month_${d}`);
+  }
+  return headers;
+};
+
+const buildFormQSubColumnsFromHeaders = (headers) => {
+  const subs = {};
+  (headers || []).forEach((h) => {
+    const m = String(h || '').match(/^(.+)_([\s\S]+)$/);
+    if (!m) return;
+    const parent = m[1].trim();
+    const sub = m[2].trim();
+    if (!subs[parent]) subs[parent] = [];
+    if (!subs[parent].includes(sub)) subs[parent].push(sub);
+  });
+  return subs;
+};
 
 const FORM_12_ALIGNMENT_HEADERS = [
   'Serial Number',
@@ -211,6 +421,136 @@ function isForm12StatutoryContext(item, fileName, formHeader) {
     .join(' ');
   return /\bform\s*[-"']?\s*12\b/i.test(blob);
 }
+
+function isFormJStatutoryContext(item, fileName, formHeader) {
+  const blob = [
+    item?.formName,
+    item?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference
+  ]
+    .map((s) => String(s || ''))
+    .join(' ');
+  return /\bform\s*[-"']?\s*j\b/i.test(blob) || /register\s+of\s+employment/i.test(blob);
+}
+
+/** Form J Register of Employment: title + (See Rule…) + multi-line register text (no S.No column). */
+const buildFormJRegisterHeaderFromSheet = ({
+  headerRowIndex,
+  getMergedAwareCellText,
+  jsonData,
+  effectiveSheetCols,
+  formTitle,
+  formSubtitle,
+  formReference
+}) => {
+  if (headerRowIndex <= 0) return null;
+
+  const jLines = [];
+  for (let r = 0; r < headerRowIndex; r++) {
+    let line = '';
+    const maxCols = Math.min(Math.max(effectiveSheetCols || 0, 20), 40);
+    for (let c = 0; c < maxCols; c++) {
+      const t = String(getMergedAwareCellText(r, c) || '')
+        .trim()
+        .replace(/\s+/g, ' ');
+      if (t.length > line.length) line = t;
+    }
+    if (!line) {
+      line = (jsonData[r] || [])
+        .map((cell) => String(cell || '').trim())
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+    if (line) jLines.push(line);
+  }
+
+  const blob = jLines.join(' ').toLowerCase();
+  const isFormJ =
+    /\bform\s+j\b/i.test(blob) ||
+    (/register\s+of\s+employment/i.test(blob) &&
+      (/shop\s+or\s+commercial|establishment\s+where\s+opening|week\s+ending/i.test(blob)));
+
+  if (!isFormJ) return null;
+
+  const titleLine =
+    jLines.find((l) => /\bform\s+j\b/i.test(l)) || formTitle || 'FORM J';
+  const refLine =
+    jLines.find((l) => /\[.*see.*rule/i.test(l) || /^\(\s*see\s+rule/i.test(l)) ||
+    formReference ||
+    '';
+  const subtitleLines = jLines.filter((l) => {
+    if (l === refLine) return false;
+    if (/^\s*form\s+j\s*$/i.test(l)) return false;
+    if (/register\s+of\s+employment/i.test(l)) return true;
+    if (/establishment\s+where\s+opening|ordinarily\s+uniform/i.test(l)) return true;
+    if (/week\s+ending/i.test(l)) return true;
+    return false;
+  });
+
+  let subtitle = subtitleLines.join('\n');
+  if (!subtitle) {
+    const parts = [formSubtitle, formReference]
+      .map((s) => String(s || '').trim())
+      .filter(Boolean);
+    subtitle = parts.join('\n');
+  }
+
+  return {
+    title: titleLine.replace(/\s+/g, ' ').trim(),
+    subtitle,
+    reference: refLine ? refLine.replace(/\s+/g, ' ').trim() : formReference
+  };
+};
+
+const shouldPlaceFormJReferenceBeforeSubtitle = (formHeader) => {
+  const title = String(formHeader?.title || '').trim();
+  const ref = String(formHeader?.reference || '').trim();
+  if (!ref || !/\bsee\s+rule/i.test(ref)) return false;
+  return (
+    /\bform\s+j\b/i.test(title) ||
+    /register\s+of\s+employment/i.test(String(formHeader?.subtitle || ''))
+  );
+};
+
+const normalizeFormJHeaderForDisplay = (formHeader, item, fileName) => {
+  if (!formHeader || !isFormJStatutoryContext(item, fileName, formHeader)) return formHeader;
+
+  let subtitle = String(formHeader.subtitle || '').trim();
+  const textRows = Array.isArray(formHeader.textRows) ? formHeader.textRows : [];
+  const needsMoreLines =
+    /register\s+of\s+employment/i.test(subtitle) &&
+    !/establishment\s+where\s+opening/i.test(subtitle) &&
+    !/week\s+ending/i.test(subtitle);
+  if (needsMoreLines) {
+    const extra = textRows.filter((line) => {
+      const l = String(line || '').toLowerCase();
+      return (
+        /establishment\s+where\s+opening|ordinarily\s+uniform/i.test(l) ||
+        /week\s+ending/i.test(l)
+      );
+    });
+    if (extra.length > 0) subtitle = [subtitle, ...extra].filter(Boolean).join('\n');
+  }
+
+  const subtitleNorm = subtitle.replace(/\s+/g, ' ').toLowerCase();
+  let wagePeriodText = formHeader.wagePeriodText;
+  const wageNorm = String(wagePeriodText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (wageNorm && subtitleNorm && (subtitleNorm.includes(wageNorm) || /week\s+ending/i.test(wageNorm))) {
+    wagePeriodText = '';
+  }
+
+  return {
+    ...formHeader,
+    subtitle,
+    textRows: [],
+    wagePeriodText: wagePeriodText || ''
+  };
+};
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -441,6 +781,26 @@ const resolveStatutorySubmittedDateDisplay = (
   return '';
 };
 
+/** Day-of-month (1–31) from checklist import; recovers mistaken Excel serial → 1900-01-* */
+const extractDayOfMonthFromDueDate = (dueDate) => {
+  if (dueDate == null || dueDate === '') return null;
+  if (typeof dueDate === 'number' && Number.isInteger(dueDate) && dueDate >= 1 && dueDate <= 31) {
+    return dueDate;
+  }
+  const s = String(dueDate).trim();
+  if (!s) return null;
+  if (/^\d{1,2}$/.test(s)) {
+    const day = parseInt(s, 10);
+    if (day >= 1 && day <= 31) return day;
+  }
+  const legacy = s.match(/^1900-01-(\d{1,2})$/);
+  if (legacy) {
+    const recovered = parseInt(legacy[1], 10) + 1;
+    if (recovered >= 1 && recovered <= 31) return recovered;
+  }
+  return null;
+};
+
 const getMonthFromDueDate = (dueDateStr) => {
   if (!dueDateStr || typeof dueDateStr !== 'string') return null;
   const s = dueDateStr.trim().toLowerCase();
@@ -496,11 +856,414 @@ function statutoryDedupeMonthNorm(item, uiMonthFallback) {
   return 'nomonth';
 }
 
+/** True when a saved statutory row should surface draft/workflow for the UI month picker. */
+function statutoryMonthMatchesUiFilter(dbRow, uiMonthNorm, selectedMonth) {
+  if (!uiMonthNorm || uiMonthNorm === 'nomonth') return true;
+  const rowMonth = statutoryDedupeMonthNorm(dbRow, selectedMonth);
+  if (rowMonth === uiMonthNorm) return true;
+  // Rows saved before MonthFilter was set (common after Autofill → Save on bulk lines).
+  if (rowMonth === 'nomonth') return true;
+  return false;
+}
+
+/** Match checklist bulk placeholder to numeric statutory row for draft linking (tolerates empty DB metadata). */
+function statutoryLineMetadataMatches(item, dbRow) {
+  const fn = (x) => baseFormNameKey(x?.formName || x?.FormName);
+  if (fn(item) !== fn(dbRow)) return false;
+  const fieldMatch = (a, b) => {
+    const left = String(a ?? '').trim().toLowerCase();
+    const right = String(b ?? '').trim().toLowerCase();
+    if (!left || !right) return true;
+    return left === right;
+  };
+  const stateMatch = (a, b) => {
+    const left = String(a ?? '').trim().toLowerCase();
+    const right = String(b ?? '').trim().toLowerCase();
+    if (left && right) return left === right;
+    if (left && !right) return false;
+    return true;
+  };
+  return (
+    fieldMatch(item?.act || item?.Act, dbRow?.act || dbRow?.Act) &&
+    fieldMatch(item?.description || item?.Description, dbRow?.description || dbRow?.Description) &&
+    fieldMatch(item?.sector || item?.Sector, dbRow?.sector || dbRow?.Sector) &&
+    stateMatch(item?.state || item?.State, dbRow?.state || dbRow?.State)
+  );
+}
+
 function squashStatutoryKeyPart(v) {
   return String(v ?? '')
     .trim()
     .toLowerCase()
     .replace(/\s+/g, ' ');
+}
+
+/** When statutory/checklist row has State, do not link another state's Form Master template. */
+function statesCompatibleForStatutoryFormLink(rowState, templateState) {
+  const r = squashStatutoryKeyPart(rowState);
+  const t = squashStatutoryKeyPart(templateState);
+  if (r && t) return r === t;
+  if (r && !t) return false;
+  return true;
+}
+
+/** Form Master / Statutory: one template per formName+act+description+sector+state (not form name alone). */
+function buildFormmasterMatchKey(item) {
+  const base = [
+    squashStatutoryKeyPart(item?.formName || item?.FormName),
+    squashStatutoryKeyPart(item?.act || item?.Act),
+    squashStatutoryKeyPart(item?.description || item?.Description),
+    squashStatutoryKeyPart(item?.sector || item?.Sector) || 'nosector',
+    squashStatutoryKeyPart(item?.state || item?.State) || 'nostate'
+  ].join('|');
+  const variant = inferFormUVariantFromRow(item);
+  return variant ? `${base}|${variant}` : base;
+}
+
+/** Label shown in modal/download — not only "Form U.xlsx" when two Form U rows exist. */
+/**
+ * Template for View File / Autofill: always prefer this grid row's stored FormFile (checklistbulk ROWID / statutory row).
+ * Draft/sample APIs use draftStatutoryRowIdForFile — do not borrow another row's id for template download.
+ */
+function scoreFormMasterTemplateMatch(gridRow, templateRow) {
+  const norm = (v) => squashStatutoryKeyPart(v);
+  let score = 0;
+  if (norm(gridRow?.formName) !== norm(templateRow?.formName)) return -999;
+  if (!statesCompatibleForStatutoryFormLink(gridRow?.state, templateRow?.state)) return -999;
+  if (norm(gridRow?.act) && norm(gridRow?.act) === norm(templateRow?.act)) score += 5;
+  if (norm(gridRow?.state) && norm(gridRow?.state) === norm(templateRow?.state)) score += 5;
+  if (norm(gridRow?.sector) && norm(gridRow?.sector) === norm(templateRow?.sector)) score += 3;
+  const gd = norm(gridRow?.description);
+  const td = norm(templateRow?.description);
+  if (gd && td) {
+    if (gd === td) score += 12;
+    else if (gd.includes(td) || td.includes(gd)) score += 7;
+  }
+  const gv = inferFormUVariantFromRow(gridRow);
+  const tv = inferFormUVariantFromRow(templateRow);
+  if (gv && tv) {
+    if (gv === tv) score += 25;
+    else score -= 200;
+  }
+  return score;
+}
+
+function headersIndicateFormUConfidential(headers) {
+  if (!Array.isArray(headers) || headers.length === 0) return false;
+  const list = headers.map((h) => String(h || '').toLowerCase());
+  const hasPerson = list.some((h) => /name\s+of\s+the\s+person/.test(h));
+  const hasEmployee = list.some(
+    (h) => /name\s+of\s+the\s+employee/.test(h) || /employee\s+identification/.test(h)
+  );
+  return hasPerson && !hasEmployee;
+}
+
+/** Merged Excel headers repeat the same label — keep one column per label for Form U Rule 34. */
+function normalizeFormUConfidentialHeaders(headers, hints = {}) {
+  const list = (Array.isArray(headers) ? headers : [])
+    .map((h) => String(h || '').trim())
+    .filter(Boolean);
+  const isConfidential =
+    isFormUConfidentialCharacterContext(hints) ||
+    headersIndicateFormUConfidential(list) ||
+    detectFormUSheetVariant(hints) === 'confidential_character';
+  if (!isConfidential) return list;
+
+  const personCount = list.filter((h) => /name\s+of\s+the\s+person/i.test(h)).length;
+  const hasSerial = list.some((h) => excelCellLooksLikeSerialHeader(h) || /serial/i.test(h));
+  if (
+    list.length === 0 ||
+    personCount > 1 ||
+    (personCount >= 1 && list.length > 2) ||
+    (personCount >= 1 && !hasSerial)
+  ) {
+    return [...FORM_U_CONFIDENTIAL_HEADERS];
+  }
+
+  const collapsed = [];
+  let prevNorm = '';
+  list.forEach((h) => {
+    const norm = h.toLowerCase().replace(/\s+/g, ' ').trim();
+    if (norm && norm === prevNorm) return;
+    collapsed.push(h);
+    prevNorm = norm;
+  });
+  if (
+    collapsed.length === 2 &&
+    collapsed.some((h) => excelCellLooksLikeSerialHeader(h)) &&
+    collapsed.some((h) => /name\s+of\s+the\s+person/i.test(h))
+  ) {
+    return collapsed;
+  }
+  return [...FORM_U_CONFIDENTIAL_HEADERS];
+}
+
+function headersIndicateFormUEmployeeRegister(headers) {
+  if (!Array.isArray(headers) || headers.length === 0) return false;
+  const list = headers.map((h) => String(h || '').toLowerCase());
+  return list.some(
+    (h) => /name\s+of\s+the\s+employee/.test(h) || /employee\s+identification/.test(h)
+  );
+}
+
+function inferFormUVariantFromSavedHeaders(headers) {
+  if (headersIndicateFormUConfidential(headers)) return 'confidential_character';
+  if (headersIndicateFormUEmployeeRegister(headers)) return 'employee_register';
+  return null;
+}
+
+/** Draft download: prefer Form Master variant match over a stale/wrong row FormFile id. */
+function resolveDraftDownloadTemplateMeta(lineItem, resolvedFormFileItem, lookups = {}, opts = {}) {
+  const expectedVariant =
+    inferFormUVariantFromRow(lineItem) ||
+    inferFormUVariantFromSavedHeaders(opts.sampleHeaders) ||
+    null;
+  const rowHasFile =
+    resolvedFormFileItem?.formFile &&
+    resolvedFormFileItem.formFile !== 'null' &&
+    String(resolvedFormFileItem.formFile).trim() !== '';
+  const picked = pickFormMasterFileForRow(lineItem, lookups, { expectedVariant });
+
+  if (expectedVariant && picked?.formFile) {
+    return {
+      ...resolvedFormFileItem,
+      ...picked,
+      formFile: picked.formFile,
+      formFileName: picked.formFileName || resolvedFormFileItem?.formFileName,
+      isFromFormmaster: true
+    };
+  }
+  if (rowHasFile) return resolvedFormFileItem;
+  if (picked?.formFile) {
+    return { ...resolvedFormFileItem, ...picked };
+  }
+  return resolvedFormFileItem;
+}
+
+function pickFormMasterFileForRow(item, lookups = {}, opts = {}) {
+  const forcedVariant = opts.expectedVariant || null;
+  const { formmasterFormFileByMatchKey, formmasterTemplates } = lookups;
+  const rowLineKey = buildFormmasterMatchKey(item);
+  const rowBulkKey = checklistBulkRowIdentityKey(item);
+  const rowVariant = forcedVariant || inferFormUVariantFromRow(item);
+  const baseLineKey = rowVariant
+    ? rowLineKey.replace(/\|(?:confidential_character|employee_register)$/, '')
+    : rowLineKey;
+  const exact =
+    formmasterFormFileByMatchKey?.get?.(rowLineKey) ||
+    (rowVariant ? formmasterFormFileByMatchKey?.get?.(`${baseLineKey}|${rowVariant}`) : null) ||
+    formmasterFormFileByMatchKey?.get?.(baseLineKey) ||
+    formmasterFormFileByMatchKey?.get?.(rowBulkKey);
+  const templates = Array.isArray(formmasterTemplates) ? formmasterTemplates : [];
+  if (!templates.length) return exact || null;
+
+  let best = null;
+  let bestScore = -Infinity;
+  templates.forEach((t) => {
+    const fileId = t.id != null ? String(t.id) : t.fileId != null ? String(t.fileId) : '';
+    if (!fileId) return;
+    const templateRow = {
+      formName: t.formName,
+      act: t.act,
+      description: t.description,
+      sector: t.sector,
+      state: t.state,
+      formFileName: t.templateFileName || t.name || t.fileName || ''
+    };
+    const templateVariant = inferFormUVariantFromRow(templateRow);
+    if (forcedVariant && templateVariant && templateVariant !== forcedVariant) return;
+    const s = scoreFormMasterTemplateMatch(item, templateRow);
+    if (s > bestScore) {
+      bestScore = s;
+      best = {
+        formFile: fileId,
+        formFileName: t.templateFileName || t.name || 'template.xlsx',
+        isFromFormmaster: true
+      };
+    }
+  });
+  if (best && bestScore > 0) return best;
+  return exact || null;
+}
+
+function resolveFormFileItemForStatutoryRow(item, lookups = {}) {
+  if (!item) return item;
+  const rowId = String(item.id ?? '').trim();
+  const rowFormFile = item.formFile || item.FormFile || null;
+  const rowFormFileName = item.formFileName || item.FormFileName || null;
+  const rowHasFormFile =
+    rowFormFile && rowFormFile !== 'null' && String(rowFormFile).trim() !== '';
+
+  if (rowHasFormFile) {
+    return {
+      ...item,
+      formFile: rowFormFile,
+      formFileName: rowFormFileName || buildStatutoryFormFileLabel(item),
+      formFetchRowId: rowId
+    };
+  }
+
+  const { formFileByFormKey } = lookups;
+  const rowFormmasterFile = pickFormMasterFileForRow(item, lookups);
+  if (rowFormmasterFile?.formFile) {
+    return {
+      ...item,
+      formFile: rowFormmasterFile.formFile,
+      formFileName: rowFormmasterFile.formFileName,
+      isFromFormmaster: true,
+      formFetchRowId: rowId
+    };
+  }
+
+  const rowLineKey = buildFormmasterMatchKey(item);
+  const rowBulkKey = checklistBulkRowIdentityKey(item);
+  const rowLookup = formFileByFormKey?.get?.(rowLineKey) || formFileByFormKey?.get?.(rowBulkKey);
+  if (rowLookup?.formFile) {
+    return {
+      ...item,
+      formFile: rowLookup.formFile,
+      formFileName: rowLookup.formFileName,
+      isFromFormmaster: !!rowLookup.isFromFormmaster,
+      formFetchRowId: rowId
+    };
+  }
+
+  return { ...item, formFetchRowId: rowId };
+}
+
+/** Ensure headerRowIndex / dataStartIndex exist before buildDraftWorkbook (Form U and similar templates). */
+function resolveDraftTemplateLayout(templateWb, opts = {}) {
+  let headersToUse = Array.isArray(opts.headersToUse)
+    ? opts.headersToUse.filter((h) => String(h || '').trim())
+    : [];
+  let headerRowIndex = Number(opts.headerRowIndex);
+  let dataStartIndex = Number(opts.dataStartIndex);
+  if (!Number.isFinite(headerRowIndex)) headerRowIndex = -1;
+  if (!Number.isFinite(dataStartIndex)) dataStartIndex = -1;
+
+  if (!templateWb || headersToUse.length === 0) {
+    return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: false };
+  }
+  if (headerRowIndex >= 0 && dataStartIndex >= 0) {
+    return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: true };
+  }
+
+  const firstSheetName = templateWb.SheetNames?.[0];
+  const ws = firstSheetName ? templateWb.Sheets?.[firstSheetName] : null;
+  if (!ws) {
+    return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: false };
+  }
+
+  const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const sheetText = jsonData
+    .slice(0, Math.min(45, jsonData.length))
+    .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+    .join(' ');
+  const hints = {
+    fileName: opts.fileName || '',
+    formName: opts.formName || '',
+    formHeaderTitle: opts.parsedFormHeader?.title || '',
+    sheetText
+  };
+  if (headersToUse.length === 0) {
+    headersToUse = resolveAutofillTableHeaders([], hints);
+  }
+
+  const firstHdr = String(headersToUse[0] || '').trim().toLowerCase();
+  for (let r = 0; r < Math.min(50, jsonData.length); r += 1) {
+    const row = jsonData[r] || [];
+    const rowText = row.map((c) => String(c || '').toLowerCase()).join(' ');
+    const matchesSno =
+      (firstHdr.includes('s.no') || firstHdr === 'sno' || firstHdr.includes('sr')) &&
+      rowHasTableSerialHeader(rowText);
+    const matchesFormU =
+      rowText.includes('name of the employee') || rowText.includes('employee identification');
+    const matchesFormUConfidential =
+      rowText.includes('name of the person') && rowHasTableSerialHeader(rowText);
+    if (matchesSno || matchesFormU || matchesFormUConfidential) {
+      headerRowIndex = r;
+      dataStartIndex = r + 1;
+      const nextRow = jsonData[r + 1] || [];
+      const seqHits = nextRow.filter((c) => /^\d{1,2}$/.test(String(c || '').trim())).length;
+      if (!matchesFormUConfidential && seqHits >= Math.min(4, headersToUse.length)) {
+        dataStartIndex = r + 2;
+      }
+      break;
+    }
+  }
+
+  if (headerRowIndex < 0 && isFormUConfidentialCharacterContext(hints) && FORM_U_CONFIDENTIAL_HEADERS.length > 0) {
+    if (!headersToUse.length) headersToUse = [...FORM_U_CONFIDENTIAL_HEADERS];
+    for (let r = 0; r < Math.min(45, jsonData.length); r += 1) {
+      const rowText = (jsonData[r] || []).map((c) => String(c || '').toLowerCase()).join(' ');
+      if (rowHasTableSerialHeader(rowText) && rowText.includes('name of the person')) {
+        headerRowIndex = r;
+        dataStartIndex = r + 1;
+        break;
+      }
+    }
+    if (headerRowIndex < 0) {
+      headerRowIndex = Math.min(10, Math.max(0, jsonData.length - 3));
+      dataStartIndex = headerRowIndex + 1;
+    }
+  }
+
+  if (headerRowIndex < 0 && isFormUEmployeeRegisterContext(hints) && FORM_U_FORMAT2_HEADERS.length > 0) {
+    if (!headersToUse.length) headersToUse = [...FORM_U_FORMAT2_HEADERS];
+    for (let r = 0; r < Math.min(45, jsonData.length); r += 1) {
+      const rowText = (jsonData[r] || []).map((c) => String(c || '').toLowerCase()).join(' ');
+      if (
+        rowHasTableSerialHeader(rowText) ||
+        rowText.includes('name of the employee') ||
+        rowText.includes('employee identification')
+      ) {
+        headerRowIndex = r;
+        dataStartIndex = r + 2;
+        break;
+      }
+    }
+    if (headerRowIndex < 0) {
+      headerRowIndex = Math.min(10, Math.max(0, jsonData.length - 3));
+      dataStartIndex = headerRowIndex + 2;
+    }
+  }
+
+  const ok = headerRowIndex >= 0 && dataStartIndex >= 0 && headersToUse.length > 0;
+  return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok };
+}
+
+function attachDraftFieldsToFormFileItem(resolvedItem, draftSourceItem, preferredDraftApiRowId) {
+  let next = { ...resolvedItem };
+  if (preferredDraftApiRowId && isNumericStatutoryBackendId(preferredDraftApiRowId)) {
+    next.draftStatutoryRowIdForFile = String(preferredDraftApiRowId);
+  }
+  if (draftSourceItem) {
+    next.draftFile = draftSourceItem.draftFile ?? draftSourceItem.DraftFile ?? next.draftFile;
+    next.draftFileName =
+      draftSourceItem.draftFileName ?? draftSourceItem.DraftFileName ?? next.draftFileName;
+    if (isNumericStatutoryBackendId(draftSourceItem.id)) {
+      next.draftStatutoryRowIdForFile = String(draftSourceItem.id);
+    }
+  }
+  return next;
+}
+
+function buildStatutoryFormFileLabel(item) {
+  const raw = String(item?.formFileName || item?.FormFileName || '').trim();
+  const formName = String(item?.formName || item?.FormName || 'Form').trim();
+  const state = String(item?.state || item?.State || '').trim();
+  const act = String(item?.act || item?.Act || '').trim();
+  const generic =
+    !raw ||
+    !raw.includes('.') ||
+    /^form\s*[a-z0-9]*\.xlsx$/i.test(raw) ||
+    raw.toLowerCase() === `${formName.toLowerCase()}.xlsx`;
+  if (!generic) return raw.replace(/[/\\?%*:|"<>]/g, '_');
+  const parts = [formName];
+  if (state) parts.push(state);
+  else if (act) parts.push(act.slice(0, 40));
+  const ext = raw.includes('.') ? raw.slice(raw.lastIndexOf('.')) : '.xlsx';
+  return `${parts.join(' - ')}${ext}`.replace(/[/\\?%*:|"<>]/g, '_');
 }
 
 function statutorySendForApprovalIsSent(row) {
@@ -525,6 +1288,22 @@ function resolveStatutorySubmittedDateStored(row) {
   if (statutorySendForApprovalIsSent(row)) {
     const mt = row.modifiedTime ?? row.MODIFIEDTIME ?? row.createdTime ?? row.CREATEDTIME;
     if (mt != null && String(mt).trim() !== '') return String(mt).trim();
+  }
+  return '';
+}
+
+function resolveStatutoryApprovedDateStored(row) {
+  if (!row) return '';
+  const direct = [
+    row.approvedDate,
+    row.ApprovedDate,
+    row.approvalDate,
+    row.ApprovalDate
+  ];
+  for (const c of direct) {
+    if (c != null && String(c).trim() !== '' && String(c).trim().toLowerCase() !== 'null') {
+      return String(c).trim();
+    }
   }
   return '';
 }
@@ -568,9 +1347,44 @@ function preserveStatutorySubmittedDatesAfterFetch(prevRows, nextRows) {
   });
 }
 
+/** Keep approver-view approved dates after refresh when bulk rows lose donor metadata. */
+function preserveStatutoryApprovedDatesAfterFetch(prevRows, nextRows) {
+  if (!Array.isArray(prevRows) || !Array.isArray(nextRows) || prevRows.length === 0) {
+    return nextRows;
+  }
+  const preserved = new Map();
+  prevRows.forEach((row) => {
+    const approvalNorm = String(row?.approval ?? row?.Approval ?? row?.status ?? row?.Status ?? '')
+      .trim()
+      .toLowerCase();
+    if (approvalNorm !== 'approved' && approvalNorm !== 'approve') return;
+    const stored = resolveStatutoryApprovedDateStored(row);
+    if (!stored) return;
+    const key = statutorySubmittedDatePreserveKey(row);
+    if (key) preserved.set(key, stored);
+  });
+  if (preserved.size === 0) return nextRows;
+  return nextRows.map((row) => {
+    const approvalNorm = String(row?.approval ?? row?.Approval ?? row?.status ?? row?.Status ?? '')
+      .trim()
+      .toLowerCase();
+    if (approvalNorm !== 'approved' && approvalNorm !== 'approve') return row;
+    if (resolveStatutoryApprovedDateStored(row)) return row;
+    const key = statutorySubmittedDatePreserveKey(row);
+    const kept = key ? preserved.get(key) : '';
+    if (!kept) return row;
+    return { ...row, approvedDate: kept, ApprovedDate: kept };
+  });
+}
+
 /** Prefer rows with draft file / proof / real Catalyst id when collapsing duplicates. */
 function statutoryRowRichnessScore(r) {
   let s = 0;
+  const approvalNorm = String(r?.approval ?? r?.Approval ?? r?.status ?? r?.Status ?? '')
+    .trim()
+    .toLowerCase();
+  if (approvalNorm === 'approved' || approvalNorm === 'approve') s += 3000;
+  if (resolveStatutoryApprovedDateStored(r)) s += 1000;
   const df = r?.draftFile ?? r?.DraftFile;
   if (df && df !== 'null' && String(df).trim() !== '') s += 200;
   const pf = r?.proofSubmissionFile ?? r?.ProofSubmissionFile;
@@ -908,13 +1722,18 @@ const formatStatutoryTableHeaderLabel = (headerKey) => {
     (parent.includes('daily') && parent.includes('hour')) ||
     (parent.includes('hour') && parent.includes('work') && parent.includes('overtime')) ||
     (parent.includes('daily') && parent.includes('work'));
-  if (looksDatesBand || looksDailyHoursBand) return String(day);
+  const looksFormQMonthBand =
+    parent.includes('date') && parent.includes('month');
+  if (looksDatesBand || looksDailyHoursBand || looksFormQMonthBand) return String(day);
   const comp = h.match(/^(.+)_([\s\S]+)$/);
   if (comp) {
     const parentNorm = comp[1].toLowerCase().replace(/\s+/g, ' ').trim();
+    const sub = String(comp[2] || '').trim();
     if (parentNorm.includes('components') && parentNorm.includes('remuneration')) {
-      return comp[2].trim();
+      return sub;
     }
+    if (/^(from|to)$/i.test(sub)) return sub;
+    if (isFormQSectionMarkerSub(sub, parentNorm)) return comp[1].trim();
   }
   return h;
 };
@@ -936,7 +1755,9 @@ const getDailyHoursGridGroupInfo = (tableHeaders) => {
       (parent.includes('daily') && parent.includes('hour')) ||
       (parent.includes('hour') && parent.includes('work') && parent.includes('overtime')) ||
       (parent.includes('daily') && parent.includes('work'));
-    if (looksDatesBand || looksDailyHoursBand) {
+    const looksFormQMonthBand =
+      parent.includes('date') && parent.includes('month');
+    if (looksDatesBand || looksDailyHoursBand || looksFormQMonthBand) {
       return { startIndex: i, parentLabel: m[1].trim() };
     }
   }
@@ -989,6 +1810,411 @@ const isFormDRemunerationFormContext = (formHeader, rowItem, fileName, tableHead
     .toLowerCase();
   if (!/\bform\s*d\b|\bform_d\b|\bform-d\b/i.test(parts)) return false;
   return getFormDRemunerationGroupInfo(tableHeaders || []) != null;
+};
+
+/** Form Q (Shops & Establishment attendance): Sr. No., worker details, hours/rest bands, days 1–31. */
+const isFormQContext = (formHeader, rowItem, fileName, tableHeaders) => {
+  const parts = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference,
+    Array.isArray(tableHeaders) ? tableHeaders.join(' ') : ''
+  ]
+    .join(' ')
+    .toLowerCase();
+  if (/\bform\s*["']?\s*q\b|\bform[_\s-]*q\b|form_q\.xlsx/i.test(parts)) return true;
+  return (
+    /sr\.?\s*no/.test(parts) &&
+    /full\s+name\s+of\s+the\s+worker/.test(parts) &&
+    (/date\s+of\s+the\s+month|working\s+hours|interval\s+for\s+rest/.test(parts))
+  );
+};
+
+/** Excel row 11 section index (1–9) — not a data sub-column under worker fields. */
+const isFormQSectionMarkerSub = (sub, main) => {
+  const subText = String(sub || '').trim();
+  if (!/^\d{1,2}$/.test(subText)) return false;
+  const n = parseInt(subText, 10);
+  if (n < 1 || n > 9) return false;
+  const ml = String(main || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (ml.includes('date') && ml.includes('month')) return false;
+  return (
+    /sr\.?\s*no/.test(ml) ||
+    /full\s+name/.test(ml) ||
+    /designation/.test(ml) ||
+    /nature\s+of\s+work/.test(ml) ||
+    /^age$/.test(ml) ||
+    /^sex$/.test(ml) ||
+    /entry\s+into\s+service/.test(ml)
+  );
+};
+
+/** Excel row 11 section index (1–9) or placeholder — not a data column. */
+const isFormQSectionIndexColumnHeader = (headerKey) => {
+  const t = String(headerKey || '').trim();
+  if (!t) return false;
+  if (/^column\s*\d+$/i.test(t)) return true;
+  const m = t.match(/^(\d{1,2})$/);
+  if (!m) return false;
+  const n = parseInt(m[1], 10);
+  return n >= 1 && n <= 9;
+};
+
+const isFormQBlankOrMetaTableHeader = (headerKey) => {
+  const t = String(headerKey || '').trim();
+  if (!t || t === ':') return true;
+  if (isFormQSectionIndexColumnHeader(t)) return true;
+  const tl = t.toLowerCase().replace(/\s+/g, ' ');
+  return (
+    /name\s+of\s+the\s+employer/.test(tl) ||
+    /name\s+of\s+the\s+establishment/.test(tl) ||
+    /^month\s*:?$/.test(tl)
+  );
+};
+
+const normalizeFormQHeaderKey = (headerKey) => {
+  const h = String(headerKey || '').trim();
+  if (!h) return h;
+  const m = h.match(/^(.+)_([\s\S]+)$/);
+  if (!m) return h;
+  const parent = m[1].trim();
+  const sub = String(m[2]).trim();
+  if (/^(from|to)$/i.test(sub)) return h;
+  if (isFormQSectionMarkerSub(sub, parent)) return parent;
+  return h;
+};
+
+/** Drop blank / employer-meta leading columns; fix Sr. No._1 → Sr. No. */
+const stripAndNormalizeFormQTableHeaders = (headers) => {
+  if (!Array.isArray(headers) || headers.length === 0) return [];
+  const normalized = headers.map(normalizeFormQHeaderKey);
+  let start = 0;
+  while (start < normalized.length && isFormQBlankOrMetaTableHeader(normalized[start])) {
+    start += 1;
+  }
+  const seen = new Set();
+  const out = [];
+  for (let i = start; i < normalized.length; i += 1) {
+    const h = normalized[i];
+    if (isFormQBlankOrMetaTableHeader(h)) continue;
+    const key = h.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(h);
+  }
+  return out;
+};
+
+const remapFormQRowsToHeaders = (rows, oldHeaders, newHeaders) => {
+  if (!Array.isArray(rows) || !Array.isArray(newHeaders) || newHeaders.length === 0) {
+    return rows || [];
+  }
+  const oldList = Array.isArray(oldHeaders) ? oldHeaders : [];
+  let oldStart = 0;
+  while (oldStart < oldList.length) {
+    const normalized = normalizeFormQHeaderKey(oldList[oldStart]);
+    if (!isFormQBlankOrMetaTableHeader(normalized)) break;
+    oldStart += 1;
+  }
+  const pickRowValue = (row, newH, oldRaw) => {
+    const keysToTry = [
+      newH,
+      normalizeFormQHeaderKey(newH),
+      oldRaw,
+      oldRaw != null ? normalizeFormQHeaderKey(oldRaw) : ''
+    ].filter((k) => k != null && String(k).trim() !== '');
+    for (let ki = 0; ki < keysToTry.length; ki += 1) {
+      const v = row[keysToTry[ki]];
+      if (v != null && String(v).trim() !== '') return v;
+    }
+    return '';
+  };
+  return rows.map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    const next = {};
+    newHeaders.forEach((newH, i) => {
+      const direct = pickRowValue(row, newH, newH);
+      if (direct !== '') {
+        next[newH] = direct;
+        return;
+      }
+      const oldRaw = oldList[oldStart + i];
+      next[newH] = pickRowValue(row, newH, oldRaw);
+    });
+    return next;
+  });
+};
+
+/**
+ * Rebuild Form Q table headers from the Excel model (row 9 parent + row 10 From/To/day subs).
+ * Avoids employer/month labels bleeding into table columns via merged-cell lookback.
+ */
+const rebuildFormQTableHeadersFromSheet = ({
+  worksheet,
+  jsonData,
+  effectiveSheetCols,
+  getMergedAwareCellText,
+  merges
+}) => {
+  const norm = (txt) =>
+    String(txt || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const normLower = (txt) => norm(txt).toLowerCase();
+
+  const isEmployerMeta = (txt) => {
+    const t = normLower(txt);
+    return (
+      /name\s+of\s+the\s+employer/.test(t) ||
+      /^month\s*:?$/.test(t) ||
+      /name\s+of\s+the\s+establishment/.test(t)
+    );
+  };
+
+  const getMergeSpanEndCol = (r, c) => {
+    for (let i = 0; i < merges.length; i += 1) {
+      const m = merges[i];
+      if (!m || !m.s || !m.e) continue;
+      if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) {
+        return m.e.c + 1;
+      }
+    }
+    return c + 1;
+  };
+
+  let headerRowIndex = -1;
+  for (let r = 0; r < Math.min(30, jsonData.length); r += 1) {
+    const parts = [];
+    for (let c = 0; c < Math.max(effectiveSheetCols, 12); c += 1) {
+      const t = normLower(getMergedAwareCellText(r, c));
+      if (t) parts.push(t);
+    }
+    const joined = parts.join(' ');
+    if (/sr\.?\s*no/.test(joined) && /full\s+name\s+of\s+the\s+worker/.test(joined)) {
+      headerRowIndex = r;
+      break;
+    }
+  }
+  if (headerRowIndex < 0) return null;
+
+  let startCol = -1;
+  for (let c = 0; c < Math.max(effectiveSheetCols, 12); c += 1) {
+    const t = normLower(getMergedAwareCellText(headerRowIndex, c));
+    if (/^sr\.?\s*no\.?$/.test(t) || t === 'sr no' || t.startsWith('sr. no')) {
+      startCol = c;
+      break;
+    }
+  }
+  if (startCol < 0) startCol = 0;
+
+  const subRowIndex = headerRowIndex + 1;
+  const flatHeaders = [];
+  const subColumnsData = {};
+  const mainHeaders = [];
+
+  let c = startCol;
+  const maxCols = Math.max(effectiveSheetCols, (jsonData[headerRowIndex] || []).length, 40);
+  while (c < maxCols) {
+    const mergeEnd = getMergeSpanEndCol(headerRowIndex, c);
+    let endC = mergeEnd;
+    const main = norm(getMergedAwareCellText(headerRowIndex, c));
+    if (!main || isEmployerMeta(main) || isFormQSectionIndexColumnHeader(main)) {
+      c = Math.max(c + 1, endC);
+      continue;
+    }
+    while (endC < maxCols) {
+      const nextMain = norm(getMergedAwareCellText(headerRowIndex, endC));
+      if (!nextMain) break;
+      if (normLower(nextMain) !== normLower(main)) break;
+      endC = Math.max(endC, getMergeSpanEndCol(headerRowIndex, endC));
+    }
+
+    const subs = [];
+    for (let sc = c; sc < endC; sc += 1) {
+      const sub = norm(getMergedAwareCellText(subRowIndex, sc));
+      if (!sub || sub.toLowerCase() === main.toLowerCase()) continue;
+      if (sub.endsWith(':') && sub.length < 40) continue;
+      if (isFormQSectionMarkerSub(sub, main)) continue;
+      subs.push(sub);
+    }
+
+    mainHeaders.push(main);
+    if (!subColumnsData[main]) subColumnsData[main] = [];
+
+    if (subs.length === 0) {
+      flatHeaders.push(main);
+    } else {
+      subs.forEach((sub) => {
+        const key = `${main}_${sub}`;
+        flatHeaders.push(key);
+        subColumnsData[main].push(sub);
+      });
+    }
+    c = endC;
+  }
+
+  while (flatHeaders.length > 0 && !flatHeaders[flatHeaders.length - 1]) flatHeaders.pop();
+  const normalizedFlat = stripAndNormalizeFormQTableHeaders(flatHeaders);
+  if (normalizedFlat.length < 4) return null;
+
+  const headerFields = [];
+  const addField = (label, key) => {
+    if (headerFields.some((f) => normLower(f.label) === normLower(label))) return;
+    headerFields.push({ label, value: '', key });
+  };
+  for (let r = 0; r < headerRowIndex; r += 1) {
+    for (let col = 0; col < Math.max(20, effectiveSheetCols); col += 1) {
+      const raw = norm(getMergedAwareCellText(r, col));
+      if (!raw) continue;
+      if (/^name\s+of\s+the\s+establishment\s*:?$/i.test(raw)) {
+        let val = '';
+        for (let nc = col + 1; nc < Math.min(col + 8, maxCols); nc += 1) {
+          const v = norm(getMergedAwareCellText(r, nc));
+          if (v && !v.includes(':')) {
+            val = v;
+            break;
+          }
+        }
+        addField(raw.includes(':') ? raw : `${raw}:`, 'form_q_establishment');
+        const idx = headerFields.length - 1;
+        if (idx >= 0) headerFields[idx].value = val;
+      } else if (/^name\s+of\s+the\s+employer\s*:?$/i.test(raw)) {
+        let val = '';
+        for (let nc = col + 1; nc < Math.min(col + 8, maxCols); nc += 1) {
+          const v = norm(getMergedAwareCellText(r, nc));
+          if (v && !v.includes(':')) {
+            val = v;
+            break;
+          }
+        }
+        addField(raw.includes(':') ? raw : `${raw}:`, 'form_q_employer');
+        const idx = headerFields.length - 1;
+        if (idx >= 0) headerFields[idx].value = val;
+      } else if (/^month\s*:?$/i.test(raw)) {
+        let val = '';
+        for (let nc = col + 1; nc < Math.min(col + 8, maxCols); nc += 1) {
+          const v = norm(getMergedAwareCellText(r, nc));
+          if (v && !/^month\s*:?$/i.test(v)) {
+            val = v;
+            break;
+          }
+        }
+        addField('Month :', 'form_q_month');
+        const idx = headerFields.length - 1;
+        if (idx >= 0) headerFields[idx].value = val;
+      }
+    }
+  }
+  const desiredOrder = [
+    { label: 'Name of the Establishment:', key: 'form_q_establishment' },
+    { label: 'Name of the Employer:', key: 'form_q_employer' },
+    { label: 'Month :', key: 'form_q_month' }
+  ];
+  const orderedFields = desiredOrder
+    .map((d) => headerFields.find((f) => f.key === d.key) || { label: d.label, value: '', key: d.key })
+    .filter(Boolean);
+
+  return {
+    headerRowIndex,
+    startCol,
+    headers: mainHeaders,
+    expandedHeaders: normalizedFlat,
+    subColumnsData,
+    headerFields: orderedFields
+  };
+};
+
+/** Prefer Excel rebuild; fall back to canonical headers so autofill always matches FORM Q layout. */
+const resolveFormQTableHeadersForWorkbook = (workbook, daysInMonth = 31) => {
+  const canonical = buildFormQCanonicalHeaders(daysInMonth);
+  if (!workbook?.SheetNames?.[0]) {
+    return {
+      headers: canonical,
+      subColumns: buildFormQSubColumnsFromHeaders(canonical),
+      headerRowIndex: 8,
+      dataStartIndex: 11,
+      headerFields: [
+        { label: 'Name of the Establishment:', value: '', key: 'form_q_establishment' },
+        { label: 'Name of the Employer:', value: '', key: 'form_q_employer' },
+        { label: 'Month :', value: '', key: 'form_q_month' }
+      ]
+    };
+  }
+  const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+  const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+  const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1:A1');
+  const maxSheetCols = range.e && typeof range.e.c === 'number' ? range.e.c + 1 : 0;
+  const merges = worksheet['!merges'] || [];
+  let mergeMaxCol = 0;
+  for (let mi = 0; mi < merges.length; mi += 1) {
+    const m = merges[mi];
+    if (m?.e && typeof m.e.c === 'number') mergeMaxCol = Math.max(mergeMaxCol, m.e.c + 1);
+  }
+  const effectiveSheetCols = Math.max(maxSheetCols, mergeMaxCol);
+  const getRawCellText = (r, c) => {
+    if (r < 0 || c < 0) return '';
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const cell = worksheet[ref];
+    if (!cell || cell.v == null) return '';
+    return String(cell.v).trim();
+  };
+  const getMergedAwareCellText = (r, c) => {
+    const direct = getRawCellText(r, c);
+    if (direct) return direct;
+    for (let i = 0; i < merges.length; i += 1) {
+      const m = merges[i];
+      if (!m?.s || !m?.e) continue;
+      if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) {
+        const topLeft = getRawCellText(m.s.r, m.s.c);
+        if (topLeft) return topLeft;
+      }
+    }
+    return '';
+  };
+  const rebuild = rebuildFormQTableHeadersFromSheet({
+    worksheet,
+    jsonData,
+    effectiveSheetCols,
+    getMergedAwareCellText,
+    merges
+  });
+  const headers = stripAndNormalizeFormQTableHeaders(canonical);
+  const subColumns =
+    rebuild?.subColumnsData && Object.keys(rebuild.subColumnsData).some((k) => (rebuild.subColumnsData[k] || []).length > 0)
+      ? rebuild.subColumnsData
+      : buildFormQSubColumnsFromHeaders(headers);
+  let dataStartIndex = (rebuild?.headerRowIndex ?? 8) + 2;
+  if (rebuild?.headerRowIndex != null && rebuild.headerRowIndex + 2 < jsonData.length) {
+    let seqHits = 0;
+    const sectionRow = rebuild.headerRowIndex + 2;
+    const startCol = rebuild.startCol ?? 0;
+    for (let hi = 0; hi < Math.min(9, headers.length); hi += 1) {
+      const t = String(getMergedAwareCellText(sectionRow, startCol + hi) || '')
+        .replace(/\s+/g, '')
+        .trim();
+      if (t === String(hi + 1)) seqHits += 1;
+    }
+    if (seqHits >= 4) dataStartIndex = sectionRow + 1;
+  }
+  return {
+    headers,
+    subColumns,
+    headerRowIndex: rebuild?.headerRowIndex ?? 8,
+    dataStartIndex,
+    headerFields: rebuild?.headerFields || [
+      { label: 'Name of the Establishment:', value: '', key: 'form_q_establishment' },
+      { label: 'Name of the Employer:', value: '', key: 'form_q_employer' },
+      { label: 'Month :', value: '', key: 'form_q_month' }
+    ],
+    startCol: rebuild?.startCol ?? 2
+  };
 };
 
 const isFormFLeaveWithWagesContext = (formHeader, rowItem, fileName) => {
@@ -1045,6 +2271,7 @@ const isFormTSEContext = (formHeader, rowItem, fileName) => {
   ]
     .join(' ')
     .toLowerCase();
+  if (/\bform\s*["']?\s*q\b|\bform[_\s-]*q\b|form_q/i.test(parts)) return false;
   return (
     parts.includes('form-t') ||
     parts.includes('form_t') ||
@@ -1052,8 +2279,7 @@ const isFormTSEContext = (formHeader, rowItem, fileName) => {
     parts.includes('form-t_s_e') ||
     parts.includes('form_t_s_e') ||
     parts.includes('t_s_e') ||
-    parts.includes('s&e') ||
-    parts.includes('s_e')
+    (/\bform[\s_-]*t\b/i.test(parts) && /s[\s&_]*e\b/i.test(parts))
   );
 };
 
@@ -2353,6 +3579,7 @@ const Statutory = ({ userEmail, userRole }) => {
   const [sendForApprovalUpdatingRowId, setSendForApprovalUpdatingRowId] = useState(null);
   /** Site view: submitted dates pinned on Send for approval until fetch confirms (prevents flash/disappear). */
   const [siteSentSubmittedDates, setSiteSentSubmittedDates] = useState({});
+  const [siteApprovedDates, setSiteApprovedDates] = useState({});
   const [isRejectRemarksModalOpen, setIsRejectRemarksModalOpen] = useState(false);
   const [rejectRemarksValue, setRejectRemarksValue] = useState('');
   const [rejectRemarksTarget, setRejectRemarksTarget] = useState(null);
@@ -2399,35 +3626,40 @@ const Statutory = ({ userEmail, userRole }) => {
     } catch (_) {}
   };
 
-  // Function to format monthly basis due dates
-  // If due date is "Monthly Basis" and a month is selected, show as "15-[Month Name]"
-  const formatMonthlyBasisDate = (dueDate) => {
+  // Monthly / day-of-month due dates: show as "7-Jun" or "15-Jun" using UI month filter
+  const formatMonthlyBasisDate = (dueDate, monthFallback = '') => {
     if (!dueDate) return '';
-   
+
     const dueDateStr = String(dueDate).trim();
     const dueDateLower = dueDateStr.toLowerCase();
-   
-    // Check if it's "Monthly Basis" and a month is selected
-    if (dueDateLower.includes('monthly basis') && selectedMonth && selectedMonth.trim() !== '') {
-      // Get the month abbreviation
-      const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
-                          'July', 'August', 'September', 'October', 'November', 'December'];
-      const monthAbbr = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                         'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-     
-      const selectedMonthLower = selectedMonth.toLowerCase();
-      const monthIndex = monthNames.findIndex(m => m.toLowerCase().startsWith(selectedMonthLower));
-     
-      if (monthIndex !== -1) {
-        // Return "15-[Month Abbr]" format (e.g., "15-Dec", "15-Nov")
-        return `15-${monthAbbr[monthIndex]}`;
-      }
-     
-      // Fallback: return "15-[Selected Month]" if month not found in list
-      return `15-${selectedMonth.substring(0, 3)}`;
+    if (/^\d{1,2}-[a-z]{3}/i.test(dueDateStr)) return dueDateStr;
+
+    const monthSource =
+      (selectedMonth && String(selectedMonth).trim()) ||
+      (monthFallback && String(monthFallback).trim()) ||
+      '';
+    const fullMonth = monthSource ? resolveToFullMonthName(monthSource) : null;
+    let monthAbbr = null;
+    if (fullMonth) {
+      const idx = MONTH_NAMES.indexOf(fullMonth);
+      if (idx >= 0) monthAbbr = MONTH_ABBR[idx];
+    } else if (monthSource) {
+      const monthIndex = MONTH_NAMES.findIndex((m) =>
+        m.toLowerCase().startsWith(monthSource.toLowerCase())
+      );
+      if (monthIndex !== -1) monthAbbr = MONTH_ABBR[monthIndex];
+      else monthAbbr = monthSource.substring(0, 3);
     }
-   
-    // Return the due date as-is for non-monthly basis items
+
+    if (dueDateLower.includes('monthly basis') && monthAbbr) {
+      return `15-${monthAbbr}`;
+    }
+
+    const day = extractDayOfMonthFromDueDate(dueDate);
+    if (day != null && monthAbbr) {
+      return `${day}-${monthAbbr}`;
+    }
+
     return dueDateStr;
   };
 
@@ -2479,18 +3711,21 @@ const Statutory = ({ userEmail, userRole }) => {
     if (!templates || !Array.isArray(templates)) return [];
     const timestamp = Date.now();
     return templates.map((t, index) => {
-      const rawName = (t.name || t.file_name || '').trim();
-      const formName = rawName.replace(/\.xlsx$/i, '').trim() || rawName;
+      const rawName = (t.templateFileName || t.name || t.file_name || '').trim();
+      const formName =
+        (t.formName || '').trim() ||
+        rawName.replace(/\.xlsx$/i, '').trim() ||
+        rawName;
       const fileId = t.id != null ? String(t.id) : null;
       const fileName = rawName || 'template.xlsx';
       return {
-        id: `formmaster_${fileId ?? timestamp}_${index}`,
+        id: `formmaster_${t.recordId || fileId || timestamp}_${index}`,
         formName,
-        sector: '',
-        state: '',
-        act: '',
+        sector: t.sector || '',
+        state: t.state || '',
+        act: t.act || '',
         dueDate: '',
-        description: '',
+        description: t.description || '',
         concernedGovtDepartment: '',
         formFile: fileId,
         formFileName: fileName,
@@ -2498,7 +3733,8 @@ const Statutory = ({ userEmail, userRole }) => {
         draft: '',
         proofSubmissionFile: null,
         proofSubmissionFileName: null,
-        isFromFormmaster: true
+        isFromFormmaster: true,
+        formmasterMatchKey: t.matchKey || buildFormmasterMatchKey({ formName, act: t.act, description: t.description, sector: t.sector, state: t.state })
       };
     });
   };
@@ -2521,8 +3757,8 @@ const Statutory = ({ userEmail, userRole }) => {
       dueDate: bulkItem.dueDate || '',
       description: bulkItem.description || '',
       concernedGovtDepartment: bulkItem.concernedGovtDepartment || '',
-      formFile: null,
-      formFileName: null,
+      formFile: bulkItem.formFile || bulkItem.FormFile || null,
+      formFileName: bulkItem.formFileName || bulkItem.FormFileName || null,
       autofill: '',
       draft: '',
       proofSubmissionFile: null,
@@ -2545,7 +3781,8 @@ const Statutory = ({ userEmail, userRole }) => {
       const fn = String(bulkItem.formName || '').toLowerCase().trim();
       if (!fn) return;
       const sec = String(bulkItem.sector || '').trim().toLowerCase();
-      bulkMap.set(`${fn}|${sec}`, bulkItem);
+      const st = String(bulkItem.state || bulkItem.State || '').trim().toLowerCase();
+      bulkMap.set(`${fn}|${sec}|${st}`, bulkItem);
     });
 
     const pick = (primary, fallback) => {
@@ -2559,9 +3796,15 @@ const Statutory = ({ userEmail, userRole }) => {
       const fn = String(item.formName || '').toLowerCase().trim();
       if (!fn) return item;
       const sec = String(item.sector || item.Sector || '').trim().toLowerCase();
-      let bulkItem = bulkMap.get(`${fn}|${sec}`);
-      if (!bulkItem && !sec) {
-        bulkItem = bulkData.find((b) => String(b.formName || '').toLowerCase().trim() === fn && !String(b.sector || '').trim());
+      const st = String(item.state || item.State || '').trim().toLowerCase();
+      let bulkItem = bulkMap.get(`${fn}|${sec}|${st}`);
+      if (!bulkItem && !st) {
+        bulkItem = bulkData.find(
+          (b) =>
+            String(b.formName || '').toLowerCase().trim() === fn &&
+            String(b.sector || '').trim().toLowerCase() === sec &&
+            !String(b.state || b.State || '').trim()
+        );
       }
       if (!bulkItem) return item;
 
@@ -3001,11 +4244,11 @@ const Statutory = ({ userEmail, userRole }) => {
         setFormmasterTemplates(formmasterTemplates || []);
       }
       if (formmasterTemplates.length > 0) {
-        const existingFormNames = new Set(
-          baseStatutoryData.map((item) => (item.formName || '').trim().toLowerCase()).filter(Boolean)
+        const existingFormmasterKeys = new Set(
+          baseStatutoryData.map((item) => buildFormmasterMatchKey(item)).filter(Boolean)
         );
         const formmasterRows = formmasterTemplatesToRows(formmasterTemplates).filter(
-          (row) => !existingFormNames.has((row.formName || '').trim().toLowerCase())
+          (row) => !existingFormmasterKeys.has(buildFormmasterMatchKey(row))
         );
         if (formmasterRows.length > 0) {
           mergedData = [...baseStatutoryData, ...formmasterRows];
@@ -3071,6 +4314,30 @@ const Statutory = ({ userEmail, userRole }) => {
       if (parsedBulkDataCache && parsedBulkDataCache.length > 0) {
         const beforeAlign = mergedData.length;
         const canonicalBulkRows = mergeBulkDataWithStatutory([], parsedBulkDataCache);
+        const formmasterFileByMatchKey = new Map();
+        (formmasterTemplates || []).forEach((t) => {
+          const fileId = t.id != null ? String(t.id) : null;
+          if (!fileId) return;
+          const lineRow = {
+            formName: t.formName,
+            act: t.act,
+            description: t.description,
+            sector: t.sector,
+            state: t.state
+          };
+          const keys = new Set([
+            t.matchKey,
+            buildFormmasterMatchKey(lineRow),
+            checklistBulkRowIdentityKey(lineRow)
+          ].filter(Boolean));
+          const payload = {
+            formFile: fileId,
+            formFileName: t.templateFileName || t.name || 'template.xlsx',
+            storageFileName: t.name || null,
+            isFromFormmaster: true
+          };
+          keys.forEach((key) => formmasterFileByMatchKey.set(key, payload));
+        });
         const byIdentity = new Map();
         const byFormName = new Map();
         mergedData.forEach((item) => {
@@ -3096,6 +4363,8 @@ const Statutory = ({ userEmail, userRole }) => {
           if (resolveStatutorySubmittedDateStored(row)) score += 80;
           const approval = String(row?.approval ?? row?.Approval ?? '').trim().toLowerCase();
           if (approval === 'approved' || approval === 'rejected' || approval === 'approve' || approval === 'reject') score += 30;
+          if (approval === 'approved' || approval === 'approve') score += 200;
+          if (resolveStatutoryApprovedDateStored(row)) score += 120;
           if (isNumericStatutoryBackendId(row?.id)) score += 10;
           return score;
         };
@@ -3116,12 +4385,30 @@ const Statutory = ({ userEmail, userRole }) => {
           const strictDonorCandidates = [...identityMatches, ...formActDescMatches];
           const formFileDonorCandidates = [...identityMatches, ...formMatches];
           const bulkMonthNorm = statutoryDedupeMonthNorm(bulkRow, selectedMonth);
-          const sameMonthDonors = strictDonorCandidates.filter(
-            (row) => statutoryDedupeMonthNorm(row, selectedMonth) === bulkMonthNorm
+          const uiMonthNormForAlign = statutoryDedupeMonthNorm(
+            { monthFilter: selectedMonth, MonthFilter: selectedMonth },
+            selectedMonth
           );
+          const sameMonthDonors = strictDonorCandidates.filter((row) => {
+            const rowMonth = statutoryDedupeMonthNorm(row, selectedMonth);
+            if (rowMonth === bulkMonthNorm) return true;
+            return statutoryMonthMatchesUiFilter(row, uiMonthNormForAlign, selectedMonth);
+          });
           const scoredSameMonth = [...sameMonthDonors].sort((a, b) => donorScore(b) - donorScore(a));
-          const monthDonor = scoredSameMonth[0] || null;
-          const scoredAllForFormFile = [...formFileDonorCandidates].sort((a, b) => donorScore(b) - donorScore(a));
+          let monthDonor = scoredSameMonth[0] || null;
+          if (!monthDonor) {
+            const draftDonorPool = [...strictDonorCandidates, ...formActDescMatches, ...formMatches]
+              .filter((row, idx, arr) => arr.indexOf(row) === idx)
+              .filter((row) => hasStatutoryDraftFileRef(row) && statutoryLineMetadataMatches(bulkRow, row));
+            monthDonor =
+              [...draftDonorPool].sort((a, b) => donorScore(b) - donorScore(a))[0] || null;
+          }
+          const strictFormFileDonorCandidates = formFileDonorCandidates.filter((row) =>
+            statutoryLineMetadataMatches(bulkRow, row)
+          );
+          const scoredAllForFormFile = [...strictFormFileDonorCandidates].sort(
+            (a, b) => donorScore(b) - donorScore(a)
+          );
           const hasFormRef = (r) => {
             const fid = r?.formFile ?? r?.FormFile;
             return fid != null && String(fid).trim() !== '' && String(fid).trim() !== 'null';
@@ -3137,14 +4424,22 @@ const Statutory = ({ userEmail, userRole }) => {
             String(selectedMonth || '').trim() ||
             null;
           if (!monthDonor) {
+            const draftOnlyDonor = [...strictDonorCandidates, ...formActDescMatches, ...formMatches]
+              .filter((row, idx, arr) => arr.indexOf(row) === idx)
+              .filter((row) => hasStatutoryDraftFileRef(row) && statutoryLineMetadataMatches(bulkRow, row))
+              .sort((a, b) => donorScore(b) - donorScore(a))[0] || null;
+            const fmExactNoDonor =
+              formmasterFileByMatchKey.get(buildFormmasterMatchKey(bulkRow)) ||
+              formmasterFileByMatchKey.get(checklistBulkRowIdentityKey(bulkRow));
             return {
               ...bulkRow,
               id: bulkRow.id,
-              formFile: formDonor?.formFile ?? formDonor?.FormFile ?? bulkRow.formFile ?? null,
-              formFileName: formDonor?.formFileName ?? formDonor?.FormFileName ?? bulkRow.formFileName ?? null,
-              draftFile: null,
-              draftFileName: null,
-              draft: '',
+              formFile: fmExactNoDonor?.formFile ?? formDonor?.formFile ?? formDonor?.FormFile ?? bulkRow.formFile ?? null,
+              formFileName: fmExactNoDonor?.formFileName ?? formDonor?.formFileName ?? formDonor?.FormFileName ?? bulkRow.formFileName ?? null,
+              isFromFormmaster: !!fmExactNoDonor,
+              draftFile: draftOnlyDonor?.draftFile ?? draftOnlyDonor?.DraftFile ?? null,
+              draftFileName: draftOnlyDonor?.draftFileName ?? draftOnlyDonor?.DraftFileName ?? null,
+              draft: draftOnlyDonor?.draft ?? draftOnlyDonor?.Draft ?? '',
               proofSubmissionFile: null,
               proofSubmissionFileName: null,
               sendForApproval: '',
@@ -3162,20 +4457,26 @@ const Statutory = ({ userEmail, userRole }) => {
               monthFilter: uiMonthOnlyLabel,
               MonthFilter: uiMonthOnlyLabel,
               monthfilter: uiMonthOnlyLabel,
-              draftStatutoryRowIdForFile: null,
+              draftStatutoryRowIdForFile: isNumericStatutoryBackendId(draftOnlyDonor?.id)
+                ? String(draftOnlyDonor.id)
+                : null,
               checklistId: bulkRow.checklistId ?? formDonor?.checklistId ?? null,
               isFromChecklist: !!formDonor?.isFromChecklist && !!monthDonor
             };
           }
           const donor = monthDonor;
+          const fmExact =
+            formmasterFileByMatchKey.get(buildFormmasterMatchKey(bulkRow)) ||
+            formmasterFileByMatchKey.get(checklistBulkRowIdentityKey(bulkRow));
           return {
             ...bulkRow,
             // Keep canonical bulk id so each ChecklistBulk row remains distinct in UI grouping/deduping.
             id: bulkRow.id,
             checklistId: donor?.checklistId ?? bulkRow.checklistId ?? null,
             isFromChecklist: donor?.isFromChecklist ?? false,
-            formFile: formDonor?.formFile ?? formDonor?.FormFile ?? bulkRow.formFile,
-            formFileName: formDonor?.formFileName ?? formDonor?.FormFileName ?? bulkRow.formFileName,
+            formFile: fmExact?.formFile ?? formDonor?.formFile ?? formDonor?.FormFile ?? bulkRow.formFile,
+            formFileName: fmExact?.formFileName ?? formDonor?.formFileName ?? formDonor?.FormFileName ?? bulkRow.formFileName,
+            isFromFormmaster: !!fmExact || !!formDonor?.isFromFormmaster,
             draftFile: donor?.draftFile ?? donor?.DraftFile ?? bulkRow.draftFile,
             draftFileName: donor?.draftFileName ?? donor?.DraftFileName ?? bulkRow.draftFileName,
             draft: donor?.draft ?? donor?.Draft ?? bulkRow.draft,
@@ -3339,7 +4640,8 @@ const Statutory = ({ userEmail, userRole }) => {
       console.log(`📊 Entries by form name:`, byFormName);
      
       setStatutoryData((prev) => {
-        const withPreservedDates = preserveStatutorySubmittedDatesAfterFetch(prev, mergedData);
+        const withPreservedSubmitted = preserveStatutorySubmittedDatesAfterFetch(prev, mergedData);
+        const withPreservedDates = preserveStatutoryApprovedDatesAfterFetch(prev, withPreservedSubmitted);
         localStorage.setItem('statutoryData', JSON.stringify(withPreservedDates));
         return withPreservedDates;
       });
@@ -4089,11 +5391,9 @@ const Statutory = ({ userEmail, userRole }) => {
         .trim()
         .toLowerCase()
         .substring(0, 3);
-      if (monthNorm && rMonthNorm && monthNorm !== rMonthNorm) return false;
+      if (monthNorm && !statutoryMonthMatchesUiFilter(r, monthNorm, selectedMonth)) return false;
       if (baseFormNameKey(r?.formName || r?.FormName) !== formNorm) return false;
-      if (String(r?.sector || r?.Sector || '').trim().toLowerCase() !== sectorNorm) return false;
-      if (String(r?.state || r?.State || '').trim().toLowerCase() !== stateNorm) return false;
-      return true;
+      return statutoryLineMetadataMatches(item, r);
     });
     if (candidates.length === 0) return null;
     const bestCandidate = candidates.reduce((best, row) => (isPreferredStatutoryRow(row, best) ? row : best), hintedRow);
@@ -4173,17 +5473,25 @@ const Statutory = ({ userEmail, userRole }) => {
     const descNorm = String(item?.description || item?.Description || '').trim().toLowerCase();
     const candidates = (statutoryData || []).filter((row) => {
       if (!/^\d+$/.test(String(row?.id ?? ''))) return false;
-      if (uiMonthNorm !== 'nomonth' && statutoryDedupeMonthNorm(row, selectedMonth) !== uiMonthNorm) return false;
-      if (baseFormNameKey(row?.formName || row?.FormName) !== formNorm) return false;
-      if (String(row?.sector || row?.Sector || '').trim().toLowerCase() !== sectorNorm) return false;
-      if (String(row?.state || row?.State || '').trim().toLowerCase() !== stateNorm) return false;
-      if (actNorm && String(row?.act || row?.Act || '').trim().toLowerCase() !== actNorm) return false;
-      if (descNorm && String(row?.description || row?.Description || '').trim().toLowerCase() !== descNorm) {
+      if (uiMonthNorm !== 'nomonth' && !statutoryMonthMatchesUiFilter(row, uiMonthNorm, selectedMonth)) {
         return false;
       }
-      return true;
+      if (baseFormNameKey(row?.formName || row?.FormName) !== formNorm) return false;
+      return statutoryLineMetadataMatches(item, row);
     });
     if (candidates.length > 0) {
+      const approvedCandidates = candidates.filter((row) => {
+        const aNorm = String(row?.approval ?? row?.Approval ?? row?.status ?? row?.Status ?? '')
+          .trim()
+          .toLowerCase();
+        return aNorm === 'approved' || aNorm === 'approve';
+      });
+      if (approvedCandidates.length > 0) {
+        const bestApproved = [...approvedCandidates].sort(
+          (a, b) => statutoryRowRichnessScore(b) - statutoryRowRichnessScore(a)
+        )[0];
+        return pickMeta(bestApproved);
+      }
       const approverDonor = findStatutoryDraftDonorForApproverView(
         item,
         statutoryData,
@@ -4253,6 +5561,11 @@ const Statutory = ({ userEmail, userRole }) => {
     setApprovalUpdatingRowId(targetId);
     const payloadApproval = decision == null || decision === '' ? null : decision;
     const payloadStatus = isApproveDecision ? 'Approved' : isRejectDecision ? 'Rejected' : undefined;
+    const approveDateIso = isApproveDecision ? todayStatutoryIsoDate() : '';
+    const approvePreserveKey = statutorySubmittedDatePreserveKey(rowItem);
+    if (isApproveDecision && approvePreserveKey) {
+      setSiteApprovedDates((prev) => ({ ...prev, [approvePreserveKey]: approveDateIso }));
+    }
     try {
       const resp = await fetch(`/server/statutoryreg_function/statutory/${targetId}`, {
         method: 'PUT',
@@ -4261,16 +5574,51 @@ const Statutory = ({ userEmail, userRole }) => {
           ...buildStatutoryRowSyncPayload(rowItem),
           approval: payloadApproval,
           ...(payloadStatus ? { status: payloadStatus } : {}),
-          ...(isApproveDecision ? { approvedDate: todayStatutoryIsoDate() } : {}),
+          ...(isApproveDecision ? { approvedDate: approveDateIso } : {}),
           ...(isRejectDecision ? { remarks: rejectRemarks } : {}),
           ...(isApproveDecision ? { remarks: null } : {})
         })
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || data.status !== 'success') {
+        if (isApproveDecision && approvePreserveKey) {
+          setSiteApprovedDates((prev) => {
+            const next = { ...prev };
+            delete next[approvePreserveKey];
+            return next;
+          });
+        }
         setError(data.message || 'Failed to update approval.');
         setTimeout(() => setError(''), 5000);
         return false;
+      }
+      if (isApproveDecision) {
+        setStatutoryData((prev) =>
+          (prev || []).map((row) => {
+            const sameNumeric = String(row?.id ?? '') === String(targetId);
+            const sameLine =
+              approvePreserveKey &&
+              statutorySubmittedDatePreserveKey(row) === approvePreserveKey;
+            if (!sameNumeric && !sameLine) return row;
+            return {
+              ...row,
+              approval: payloadApproval,
+              Approval: payloadApproval,
+              status: payloadStatus,
+              Status: payloadStatus,
+              approvedDate: approveDateIso,
+              ApprovedDate: approveDateIso
+            };
+          })
+        );
+      } else if (isRejectDecision) {
+        if (approvePreserveKey) {
+          setSiteApprovedDates((prev) => {
+            const next = { ...prev };
+            delete next[approvePreserveKey];
+            return next;
+          });
+        }
       }
       setSuccess(payloadApproval == null ? 'Approval cleared.' : `Approval: ${payloadApproval}.`);
       broadcastStatutoryDataChange({ id: targetId, source: 'approval' });
@@ -4278,6 +5626,13 @@ const Statutory = ({ userEmail, userRole }) => {
       setTimeout(() => setSuccess(''), 2500);
       return true;
     } catch (err) {
+      if (isApproveDecision && approvePreserveKey) {
+        setSiteApprovedDates((prev) => {
+          const next = { ...prev };
+          delete next[approvePreserveKey];
+          return next;
+        });
+      }
       setError(err?.message || 'Failed to update approval.');
       setTimeout(() => setError(''), 5000);
       return false;
@@ -4604,10 +5959,7 @@ const Statutory = ({ userEmail, userRole }) => {
     setError('');
     setIsFormFileModalOpen(true);
     setFormFileModalData({
-      fileName:
-        (item?.formFileName && !formFileNameLooksLikePlaceholder(item.formFileName)
-          ? item.formFileName
-          : defaultFormTemplateFileName(item)) || 'Form',
+      fileName: buildStatutoryFormFileLabel(item) || 'Form',
       fileType: 'excel-form',
       loading: true,
       item
@@ -5216,7 +6568,7 @@ const Statutory = ({ userEmail, userRole }) => {
     const toFormUOrderedValues = (row, rowIndex) => {
       if (Array.isArray(row)) return row;
       const ordered = [
-        pickObjectValue(row, [/\bs\.?\s*no\b/, /serial/], 0),
+        pickObjectValue(row, [/\bs\.?\s*no\b/, /\bsr\.?\s*no\b/, /serial/], 0),
         pickObjectValue(row, [/name.*employee/, /employee.*name/, /name of the employee/], 1),
         pickObjectValue(row, [/employee.*identification/, /employee.*id/, /emp.*id/], 2),
         pickObjectValue(row, [/\bgender\b/, /\bsex\b/], 3),
@@ -5238,31 +6590,76 @@ const Statutory = ({ userEmail, userRole }) => {
       if (ordered[0] == null || String(ordered[0]).trim() === '') ordered[0] = rowIndex + 1;
       return ordered;
     };
+    const toFormUConfidentialOrderedValues = (row, rowIndex) => {
+      if (Array.isArray(row)) return row;
+      const sno =
+        pickObjectValue(row, [/\bs\.?\s*no\b/, /\bsr\.?\s*no\b/, /serial/], 0) || rowIndex + 1;
+      const name = pickObjectValue(row, [/name\s+of\s+the\s+person/, /name.*person/], 1);
+      return [sno, name];
+    };
 
     let snoAnchor = null;
     const maxScanRows = Math.max(80, worksheet.rowCount + 5);
     for (let r = 1; r <= maxScanRows; r++) {
+      let rowHasPersonCol = false;
+      let rowSrCol = null;
       for (let c = 1; c <= 180; c++) {
         const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
         const t = normalize(raw);
-        if (t && (t === 's.no' || t === 's no' || t.includes('s.no') || t.includes('serial'))) {
-          snoAnchor = { r, c };
-          break;
+        if (excelCellLooksLikeSerialHeader(raw)) {
+          if (!snoAnchor) snoAnchor = { r, c };
+          rowSrCol = c;
         }
+        if (/name\s+of\s+the\s+person/.test(t)) rowHasPersonCol = true;
       }
-      if (snoAnchor) break;
+      if (rowHasPersonCol && rowSrCol != null) {
+        snoAnchor = { r, c: rowSrCol };
+        break;
+      }
+      if (snoAnchor && !headersIndicateFormUConfidential(headersToUse)) break;
     }
-    if (!snoAnchor) throw new Error('Could not locate Form U table anchor (S.No) in original template.');
+    if (!snoAnchor) {
+      for (let r = 1; r <= maxScanRows; r++) {
+        for (let c = 1; c <= 180; c++) {
+          const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
+          if (excelCellLooksLikeSerialHeader(raw)) {
+            snoAnchor = { r, c };
+            break;
+          }
+        }
+        if (snoAnchor) break;
+      }
+    }
+    if (!snoAnchor) {
+      throw new Error('Could not locate Form U table anchor (S.No / Sr. No.) in original template.');
+    }
 
-    // Form U has one numbering row (1..n) below the main header, so actual data starts on next row.
-    const startRow = snoAnchor.r + 2;
-    const startCol = snoAnchor.c;
     const headerRow = snoAnchor.r;
+    const startCol = snoAnchor.c;
     const headerColMap = new Map();
     for (let c = Math.max(1, startCol - 1); c <= 220; c++) {
       const txt = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
       if (txt) headerColMap.set(c, txt);
     }
+    const headerTexts = [...headerColMap.values()];
+    const isConfidentialFormU =
+      headersIndicateFormUConfidential(headersToUse) ||
+      headerTexts.some((t) => /name\s+of\s+the\s+person/.test(t));
+
+    let numberingRowBelowHeader = false;
+    if (!isConfidentialFormU) {
+      let numericMarkers = 0;
+      for (let c = startCol; c <= startCol + 12; c++) {
+        const v = normalize(excelCellValueToString(worksheet.getCell(headerRow + 1, c)?.value));
+        if (/^\d+$/.test(v)) numericMarkers += 1;
+      }
+      numberingRowBelowHeader = numericMarkers >= 2;
+    }
+    const startRow = isConfidentialFormU
+      ? headerRow + 1
+      : numberingRowBelowHeader
+        ? headerRow + 2
+        : headerRow + 1;
     const resolveFormUColForHeader = (header) => {
       const h = normalize(header);
       if (!h) return null;
@@ -5289,7 +6686,9 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       return null;
     };
-    const formUFieldMatchers = [
+    const formUFieldMatchers = isConfidentialFormU
+      ? [/\bs\.?\s*no\b|\bsr\.?\s*no\b|serial/, /name\s+of\s+the\s+person/]
+      : [
       /\bs\.?\s*no\b|serial/,                              // 0
       /name\s+of\s+the\s+employee|name\s+of\s+employee/,  // 1
       /employee\s+identification|employee\s+id/,          // 2
@@ -5319,6 +6718,9 @@ const Statutory = ({ userEmail, userRole }) => {
       if (!Array.isArray(row)) return false;
       const cells = row.map((v) => String(v ?? '').trim()).filter(Boolean);
       if (cells.length === 0) return false;
+      if (isConfidentialFormU) {
+        return cells.some((v) => /[a-z]/i.test(v)) || cells.length >= 1;
+      }
       // Ignore pure serial/index-like rows (e.g. "1,2,3,4,5...").
       const alphaCount = cells.filter((v) => /[a-z]/i.test(v)).length;
       if (alphaCount > 0) return true;
@@ -5328,9 +6730,10 @@ const Statutory = ({ userEmail, userRole }) => {
     const matrixRows = Array.isArray(mappedRowMatrix)
       ? mappedRowMatrix.filter((row) => hasMeaningfulRow(row))
       : [];
+    const mapRowValues = isConfidentialFormU ? toFormUConfidentialOrderedValues : toFormUOrderedValues;
     const mappedArrayRows = Array.isArray(mappedData)
       ? mappedData
-          .map((row, idx) => toFormUOrderedValues(row, idx))
+          .map((row, idx) => mapRowValues(row, idx))
           .filter((row) => hasMeaningfulRow(row))
       : [];
     const useMatrix = matrixRows.length > 0 || mappedArrayRows.length > 0;
@@ -5346,17 +6749,83 @@ const Statutory = ({ userEmail, userRole }) => {
     const matrixSource = matrixRows.length > 0 ? matrixRows : mappedArrayRows;
     const totalRows = matrixSource.length;
 
+    const writableCols = (isConfidentialFormU ? formUFieldCols.slice(0, 2) : formUFieldCols).filter(
+      (c) => Number.isFinite(c) && c > 0
+    );
+    const tableColMin = writableCols.length > 0 ? Math.min(startCol, ...writableCols) : startCol;
+    let tableColMax = writableCols.length > 0 ? Math.max(...writableCols) : startCol + 1;
+    for (let c = tableColMin; c <= tableColMax + 4; c++) {
+      const bodyCell = worksheet.getCell(startRow, c);
+      const b = bodyCell?.border;
+      if (b && (b.left?.style || b.right?.style || b.top?.style || b.bottom?.style)) {
+        tableColMax = Math.max(tableColMax, c);
+      }
+    }
+
+    const isFormUFooterRow = (r) => {
+      for (let c = 1; c <= Math.max(30, tableColMax + 4); c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (!t) continue;
+        if (/^date\s*:?$/.test(t) || /^place\s*:?$/.test(t)) return true;
+        if (/signature of the manager|authorised person with seal|cc to/i.test(t)) return true;
+      }
+      return false;
+    };
+
+    const countTemplateFormUDataRows = () => {
+      let rows = 0;
+      for (let r = startRow; r <= startRow + 150; r++) {
+        if (isFormUFooterRow(r)) break;
+        rows += 1;
+      }
+      return Math.max(rows, 1);
+    };
+
+    const copyFormUDataRowStyle = (fromRowNum, toRowNum) => {
+      const fromRow = worksheet.getRow(fromRowNum);
+      const toRow = worksheet.getRow(toRowNum);
+      if (fromRow.height) toRow.height = fromRow.height;
+      for (let c = tableColMin; c <= tableColMax; c++) {
+        const src = worksheet.getCell(fromRowNum, c);
+        const dst = worksheet.getCell(toRowNum, c);
+        if (!src?.style) continue;
+        try {
+          dst.style = JSON.parse(JSON.stringify(src.style));
+        } catch (_) {
+          dst.style = { ...src.style };
+        }
+      }
+    };
+
+    const templateDataRows = countTemplateFormUDataRows();
+    const rowsToInsert = Math.max(0, totalRows - templateDataRows);
+    if (rowsToInsert > 0) {
+      const anchorRow = startRow + templateDataRows - 1;
+      if (typeof worksheet.duplicateRow === 'function') {
+        worksheet.duplicateRow(anchorRow, rowsToInsert, true);
+      } else {
+        for (let k = 0; k < rowsToInsert; k++) {
+          const insertAt = startRow + templateDataRows;
+          worksheet.insertRow(insertAt, []);
+          copyFormUDataRowStyle(anchorRow, insertAt);
+        }
+      }
+    }
+
     for (let i = 0; i < totalRows; i++) {
       const rowArr = matrixSource[i] || [];
       const totalCols = rowArr.length;
+      const targetRow = startRow + i;
+      writableCols.forEach((col) => {
+        worksheet.getCell(targetRow, col).value = null;
+      });
       for (let j = 0; j < totalCols; j++) {
         let value = rowArr[j];
-        if (value == null || value === '') continue; // keep template untouched for empty values
+        if (value == null || value === '') continue;
         const targetCol = j < formUFieldCols.length ? formUFieldCols[j] : (startCol + j);
-        const cell = worksheet.getCell(startRow + i, targetCol);
-        // Keep Form U output stable with template formatting: write as text to avoid Excel auto-date (e.g. 6 -> 01/06/1900).
+        const cell = worksheet.getCell(targetRow, targetCol);
         if ((targetCol === formUFieldCols[0] || j === 0) && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
-          cell.value = Number(value); // S.No can stay numeric
+          cell.value = Number(value);
         } else {
           cell.value = String(value);
         }
@@ -5523,6 +6992,359 @@ const Statutory = ({ userEmail, userRole }) => {
         // Keep Form 12 data rows normal-weight (template sample row can be bold).
         cell.font = { ...(cell.font || {}), bold: false };
         cell.alignment = { ...(cell.alignment || {}), horizontal: 'left' };
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormJWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const maxScanRows = Math.max(120, worksheet.rowCount + 10);
+    const maxScanCols = 80;
+
+    const rowHasFormJRegisterHeader = (r) => {
+      let hasEmployee = false;
+      let hasSexOrAge = false;
+      for (let c = 1; c <= maxScanCols; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (!t) continue;
+        if (
+          /name\s+of\s+the\s+employee/.test(t) ||
+          (t.includes('employee') && t.includes('establishment'))
+        ) {
+          hasEmployee = true;
+        }
+        if (t === 'sex' || /\bsex\b/.test(t) || t === 'age' || /\bage\b/.test(t)) {
+          hasSexOrAge = true;
+        }
+      }
+      return hasEmployee && hasSexOrAge;
+    };
+
+    const findNumberedMarkerBelow = (headerR) => {
+      for (let r = headerR + 1; r <= Math.min(headerR + 3, maxScanRows); r++) {
+        let startCol = -1;
+        let seq = 0;
+        let expect = 1;
+        for (let c = 1; c <= maxScanCols; c++) {
+          const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+          if (!/^(\d{1,2})$/.test(t)) continue;
+          const n = parseInt(t, 10);
+          if (n === expect) {
+            if (startCol < 0) startCol = c;
+            seq = expect;
+            expect += 1;
+          }
+        }
+        if (seq >= 8) return { markerRow: r, startCol };
+      }
+      return null;
+    };
+
+    let headerRow = -1;
+    let startCol = 1;
+    let startRow = -1;
+
+    for (let r = 1; r <= maxScanRows; r++) {
+      if (!rowHasFormJRegisterHeader(r)) continue;
+      headerRow = r;
+      for (let c = 1; c <= maxScanCols; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (
+          /name\s+of\s+the\s+employee/.test(t) ||
+          (t.includes('employee') && t.includes('establishment'))
+        ) {
+          startCol = c;
+          break;
+        }
+      }
+      if (startCol < 1) {
+        for (let c = 1; c <= maxScanCols; c++) {
+          const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+          if (t) {
+            startCol = c;
+            break;
+          }
+        }
+      }
+      const marker = findNumberedMarkerBelow(r);
+      if (marker && marker.startCol > 0) startCol = marker.startCol;
+      startRow = marker ? marker.markerRow + 1 : r + 1;
+      break;
+    }
+
+    if (headerRow < 1) {
+      for (let r = 1; r <= maxScanRows; r++) {
+        for (let c = 1; c <= maxScanCols; c++) {
+          const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+          if (t && (t === 's.no' || t === 's no' || t.includes('s.no') || t.includes('serial'))) {
+            headerRow = r;
+            startCol = c;
+            const marker = findNumberedMarkerBelow(r);
+            startRow = marker ? marker.markerRow + 1 : (r + 1);
+            break;
+          }
+        }
+        if (headerRow > 0) break;
+      }
+    }
+
+    if (headerRow < 1 && parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0) {
+      headerRow = parsedHeaderRowIndex + 1;
+      startCol = 1;
+      for (let c = 1; c <= maxScanCols; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+        if (t) {
+          startCol = c;
+          break;
+        }
+      }
+      const marker = findNumberedMarkerBelow(headerRow);
+      if (marker && marker.startCol > 0) startCol = marker.startCol;
+      startRow =
+        parsedDataStartIndex != null && parsedDataStartIndex >= 0
+          ? parsedDataStartIndex + 1
+          : marker
+            ? marker.markerRow + 1
+            : headerRow + 1;
+    }
+
+    if (headerRow < 1 || startRow < 1) {
+      throw new Error(
+        'Could not locate Form J table (Register of Employment — Name of the employee / Sex / Age headers) in original template.'
+      );
+    }
+
+    const templateHeaderCols = [];
+    let blankRun = 0;
+    for (let c = startCol; c <= startCol + 24; c++) {
+      const txt = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (txt) {
+        templateHeaderCols.push(c);
+        blankRun = 0;
+      } else if (templateHeaderCols.length > 0) {
+        blankRun += 1;
+        if (blankRun >= 4) break;
+      }
+    }
+    if (templateHeaderCols.length < 4) {
+      const marker = findNumberedMarkerBelow(headerRow);
+      const markerRow = marker ? marker.markerRow : headerRow + 1;
+      const colsFromNumbers = [];
+      for (let c = startCol; c <= startCol + 24; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(markerRow, c)?.value));
+        if (/^(\d{1,2})$/.test(t)) colsFromNumbers.push(c);
+      }
+      if (colsFromNumbers.length >= 8) {
+        templateHeaderCols.length = 0;
+        templateHeaderCols.push(...colsFromNumbers);
+      }
+    }
+
+    const templateHeaderLabels = templateHeaderCols.map((col) =>
+      String(excelCellValueToString(worksheet.getCell(headerRow, col)?.value) || '').trim()
+    );
+    const orderedHeaders =
+      Array.isArray(headersToUse) && headersToUse.length > 0
+        ? headersToUse
+        : templateHeaderLabels.filter(Boolean);
+    const colCount = Math.max(
+      templateHeaderCols.length,
+      orderedHeaders.length,
+      12
+    );
+    const effectiveHeaders =
+      orderedHeaders.length > 0
+        ? orderedHeaders.slice(0, colCount)
+        : templateHeaderLabels.filter(Boolean);
+    const fieldCols = Array.from({ length: colCount }, (_, idx) =>
+      templateHeaderCols[idx] != null ? templateHeaderCols[idx] : startCol + idx
+    );
+
+    const formJFieldMatchers = [
+      /name\s+of\s+the\s+employee|employee.*establishment|name.*employee/,
+      /\bsex\b/,
+      /\bage\b/,
+      /employment\s+commences|time.*commences|commences/,
+      /employment\s+ceases|time.*ceases|ceases/,
+      /rest\s+interval/,
+      /hours\s+worked.*sunday|sunday.*monday|monday.*tuesday|wednesday/,
+      /hours\s+worked.*thursday|thursday.*friday|saturday/,
+      /date\s+on\s+which\s+over|over.?hours\s+worked\s+during\s+the\s+week/,
+      /date\s+on\s+extent|extent\s+of\s+time\s+work/,
+      /overtime\s+worked\s+during\s+the\s+week/,
+      /extent\s+of\s+overtime\s+worked\s+previously/
+    ];
+
+    const pickObjectValue = (row, patterns, fallbackIndex = null) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
+      const keys = Object.keys(row);
+      const normKey = (s) => normalize(String(s || '').replace(/[^a-z0-9]/gi, ' '));
+      for (let pi = 0; pi < patterns.length; pi++) {
+        const hit = keys.find((k) => patterns[pi].test(normKey(k)));
+        if (hit) {
+          const v = row[hit];
+          if (v != null && String(v).trim() !== '') return v;
+        }
+      }
+      if (fallbackIndex != null && fallbackIndex >= 0 && fallbackIndex < keys.length) {
+        return row[keys[fallbackIndex]];
+      }
+      return '';
+    };
+
+    const getRowValueForHeader = (row, header) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
+      if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
+      const target = normalize(String(header || '').replace(/[^a-z0-9]/gi, ' '));
+      if (!target) return '';
+      const rowKeys = Object.keys(row);
+      const exact = rowKeys.find((k) => normalize(String(k || '').replace(/[^a-z0-9]/gi, ' ')) === target);
+      if (exact) return row[exact];
+      const fuzzy = rowKeys.find((k) => {
+        const nk = normalize(String(k || '').replace(/[^a-z0-9]/gi, ' '));
+        return nk && (nk.includes(target) || target.includes(nk));
+      });
+      return fuzzy ? row[fuzzy] : '';
+    };
+    const toFormJOrderedValues = (row) => {
+      if (Array.isArray(row)) {
+        return effectiveHeaders.map((_, idx) => row[idx] ?? '');
+      }
+      return effectiveHeaders.map((header, idx) => {
+        const direct = getRowValueForHeader(row, header);
+        if (direct != null && String(direct).trim() !== '') return direct;
+        const matchers = idx < formJFieldMatchers.length ? [formJFieldMatchers[idx]] : [];
+        if (matchers.length > 0) return pickObjectValue(row, matchers, idx);
+        return pickObjectValue(row, formJFieldMatchers, idx);
+      });
+    };
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) {
+        const cells = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (cells.length === 0) return false;
+        return cells.some((v) => /[a-z]/i.test(v)) || !cells.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      if (row && typeof row === 'object') {
+        const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      return false;
+    };
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row) => toFormJOrderedValues(row));
+
+    const writableCols = fieldCols.slice(0, effectiveHeaders.length);
+    const lastTableCol = writableCols.length > 0 ? Math.max(...writableCols) : startCol + colCount - 1;
+
+    const copyFormJDataRowStyle = (fromRowNum, toRowNum) => {
+      const fromRow = worksheet.getRow(fromRowNum);
+      const toRow = worksheet.getRow(toRowNum);
+      if (fromRow.height) toRow.height = fromRow.height;
+      for (let c = startCol; c <= lastTableCol; c++) {
+        const src = worksheet.getCell(fromRowNum, c);
+        const dst = worksheet.getCell(toRowNum, c);
+        if (!src?.style) continue;
+        try {
+          dst.style = JSON.parse(JSON.stringify(src.style));
+        } catch (_) {
+          dst.style = { ...src.style };
+        }
+      }
+    };
+
+    const countExistingFormJDataRows = () => {
+      let count = 0;
+      let blankStreak = 0;
+      for (let r = startRow; r < startRow + 120; r++) {
+        let hasCell = false;
+        for (let wi = 0; wi < writableCols.length; wi++) {
+          const v = String(excelCellValueToString(worksheet.getCell(r, writableCols[wi])?.value) || '').trim();
+          if (v) hasCell = true;
+        }
+        if (hasCell) {
+          count += 1;
+          blankStreak = 0;
+        } else if (count > 0) {
+          blankStreak += 1;
+          if (blankStreak >= 2) break;
+        }
+      }
+      return Math.max(count, 1);
+    };
+
+    const templateDataRows = countExistingFormJDataRows();
+    const rowsToInsert = Math.max(0, sourceRows.length - templateDataRows);
+    if (rowsToInsert > 0) {
+      if (typeof worksheet.duplicateRow === 'function') {
+        const anchorRow = startRow + templateDataRows - 1;
+        worksheet.duplicateRow(anchorRow, rowsToInsert, true);
+      } else {
+        for (let k = 0; k < rowsToInsert; k++) {
+          worksheet.insertRow(startRow + 1, []);
+          copyFormJDataRowStyle(startRow, startRow + 1);
+        }
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i];
+      const targetRow = startRow + i;
+      for (let wc = 0; wc < writableCols.length; wc++) {
+        worksheet.getCell(targetRow, writableCols[wc]).value = '';
+      }
+      for (let c = lastTableCol + 1; c <= lastTableCol + 40; c++) {
+        const spill = worksheet.getCell(targetRow, c);
+        if (spill.value != null && spill.value !== '') spill.value = null;
+      }
+      const maxWriteCols = Math.min(row.length, writableCols.length);
+      for (let j = 0; j < maxWriteCols; j++) {
+        const value = row[j];
+        if (value == null || value === '') continue;
+        worksheet.getCell(targetRow, writableCols[j]).value = String(value);
       }
     }
 
@@ -6733,13 +8555,38 @@ const Statutory = ({ userEmail, userRole }) => {
 
   // View Draft File: generate formmaster template + autofill (Zoho People) data and download (no modal, no save)
   const handleViewDraftFileGenerate = async (item, resolvedFormFileItem) => {
-    const rowFormNameKey = normalizeTemplateFormNameKey(
-      item?.formName || item?.FormName || resolvedFormFileItem?.formName || resolvedFormFileItem?.FormName || ''
+    const lineItem = item || resolvedFormFileItem || {};
+    const isFormUItem = isFormUAutofillContext({
+      formName: lineItem?.formName || lineItem?.FormName,
+      item: lineItem
+    });
+    const draftIdOptsEarly = showApprovalColumn ? { preferSiteSubmittedDraft: true } : {};
+    let sampleHeadersForTemplate = null;
+    if (isFormUItem) {
+      const sampleStatutoryIdEarly =
+        resolveNumericStatutoryIdForProofRow(item, draftIdOptsEarly) ||
+        resolveNumericStatutoryIdForProofRow(resolvedFormFileItem, draftIdOptsEarly);
+      if (sampleStatutoryIdEarly && isNumericStatutoryBackendId(sampleStatutoryIdEarly)) {
+        try {
+          const sampleRespEarly = await fetch(
+            `/server/statutoryreg_function/statutory/${sampleStatutoryIdEarly}/sampledata?_ts=${Date.now()}`
+          );
+          if (sampleRespEarly.ok) {
+            const sampleJsonEarly = await sampleRespEarly.json().catch(() => null);
+            const sh = sampleJsonEarly?.data?.sampleData?.headers;
+            if (Array.isArray(sh) && sh.length > 0) sampleHeadersForTemplate = sh;
+          }
+        } catch (sampleEarlyErr) {
+          console.warn('Could not prefetch SampleData headers for Form U draft download:', sampleEarlyErr);
+        }
+      }
+    }
+    const templateMeta = resolveDraftDownloadTemplateMeta(
+      lineItem,
+      resolvedFormFileItem,
+      { formmasterFormFileByMatchKey, formmasterTemplates },
+      { sampleHeaders: sampleHeadersForTemplate }
     );
-    const formmasterTemplateForRow = rowFormNameKey ? formmasterFormFileByFormName.get(rowFormNameKey) : null;
-    const templateMeta = formmasterTemplateForRow && formmasterTemplateForRow.formFile
-      ? formmasterTemplateForRow
-      : resolvedFormFileItem;
     const hasFormFile = templateMeta?.formFile && templateMeta.formFile !== 'null' && String(templateMeta.formFile).trim() !== '';
     if (!hasFormFile) {
       setError('No form template available for this row. Use the draft link to open the saved file.');
@@ -6757,13 +8604,88 @@ const Statutory = ({ userEmail, userRole }) => {
         return;
       }
       const arrayBuffer = await res.arrayBuffer();
-      const templateWb = XLSX.read(arrayBuffer, { type: 'array' });
-      const parsed = parseExcelForm(templateWb);
-      let headersToUse = parsed.headers?.length ? [...parsed.headers] : [];
+      let templateWb = XLSX.read(arrayBuffer, { type: 'array' });
+      let parsed = parseExcelForm(templateWb);
+      const sheetTextForDownload = templateWb.SheetNames?.[0]
+        ? (() => {
+            const ws0 = templateWb.Sheets[templateWb.SheetNames[0]];
+            const rows = XLSX.utils.sheet_to_json(ws0, { header: 1, defval: '' });
+            return rows
+              .slice(0, 35)
+              .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+              .join(' ');
+          })()
+        : '';
+      const downloadHeaderHints = {
+        fileName: fn,
+        formFileName: templateMeta.formFileName,
+        formName: lineItem?.formName || lineItem?.FormName,
+        formHeaderTitle: parsed.formHeader?.title,
+        sheetText: sheetTextForDownload,
+        item: lineItem
+      };
+      let headersToUse = resolveAutofillTableHeaders(
+        (parsed.headers || []).filter((h) => String(h || '').trim()),
+        downloadHeaderHints
+      );
+      const expectedFormUVariant =
+        inferFormUVariantFromRow(lineItem) ||
+        inferFormUVariantFromSavedHeaders(sampleHeadersForTemplate) ||
+        inferFormUVariantFromSavedHeaders(headersToUse) ||
+        null;
+      const fetchedSheetVariant = detectFormUSheetVariant(downloadHeaderHints);
+      if (
+        isFormUItem &&
+        expectedFormUVariant &&
+        fetchedSheetVariant !== 'unknown' &&
+        fetchedSheetVariant !== expectedFormUVariant
+      ) {
+        const repickMeta = resolveDraftDownloadTemplateMeta(
+          lineItem,
+          resolvedFormFileItem,
+          { formmasterFormFileByMatchKey, formmasterTemplates },
+          { sampleHeaders: sampleHeadersForTemplate || headersToUse }
+        );
+        if (repickMeta?.formFile && String(repickMeta.formFile) !== String(templateMeta.formFile)) {
+          const repickFn = String(
+            repickMeta.formFileName || templateMeta.formFileName || 'template.xlsx'
+          ).replace(/[^a-zA-Z0-9._-]/g, '_');
+          const repickUrl = `/server/formmaster_function/templates/download/${repickMeta.formFile}?fileName=${encodeURIComponent(repickFn)}`;
+          const repickRes = await fetch(repickUrl);
+          if (repickRes.ok) {
+            const repickBuf = await repickRes.arrayBuffer();
+            templateWb = XLSX.read(repickBuf, { type: 'array' });
+            parsed = parseExcelForm(templateWb);
+            downloadHeaderHints.fileName = repickFn;
+            downloadHeaderHints.formFileName = repickMeta.formFileName;
+            downloadHeaderHints.sheetText = templateWb.SheetNames?.[0]
+              ? (() => {
+                  const ws0 = templateWb.Sheets[templateWb.SheetNames[0]];
+                  const rows = XLSX.utils.sheet_to_json(ws0, { header: 1, defval: '' });
+                  return rows
+                    .slice(0, 35)
+                    .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+                    .join(' ');
+                })()
+              : '';
+            headersToUse = resolveAutofillTableHeaders(
+              (parsed.headers || []).filter((h) => String(h || '').trim()),
+              downloadHeaderHints
+            );
+            Object.assign(templateMeta, repickMeta);
+          }
+        }
+      }
       if (!headersToUse.length) {
         setError('Could not read template headers.');
         return;
       }
+      const formUConfidentialDownload =
+        isFormUItem &&
+        (expectedFormUVariant === 'confidential_character' ||
+          fetchedSheetVariant === 'confidential_character' ||
+          headersIndicateFormUConfidential(headersToUse) ||
+          headersIndicateFormUConfidential(sampleHeadersForTemplate));
       let mappedData = null;
       let usedLiveModalGrid = false;
       let usedSnapshot = false;
@@ -6804,6 +8726,9 @@ const Statutory = ({ userEmail, userRole }) => {
       const isFormIDownload =
         /\bform\s*[-"']?\s*i\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform\s*[-"']?\s*i\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormJDownload =
+        /\bform\s*[-"']?\s*j\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        /\bform\s*[-"']?\s*j\b/i.test(String(parsed?.formHeader?.title || ''));
       const isFormVDownload =
         /\bform\s*[-"']?\s*v\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform\s*[-"']?\s*v\b/i.test(String(parsed?.formHeader?.title || '')) ||
@@ -7024,6 +8949,21 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
       if (
+        isFormJDownload &&
+        Array.isArray(formTableDataRef.current) &&
+        formTableDataRef.current.length > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
         isFormVDownload &&
         Array.isArray(formTableDataRef.current) &&
         formTableDataRef.current.length > 0
@@ -7084,7 +9024,13 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       // Prefer saved Draft file rows only when no exact SampleData snapshot exists.
-      if (!usedLiveModalGrid && !usedSnapshot && (isFormADownload || isFormUDownload || isForm12Download || isForm10Download || isForm25Download || isFormBDownload || isFormWDownload || isFormXDownload || isFormCDownload || isFormDDownload || isFormIDownload || isFormVDownload || isFormVIDownload || !Array.isArray(mappedData) || mappedData.length === 0)) {
+      // Form U confidential: never reuse stored Draft workbook (often saved with employee-register template).
+      if (
+        !usedLiveModalGrid &&
+        !usedSnapshot &&
+        !formUConfidentialDownload &&
+        (isFormADownload || isFormUDownload || isForm12Download || isForm10Download || isForm25Download || isFormBDownload || isFormWDownload || isFormXDownload || isFormCDownload || isFormDDownload || isFormIDownload || isFormJDownload || isFormVDownload || isFormVIDownload || !Array.isArray(mappedData) || mappedData.length === 0)
+      ) {
         const draftStatutoryId =
           resolveNumericStatutoryIdForProofRow(item, draftIdOpts) ||
           resolveNumericStatutoryIdForProofRow(resolvedFormFileItem, draftIdOpts);
@@ -7404,6 +9350,19 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
+      if (isFormJDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+        try {
+          const refreshedFormJRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedFormJRows) && refreshedFormJRows.length > 0) {
+            mappedData = refreshedFormJRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
       if (isFormVDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
         try {
           const refreshedFormVRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
@@ -7515,6 +9474,9 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
       if (isFormIDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isFormJDownload && Array.isArray(mappedData) && mappedData.length > 0) {
         savedDraftRowMatrix = null;
       }
       if (isFormVDownload && Array.isArray(mappedData) && mappedData.length > 0) {
@@ -7642,6 +9604,17 @@ const Statutory = ({ userEmail, userRole }) => {
                             parsedFormHeader: parsed.formHeader,
                             formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
                           })
+                        : isFormJDownload
+                          ? await buildFormJWorkbookWithTemplateStyles({
+                              templateArrayBuffer: arrayBuffer,
+                              mappedData,
+                              mappedRowMatrix: savedDraftRowMatrix,
+                              headersToUse,
+                              parsedHeaderRowIndex: parsed.headerRowIndex,
+                              parsedDataStartIndex: parsed.dataStartIndex,
+                              parsedFormHeader: parsed.formHeader,
+                              formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                            })
                         : isFormVDownload
                           ? await buildFormVWorkbookWithTemplateStyles({
                               templateArrayBuffer: arrayBuffer,
@@ -7704,6 +9677,13 @@ const Statutory = ({ userEmail, userRole }) => {
 
   const handleDownloadSavedDraftFile = async (draftApiRowId, fileName, sourceItem, resolvedFormFileItem) => {
     if (!draftApiRowId) {
+      await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem);
+      return;
+    }
+    const isFormUDownloadRow =
+      isFormUAutofillContext({ formName: sourceItem?.formName, item: sourceItem }) ||
+      isFormUAutofillContext({ formName: resolvedFormFileItem?.formName, item: resolvedFormFileItem });
+    if (isFormUDownloadRow) {
       await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem);
       return;
     }
@@ -7839,61 +9819,80 @@ const Statutory = ({ userEmail, userRole }) => {
       let parsedFormHeaderForSave = formFileModalData?.parsedFormHeader || formHeader;
       const hasSubColumns = formFileModalData?.parsedSubColumns && Object.keys(formFileModalData.parsedSubColumns || {}).length > 0;
 
-      // If we don't have the form file template in state, fetch it now so draft always uses form file format (not new Excel)
-      if (!templateWb && currentItem && (currentItem.formFile || currentItem.formFileName) && !isFromChecklist) {
+      const itemForTemplateFetch = {
+        ...(currentItem || {}),
+        formFile: currentItem?.formFile ?? currentItem?.FormFile ?? formFileModalData?.item?.formFile,
+        formFileName:
+          currentItem?.formFileName ??
+          currentItem?.FormFileName ??
+          formFileModalData?.formFileName ??
+          formFileModalData?.fileName,
+        formFetchRowId: currentItem?.formFetchRowId ?? currentItem?.id
+      };
+      const hasFormFileId =
+        itemForTemplateFetch.formFile &&
+        itemForTemplateFetch.formFile !== 'null' &&
+        String(itemForTemplateFetch.formFile).trim() !== '';
+
+      // Always re-load template from this row's FormFile id (same URL as View File / Autofill) so Save matches the open form
+      if (hasFormFileId) {
         try {
-          let fileUrl;
-          const isFromFormmaster = currentItem.isFromFormmaster && currentItem.formFile;
-          if (isFromFormmaster) {
-            const fn = (currentItem.formFileName || 'template.xlsx').replace(/[^a-zA-Z0-9._-]/g, '_');
-            fileUrl = `/server/formmaster_function/templates/download/${currentItem.formFile}?fileName=${encodeURIComponent(fn)}`;
-          } else if (currentItem.id && !String(currentItem.id).startsWith('formmaster_') && !String(currentItem.id).startsWith('bulk_')) {
-            fileUrl = `/server/statutoryreg_function/statutory/${currentItem.id}/file/Form`;
-          } else {
-            const fn = (currentItem.formFileName || 'template.xlsx').replace(/[^a-zA-Z0-9._-]/g, '_');
-            fileUrl = `/server/formmaster_function/templates/download/${currentItem.formFile}?fileName=${encodeURIComponent(fn)}`;
-          }
-          const res = await fetch(fileUrl);
-          if (res.ok) {
-            const arrayBuffer = await res.arrayBuffer();
-            templateWb = XLSX.read(arrayBuffer, { type: 'array' });
-            const parsed = parseExcelForm(templateWb);
-            headerRowIndex = parsed.headerRowIndex;
-            dataStartIndex = parsed.dataStartIndex;
-            parsedFormHeaderForSave = parsed.formHeader || parsedFormHeaderForSave;
-            if (!headersToUse.length && parsed.headers?.length) headersToUse = parsed.headers;
-          }
+          const urls = getFormFileFetchUrlCandidates(itemForTemplateFetch);
+          const cacheKey = getFormTemplateCacheKey(itemForTemplateFetch);
+          const { arrayBuffer } = await fetchFormTemplateArrayBuffer(urls, cacheKey);
+          templateWb = XLSX.read(arrayBuffer, { type: 'array' });
+          const parsed = parseExcelForm(templateWb);
+          headerRowIndex = parsed.headerRowIndex;
+          dataStartIndex = parsed.dataStartIndex;
+          parsedFormHeaderForSave = parsed.formHeader || parsedFormHeaderForSave;
+          if (parsed.headers?.length) headersToUse = parsed.headers;
         } catch (fetchErr) {
-          console.warn('Could not fetch form file template for draft:', fetchErr);
+          console.warn('Could not re-fetch form template for save:', fetchErr);
+        }
+      } else if (!templateWb && currentItem && !isFromChecklist) {
+        const primary = getFormFileFetchUrl(itemForTemplateFetch);
+        if (primary) {
+          try {
+            const res = await fetch(primary);
+            if (res.ok) {
+              const arrayBuffer = await res.arrayBuffer();
+              templateWb = XLSX.read(arrayBuffer, { type: 'array' });
+              const parsed = parseExcelForm(templateWb);
+              headerRowIndex = parsed.headerRowIndex;
+              dataStartIndex = parsed.dataStartIndex;
+              parsedFormHeaderForSave = parsed.formHeader || parsedFormHeaderForSave;
+              if (parsed.headers?.length) headersToUse = parsed.headers;
+            }
+          } catch (fetchErr) {
+            console.warn('Could not fetch statutory form template for draft:', fetchErr);
+          }
         }
       }
 
-      // When we have the form master template but parse didn't return indices, detect header/data row from sheet
-      if (templateWb && headersToUse.length > 0 && (headerRowIndex == null || headerRowIndex < 0 || dataStartIndex == null || dataStartIndex < 0)) {
-        const firstSheetName = templateWb.SheetNames[0];
-        const templateWs = templateWb.Sheets[firstSheetName];
-        const jsonData = XLSX.utils.sheet_to_json(templateWs, { header: 1, defval: '' });
-        const firstHeader = (headersToUse[0] || '').trim().toLowerCase();
-        for (let r = 0; r < Math.min(30, jsonData.length); r++) {
-          const row = jsonData[r] || [];
-          for (let c = 0; c < row.length; c++) {
-            const cell = String(row[c] || '').trim().toLowerCase();
-            const matchesFirstHeader = cell && (
-              cell.includes(firstHeader) ||
-              firstHeader.includes(cell) ||
-              (firstHeader.includes('s.no') && (cell.includes('s.no') || cell.includes('serial')))
-            );
-            if (matchesFirstHeader) {
-              headerRowIndex = r;
-              dataStartIndex = hasSubColumns ? r + 2 : r + 1;
-              break;
-            }
-          }
-          if (headerRowIndex >= 0) break;
-        }
-      }
+      const draftFileNameForSaveEarly =
+        formFileModalData?.formFileName || formFileModalData?.fileName || '';
+      const layout = resolveDraftTemplateLayout(templateWb, {
+        headersToUse,
+        headerRowIndex,
+        dataStartIndex,
+        parsedFormHeader: parsedFormHeaderForSave,
+        fileName: draftFileNameForSaveEarly,
+        formName: currentItem?.formName || currentItem?.FormName
+      });
+      templateWb = layout.templateWb;
+      headersToUse = layout.headersToUse;
+      headerRowIndex = layout.headerRowIndex;
+      dataStartIndex = layout.dataStartIndex;
+
       if (!templateWb) {
-        setError('Original statutory template not found. Save requires the existing form template.');
+        setError('Original statutory template not found. Open Autofill again, then Save.');
+        setSubmitting(false);
+        return;
+      }
+      if (!layout.ok) {
+        setError(
+          'Could not read the form template layout. Close the modal, open Autofill for this row again, then Save.'
+        );
         setSubmitting(false);
         return;
       }
@@ -7905,6 +9904,18 @@ const Statutory = ({ userEmail, userRole }) => {
         draftFileNameForSave,
         parsedFormHeaderForSave || formHeader
       );
+      const formJSave = isFormJStatutoryContext(
+        currentItem,
+        draftFileNameForSave,
+        parsedFormHeaderForSave || formHeader
+      );
+      const formUSave =
+        isFormUAutofillContext({
+          formName: currentItem?.formName || currentItem?.FormName,
+          item: currentItem
+        }) ||
+        headersIndicateFormUConfidential(headersToUse) ||
+        headersIndicateFormUEmployeeRegister(headersToUse);
       let blob;
       let fileName;
       if (form12Save && templateWb) {
@@ -7918,6 +9929,37 @@ const Statutory = ({ userEmail, userRole }) => {
           mappedData: tableDataForSave,
           mappedRowMatrix: null,
           headersToUse: form12Headers,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave
+        }));
+      } else if (formJSave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        ({ blob, fileName } = await buildFormJWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: tableDataForSave,
+          mappedRowMatrix: null,
+          headersToUse: Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [],
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave
+        }));
+      } else if (formUSave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const formUHeaders =
+          Array.isArray(headersToUse) && headersToUse.length > 0
+            ? headersToUse
+            : isFormUConfidentialCharacterContext({
+                item: currentItem,
+                formHeaderTitle: parsedFormHeaderForSave?.title
+              })
+              ? [...FORM_U_CONFIDENTIAL_HEADERS]
+              : [...FORM_U_FORMAT2_HEADERS];
+        ({ blob, fileName } = await buildFormUWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          headersToUse: formUHeaders,
+          mappedData: tableDataForSave,
+          mappedRowMatrix: null,
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           formFileName: draftFileNameForSave
         }));
@@ -8014,7 +10056,7 @@ const Statutory = ({ userEmail, userRole }) => {
         : null;
       // Only treat as update (PUT) when this id is an actual Statutory table record. statutoryData is merged (API + form master + bulk), so we must detect synthetic ids explicitly — backend only has numeric ROWIDs.
       const idStr = currentItem?.id != null ? String(currentItem.id).trim() : '';
-      const isSyntheticId = idStr.startsWith('formmaster_') || idStr.startsWith('bulk_') || idStr.startsWith('checklist_') || idStr.startsWith('placeholder_');
+      const isSyntheticId = isSyntheticStatutoryRowId(idStr);
       const isUpdate = !!currentItem?.id && !isFromChecklist && !isSyntheticId;
 
       const latestRecord = currentItem?.id && statutoryData?.length ? statutoryData.find(r => String(r.id) === String(currentItem.id)) : null;
@@ -8264,8 +10306,45 @@ const Statutory = ({ userEmail, userRole }) => {
       }
      
       // Use provided headers or fall back to state
-      const currentHeaders = headersToUse || (modalData?.parsedTableHeaders?.length ? modalData.parsedTableHeaders : tableHeaders);
-     
+      let currentHeaders = headersToUse || (modalData?.parsedTableHeaders?.length ? modalData.parsedTableHeaders : tableHeaders);
+      const formQMonthIdx = MONTH_NAMES.findIndex((m) =>
+        m.toLowerCase().startsWith(String(selectedMonth || '').toLowerCase().trim())
+      );
+      const formQDayCount =
+        formQMonthIdx >= 0
+          ? new Date(new Date().getFullYear(), formQMonthIdx + 1, 0).getDate()
+          : 31;
+      const formQAutofillFileHint = String(
+        modalData?.fileName || modalData?.formFileName || modalData?.item?.formName || modalData?.item?.FormName || ''
+      );
+      const formQAutofillContext =
+        /form[\s_-]*q/i.test(formQAutofillFileHint) ||
+        isFormQContext(modalData?.parsedFormHeader, modalData?.item, formQAutofillFileHint, currentHeaders);
+      if (formQAutofillContext) {
+        currentHeaders = stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount));
+        if (!returnMappedData) {
+          setFormFileModalData((prev) =>
+            prev ? { ...prev, parsedTableHeaders: currentHeaders } : prev
+          );
+          setTableHeaders(currentHeaders);
+        }
+      }
+
+      currentHeaders = resolveAutofillTableHeaders(currentHeaders, {
+        fileName: modalData?.fileName,
+        formFileName: modalData?.formFileName,
+        formName: modalData?.item?.formName || modalData?.item?.FormName,
+        itemFormName: modalData?.item?.formName || modalData?.item?.FormName,
+        formHeaderTitle: modalData?.parsedFormHeader?.title,
+        item: modalData?.item
+      });
+      if (currentHeaders.length > 0 && !returnMappedData) {
+        setFormFileModalData((prev) =>
+          prev ? { ...prev, parsedTableHeaders: currentHeaders } : prev
+        );
+        setTableHeaders(currentHeaders);
+      }
+
       if (!currentHeaders || currentHeaders.length === 0) {
         console.error('⚠️ Table headers not available');
         if (!returnMappedData) setError('Table headers not available. Please try again.');
@@ -8786,7 +10865,9 @@ const Statutory = ({ userEmail, userRole }) => {
       const genericHeaderRegex = /^column\s+([a-z]+|\d+)$/i;
       const genericHeadersCount = currentHeaders.filter((h) => genericHeaderRegex.test(String(h || '').trim())).length;
       const shouldUseGenericColumnFallback =
-        currentHeaders.length > 0 && genericHeadersCount >= Math.max(3, Math.ceil(currentHeaders.length * 0.5));
+        !formQAutofillContext &&
+        currentHeaders.length > 0 &&
+        genericHeadersCount >= Math.max(3, Math.ceil(currentHeaders.length * 0.5));
 
       /** Headers like `17` or `DATES_17` — calendar day columns only attendance should fill. */
       const isLikelyDayOfMonthColumnHeader = (h) => {
@@ -10547,6 +12628,62 @@ const Statutory = ({ userEmail, userRole }) => {
         currentHeaders.forEach((header, colIndex) => {
           const headerLower = header.toLowerCase().trim();
           const normalizedHeader = headerLower.replace(/[^a-z0-9]/g, '');
+          if (formQAutofillContext) {
+            if (isFormQBlankOrMetaTableHeader(header) || !String(header || '').trim()) {
+              row[header] = '';
+              return;
+            }
+            if (
+              headerLower.includes('s.no') ||
+              normalizedHeader === 'sno' ||
+              (headerLower.includes('sr') && headerLower.includes('no'))
+            ) {
+              row[header] = String(index + 1);
+              return;
+            }
+            if (/full\s+name\s+of\s+the\s+worker/.test(headerLower)) {
+              row[header] = sanitizeValue(getEmployeeLookupName(emp));
+              return;
+            }
+            if (/designation/.test(headerLower) && /nature\s+of\s+work|worker/.test(headerLower)) {
+              row[header] = sanitizeValue(
+                emp.Designation ||
+                  emp['Designation'] ||
+                  emp.designation ||
+                  emp['Designation.displayValue'] ||
+                  ''
+              );
+              return;
+            }
+            if (/^age$/.test(headerLower) || (headerLower.includes('age') && !headerLower.includes('wage'))) {
+              row[header] = sanitizeValue(computeAgeFromDobForStatutory(emp) || '');
+              return;
+            }
+            if (/^sex$/.test(headerLower) || headerLower === 'gender') {
+              row[header] = sanitizeValue(
+                emp.Sex || emp.Gender || emp['Sex'] || emp['Gender'] || emp.gender || ''
+              );
+              return;
+            }
+            if (/date\s+of\s+entry\s+into\s+service/.test(headerLower)) {
+              row[header] = sanitizeValue(
+                emp.Dateofjoining ||
+                  emp['Dateofjoining'] ||
+                  emp['Date of Joining'] ||
+                  emp.Date_of_Joining ||
+                  emp['Date_of_Joining'] ||
+                  ''
+              );
+              return;
+            }
+            if (
+              /working\s+hours|interval\s+for\s+rest|date\s+of\s+the\s+month/.test(headerLower) ||
+              /^date\s+of\s+the\s+month_\d{1,2}$/i.test(String(header || '').trim())
+            ) {
+              row[header] = '';
+              return;
+            }
+          }
           if (shouldUseGenericColumnFallback) {
             const fallbackValue = getFallbackByColumnIndex(emp, colIndex, index);
             row[header] = fallbackValue;
@@ -10699,7 +12836,7 @@ const Statutory = ({ userEmail, userRole }) => {
               formXVIIIAutofillContext &&
               (isFormXVIIISerialRegisterHeader(header) || isFormXVIIIAttendanceUnitsHeader(header))
             ) &&
-            (headerLower.includes('s.no') ||
+            (rowHasTableSerialHeader(headerLower) ||
               normalizedHeader === 'sno' ||
               normalizedHeader === 'serialno' ||
               (headerLower.includes('serial') &&
@@ -10708,6 +12845,9 @@ const Statutory = ({ userEmail, userRole }) => {
                 !headerLower.includes('workman')))
           ) {
             row[header] = String(index + 1);
+          }
+          else if (/name\s+of\s+the\s+person/.test(headerLower)) {
+            row[header] = sanitizeValue(getEmployeeLookupName(emp));
           }
           // Form B (TN LWF Register of Wages): total employees = count with Employee ID + First + Last name in Zoho.
           else if (formBAutofillContext && isFormBTotalEmployeeCountHeader(header)) {
@@ -13888,7 +16028,11 @@ const Statutory = ({ userEmail, userRole }) => {
       }
      
       // Update form table data with employee data (including leave balance and leave earned)
-      if (!returnMappedData) setFormTableData(mappedData);
+      let tableDataToSet = mappedData;
+      if (formQAutofillContext) {
+        tableDataToSet = mappedData;
+      }
+      if (!returnMappedData) setFormTableData(tableDataToSet);
       let successMessage = `Successfully loaded ${mappedData.length} employee records`;
       const populatedFields = [];
       if (hasTotalHoursColumn && attendanceHoursPopulated > 0) {
@@ -13978,7 +16122,8 @@ const Statutory = ({ userEmail, userRole }) => {
    
     // Table header keywords (Form U, V, W, X and similar statutory forms)
     const tableHeaderKeywords = [
-      's.no', 's.no.', 'serial', 'serial number',
+      's.no', 's.no.', 'sr. no', 'sr.no', 'serial', 'serial number',
+      'name of the person',
       'name of the employee', 'employee name', 'name of employee',
       'employee identification', 'identification no', 'identification number',
       'gender', 'designation', 'father', 'spouse', 'father / spouse',
@@ -13990,7 +16135,10 @@ const Statutory = ({ userEmail, userRole }) => {
       'number in register', 'muster', 'exempted', 'extent of overtime', 'normal hours',
       'normal rate of pay', 'overtime rate', 'department', 'date of which overtime',
       // LWF Form C and similar (merged quarterly columns)
-      'quarter', 'fines', 'unpaid', 'accumulations'
+      'quarter', 'fines', 'unpaid', 'accumulations',
+      // Form Q (attendance / hours register)
+      'sr. no', 'full name of the worker', 'working hours', 'interval for rest',
+      'date of the month', 'date of entry into service', 'nature of work'
     ];
    
     // First pass: strongly prefer the real table row that contains S.No/Serial.
@@ -14006,12 +16154,11 @@ const Statutory = ({ userEmail, userRole }) => {
       if (nonEmpty.length === 0) continue;
       const rowTextLower = nonEmpty.join(' ').toLowerCase();
       const hasSNo =
-        rowTextLower.includes('s.no') ||
-        rowTextLower.includes('s. no') ||
-        rowTextLower.includes('serial') ||
+        rowHasTableSerialHeader(rowTextLower) ||
         /number\s+in\s+register|register\s+number/i.test(rowTextLower);
       if (!hasSNo) continue;
 
+      const hasConfidentialPersonCol = /name\s+of\s+the\s+person/.test(rowTextLower);
       const keywordHits = [
         'employee',
         'wage',
@@ -14026,7 +16173,10 @@ const Statutory = ({ userEmail, userRole }) => {
       ].reduce((acc, kw) => (rowTextLower.includes(kw) ? acc + 1 : acc), 0);
 
       // Prefer rows that look like a wide table header, not a small label row.
-      const score = (nonEmpty.length * 10) + (keywordHits * 30);
+      const score =
+        (nonEmpty.length * 10) +
+        (keywordHits * 30) +
+        (hasConfidentialPersonCol ? 800 : 0);
       if (score > bestSNoHeaderScore) {
         bestSNoHeaderScore = score;
         bestSNoHeaderRow = rowIdx;
@@ -14393,10 +16543,14 @@ const Statutory = ({ userEmail, userRole }) => {
               }
             }
           }
-          // Form letter title pattern, e.g. Form " B " (See rule 29)
+          // Form letter title pattern, e.g. Form " B " (See rule 29) or FORM Q
           if (!formTitle) {
             for (let colIdx = 0; colIdx < row.length; colIdx++) {
               const cell = rowCells[colIdx];
+              if (cell && /\bform\s*q\b/i.test(cell)) {
+                formTitle = cell.replace(/\s+/g, ' ').trim();
+                break;
+              }
               if (cell && /\bform\s*["']?\s*[a-z]\s*["']?\s*(?:\([^)]*\))?/i.test(cell)) {
                 formTitle = cell.replace(/\s+/g, ' ').trim();
                 break;
@@ -15341,6 +17495,34 @@ const Statutory = ({ userEmail, userRole }) => {
           headerFields = [...orderedFormXXIIIFields, ...otherHeaderFields];
         }
 
+        const formJHeaderFromSheet = buildFormJRegisterHeaderFromSheet({
+          headerRowIndex,
+          getMergedAwareCellText,
+          jsonData,
+          effectiveSheetCols,
+          formTitle,
+          formSubtitle,
+          formReference
+        });
+        if (formJHeaderFromSheet) {
+          formTitle = formJHeaderFromSheet.title;
+          formSubtitle = formJHeaderFromSheet.subtitle;
+          formReference = formJHeaderFromSheet.reference;
+          const subtitleNorm = String(formSubtitle || '').replace(/\s+/g, ' ').toLowerCase();
+          headerTextRows = headerTextRows.filter((line) => {
+            const ln = String(line || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            if (!ln) return false;
+            if (/register\s+of\s+employment|establishment\s+where\s+opening|week\s+ending/i.test(ln)) {
+              return false;
+            }
+            return !(subtitleNorm && (subtitleNorm.includes(ln) || ln.includes(subtitleNorm.slice(0, 48))));
+          });
+          const wageNorm = String(wagePeriodText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          if (wageNorm && subtitleNorm && (subtitleNorm.includes(wageNorm) || /week\s+ending/i.test(wageNorm))) {
+            wagePeriodText = '';
+          }
+        }
+
         if (formTitle || formSubtitle || formReference || headerFields.length > 0 || wagePeriodText || festivalGrid) {
           formHeaderInfo = {
             title: formTitle,
@@ -15360,7 +17542,17 @@ const Statutory = ({ userEmail, userRole }) => {
    
     // Extract table data – use expanded headers when subcolumns exist so each column maps correctly
     const hasSubColumns = subColumnsData && Object.keys(subColumnsData).length > 0;
-    const headersToUse = expandedHeaders.length > 0 ? expandedHeaders : headers;
+    let headersToUse = expandedHeaders.length > 0 ? expandedHeaders : headers;
+    const earlyFormUHints = {
+      fileName: firstSheetName,
+      formHeaderTitle: formHeaderInfo?.title
+    };
+    if (
+      isFormUConfidentialCharacterContext(earlyFormUHints) ||
+      headersIndicateFormUConfidential(headersToUse)
+    ) {
+      headersToUse = normalizeFormUConfidentialHeaders(headersToUse, earlyFormUHints);
+    }
 
     /** Bottom sheet row of any merge that contains (headerRowIndex, c) — multi-row merged thead (e.g. LWF Form C). */
     let firstRowAfterHeaderBlock =
@@ -15463,6 +17655,123 @@ const Statutory = ({ userEmail, userRole }) => {
       const deduped = dedupeConsecutiveFixedAggregateBodyRows(tableData);
       tableData.length = 0;
       deduped.forEach((r) => tableData.push(r));
+    }
+
+    /** Form Q: align table headers with Excel model (parent row + From/To/day sub-row); keep employer/month above the grid. */
+    const formQProbeTitle = formHeaderInfo?.title || '';
+    const formQProbeSub = formHeaderInfo?.subtitle || '';
+    if (
+      isFormQContext(
+        { title: formQProbeTitle, subtitle: formQProbeSub },
+        null,
+        firstSheetName,
+        headersToUse
+      )
+    ) {
+      const formQRebuild = rebuildFormQTableHeadersFromSheet({
+        worksheet,
+        jsonData,
+        effectiveSheetCols,
+        getMergedAwareCellText,
+        merges
+      });
+      if (formQRebuild && formQRebuild.expandedHeaders.length >= 4) {
+        const priorHeaders = [...headersToUse];
+        headers = formQRebuild.headers;
+        expandedHeaders = formQRebuild.expandedHeaders;
+        subColumnsData = formQRebuild.subColumnsData;
+        headerRowIndex = formQRebuild.headerRowIndex;
+        const formQFields = formQRebuild.headerFields || [];
+        if (formQFields.length > 0) {
+          const nf = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+          const formQKeys = new Set(formQFields.map((f) => f.key));
+          const restFields = (formHeaderInfo?.fields || []).filter(
+            (f) => !formQKeys.has(f.key) && !/name\s+of\s+the\s+employer|establishment|^month/.test(nf(f.label))
+          );
+          const mergedFields = [...formQFields, ...restFields];
+          if (formHeaderInfo) {
+            formHeaderInfo = { ...formHeaderInfo, fields: mergedFields };
+          } else {
+            formHeaderInfo = {
+              title: formQProbeTitle || 'FORM Q',
+              subtitle: formQProbeSub,
+              reference: '',
+              wagePeriodText: '',
+              fields: mergedFields,
+              textRows: []
+            };
+          }
+        }
+        if (!formHeaderInfo?.title && /form\s*q/i.test(firstSheetName)) {
+          formHeaderInfo = {
+            ...(formHeaderInfo || {}),
+            title: 'FORM Q',
+            subtitle: formHeaderInfo?.subtitle || '',
+            reference: formHeaderInfo?.reference || '',
+            fields: formHeaderInfo?.fields || formQFields,
+            textRows: formHeaderInfo?.textRows || [],
+            wagePeriodText: formHeaderInfo?.wagePeriodText || ''
+          };
+        }
+        headersToUse = formQRebuild.expandedHeaders;
+        const priorRows = tableData.map((row) => ({ ...row }));
+        const formQStartCol = formQRebuild.startCol;
+        const hasSubCols = Object.keys(subColumnsData).some((k) => (subColumnsData[k] || []).length > 0);
+        if (hasSubCols) {
+          let dataStart = headerRowIndex + 2;
+          const sectionRow = headerRowIndex + 2;
+          if (sectionRow < jsonData.length && expandedHeaders.length >= 4) {
+            let seqHits = 0;
+            for (let hi = 0; hi < Math.min(9, expandedHeaders.length); hi += 1) {
+              const t = String(getMergedAwareCellText(sectionRow, formQStartCol + hi) || '')
+                .replace(/\s+/g, '')
+                .trim();
+              if (t === String(hi + 1)) seqHits += 1;
+            }
+            if (seqHits >= 4) dataStart = sectionRow + 1;
+          }
+          startIndex = dataStart;
+          tableData.length = 0;
+          const orderedMains = [];
+          let curMain = null;
+          for (let colIdx = 0; colIdx < headers.length; colIdx += 1) {
+            const h = (headers[colIdx] || '').trim();
+            if (h) curMain = h;
+            if (curMain && orderedMains[orderedMains.length - 1] !== curMain) orderedMains.push(curMain);
+          }
+          if (orderedMains.length === 0) orderedMains.push(...Object.keys(subColumnsData));
+          for (let i = startIndex; i < jsonData.length; i += 1) {
+            const rowData = {};
+            let excelColIdx = formQStartCol;
+            orderedMains.forEach((main) => {
+              const subs = subColumnsData[main] || [];
+              if (subs.length > 0) {
+                subs.forEach((sub) => {
+                  const key = `${main}_${sub}`;
+                  rowData[key] = String(getMergedAwareCellText(i, excelColIdx) || '').trim();
+                  excelColIdx += 1;
+                });
+              } else {
+                rowData[main] = String(getMergedAwareCellText(i, excelColIdx) || '').trim();
+                excelColIdx += 1;
+              }
+            });
+            if (Object.values(rowData).some((val) => val)) tableData.push(rowData);
+          }
+          if (
+            priorRows.length > 0 &&
+            tableData.every(
+              (row) => !row || !Object.values(row).some((val) => String(val ?? '').trim() !== '')
+            )
+          ) {
+            tableData.length = 0;
+            remapFormQRowsToHeaders(priorRows, priorHeaders, headersToUse).forEach((r) => tableData.push(r));
+          }
+        } else if (priorRows.length > 0) {
+          tableData.length = 0;
+          remapFormQRowsToHeaders(priorRows, priorHeaders, headersToUse).forEach((r) => tableData.push(r));
+        }
+      }
     }
 
     /** Form X: merged row above detail headers (Earned Leave, Medical Leave, …) — not employer meta like Registration Certificate. */
@@ -15585,6 +17894,110 @@ const Statutory = ({ userEmail, userRole }) => {
           if (rawGroups.some((x) => x)) columnGroupLabels = rawGroups;
         }
       }
+    }
+
+    const sheetTextBlob = jsonData
+      .slice(0, Math.min(40, jsonData.length))
+      .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+      .join(' ');
+    const usableHeaderCount = headersToUse.filter((h) => String(h || '').trim()).length;
+    const formUHints = {
+      fileName: firstSheetName,
+      formHeaderTitle: formHeaderInfo?.title,
+      sheetText: sheetTextBlob
+    };
+    if (
+      usableHeaderCount === 0 &&
+      isFormUConfidentialCharacterContext(formUHints)
+    ) {
+      headersToUse = normalizeFormUConfidentialHeaders([], formUHints);
+      if (headerRowIndex < 0) {
+        for (let r = 0; r < Math.min(45, jsonData.length); r += 1) {
+          const rowText = (jsonData[r] || [])
+            .map((c) => String(c || '').toLowerCase())
+            .join(' ');
+          if (rowHasTableSerialHeader(rowText) && rowText.includes('name of the person')) {
+            headerRowIndex = r;
+            break;
+          }
+        }
+      }
+      if (startIndex < 0) {
+        startIndex = headerRowIndex >= 0 ? headerRowIndex + 1 : Math.min(12, jsonData.length);
+      }
+    } else if (
+      usableHeaderCount === 0 &&
+      isFormUEmployeeRegisterContext(formUHints)
+    ) {
+      headersToUse = [...FORM_U_FORMAT2_HEADERS];
+      if (headerRowIndex < 0) {
+        for (let r = 0; r < Math.min(45, jsonData.length); r += 1) {
+          const rowText = (jsonData[r] || [])
+            .map((c) => String(c || '').toLowerCase())
+            .join(' ');
+          if (
+            rowHasTableSerialHeader(rowText) ||
+            rowText.includes('name of the employee') ||
+            rowText.includes('employee identification')
+          ) {
+            headerRowIndex = r;
+            break;
+          }
+        }
+      }
+      if (startIndex < 0) {
+        startIndex = headerRowIndex >= 0 ? headerRowIndex + 2 : Math.min(12, jsonData.length);
+      }
+    } else if (
+      detectFormUSheetVariant(formUHints) === 'confidential_character' ||
+      (headersIndicateFormUConfidential(headersToUse) &&
+        headersToUse.filter((h) => /name\s+of\s+the\s+person/i.test(String(h || ''))).length > 1)
+    ) {
+      headersToUse = normalizeFormUConfidentialHeaders(headersToUse, formUHints);
+      for (let r = 0; r < Math.min(45, jsonData.length); r += 1) {
+        const rowText = (jsonData[r] || [])
+          .map((c) => String(c || '').toLowerCase())
+          .join(' ');
+        if (rowHasTableSerialHeader(rowText) && rowText.includes('name of the person')) {
+          headerRowIndex = r;
+          break;
+        }
+      }
+      if (startIndex < 0) {
+        startIndex = headerRowIndex >= 0 ? headerRowIndex + 1 : Math.min(12, jsonData.length);
+      }
+    }
+
+    const formQFileHint =
+      /form[\s_-]*q/i.test(String(firstSheetName || '')) ||
+      isFormQContext(formHeaderInfo, null, firstSheetName, headersToUse);
+    if (formQFileHint) {
+      const priorHeadersForRemap = [...headersToUse];
+      const priorRowsForRemap = tableData.map((row) => ({ ...row }));
+      const resolved = resolveFormQTableHeadersForWorkbook(workbook, 31);
+      const formQHeaders = resolved.headers;
+      let formQTableData = remapFormQRowsToHeaders(priorRowsForRemap, priorHeadersForRemap, formQHeaders);
+      const formQFields = resolved.headerFields || [];
+      const mergedFields = formQFields;
+      formHeaderInfo = {
+        ...(formHeaderInfo || {}),
+        title: formHeaderInfo?.title || 'FORM Q',
+        subtitle: formHeaderInfo?.subtitle || '',
+        reference: formHeaderInfo?.reference || '',
+        wagePeriodText: formHeaderInfo?.wagePeriodText || '',
+        fields: mergedFields,
+        textRows: formHeaderInfo?.textRows || []
+      };
+      return {
+        formHeader: formHeaderInfo,
+        tableData: formQTableData,
+        headers: formQHeaders,
+        subColumns: resolved.subColumns,
+        headerRowIndex: resolved.headerRowIndex,
+        dataStartIndex: resolved.dataStartIndex,
+        columnGroupLabels: null,
+        originalHeaderRowIndex: resolved.headerRowIndex
+      };
     }
 
     return {
@@ -15742,10 +18155,7 @@ const Statutory = ({ userEmail, userRole }) => {
     return false;
   };
 
-  const defaultFormTemplateFileName = (item) => {
-    const base = ((item?.formName || item?.FormName || 'form') + '').trim().replace(/[/\\?%*:|"<>]/g, '') || 'form';
-    return `${base}.xlsx`;
-  };
+  const defaultFormTemplateFileName = (item) => buildStatutoryFormFileLabel(item);
 
   const normalizeTemplateFormNameKey = (name) =>
     String(name || '')
@@ -15874,19 +18284,37 @@ const Statutory = ({ userEmail, userRole }) => {
     }
   };
 
-  /** Build candidate fetch URLs so Autofill can still open if one mapping is stale. */
+  /** Load template for this row only — avoid parallel URLs that can return another line's form. */
   const getFormFileFetchUrlCandidates = (item) => {
-    const urls = [];
-    const primary = getFormFileFetchUrl(item);
-    if (primary) urls.push(primary);
-    if (item?.formFile && item.formFile !== 'null' && String(item.formFile).trim() !== '') {
+    const idStr = String(item?.formFetchRowId ?? item?.id ?? '').trim();
+    const formFileId = item?.formFile ?? item?.FormFile;
+    const hasStoredFormFile =
+      formFileId && formFileId !== 'null' && String(formFileId).trim() !== '';
+
+    if (hasStoredFormFile) {
       const rawName = formFileNameLooksLikePlaceholder(item.formFileName)
-        ? defaultFormTemplateFileName(item)
-        : (item.formFileName || defaultFormTemplateFileName(item));
+        ? buildStatutoryFormFileLabel(item)
+        : (item.formFileName || buildStatutoryFormFileLabel(item));
       const fileName = String(rawName).replace(/[^a-zA-Z0-9._-]/g, '_');
-      urls.push(`/server/formmaster_function/templates/download/${item.formFile}?fileName=${encodeURIComponent(fileName)}`);
+      return [
+        `/server/formmaster_function/templates/download/${String(formFileId).trim()}?fileName=${encodeURIComponent(fileName)}`
+      ];
     }
-    return Array.from(new Set(urls.filter(Boolean)));
+
+    const isFromChecklist = item?.isFromChecklist || idStr.startsWith('checklist_');
+    if (isFromChecklist) {
+      const checklistId = item?.checklistId || idStr.replace(/^checklist_/, '');
+      if (checklistId) {
+        return [`/server/checklist_function/checklist/${checklistId}/file/Form`];
+      }
+    }
+
+    if (!isSyntheticStatutoryRowId(idStr) && /^\d+$/.test(idStr)) {
+      const primary = `/server/statutoryreg_function/statutory/${idStr}/file/Form`;
+      return primary ? [primary] : [];
+    }
+
+    return [];
   };
 
   const prefetchAutofillForRow = useCallback((item) => {
@@ -15979,10 +18407,66 @@ const Statutory = ({ userEmail, userRole }) => {
           : '';
 
         const parsed = parseExcelForm(workbook);
+        const sheetTextForVariant = workbook.SheetNames?.[0]
+          ? (() => {
+              const ws0 = workbook.Sheets[workbook.SheetNames[0]];
+              const rows = XLSX.utils.sheet_to_json(ws0, { header: 1, defval: '' });
+              return rows
+                .slice(0, 35)
+                .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+                .join(' ');
+            })()
+          : '';
+        const variantHints = {
+          fileName: displayFileName,
+          formFileName: item?.formFileName,
+          formName: item?.formName || item?.FormName,
+          formHeaderTitle: parsed.formHeader?.title,
+          sheetText: sheetTextForVariant,
+          item
+        };
+        const templateMismatch = validateFormUTemplateForRow(item, variantHints);
+        if (templateMismatch) {
+          throw new Error(templateMismatch);
+        }
+        const resolvedHeaders = resolveAutofillTableHeaders(parsed.headers || [], variantHints);
+        if (resolvedHeaders.length > (parsed.headers || []).filter((h) => String(h || '').trim()).length) {
+          parsed.headers = resolvedHeaders;
+        }
 
-        const resolvedFormFileName = item.formFileName && !formFileNameLooksLikePlaceholder(item.formFileName)
-          ? item.formFileName
-          : displayFileName;
+        const resolvedFormFileName =
+          item.formFileName && !formFileNameLooksLikePlaceholder(item.formFileName)
+            ? item.formFileName
+            : buildStatutoryFormFileLabel({ ...item, formFileName: displayFileName });
+
+        const formQMonthIdx = MONTH_NAMES.findIndex((m) =>
+          m.toLowerCase().startsWith(String(selectedMonth || '').toLowerCase().trim())
+        );
+        const formQDayCount =
+          formQMonthIdx >= 0
+            ? new Date(new Date().getFullYear(), formQMonthIdx + 1, 0).getDate()
+            : 31;
+        const formQFileOpen =
+          /form[\s_-]*q/i.test(String(displayFileName || resolvedFormFileName || '')) ||
+          isFormQContext(parsed.formHeader, item, displayFileName, parsed.headers);
+        if (formQFileOpen) {
+          const priorHeaders = parsed.headers || [];
+          const priorRows = parsed.tableData || [];
+          const resolvedFormQ = resolveFormQTableHeadersForWorkbook(workbook, formQDayCount);
+          parsed.headers = resolvedFormQ.headers;
+          parsed.subColumns = resolvedFormQ.subColumns;
+          parsed.headerRowIndex = resolvedFormQ.headerRowIndex;
+          parsed.dataStartIndex = resolvedFormQ.dataStartIndex;
+          parsed.columnGroupLabels = null;
+          parsed.tableData = remapFormQRowsToHeaders(priorRows, priorHeaders, resolvedFormQ.headers);
+          if (resolvedFormQ.headerFields?.length) {
+            parsed.formHeader = {
+              ...(parsed.formHeader || {}),
+              title: parsed.formHeader?.title || 'FORM Q',
+              fields: resolvedFormQ.headerFields
+            };
+          }
+        }
 
         const templateWageLine = parsed.formHeader?.wagePeriodText || '';
 
@@ -16051,8 +18535,24 @@ const Statutory = ({ userEmail, userRole }) => {
           formHeaderForModal = { ...formHeaderForModal, fields };
         }
 
+        formHeaderForModal = normalizeFormJHeaderForDisplay(
+          formHeaderForModal,
+          item,
+          displayFileName
+        );
+        const tableHeadersForModal = formQFileOpen
+          ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
+          : resolveAutofillTableHeaders(parsed.headers || [], {
+              fileName: displayFileName,
+              formFileName: resolvedFormFileName,
+              formName: item?.formName || item?.FormName,
+              formHeaderTitle: formHeaderForModal?.title || parsed.formHeader?.title,
+              sheetText: sheetTextForVariant,
+              item
+            });
+        parsed.headers = tableHeadersForModal;
         setFormHeader(formHeaderForModal);
-        setTableHeaders(parsed.headers);
+        setTableHeaders(tableHeadersForModal);
         setSubColumns(parsed.subColumns);
 
         let initialHeaderFormData = {};
@@ -16131,7 +18631,7 @@ const Statutory = ({ userEmail, userRole }) => {
           rawData: workbook,
           item: modalSourceItem,
           parsedFormHeader: formHeaderForModal,
-          parsedTableHeaders: parsed.headers || [],
+          parsedTableHeaders: tableHeadersForModal,
           parsedSubColumns: parsed.subColumns,
           parsedHeaderFormData: initialHeaderFormData,
           headerRowIndex: parsed.headerRowIndex,
@@ -16146,7 +18646,7 @@ const Statutory = ({ userEmail, userRole }) => {
         const shouldAutofill = forceAutofill || isAutofillMode;
 
         if (shouldAutofill) {
-          console.log('🔄 Autofill: template from Form File – headers:', (parsed.headers || []).length);
+          console.log('🔄 Autofill: template from Form File – headers:', tableHeadersForModal.length);
           // Show the selected form file immediately on first click, then replace rows with Autofill data.
           setFormTableData(parsed.tableData || []);
           const shouldPreferSavedDraftData = !!options?.preferSavedDraftData;
@@ -16155,6 +18655,9 @@ const Statutory = ({ userEmail, userRole }) => {
             const modalReqTs = Date.now();
             try {
               const sampleRowId =
+                (item?.draftStatutoryRowIdForFile && isNumericStatutoryBackendId(item.draftStatutoryRowIdForFile)
+                  ? String(item.draftStatutoryRowIdForFile).trim()
+                  : null) ||
                 (sentDraftDonorForModal?.id != null ? String(sentDraftDonorForModal.id).trim() : null) ||
                 resolveNumericStatutoryIdForProofRow(modalDraftSourceItem, { preferSiteSubmittedDraft: true }) ||
                 resolveNumericStatutoryIdForProofRow(item, { preferSiteSubmittedDraft: true }) ||
@@ -16179,7 +18682,18 @@ const Statutory = ({ userEmail, userRole }) => {
                     setFormFileModalData((prev) => {
                       if (!prev) return prev;
                       const next = { ...prev };
-                      if (sampleHeaders.length > 0) next.parsedTableHeaders = sampleHeaders;
+                      const formQSaved = isFormQContext(
+                        prev.parsedFormHeader,
+                        prev.item,
+                        prev.fileName || '',
+                        sampleHeaders
+                      );
+                      const normalizedSampleHeaders = formQSaved
+                        ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
+                        : sampleHeaders;
+                      if (normalizedSampleHeaders.length > 0) {
+                        next.parsedTableHeaders = normalizedSampleHeaders;
+                      }
                       if (hasSavedHeaderFormData) {
                         next.parsedHeaderFormData = {
                           ...(prev.parsedHeaderFormData || {}),
@@ -16196,7 +18710,20 @@ const Statutory = ({ userEmail, userRole }) => {
                     }));
                   }
                   if (Array.isArray(sampleRows) && sampleRows.length > 0) {
-                    setFormTableData(sampleRows);
+                    const formQSaved = isFormQContext(
+                      formFileModalData?.parsedFormHeader,
+                      item,
+                      displayFileName,
+                      sampleHeaders
+                    );
+                    const hdrsForRows = formQSaved
+                      ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
+                      : sampleHeaders;
+                    setFormTableData(
+                      formQSaved
+                        ? remapFormQRowsToHeaders(sampleRows, sampleHeaders, hdrsForRows)
+                        : sampleRows
+                    );
                   }
                   if ((Array.isArray(sampleRows) && sampleRows.length > 0) || hasSavedHeaderFormData) {
                     loadedSavedData = true;
@@ -16266,33 +18793,33 @@ const Statutory = ({ userEmail, userRole }) => {
                 return;
               }
               if (shouldPreferSavedDraftData) {
-                setError('Could not load the site saved draft. Use Download Draft File or try again.');
-              } else {
-                setTableAutofillLoading(true);
-                fetchAndPopulateEmployeeData(parsed.headers, {
-                  columnGroupLabels: parsed.columnGroupLabels ?? null,
-                  formFileModalData: {
-                    fileName: displayFileName,
-                    formFileName: resolvedFormFileName,
-                    fileType: 'excel-form',
-                    sheetHtml: excelSheetHtml,
-                    rawData: workbook,
-                    item: modalSourceItem,
-                    parsedFormHeader: formHeaderForModal,
-                    parsedTableHeaders: parsed.headers || [],
-                    parsedSubColumns: parsed.subColumns,
-                    parsedHeaderFormData: initialHeaderFormData,
-                    headerRowIndex: parsed.headerRowIndex,
-                    dataStartIndex: parsed.dataStartIndex,
-                    parsedColumnGroupLabels: parsed.columnGroupLabels ?? null,
-                    originalHeaderRowIndex: parsed.originalHeaderRowIndex ?? parsed.headerRowIndex
-                  }
-                });
+                setError('Could not load the saved draft. Loading employee data from Zoho People…');
+                setTimeout(() => setError(''), 4000);
               }
+              setTableAutofillLoading(true);
+              fetchAndPopulateEmployeeData(tableHeadersForModal, {
+                columnGroupLabels: parsed.columnGroupLabels ?? null,
+                formFileModalData: {
+                  fileName: displayFileName,
+                  formFileName: resolvedFormFileName,
+                  fileType: 'excel-form',
+                  sheetHtml: excelSheetHtml,
+                  rawData: workbook,
+                  item: modalSourceItem,
+                  parsedFormHeader: formHeaderForModal,
+                  parsedTableHeaders: tableHeadersForModal,
+                  parsedSubColumns: parsed.subColumns,
+                  parsedHeaderFormData: initialHeaderFormData,
+                  headerRowIndex: parsed.headerRowIndex,
+                  dataStartIndex: parsed.dataStartIndex,
+                  parsedColumnGroupLabels: parsed.columnGroupLabels ?? null,
+                  originalHeaderRowIndex: parsed.originalHeaderRowIndex ?? parsed.headerRowIndex
+                }
+              });
             }
           } else {
             setTableAutofillLoading(true);
-            fetchAndPopulateEmployeeData(parsed.headers, {
+            fetchAndPopulateEmployeeData(tableHeadersForModal, {
               columnGroupLabels: parsed.columnGroupLabels ?? null,
               formFileModalData: modalPayloadForAutofill
             });
@@ -16479,11 +19006,18 @@ const Statutory = ({ userEmail, userRole }) => {
             });
             if (byFuzzy.length > 0) byState = byFuzzy;
           }
+          const urlSite = String(siteFromUrl || '').trim();
+          if (urlSite) {
+            const urlNorm = urlSite.toLowerCase();
+            const urlMatch = byState.find(
+              (rec) => String(rec.siteName || '').trim().toLowerCase() === urlNorm
+            );
+            if (urlMatch?.siteName) return urlMatch.siteName;
+          }
           const names = [...new Set(byState.map((r) => r.siteName).filter(Boolean))];
           if (names.length === 1) return names[0];
           if (names.length > 1) return names.sort((a, b) => a.localeCompare(b)).join(', ');
         }
-        if (inchargePool.length > 0) return '';
       }
     }
     if (Array.isArray(allowedSiteNameList) && allowedSiteNameList.length === 1) {
@@ -16831,23 +19365,31 @@ const Statutory = ({ userEmail, userRole }) => {
     setCurrentPage(1);
   };
 
-  // Form file shared across months: once uploaded in SEMaster, show in every month by looking up from any record with same form name
+  // Form file by full line identity (Form Name + Act + Description + Sector + State) — two "Form U" rows stay distinct
   const formFileByFormKey = useMemo(() => {
     const map = new Map();
     if (!statutoryData || !Array.isArray(statutoryData)) return map;
+    const score = (row) => {
+      let s = 0;
+      if (row?.isFromFormmaster) s += 200;
+      if (row?.formFile) s += 50;
+      return s;
+    };
     statutoryData.forEach((row) => {
       const formFile = row.formFile || row.FormFile || null;
       const hasFile = formFile && formFile !== 'null' && String(formFile).trim() !== '';
       if (!hasFile) return;
-      const sec = String(row.sector || row.Sector || '').trim().toLowerCase();
-      const st = String(row.state || row.State || '').trim().toLowerCase();
-      const key = `${(row.formName || '').toLowerCase().trim()}|${(row.act || '').toLowerCase().trim()}|${sec}|${st}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          formFile,
-          formFileName: row.formFileName || row.FormFileName || 'View File',
-          id: row.id
-        });
+      const key = buildFormmasterMatchKey(row);
+      if (!key) return;
+      const candidate = {
+        formFile,
+        formFileName: row.formFileName || row.FormFileName || 'View File',
+        id: row.id,
+        isFromFormmaster: !!row.isFromFormmaster
+      };
+      const prev = map.get(key);
+      if (!prev || score(candidate) > score(prev)) {
+        map.set(key, candidate);
       }
     });
     return map;
@@ -16858,33 +19400,70 @@ const Statutory = ({ userEmail, userRole }) => {
   const draftRowByFormActMonthKey = useMemo(() => {
     const map = new Map();
     if (!Array.isArray(statutoryData) || statutoryData.length === 0) return map;
-    statutoryData.forEach((row) => {
-      const draftFile = row?.draftFile ?? row?.DraftFile ?? null;
-      const hasDraft = draftFile && draftFile !== 'null' && String(draftFile).trim() !== '';
-      if (!hasDraft) return;
-      const monthNorm = String(row?.monthFilter || row?.MonthFilter || row?.monthfilter || '').trim().toLowerCase().substring(0, 3);
-      const descNorm = String(row?.description || row?.Description || '').trim().toLowerCase();
-      const secNorm = String(row?.sector || row?.Sector || '').trim().toLowerCase();
-      const stateNorm = String(row?.state || row?.State || '').trim().toLowerCase();
-      const siteNorm = squashStatutoryKeyPart(row?.site ?? row?.Site ?? '');
-      const key = `${String(row?.formName || '').toLowerCase().trim()}|${String(row?.act || '').toLowerCase().trim()}|${descNorm}|${monthNorm || 'nomonth'}|${secNorm}|${stateNorm}|${siteNorm || 'nosite'}`;
+    const uiMonthNorm = statutoryDedupeMonthNorm(
+      { monthFilter: selectedMonth, MonthFilter: selectedMonth },
+      selectedMonth
+    );
+    const putDraftKey = (key, row) => {
       const prev = map.get(key);
       if (isPreferredStatutoryRow(row, prev)) {
         map.set(key, row);
       }
+    };
+    statutoryData.forEach((row) => {
+      const draftFile = row?.draftFile ?? row?.DraftFile ?? null;
+      const hasDraft = draftFile && draftFile !== 'null' && String(draftFile).trim() !== '';
+      if (!hasDraft) return;
+      const monthNorm = statutoryDedupeMonthNorm(row, selectedMonth);
+      const descNorm = String(row?.description || row?.Description || '').trim().toLowerCase();
+      const secNorm = String(row?.sector || row?.Sector || '').trim().toLowerCase();
+      const stateNorm = String(row?.state || row?.State || '').trim().toLowerCase();
+      const siteNorm = squashStatutoryKeyPart(row?.site ?? row?.Site ?? '');
+      const baseKey = `${String(row?.formName || '').toLowerCase().trim()}|${String(row?.act || '').toLowerCase().trim()}|${descNorm}|`;
+      const tail = `${secNorm}|${stateNorm}|${siteNorm || 'nosite'}`;
+      putDraftKey(`${baseKey}${monthNorm || 'nomonth'}|${tail}`, row);
+      if (monthNorm === 'nomonth' && uiMonthNorm !== 'nomonth') {
+        putDraftKey(`${baseKey}${uiMonthNorm}|${tail}`, row);
+      }
     });
     return map;
-  }, [statutoryData]);
+  }, [statutoryData, selectedMonth]);
 
   // Autofill/View modal: use format read from the View File (parsed form header + table headers) so each form opens with its own structure
-  const displayFormHeader = useMemo(() =>
-    (formFileModalData?.parsedFormHeader != null) ? formFileModalData.parsedFormHeader : formHeader,
-  [formFileModalData?.parsedFormHeader, formHeader]);
+  const displayFormHeader = useMemo(() => {
+    const base =
+      formFileModalData?.parsedFormHeader != null ? formFileModalData.parsedFormHeader : formHeader;
+    return normalizeFormJHeaderForDisplay(
+      base,
+      formFileModalData?.item,
+      formFileModalData?.fileName
+    );
+  }, [formFileModalData?.parsedFormHeader, formFileModalData?.item, formFileModalData?.fileName, formHeader]);
   const isFormFileReadOnly = !!formFileModalData?.readOnly;
   const displayTableHeaders = useMemo(() => {
     const parsed = formFileModalData?.parsedTableHeaders;
-    const baseHeaders = Array.isArray(parsed) && parsed.length > 0 ? parsed : tableHeaders || [];
+    let baseHeaders = Array.isArray(parsed) && parsed.length > 0 ? parsed : tableHeaders || [];
+    const item = formFileModalData?.item;
+    const fn = formFileModalData?.fileName || '';
+    baseHeaders = resolveAutofillTableHeaders(baseHeaders, {
+      fileName: fn,
+      formFileName: formFileModalData?.formFileName,
+      formName: item?.formName || item?.FormName,
+      itemFormName: item?.FormName,
+      formHeaderTitle: formFileModalData?.parsedFormHeader?.title,
+      item
+    });
     const effectiveSelectedMonth = resolveToFullMonthName(selectedMonth) || '';
+    if (isFormQContext(displayFormHeader, item, fn, baseHeaders)) {
+      const formQMonthIdx = MONTH_NAMES.findIndex((m) =>
+        m.toLowerCase().startsWith(String(effectiveSelectedMonth || '').toLowerCase().trim())
+      );
+      const formQDayCount =
+        formQMonthIdx >= 0
+          ? new Date(new Date().getFullYear(), formQMonthIdx + 1, 0).getDate()
+          : 31;
+      baseHeaders = stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount));
+    }
     const selectedMonthIndex = MONTH_NAMES.findIndex(
       (month) => month.toLowerCase().startsWith(String(effectiveSelectedMonth || '').toLowerCase().trim())
     );
@@ -16916,7 +19495,35 @@ const Statutory = ({ userEmail, userRole }) => {
       const day = Number(String(header).trim().replace(/^.+_/, ''));
       return day <= monthDayCount;
     });
-  }, [formFileModalData?.parsedTableHeaders, tableHeaders, selectedMonth]);
+  }, [
+    formFileModalData?.parsedTableHeaders,
+    formFileModalData?.item,
+    formFileModalData?.fileName,
+    tableHeaders,
+    selectedMonth,
+    displayFormHeader
+  ]);
+
+  const displayFormTableData = useMemo(() => {
+    const rows = formTableData;
+    if (!Array.isArray(rows) || rows.length === 0) return rows || [];
+    const item = formFileModalData?.item;
+    const fn = formFileModalData?.fileName || '';
+    const hdrs = displayTableHeaders;
+    if (!isFormQContext(displayFormHeader, item, fn, hdrs)) return rows;
+    const rawHeaders = formFileModalData?.parsedTableHeaders?.length
+      ? formFileModalData.parsedTableHeaders
+      : tableHeaders || [];
+    return remapFormQRowsToHeaders(rows, rawHeaders, hdrs);
+  }, [
+    formTableData,
+    displayTableHeaders,
+    formFileModalData?.parsedTableHeaders,
+    formFileModalData?.item,
+    formFileModalData?.fileName,
+    tableHeaders,
+    displayFormHeader
+  ]);
 
   const displayColumnGroupLabels = useMemo(() => {
     const g = formFileModalData?.parsedColumnGroupLabels;
@@ -16925,6 +19532,7 @@ const Statutory = ({ userEmail, userRole }) => {
     if (!g.some((x) => String(x || '').trim())) return null;
     const item = formFileModalData?.item;
     const fn = String(formFileModalData?.fileName || '');
+    if (isFormQContext(displayFormHeader, item, fn, displayTableHeaders)) return null;
     const formContext = [
       item?.formName,
       item?.FormName,
@@ -17008,6 +19616,7 @@ const Statutory = ({ userEmail, userRole }) => {
     const fn = formFileModalData?.fileName || '';
     const originalHeaderRowIndex = formFileModalData?.originalHeaderRowIndex;
     if (!wb || wb.SheetNames == null || !wb.SheetNames[0] || ds == null || ds < 1 || !hdrs?.length) return null;
+    if (isFormQContext(displayFormHeader, item, fn, hdrs)) return null;
     if (!isForm11EsicAccidentBookContext(displayFormHeader, item, fn, hdrs)) return null;
     if (originalHeaderRowIndex == null || originalHeaderRowIndex < 0) return null;
     const ws = wb.Sheets[wb.SheetNames[0]];
@@ -17034,6 +19643,7 @@ const Statutory = ({ userEmail, userRole }) => {
     const fn = formFileModalData?.fileName || '';
     const originalHeaderRowIndex = formFileModalData?.originalHeaderRowIndex;
     if (!wb || wb.SheetNames == null || !wb.SheetNames[0] || ds == null || ds < 1 || !hdrs?.length) return null;
+    if (isFormQContext(displayFormHeader, item, fn, hdrs)) return null;
     if (!isFormHLeaveBookContext(displayFormHeader, item, fn)) return null;
     if (originalHeaderRowIndex == null || originalHeaderRowIndex < 0) return null;
     const ws = wb.Sheets[wb.SheetNames[0]];
@@ -17101,6 +19711,7 @@ const Statutory = ({ userEmail, userRole }) => {
     const fn = formFileModalData?.fileName || '';
     const originalHeaderRowIndex = formFileModalData?.originalHeaderRowIndex;
     if (!wb || wb.SheetNames == null || !wb.SheetNames[0] || ds == null || ds < 1 || !hdrs?.length) return null;
+    if (isFormQContext(displayFormHeader, item, fn, hdrs)) return null;
     if (!isFormTSEContext(displayFormHeader, item, fn)) return null;
     if (originalHeaderRowIndex == null || originalHeaderRowIndex < 0) return null;
     const ws = wb.Sheets[wb.SheetNames[0]];
@@ -17182,6 +19793,7 @@ const Statutory = ({ userEmail, userRole }) => {
     const fn = formFileModalData?.fileName || '';
     const originalHeaderRowIndex = formFileModalData?.originalHeaderRowIndex;
     if (!wb || wb.SheetNames == null || !wb.SheetNames[0] || ds == null || ds < 1 || !hdrs?.length) return null;
+    if (isFormQContext(displayFormHeader, item, fn, hdrs)) return null;
     if (!isRegisterOfWagesCumMusterRollContext(displayFormHeader, item, fn)) return null;
     if (originalHeaderRowIndex == null || originalHeaderRowIndex < 0) return null;
     const ws = wb.Sheets[wb.SheetNames[0]];
@@ -17253,6 +19865,7 @@ const Statutory = ({ userEmail, userRole }) => {
     const fn = formFileModalData?.fileName || '';
     const originalHeaderRowIndex = formFileModalData?.originalHeaderRowIndex;
     if (!wb || wb.SheetNames == null || !wb.SheetNames[0] || ds == null || ds < 1 || !hdrs?.length) return null;
+    if (isFormQContext(displayFormHeader, item, fn, hdrs)) return null;
     if (!isFormXVIIContext(displayFormHeader, item, fn) && !isFormXXIIIContext(displayFormHeader, item, fn)) {
       return null;
     }
@@ -17328,6 +19941,9 @@ const Statutory = ({ userEmail, userRole }) => {
 
   const formVDailyHoursThead = useMemo(() => {
     const hdrs = displayTableHeaders;
+    const item = formFileModalData?.item;
+    const fn = formFileModalData?.fileName || '';
+    if (isFormQContext(displayFormHeader, item, fn, hdrs)) return null;
     const info = getDailyHoursGridGroupInfo(hdrs);
     if (!info) return null;
     const { startIndex, parentLabel } = info;
@@ -17569,6 +20185,113 @@ const Statutory = ({ userEmail, userRole }) => {
     );
   }, [displayTableHeaders, displayFormHeader, formFileModalData?.item, formFileModalData?.fileName]);
 
+  /** Form Q: Excel model — worker columns + Working hours / Interval for Rest / Date of the Month (From/To or day subs). */
+  const formQGroupedThead = useMemo(() => {
+    const hdrs = stripAndNormalizeFormQTableHeaders(displayTableHeaders);
+    const item = formFileModalData?.item;
+    const fn = formFileModalData?.fileName || '';
+    if (!Array.isArray(hdrs) || hdrs.length < 2) return null;
+    if (!isFormQContext(displayFormHeader, item, fn, hdrs)) return null;
+
+    const splitHeader = (h) => {
+      const m = String(h || '').match(/^(.+)_([\s\S]+)$/);
+      if (!m) return null;
+      return { parent: m[1].trim(), sub: m[2].trim() };
+    };
+
+    let hasGroupWithSubs = false;
+    const chunks = [];
+    for (let i = 0; i < hdrs.length; i += 1) {
+      const first = splitHeader(hdrs[i]);
+      if (!first) {
+        chunks.push({ kind: 'single', header: hdrs[i], start: i, end: i + 1 });
+        continue;
+      }
+      let j = i + 1;
+      while (j < hdrs.length) {
+        const next = splitHeader(hdrs[j]);
+        if (!next || next.parent.toLowerCase() !== first.parent.toLowerCase()) break;
+        j += 1;
+      }
+      const span = j - i;
+      if (span >= 2) {
+        hasGroupWithSubs = true;
+        chunks.push({ kind: 'group', parent: first.parent, start: i, end: j });
+      } else {
+        chunks.push({ kind: 'single', header: hdrs[i], start: i, end: i + 1 });
+      }
+      i = j - 1;
+    }
+    if (!hasGroupWithSubs) return null;
+
+    const groupHeaderStyle = {
+      backgroundColor: STAT_FORM_FILE_ACCENT_BG,
+      color: 'white',
+      padding: '10px 12px',
+      textAlign: 'center',
+      fontWeight: '700',
+      fontSize: '13px',
+      border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
+      verticalAlign: 'middle'
+    };
+    const identityOrDetailHeaderStyle = {
+      backgroundColor: STAT_FORM_FILE_ACCENT_BG,
+      color: 'white',
+      padding: '12px',
+      textAlign: 'left',
+      fontWeight: '600',
+      fontSize: '14px',
+      border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
+      verticalAlign: 'middle'
+    };
+    const stickyDetailHeaderStyle = {
+      ...identityOrDetailHeaderStyle,
+      textAlign: 'center',
+      fontSize: '13px',
+      minWidth: '44px',
+      position: 'sticky',
+      top: 0,
+      zIndex: 10
+    };
+
+    const row1Cells = chunks.map((chunk, idx) => {
+      if (chunk.kind === 'single') {
+        return (
+          <th key={`formq-single-${idx}`} rowSpan={2} style={identityOrDetailHeaderStyle} title={chunk.header}>
+            {formatStatutoryTableHeaderLabel(chunk.header)}
+          </th>
+        );
+      }
+      return (
+        <th key={`formq-group-${idx}`} colSpan={chunk.end - chunk.start} style={groupHeaderStyle} title={chunk.parent}>
+          {chunk.parent}
+        </th>
+      );
+    });
+
+    const row2Cells = [];
+    chunks.forEach((chunk, chunkIdx) => {
+      if (chunk.kind !== 'group') return;
+      for (let col = chunk.start; col < chunk.end; col += 1) {
+        const split = splitHeader(hdrs[col]);
+        const sub = split?.sub || formatStatutoryTableHeaderLabel(hdrs[col]);
+        row2Cells.push(
+          <th key={`formq-sub-${chunkIdx}-${col}`} style={stickyDetailHeaderStyle} title={sub}>
+            {formatStatutoryTableHeaderLabel(sub)}
+          </th>
+        );
+      }
+    });
+
+    if (row2Cells.length === 0) return null;
+    return (
+      <>
+        <tr>{row1Cells}</tr>
+        <tr>{row2Cells}</tr>
+      </>
+    );
+  }, [displayTableHeaders, displayFormHeader, formFileModalData?.item, formFileModalData?.fileName]);
+
   /** Form VI: merged festival-holiday band over multiple date columns; preserve Excel-style grouped header. */
   const formVIFestivalThead = useMemo(() => {
     const hdrs = displayTableHeaders;
@@ -17658,32 +20381,48 @@ const Statutory = ({ userEmail, userRole }) => {
     );
   }, [displayTableHeaders, displayFormHeader, formFileModalData?.item, formFileModalData?.fileName]);
 
-  // Formmaster templates by normalized form name: for rows without a form file (e.g. ChecklistBulk-only), show Formmaster file when form name matches
-  const formmasterFormFileByFormName = useMemo(() => {
+  // Formmaster templates by formName+act+description+sector+state (same form name, different metadata => different file)
+  const formmasterFormFileByMatchKey = useMemo(() => {
     const map = new Map();
     if (!formmasterTemplates || !Array.isArray(formmasterTemplates)) return map;
     const templateRecencyScore = (t) => {
       const createdRaw = t?.createdTime || t?.created_time || t?.createdAt || t?.created_at || '';
       const createdMs = createdRaw ? Date.parse(String(createdRaw)) : NaN;
       if (Number.isFinite(createdMs)) return createdMs;
-      const idNum = Number.parseInt(String(t?.id ?? ''), 10);
+      const idNum = Number.parseInt(String(t?.recordId ?? t?.id ?? ''), 10);
       return Number.isFinite(idNum) ? idNum : 0;
     };
     formmasterTemplates.forEach((t) => {
-      const rawName = (t.name || t.file_name || t.fileName || '').trim();
-      const formName = rawName.replace(/\.xlsx$/i, '').trim() || rawName;
-      const key = normalizeTemplateFormNameKey(formName);
-      if (!key) return;
+      const rawName = (t.templateFileName || t.name || t.file_name || t.fileName || '').trim();
+      const formName =
+        (t.formName || '').trim() ||
+        rawName.replace(/\.xlsx$/i, '').trim() ||
+        rawName;
+      const lineRow = {
+        formName,
+        act: t.act,
+        description: t.description,
+        sector: t.sector,
+        state: t.state
+      };
+      const keys = new Set();
+      if (t.matchKey) keys.add(t.matchKey);
+      keys.add(buildFormmasterMatchKey(lineRow));
+      keys.add(checklistBulkRowIdentityKey(lineRow));
+      if ([...keys].every((k) => !k || k === '|||nosector|nostate')) return;
       const candidate = {
         formFile: t.id != null ? String(t.id) : null,
-        formFileName: rawName || 'template.xlsx',
+        formFileName: t.templateFileName || rawName || 'template.xlsx',
         isFromFormmaster: true,
         _score: templateRecencyScore(t)
       };
-      const current = map.get(key);
-      if (!current || candidate._score >= (current._score || 0)) {
-        map.set(key, candidate);
-      }
+      keys.forEach((key) => {
+        if (!key || key === '|||nosector|nostate') return;
+        const current = map.get(key);
+        if (!current || candidate._score >= (current._score || 0)) {
+          map.set(key, candidate);
+        }
+      });
     });
     return map;
   }, [formmasterTemplates]);
@@ -17905,24 +20644,23 @@ const Statutory = ({ userEmail, userRole }) => {
                             approverDraftDonorRow || draftRowByFormActMonthKey.get(draftLookupKey) || null;
                           // Autofill → Save POST creates a numeric statutory row with DraftFile while the grid row may still be bulk_* / checklist_* — pick sibling by line identity.
                           if (!fallbackDraftRow && !rowHasDraft && Array.isArray(statutoryData)) {
-                            const fn = (x) => String(x?.formName || x?.FormName || '').trim().toLowerCase().replace(/\s+/g, ' ');
-                            const ac = (x) => String(x?.act || x?.Act || '').trim().toLowerCase();
-                            const ds = (x) => String(x?.description || x?.Description || '').trim().toLowerCase();
-                            const sc = (x) => String(x?.sector || x?.Sector || '').trim().toLowerCase();
-                            const st = (x) => String(x?.state || x?.State || '').trim().toLowerCase();
+                            const uiMonthNormDraft = statutoryDedupeMonthNorm(
+                              { monthFilter: selectedMonth, MonthFilter: selectedMonth },
+                              selectedMonth
+                            );
                             fallbackDraftRow =
                               statutoryData
                                 .filter((r) => {
                                 if (!/^\d+$/.test(String(r?.id ?? ''))) return false;
                                 const df = r?.draftFile ?? r?.DraftFile;
                                 if (!df || df === 'null' || String(df).trim() === '') return false;
-                                return (
-                                  fn(r) === fn(item) &&
-                                  ac(r) === ac(item) &&
-                                  ds(r) === ds(item) &&
-                                  sc(r) === sc(item) &&
-                                  st(r) === st(item)
-                                );
+                                if (
+                                  uiMonthNormDraft !== 'nomonth' &&
+                                  !statutoryMonthMatchesUiFilter(r, uiMonthNormDraft, selectedMonth)
+                                ) {
+                                  return false;
+                                }
+                                return statutoryLineMetadataMatches(item, r);
                                 })
                                 .reduce((best, row) => {
                                   if (showApprovalColumn) {
@@ -18000,58 +20738,26 @@ const Statutory = ({ userEmail, userRole }) => {
                             !/^sent$/i.test(sendForApprovalEffective);
                           const showDraftForRow =
                             !!draftSourceHasFile && !hideDraftUntilSiteSent && !hideDraftByStoredMonth;
-                          // Resolved form file item: same source as "View File" so Autofill uses the same Excel format
-                          const rowFormFile = item.formFile || item.FormFile || null;
-                          const rowFormFileName = item.formFileName || item.FormFileName || null;
-                          const rowHasFormFile = rowFormFile && rowFormFile !== 'null' && rowFormFile !== null && String(rowFormFile).trim() !== '';
-                          const rowFormKey = `${(item.formName || '').toLowerCase().trim()}|${(item.act || '').toLowerCase().trim()}|${secPart}|${statePart}`;
-                          const rowLookup = formFileByFormKey.get(rowFormKey);
-                          const rowNormalizedFormName = normalizeTemplateFormNameKey(item.formName || item.FormName || '');
-                          const rowFormmasterFile = formmasterFormFileByFormName.get(rowNormalizedFormName);
-                          let resolvedFormFileItem = rowHasFormFile
-                            ? {
-                              ...item,
-                              formFile: rowFormFile,
-                              formFileName: rowFormFileName || `${((item.formName || 'Form') + '').trim().replace(/[/\\?%*:|"<>]/g, '') || 'Form'}.xlsx`
-                            }
-                            : rowLookup
-                              ? { ...item, formFile: rowLookup.formFile, formFileName: rowLookup.formFileName, id: rowLookup.id }
-                              : rowFormmasterFile && rowFormmasterFile.formFile
-                                ? { ...item, formFile: rowFormmasterFile.formFile, formFileName: rowFormmasterFile.formFileName, isFromFormmaster: true }
-                                : item;
-                          // Saved draft lives on API row (numeric id); merged grid row may still be bulk_* — wire draft + id for View Draft / Autofill.
+                          // Same row's FormFile for View File + Autofill (checklistbulk / statutory ROWID), not another line's template
+                          let resolvedFormFileItem = resolveFormFileItemForStatutoryRow(item, {
+                            formmasterFormFileByMatchKey,
+                            formFileByFormKey,
+                            formmasterTemplates
+                          });
+                          const rowHasFormFile =
+                            resolvedFormFileItem.formFile &&
+                            resolvedFormFileItem.formFile !== 'null' &&
+                            String(resolvedFormFileItem.formFile).trim() !== '';
                           if (
                             !hideDraftUntilSiteSent &&
                             !hideDraftByStoredMonth &&
-                            fallbackDraftRow &&
-                            draftSourceItem &&
-                            String(draftSourceItem.id ?? '') !== String(item.id ?? '')
+                            (draftSourceItem || preferredDraftApiRowId)
                           ) {
-                            resolvedFormFileItem = {
-                              ...resolvedFormFileItem,
-                              id: draftSourceItem.id,
-                              draftFile: draftSourceItem.draftFile ?? draftSourceItem.DraftFile ?? resolvedFormFileItem.draftFile,
-                              draftFileName:
-                                draftSourceItem.draftFileName ??
-                                draftSourceItem.DraftFileName ??
-                                resolvedFormFileItem.draftFileName
-                            };
-                          }
-                          if (
-                            !hideDraftUntilSiteSent &&
-                            !hideDraftByStoredMonth &&
-                            preferredDraftApiRowId &&
-                            !isNumericStatutoryBackendId(item?.id)
-                          ) {
-                            resolvedFormFileItem = {
-                              ...resolvedFormFileItem,
-                              id: preferredDraftApiRowId,
-                              draftFile: item.draftFile ?? item.DraftFile ?? resolvedFormFileItem.draftFile,
-                              draftFileName:
-                                item.draftFileName ??
-                                item.DraftFileName ??
-                                resolvedFormFileItem.draftFileName
-                            };
+                            resolvedFormFileItem = attachDraftFieldsToFormFileItem(
+                              resolvedFormFileItem,
+                              draftSourceItem,
+                              preferredDraftApiRowId
+                            );
                           }
                           return (
                             <tr key={item.id || index} className={rowLocked ? 'statutory-row-approved' : undefined}>
@@ -18087,9 +20793,9 @@ const Statutory = ({ userEmail, userRole }) => {
                               className="table-col-description"
                               style={{ width: '220px', minWidth: '220px', maxWidth: '220px' }}
                             >
-                              {item.description || item.Description || item.formName || '-'}
+                              {item.description || item.Description || '-'}
                             </td>
-                            <td><span className="statutory-pill statutory-pill-form">{item.formName || '-'}</span></td>
+                            <td><span className="statutory-pill statutory-pill-form">{item.formName || item.FormName || '-'}</span></td>
                             <td>
                               {(() => {
                                 if (resolvedFormFileItem.formFile && resolvedFormFileItem.formFile !== 'null' && String(resolvedFormFileItem.formFile).trim() !== '') {
@@ -18116,7 +20822,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                 return 'No File';
                               })()}
                             </td>
-                            <td>{formatMonthlyBasisDate(item.dueDate) || '-'}</td>
+                            <td>{formatMonthlyBasisDate(item.dueDate, item.monthFilter || item.MonthFilter) || '-'}</td>
                             <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
                               {(() => {
                                 const m =
@@ -18139,7 +20845,16 @@ const Statutory = ({ userEmail, userRole }) => {
                                     String(draftSourceItem?.draftFile ?? draftSourceItem?.DraftFile).trim() !== '' &&
                                     String(draftSourceItem?.draftFile ?? draftSourceItem?.DraftFile).trim().toLowerCase() !== 'null'
                                   );
-                                  const openSavedDraftForReview = hasSavedDraftForRow;
+                                  const draftApiRowId =
+                                    resolveNumericStatutoryIdForProofRow(draftSourceItem || item, {
+                                      preferSiteSubmittedDraft: true
+                                    }) ||
+                                    (isNumericStatutoryBackendId(draftSourceItem?.id)
+                                      ? String(draftSourceItem.id)
+                                      : null) ||
+                                    (isNumericStatutoryBackendId(item?.id) ? String(item.id) : null);
+                                  const canLoadSavedDraft = hasSavedDraftForRow && !!draftApiRowId;
+                                  const openSavedDraftForReview = canLoadSavedDraft;
                                   return (
                                     <button
                                       className="statutory-autofill-btn-ui"
@@ -18447,16 +21162,33 @@ const Statutory = ({ userEmail, userRole }) => {
                             ) : null}
                             {showApprovedDateColumn ? (
                               <td style={{ whiteSpace: 'nowrap' }}>
-                                {formatStatutoryDateDisplay(
-                                  monthWorkflowMeta.approvedDate ??
-                                    monthWorkflowMeta.ApprovedDate ??
-                                    monthWorkflowMeta.approvalDate ??
-                                    monthWorkflowMeta.ApprovalDate ??
-                                    item.approvedDate ??
-                                    item.ApprovedDate ??
-                                    item.approvalDate ??
-                                    item.ApprovalDate
-                                ) || '-'}
+                                {(() => {
+                                  const approvedPreserveKey = statutorySubmittedDatePreserveKey(item);
+                                  const pinnedApproved =
+                                    approvedPreserveKey && siteApprovedDates[approvedPreserveKey];
+                                  if (pinnedApproved) {
+                                    return formatStatutoryDateDisplay(pinnedApproved) || '-';
+                                  }
+                                  const linkedDbRow =
+                                    Array.isArray(statutoryData) &&
+                                    (() => {
+                                      const lid =
+                                        item.draftStatutoryRowIdForFile ||
+                                        preferredDraftApiRowId ||
+                                        resolveNumericStatutoryIdForProofRow(item);
+                                      if (!lid) return null;
+                                      return (
+                                        statutoryData.find((r) => String(r?.id ?? '') === String(lid)) ||
+                                        null
+                                      );
+                                    })();
+                                  const raw =
+                                    resolveStatutoryApprovedDateStored(itemForMonthWorkflow) ||
+                                    resolveStatutoryApprovedDateStored(monthWorkflowMeta) ||
+                                    resolveStatutoryApprovedDateStored(linkedDbRow) ||
+                                    resolveStatutoryApprovedDateStored(item);
+                                  return formatStatutoryDateDisplay(raw) || '-';
+                                })()}
                               </td>
                             ) : null}
                             <td style={{ textAlign: 'center' }}>
@@ -19148,7 +21880,7 @@ const Statutory = ({ userEmail, userRole }) => {
                         </div>
                       )}
                       {/* Form C / Form B: legal citation as 2nd line (between title and subtitle) */}
-                      {(shouldAppendReferenceToFormCTitle(displayFormHeader) || shouldPlaceFormBReferenceBeforeSubtitle(displayFormHeader) || shouldPlaceFormAReferenceBeforeSubtitle(displayFormHeader)) && displayFormHeader.reference && (
+                      {(shouldAppendReferenceToFormCTitle(displayFormHeader) || shouldPlaceFormBReferenceBeforeSubtitle(displayFormHeader) || shouldPlaceFormAReferenceBeforeSubtitle(displayFormHeader) || shouldPlaceFormJReferenceBeforeSubtitle(displayFormHeader)) && displayFormHeader.reference && (
                         <div style={{
                           fontSize: '14px',
                           color: '#6b7280',
@@ -19185,7 +21917,8 @@ const Statutory = ({ userEmail, userRole }) => {
                         !(displayFormHeader.subtitle && /equal\s+remuneration/i.test(displayFormHeader.subtitle)) &&
                         !shouldAppendReferenceToFormCTitle(displayFormHeader) &&
                         !shouldPlaceFormBReferenceBeforeSubtitle(displayFormHeader) &&
-                        !shouldPlaceFormAReferenceBeforeSubtitle(displayFormHeader) && (
+                        !shouldPlaceFormAReferenceBeforeSubtitle(displayFormHeader) &&
+                        !shouldPlaceFormJReferenceBeforeSubtitle(displayFormHeader) && (
                         <div style={{
                           fontSize: '12px',
                           color: '#6b7280',
@@ -19198,7 +21931,13 @@ const Statutory = ({ userEmail, userRole }) => {
                       )}
                      
                       {/* Wage Period line (Form W / wage registers) — full-width banner like Excel row above the grid */}
-                      {displayFormHeader.wagePeriodText && !isFormAMusterRollContext(displayFormHeader) && (
+                      {displayFormHeader.wagePeriodText &&
+                        !isFormAMusterRollContext(displayFormHeader) &&
+                        !isFormJStatutoryContext(
+                          displayFormHeader,
+                          formFileModalData?.item,
+                          formFileModalData?.fileName
+                        ) && (
                         <div
                           className="statutory-form-w-wage-period"
                           style={{
@@ -19222,7 +21961,13 @@ const Statutory = ({ userEmail, userRole }) => {
                         </div>
                       )}
 
-                      {Array.isArray(displayFormHeader.textRows) && displayFormHeader.textRows.length > 0 && (
+                      {Array.isArray(displayFormHeader.textRows) &&
+                        displayFormHeader.textRows.length > 0 &&
+                        !isFormJStatutoryContext(
+                          displayFormHeader,
+                          formFileModalData?.item,
+                          formFileModalData?.fileName
+                        ) && (
                         <div style={{
                           marginTop: '10px',
                           marginBottom: '16px',
@@ -19642,7 +22387,7 @@ const Statutory = ({ userEmail, userRole }) => {
                     </div>
                   ) : null}
 
-                  {displayTableHeaders.length > 0 && (formTableData.length > 0 || tableAutofillLoading) && (
+                  {displayTableHeaders.length > 0 && (
                     <>
                     <div className="form-file-modal-table-wrap" style={{
                       overflowX: 'auto',
@@ -19657,6 +22402,8 @@ const Statutory = ({ userEmail, userRole }) => {
                         <thead>
                           {registerOfWagesCumMusterRollThead ? (
                             registerOfWagesCumMusterRollThead
+                          ) : formQGroupedThead ? (
+                            formQGroupedThead
                           ) : formXVIITablead ? (
                             formXVIITablead
                           ) : registerOfWagesMergedTheadRows ? (
@@ -19788,7 +22535,22 @@ const Statutory = ({ userEmail, userRole }) => {
                           )}
                         </thead>
                         <tbody>
-                          {formTableData.map((row, rowIndex) => (
+                          {!tableAutofillLoading && formTableData.length === 0 ? (
+                            <tr>
+                              <td
+                                colSpan={displayTableHeaders.length}
+                                style={{
+                                  textAlign: 'center',
+                                  padding: '24px 16px',
+                                  color: '#6b7280',
+                                  fontSize: '14px'
+                                }}
+                              >
+                                No rows loaded yet. Click <strong>Autofill</strong> to pull employee data from Zoho People, or use <strong>Import</strong> to upload filled Excel rows.
+                              </td>
+                            </tr>
+                          ) : null}
+                          {displayFormTableData.map((row, rowIndex) => (
                             <tr key={rowIndex} style={{
                               backgroundColor: rowIndex % 2 === 0 ? '#fff' : '#f9fafb'
                             }}>
@@ -19806,7 +22568,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                       if (isFormFileReadOnly) return;
                                       const newData = [...formTableData];
                                       newData[rowIndex] = {
-                                        ...newData[rowIndex],
+                                        ...(displayFormTableData[rowIndex] || newData[rowIndex] || {}),
                                         [header]: e.target.value
                                       };
                                       setFormTableData(newData);

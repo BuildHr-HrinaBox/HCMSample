@@ -6,6 +6,7 @@
   "description": "Formmaster: list/download templates from FormMaster Data Store and File Store",
   "dependencies": {
     "express": "^4.22.1",
+    "express-fileupload": "^1.5.2",
     "zcatalyst-sdk-node": "latest"
   }
 }

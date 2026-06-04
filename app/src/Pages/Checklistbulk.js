@@ -25,19 +25,107 @@ function buildPaginationItems(currentPage, totalPages) {
   return out;
 }
 
+const isMonthlyFrequency = (frequency, dueDate) => {
+  const f = String(frequency || '').toLowerCase();
+  const d = String(dueDate || '').toLowerCase();
+  return f.includes('monthly') || d.includes('monthly basis');
+};
+
+const extractMonthlyDayOfMonth = (dueDate) => {
+  if (dueDate == null || dueDate === '') return null;
+  if (typeof dueDate === 'number' && Number.isInteger(dueDate) && dueDate >= 1 && dueDate <= 31) {
+    return dueDate;
+  }
+  const s = String(dueDate).trim();
+  if (!s) return null;
+  if (/^\d{1,2}$/.test(s)) {
+    const day = parseInt(s, 10);
+    if (day >= 1 && day <= 31) return day;
+  }
+  const legacy = s.match(/^1900-01-(\d{1,2})$/);
+  if (legacy) {
+    const recovered = parseInt(legacy[1], 10) + 1;
+    if (recovered >= 1 && recovered <= 31) return recovered;
+  }
+  return null;
+};
+
+const ordinalDay = (day) => {
+  const n = Number(day);
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+  const suffix = ['th', 'st', 'nd', 'rd'];
+  return `${n}${suffix[n % 10] || 'th'}`;
+};
+
+/** e.g. dueDate 7 + Monthly Basis → "7th Jun" */
+const formatChecklistDueDate = (dueDate, frequency) => {
+  const raw = String(dueDate ?? '').trim();
+  if (!raw) return '-';
+  if (!isMonthlyFrequency(frequency, dueDate)) return raw;
+  const day = extractMonthlyDayOfMonth(dueDate);
+  if (day == null) return raw;
+  const month = new Date().toLocaleString('en-GB', { month: 'short' });
+  return `${ordinalDay(day)} ${month}`;
+};
+
+const normalizeDueDateForImport = (dueDate, frequency) => {
+  if (dueDate == null || dueDate === '') return '';
+  if (typeof dueDate === 'number' && Number.isInteger(dueDate) && dueDate >= 1 && dueDate <= 31) {
+    return String(dueDate);
+  }
+  const s = String(dueDate).trim();
+  if (isMonthlyFrequency(frequency, dueDate)) {
+    const day = extractMonthlyDayOfMonth(dueDate);
+    if (day != null) return String(day);
+  }
+  if (/^\d{1,2}$/.test(s)) {
+    const day = parseInt(s, 10);
+    if (day >= 1 && day <= 31) return String(day);
+  }
+  return dueDate;
+};
+
 // Map Excel row to datastore format (checklistbulk table)
-const mapRowToRecord = (row) => ({
+const mapRowToRecord = (row) => {
+  const formNumber = row.FormNumber ?? row['Form Number'] ?? '';
+  const formNameCol = row['Form Name'] ?? '';
+  const canonicalFormName = row.FormName ?? row.formName ?? '';
+  const canonicalDescription = row.Description ?? row.description ?? '';
+
+  const hasFormNumber = String(formNumber).trim() !== '';
+  let formName;
+  let description;
+
+  if (hasFormNumber) {
+    formName = String(formNumber).trim();
+    description = String(formNameCol || canonicalFormName || canonicalDescription).trim();
+  } else {
+    formName = String(canonicalFormName).trim();
+    description = String(canonicalDescription || formNameCol).trim();
+    if (formNameCol && !description && formName) {
+      description = String(formNameCol).trim();
+    } else if (formNameCol && !formName) {
+      formName = String(canonicalFormName || formNameCol).trim();
+    }
+  }
+
+  const frequency = row.Frequency ?? row.frequency ?? '';
+  const rawDueDate = row.DueDate ?? row['Due Date'] ?? row.dueDate ?? '';
+
+  return {
   sector: row.Sector ?? row.sector ?? '',
   state: row.State ?? row.state ?? '',
   act: row.Act ?? row.act ?? '',
-  formName: row.FormName ?? row['Form Name'] ?? row.formName ?? '',
-  description: row.Description ?? row.description ?? '',
+  formName,
+  description,
   concernedGovtDepartment: row.ConcernedGovtDepartment ?? row['Concerned Govt Department'] ?? row['Govt Department'] ?? row.concernedGovtDepartment ?? '',
-  dueDate: row.DueDate ?? row['Due Date'] ?? row.dueDate ?? '',
+  dueDate: normalizeDueDateForImport(rawDueDate, frequency),
   nameOfTheCode: row.Nameofthecode ?? row.NameOfTheCode ?? row['Name of the Code'] ?? row.nameOfTheCode ?? row.nameofthecode ?? '',
-  frequency: row.Frequency ?? row.frequency ?? '',
+  frequency,
   nameOfTheRule: row.NameoftheRule ?? row.NameOfTheRule ?? row['Name of the Rule'] ?? row.nameOfTheRule ?? row.nameoftheRule ?? ''
-});
+  };
+};
 
 const Checklistbulk = ({ userRole, userEmail }) => {
   const [file, setFile] = useState(null);
@@ -126,7 +214,7 @@ const Checklistbulk = ({ userRole, userEmail }) => {
       });
       const data = await res.json();
       if (data.status === 'success') {
-        setMessage('');
+        setMessage(data.message || 'Import completed.');
         setFile(null);
         setLastImportAt(new Date().toLocaleString());
         await fetchData();
@@ -135,6 +223,25 @@ const Checklistbulk = ({ userRole, userEmail }) => {
       }
     } catch (err) {
       setMessage('Import failed: ' + (err.message || 'Unknown error'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSyncFormFiles = async () => {
+    setLoading(true);
+    setMessage('');
+    try {
+      const res = await fetch(`${API_BASE}/checklistbulk?action=syncFormFiles`, { method: 'POST' });
+      const data = await res.json();
+      if (data.status === 'success' || data.status === 'partial') {
+        setMessage(data.message || 'Form files linked from Form Master.');
+        await fetchData();
+      } else {
+        setMessage(data.message || 'Could not link form files.');
+      }
+    } catch (err) {
+      setMessage('Link form files failed: ' + (err.message || 'Unknown error'));
     } finally {
       setLoading(false);
     }
@@ -198,8 +305,8 @@ const Checklistbulk = ({ userRole, userEmail }) => {
       Sector: 'Factories Act',
       State: 'Tamilnadu',
       Act: 'The Factories Act, 1948',
-      FormName: 'Form 11',
-      Description: 'Accident Book',
+      FormNumber: 'Form 11',
+      FormName: 'Accident Book',
       ConcernedGovtDepartment: 'Labour Department',
       DueDate: 'Monthly Basis',
       Nameofthecode: 'FAC-AB-011',
@@ -262,9 +369,10 @@ const Checklistbulk = ({ userRole, userEmail }) => {
           </div>
           <div className="checklistbulk-guidelines">
             <div className="checklistbulk-guideline-row"><span>File Format</span><strong>Excel (.xlsx, .xls)</strong></div>
-            <div className="checklistbulk-guideline-row"><span>Required Columns</span><strong>Sector, State, Act, FormName, Description, ConcernedGovtDepartment, DueDate, Nameofthecode, Frequency, NameoftheRule</strong></div>
+            <div className="checklistbulk-guideline-row"><span>Required Columns</span><strong>Sector, State, Act, FormNumber, FormName, ConcernedGovtDepartment, DueDate, Nameofthecode, Frequency, NameoftheRule</strong></div>
             <div className="checklistbulk-guideline-row"><span>Data Validation</span><strong>Automatic validation on import</strong></div>
             <div className="checklistbulk-guideline-row"><span>Tips</span><strong>Use the template to ensure correct column format</strong></div>
+            <div className="checklistbulk-guideline-row"><span>Form File</span><strong>Each row is linked to Form Master by Form Name + Act + Description + Sector + State (upload templates there first)</strong></div>
           </div>
           <div className="checklistbulk-best-practice">Best Practice: Ensure date format is DD-MM-YYYY for accurate date processing.</div>
         </section>
@@ -294,6 +402,15 @@ const Checklistbulk = ({ userRole, userEmail }) => {
             />
           </div>
           <div className="checklistbulk-data-actions">
+            <button
+              type="button"
+              className="checklistbulk-btn checklistbulk-btn-outline"
+              onClick={handleSyncFormFiles}
+              disabled={loading || !importedData.length}
+              title="Match each row to Form Master template by act, description, sector, state, and form name"
+            >
+              Link Form Files
+            </button>
             <button type="button" className="checklistbulk-btn checklistbulk-btn-outline" onClick={handleExport} disabled={!filteredData.length}>
               Export Data
             </button>
@@ -320,11 +437,12 @@ const Checklistbulk = ({ userRole, userEmail }) => {
                   <th>Govt Department</th>
                   <th>Frequency</th>
                   <th>Due Date</th>
+                  <th>Form File</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredData.length === 0 ? (
-                  <tr><td colSpan={11} className="checklistbulk-empty">No imported data. Upload an Excel file and click Import Data.</td></tr>
+                  <tr><td colSpan={12} className="checklistbulk-empty">No imported data. Upload an Excel file and click Import Data.</td></tr>
                 ) : (
                   paginatedData.map((row, i) => (
                     <tr key={row.id || i}>
@@ -338,7 +456,10 @@ const Checklistbulk = ({ userRole, userEmail }) => {
                       <td>{row.description}</td>
                       <td>{row.concernedGovtDepartment}</td>
                       <td>{row.frequency || '-'}</td>
-                      <td>{row.dueDate}</td>
+                      <td>{formatChecklistDueDate(row.dueDate, row.frequency)}</td>
+                      <td title={row.formFile ? `File id: ${row.formFile}` : 'Upload matching row in Form Master, then Link Form Files'}>
+                        {row.formFileName || (row.formFile ? 'Linked' : '—')}
+                      </td>
                     </tr>
                   ))
                 )}

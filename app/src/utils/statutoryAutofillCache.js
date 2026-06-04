@@ -178,9 +178,16 @@ export function prefetchStatutoryAutofillData() {
 }
 
 export function getFormTemplateCacheKey(item) {
+  const rowId = String(item?.formFetchRowId ?? item?.id ?? '').trim();
   const id = String(item?.formFile || item?.FormFile || '').trim();
-  const name = String(item?.formName || item?.FormName || '').trim().toLowerCase();
-  return `${id}|${name}`;
+  const lineKey = [
+    String(item?.formName || item?.FormName || '').trim().toLowerCase(),
+    String(item?.act || item?.Act || '').trim().toLowerCase(),
+    String(item?.description || item?.Description || '').trim().toLowerCase(),
+    String(item?.sector || item?.Sector || '').trim().toLowerCase(),
+    String(item?.state || item?.State || '').trim().toLowerCase()
+  ].join('|');
+  return `${rowId}|${id}|${lineKey}`;
 }
 
 export function readFormTemplateCache(cacheKey) {

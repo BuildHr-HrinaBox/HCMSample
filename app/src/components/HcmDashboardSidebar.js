@@ -28,6 +28,7 @@ export const HCM_ORGANIZATION_CHILDREN = [
 export const HCM_TRANSACTION_CHILDREN = [
   { label: 'Statutory', to: '/rule-book/statutory' },
   { label: 'Checklist Master', to: '/rule-book/checklistbulk' },
+  { label: 'Form Master', to: '/rule-book/formmaster' },
 ];
 
 /** Form Fetch — matches NewHomeSidebar formFetch group */

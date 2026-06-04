@@ -197,6 +197,226 @@
   background: #fff;
 }
 
+.formmaster-import-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 900px) {
+  .formmaster-import-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.formmaster-import-card,
+.formmaster-guidelines-card {
+  margin-bottom: 0;
+}
+
+.formmaster-import-heading {
+  margin: 0 0 8px 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.formmaster-import-caption {
+  margin: 0 0 12px 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.formmaster-dropzone {
+  position: relative;
+  border: 2px dashed #d1d5db;
+  border-radius: 0;
+  padding: 24px 16px;
+  text-align: center;
+  background: #f9fafb;
+  transition: border-color 0.15s, background 0.15s;
+  cursor: pointer;
+}
+
+.formmaster-dropzone-active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+
+.formmaster-dropzone > *:not(.formmaster-file-input) {
+  pointer-events: none;
+}
+
+.formmaster-dropzone-icon {
+  color: #6b7280;
+  margin-bottom: 8px;
+}
+
+.formmaster-dropzone-title {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.formmaster-btn-choose {
+  display: inline-block;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: #3b82f6;
+  cursor: pointer;
+  pointer-events: none;
+}
+
+/* Covers dropzone so "Choose file" and drag area open the picker (same as ActsBulk) */
+.formmaster-file-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.formmaster-row-file-input {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.formmaster-import-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.formmaster-import-filename {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.formmaster-btn-import {
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: #059669;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.formmaster-btn-import:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.formmaster-guidelines-list {
+  margin: 0 0 14px 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: #4b5563;
+  line-height: 1.5;
+}
+
+.formmaster-banner {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.formmaster-banner-error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.formmaster-table-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.formmaster-toolbar-right {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.formmaster-btn-clear {
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #b91c1c;
+  background: #fff;
+  border: 1px solid #fecaca;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.formmaster-btn-clear:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.formmaster-cell-desc {
+  max-width: 220px;
+}
+
+.formmaster-no-file {
+  font-size: 12px;
+  color: #9ca3af;
+  font-style: italic;
+}
+
+.formmaster-btn-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: #3b82f6;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.formmaster-btn-upload:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.formmaster-table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.formmaster-data-table-wide {
+  min-width: 960px;
+}
+
 .formmaster-data-table {
   width: 100%;
   min-width: 760px;
@@ -224,7 +444,8 @@
 
 .formmaster-th-actions {
   text-align: center;
-  width: 120px;
+  width: 160px;
+  min-width: 140px;
 }
 
 .formmaster-data-table td {
@@ -248,34 +469,6 @@
   background: #fafafa;
 }
 
-.formmaster-table-actions {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-}
-
-.formmaster-data-table th:nth-child(1),
-.formmaster-data-table td:nth-child(1) {
-  width: 30%;
-}
-
-.formmaster-data-table th:nth-child(2),
-.formmaster-data-table td:nth-child(2) {
-  width: 28%;
-}
-
-.formmaster-data-table th:nth-child(3),
-.formmaster-data-table td:nth-child(3) {
-  width: 28%;
-}
-
-.formmaster-data-table th:nth-child(4),
-.formmaster-data-table td:nth-child(4) {
-  width: 16%;
-  text-align: center;
-  vertical-align: middle;
-}
 
 .formmaster-file-name {
   display: inline-flex;

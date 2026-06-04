@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Building,
   ClipboardList,
@@ -215,6 +215,14 @@ async function fetchActiveSiteCountFromSiteManagement() {
   }
 }
 
+/** Nearest due day in the current month (today or later), else earliest marked day. */
+const pickNearestUpcomingDueDay = (dueDays, todayDay) => {
+  const days = [...dueDays].filter((day) => day != null).sort((a, b) => a - b);
+  if (!days.length) return null;
+  const upcoming = days.filter((day) => day >= todayDay);
+  return upcoming.length ? upcoming[0] : days[0];
+};
+
 const limitUpcomingTasks = (items, limit = 4) => {
   const submitted = [];
   const remaining = [];
@@ -235,7 +243,8 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
   const [metrics, setMetrics] = useState(DEFAULT_METRICS);
   const [tasks, setTasks] = useState([]);
   const [calendarDueDates, setCalendarDueDates] = useState(new Set());
-  const [selectedCalendarDay, setSelectedCalendarDay] = useState(new Date().getDate());
+  const [selectedCalendarDay, setSelectedCalendarDay] = useState(null);
+  const calendarDayUserPicked = useRef(false);
 
   const now = new Date();
   const calendarMonth = useMemo(
@@ -334,7 +343,6 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
 
           upcomingTasks = statutoryData
             .filter((item) => hasValue(item?.act ?? item?.Act) || hasValue(item?.formName ?? item?.FormName))
-            .slice(0, 4)
             .map((item, index) => {
               const dueDateInfo = getDueDateInfo(item?.dueDate ?? item?.DueDate, calendarMonth);
               if (dueDateInfo.day != null) dueDateCandidates.push(dueDateInfo.day);
@@ -432,17 +440,24 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
           })
           .map(({ sortDate, ...item }) => item);
 
+        const dueDaysSet = new Set(dueDateCandidates.filter((day) => day != null));
+        const defaultDueDay = pickNearestUpcomingDueDay(dueDaysSet, now.getDate());
+        const filterDay = calendarDayUserPicked.current
+          ? selectedCalendarDay
+          : selectedCalendarDay ?? defaultDueDay;
+
         const filteredUpcomingTasks =
-          selectedCalendarDay == null
+          filterDay == null
             ? sortedUpcomingTasks
-            : sortedUpcomingTasks.filter((item) => item.calendarDay === selectedCalendarDay);
+            : sortedUpcomingTasks.filter((item) => item.calendarDay === filterDay);
 
         upcomingTasks = limitUpcomingTasks(filteredUpcomingTasks, 4);
 
         if (!cancelled) {
-          setCalendarDueDates(
-            new Set(dueDateCandidates.filter((day) => day != null))
-          );
+          setCalendarDueDates(dueDaysSet);
+          if (!calendarDayUserPicked.current && defaultDueDay != null && selectedCalendarDay == null) {
+            setSelectedCalendarDay(defaultDueDay);
+          }
           setTasks(upcomingTasks);
           setMetrics((prev) =>
             prev.map((metric) => {
@@ -618,16 +633,18 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
                           day === now.getDate() &&
                           calendarMonth.month === now.getMonth() &&
                           calendarMonth.year === now.getFullYear();
+                        const isSelected = selectedCalendarDay === day;
                         const marks = [];
                         if (calendarDueDates.has(day)) marks.push('due');
                         return (
                           <button
                             type="button"
                             key={day}
-                            className={`nd-cal-day${isToday ? ' nd-cal-day--today' : ''}${selectedCalendarDay === day ? ' nd-cal-day--today' : ''}`}
-                            onClick={() =>
-                              setSelectedCalendarDay((current) => (current === day ? null : day))
-                            }
+                            className={`nd-cal-day${isToday ? ' nd-cal-day--today' : ''}${isSelected ? ' nd-cal-day--selected' : ''}`}
+                            onClick={() => {
+                              calendarDayUserPicked.current = true;
+                              setSelectedCalendarDay((current) => (current === day ? null : day));
+                            }}
                           >
                             <span className="nd-cal-num">{day}</span>
                             {marks.length > 0 && (

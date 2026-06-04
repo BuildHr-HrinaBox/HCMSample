@@ -75,6 +75,7 @@ const navigationItems = [
     children: [
       { label: 'Checklist', path: '/rule-book/checklist' },
       { label: 'Checklist Master', path: '/rule-book/checklistbulk' },
+      { label: 'Form Master', path: '/rule-book/formmaster' },
       { label: 'To-Do List', path: '/rule-book/todo-list' },
       { label: 'Statutory', path: '/rule-book/statutory' },
       {

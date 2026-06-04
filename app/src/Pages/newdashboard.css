@@ -1020,6 +1020,19 @@
   font-weight: 700;
 }
 
+.nd-cal-day--selected:not(.nd-cal-day--today) .nd-cal-num {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #e8f5e9;
+  color: var(--nd-green);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  box-shadow: inset 0 0 0 2px var(--nd-green);
+}
+
 .nd-cal-marks {
   display: flex;
   gap: 3px;

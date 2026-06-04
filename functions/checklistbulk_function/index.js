@@ -20,23 +20,271 @@ app.use((req, res, next) => {
 
 // Table name for checklist bulk data
 const TABLE_NAME = 'checklistbulk';
+const FORM_MASTER_TABLE = 'FormMaster';
 
-// Normalize incoming DueDate to ISO (YYYY-MM-DD) if it's a date, or return text as-is
-// Since DueDate column is now text type, we can store both dates and text values
-const normalizeToISODate = (value) => {
-  if (!value) return '';
+function squashKeyPart(v) {
+  return String(v ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.(xlsx|xls)$/i, '')
+    .replace(/\s+/g, ' ');
+}
+
+/** Same key as Form Master / Statutory — one template per form+act+description+sector+state (+ Form U variant). */
+function buildChecklistBulkMatchKey(data) {
+  const base = [
+    squashKeyPart(data.formName || data.FormName),
+    squashKeyPart(data.act || data.Act),
+    squashKeyPart(data.description || data.Description),
+    squashKeyPart(data.sector || data.Sector) || 'nosector',
+    squashKeyPart(data.state || data.State) || 'nostate'
+  ].join('|');
+  const variant = inferFormUVariantFromBulkRow(data);
+  return variant ? `${base}|${variant}` : base;
+}
+
+function buildChecklistBulkIdentityKey(data) {
+  const norm = (v) =>
+    String(v ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+  return [
+    norm(data.formName || data.FormName),
+    norm(data.sector || data.Sector),
+    norm(data.state || data.State),
+    norm(data.act || data.Act),
+    norm(data.description || data.Description)
+  ].join('\x1f');
+}
+
+function buildDisplayTemplateFileName(record) {
+  const original = String(record?.TemplateFileName || record?.templateFileName || '').trim();
+  const formName = String(record?.FormName || record?.formName || 'Form').trim();
+  const state = String(record?.State || record?.state || '').trim();
+  const act = String(record?.Act || record?.act || '').trim();
+  const looksGeneric =
+    !original ||
+    /^form\s*[a-z0-9]*\.xlsx$/i.test(original) ||
+    original.toLowerCase() === `${formName.toLowerCase()}.xlsx`;
+  if (!looksGeneric) return original;
+  const parts = [formName];
+  if (state) parts.push(state);
+  else if (act) parts.push(act.slice(0, 40));
+  const ext = original.includes('.') ? original.slice(original.lastIndexOf('.')) : '.xlsx';
+  return `${parts.join(' - ')}${ext}`.replace(/[/\\?%*:|"<>]/g, '_');
+}
+
+function inferFormUVariantFromBulkRow(data) {
+  const blob = [
+    data.description,
+    data.Description,
+    data.act,
+    data.Act,
+    data.formName,
+    data.FormName,
+    data.formFileName,
+    data.FormFileName
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (/confidential|rule\s*34|confidential\s+character/.test(blob)) {
+    return 'confidential_character';
+  }
+  if (
+    /employee|particulars|register\s+of\s+employees|shops\s+and\s+establishment|wage\s+register/.test(
+      blob
+    )
+  ) {
+    return 'employee_register';
+  }
+  return null;
+}
+
+/** When checklist row has State, template must use the same State (not another state's file). */
+function statesCompatibleForFormTemplateLink(bulkState, masterState) {
+  const b = squashKeyPart(bulkState);
+  const m = squashKeyPart(masterState);
+  if (b && m) return b === m;
+  if (b && !m) return false;
+  return true;
+}
+
+function scoreBulkToFormMasterLine(bulkLine, masterLine) {
+  let score = 0;
+  if (squashKeyPart(bulkLine.formName) !== squashKeyPart(masterLine.formName)) return -999;
+  if (!statesCompatibleForFormTemplateLink(bulkLine.state, masterLine.state)) return -999;
+  if (squashKeyPart(bulkLine.act) && squashKeyPart(bulkLine.act) === squashKeyPart(masterLine.act)) {
+    score += 5;
+  }
+  if (squashKeyPart(bulkLine.state) && squashKeyPart(bulkLine.state) === squashKeyPart(masterLine.state)) {
+    score += 5;
+  }
+  if (squashKeyPart(bulkLine.sector) && squashKeyPart(bulkLine.sector) === squashKeyPart(masterLine.sector)) {
+    score += 3;
+  }
+  const bd = squashKeyPart(bulkLine.description);
+  const md = squashKeyPart(masterLine.description);
+  if (bd && md) {
+    if (bd === md) score += 12;
+    else if (bd.includes(md) || md.includes(bd)) score += 7;
+  }
+  const bv = inferFormUVariantFromBulkRow(bulkLine);
+  const mv = inferFormUVariantFromBulkRow(masterLine);
+  if (bv && mv) {
+    if (bv === mv) score += 25;
+    else score -= 200;
+  }
+  return score;
+}
+
+async function buildFormMasterFileLookup(catalyst) {
+  const lookup = new Map();
+  const allTemplates = [];
+  try {
+    const table = catalyst.datastore().table(FORM_MASTER_TABLE);
+    const rows = await table.getAllRows();
+    (rows || []).forEach((record) => {
+      const fileId = record.Action != null ? String(record.Action).trim() : '';
+      if (!fileId) return;
+      const line = {
+        formName: record.FormName || '',
+        act: record.Act || '',
+        description: record.Description || '',
+        sector: record.Sector || '',
+        state: record.State || ''
+      };
+      allTemplates.push({
+        line,
+        payload: {
+          formFile: fileId,
+          formFileName: buildDisplayTemplateFileName({
+            FormName: line.formName,
+            State: line.state,
+            Act: line.act,
+            TemplateFileName: record.TemplateFileName || ''
+          })
+        }
+      });
+    });
+    allTemplates.forEach(({ line, payload }) => {
+      const keys = new Set([
+        buildChecklistBulkMatchKey(line),
+        buildChecklistBulkIdentityKey(line)
+      ].filter(Boolean));
+      keys.forEach((key) => lookup.set(key, payload));
+    });
+  } catch (err) {
+    console.warn('Form Master lookup skipped for checklistbulk:', err.message);
+  }
+  lookup.__allTemplates = allTemplates;
+  return lookup;
+}
+
+function resolveFormFileForBulkRecordScored(data, lookup) {
+  if (!lookup) {
+    return { formFile: '', formFileName: '' };
+  }
+  const line = {
+    formName: data.formName || data.FormName || '',
+    act: data.act || data.Act || '',
+    description: data.description || data.Description || '',
+    sector: data.sector || data.Sector || '',
+    state: data.state || data.State || ''
+  };
+  const exact =
+    lookup.get(buildChecklistBulkMatchKey(line)) ||
+    lookup.get(buildChecklistBulkIdentityKey(line));
+  if (exact?.formFile) return exact;
+  const templates = lookup.__allTemplates || [];
+  if (!templates.length) {
+    return { formFile: '', formFileName: '' };
+  }
+  let best = null;
+  let bestScore = -Infinity;
+  templates.forEach(({ line: masterLine, payload }) => {
+    const s = scoreBulkToFormMasterLine(line, masterLine);
+    if (s > bestScore) {
+      bestScore = s;
+      best = payload;
+    }
+  });
+  if (best && bestScore > 0) {
+    return best;
+  }
+  return { formFile: '', formFileName: '' };
+}
+
+function resolveFormFileForBulkRecord(data, lookup) {
+  return resolveFormFileForBulkRecordScored(data, lookup);
+}
+
+const isMonthlyFrequency = (frequency) =>
+  String(frequency || '').toLowerCase().includes('monthly');
+
+/** Day-of-month (1–31) from due date; recovers mistaken Excel serial → 1900-01-* rows. */
+const extractMonthlyDayOfMonth = (value) => {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 31) {
+    return value;
+  }
+  const s = String(value).trim();
+  if (!s) return null;
+  if (/^\d{1,2}$/.test(s)) {
+    const day = parseInt(s, 10);
+    if (day >= 1 && day <= 31) return day;
+  }
+  const legacy = s.match(/^1900-01-(\d{1,2})$/);
+  if (legacy) {
+    const recovered = parseInt(legacy[1], 10) + 1;
+    if (recovered >= 1 && recovered <= 31) return recovered;
+  }
+  return null;
+};
+
+// Normalize incoming DueDate: day-of-month (1–31) for monthly, ISO for real dates, else text
+const normalizeToISODate = (value, frequency = '') => {
+  if (!value && value !== 0) return '';
+  const monthly = isMonthlyFrequency(frequency);
   const pad2 = (n) => String(n).padStart(2, '0');
   const fmt = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+  if (typeof value === 'number') {
+    if (Number.isInteger(value) && value >= 1 && value <= 31) {
+      return String(value);
+    }
+    if (value > 31) {
+      const excelEpoch = new Date(1900, 0, 1);
+      const jsDate = new Date(excelEpoch.getTime() + (value - 2) * 24 * 60 * 60 * 1000);
+      return fmt(jsDate);
+    }
+    return String(value);
+  }
+
   if (typeof value === 'string') {
     const s = value.trim();
     if (!s) return '';
-    
+
+    const monthlyDay = extractMonthlyDayOfMonth(s);
+    if (monthlyDay != null && monthly) {
+      return String(monthlyDay);
+    }
+    if (/^\d{1,2}$/.test(s)) {
+      const day = parseInt(s, 10);
+      if (day >= 1 && day <= 31) return String(day);
+    }
+
     // Try to parse as ISO date format (YYYY-MM-DD or YYYY/MM/DD)
     const iso = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
     if (iso) {
       const y = Number(iso[1]);
       const m = Number(iso[2]);
       const d = Number(iso[3]);
+      if (y === 1900 && monthly) {
+        const recovered = extractMonthlyDayOfMonth(s);
+        if (recovered != null) return String(recovered);
+      }
       // Validate the date
       const dateObj = new Date(y, m - 1, d);
       if (dateObj.getFullYear() === y && dateObj.getMonth() === m - 1 && dateObj.getDate() === d) {
@@ -80,20 +328,17 @@ const normalizeToISODate = (value) => {
     // Since DueDate is now a text column, we can store these values directly
     return s;
   }
-  if (typeof value === 'number') {
-    const excelEpoch = new Date(1900, 0, 1);
-    const jsDate = new Date(excelEpoch.getTime() + (value - 2) * 24 * 60 * 60 * 1000);
-    return fmt(jsDate);
-  }
   if (value instanceof Date) return fmt(value);
   return '';
 };
 
 // Checklist bulk data structure based on the Data Store schema
-const createChecklistBulkRecord = (data) => {
-  // Normalize the due date - will return ISO format for dates or original text for non-dates
-  const normalizedDueDate = normalizeToISODate(data.dueDate);
-  
+const createChecklistBulkRecord = (data, formFileFields = null) => {
+  const normalizedDueDate = normalizeToISODate(data.dueDate, data.frequency);
+  const resolved =
+    formFileFields ||
+    resolveFormFileForBulkRecord(data, data.__formMasterLookup || null);
+
   return {
     Sector: data.sector || '',
     State: data.state || '',
@@ -104,7 +349,8 @@ const createChecklistBulkRecord = (data) => {
     Description: data.description || '',
     Nameofthecode: data.nameOfTheCode || data.nameofthecode || '',
     Frequency: data.frequency || '',
-    NameoftheRule: data.nameOfTheRule || data.nameoftheRule || ''
+    NameoftheRule: data.nameOfTheRule || data.nameoftheRule || '',
+    FormFile: resolved.formFile || data.formFile || data.FormFile || ''
   };
 };
 
@@ -122,6 +368,24 @@ const convertToAppFormat = (record) => {
     nameOfTheCode: record.Nameofthecode || '',
     frequency: record.Frequency || '',
     nameOfTheRule: record.NameoftheRule || '',
+    formFile: record.FormFile || null,
+    formFileName:
+      record.FormFileName ||
+      (record.FormFile
+        ? buildDisplayTemplateFileName({
+            FormName: record.FormName,
+            State: record.State,
+            Act: record.Act,
+            TemplateFileName: ''
+          })
+        : null),
+    matchKey: buildChecklistBulkMatchKey({
+      formName: record.FormName,
+      act: record.Act,
+      description: record.Description,
+      sector: record.Sector,
+      state: record.State
+    }),
     createdTime: record.CREATEDTIME,
     modifiedTime: record.MODIFIEDTIME,
     creatorId: record.CREATORID
@@ -202,7 +466,8 @@ const addChecklistBulkData = async (catalyst, data) => {
     
     const dataStore = catalyst.datastore();
     const table = dataStore.table(TABLE_NAME);
-    const record = createChecklistBulkRecord(data);
+    const formMasterLookup = await buildFormMasterFileLookup(catalyst);
+    const record = createChecklistBulkRecord(data, resolveFormFileForBulkRecord(data, formMasterLookup));
     
     console.log('Record to be inserted:', record);
     
@@ -238,7 +503,8 @@ const updateChecklistBulkData = async (catalyst, id, data) => {
     
     const dataStore = catalyst.datastore();
     const table = dataStore.table(TABLE_NAME);
-    const record = createChecklistBulkRecord(data);
+    const formMasterLookup = await buildFormMasterFileLookup(catalyst);
+    const record = createChecklistBulkRecord(data, resolveFormFileForBulkRecord(data, formMasterLookup));
     
     const result = await table.updateRow(id, record);
     
@@ -484,7 +750,12 @@ const bulkImportChecklistData = async (catalyst, dataArray) => {
       console.error('Error getting table info:', tableError);
     }
     
-    const records = dataArray.map(data => createChecklistBulkRecord(data));
+    const formMasterLookup = await buildFormMasterFileLookup(catalyst);
+    const records = dataArray.map((data) =>
+      createChecklistBulkRecord(data, resolveFormFileForBulkRecord(data, formMasterLookup))
+    );
+    const linkedCount = records.filter((r) => r.FormFile && String(r.FormFile).trim()).length;
+    console.log(`Form Master link: ${linkedCount}/${records.length} checklistbulk row(s) have FormFile`);
     
     console.log('Records to be inserted:', JSON.stringify(records.slice(0, 2), null, 2)); // Log first 2 records as sample
     console.log('Total records to insert:', records.length);
@@ -501,10 +772,12 @@ const bulkImportChecklistData = async (catalyst, dataArray) => {
     
     return {
       status: 'success',
-      message: `Bulk import completed successfully. ${result.length} records added`,
+      message: `Bulk import completed successfully. ${result.length} records added (${linkedCount} linked to Form Master templates)`,
       data: result.map((record, index) => ({
         id: record.ROWID,
-        ...dataArray[index]
+        ...dataArray[index],
+        formFile: records[index].FormFile || null,
+        formFileName: resolveFormFileForBulkRecord(dataArray[index], formMasterLookup).formFileName || null
       }))
     };
   } catch (error) {
@@ -623,6 +896,112 @@ const getChecklistDataByAct = async (catalyst, act) => {
     return {
       status: 'error',
       message: 'Failed to fetch checklist data by act',
+      error: error.message
+    };
+  }
+};
+
+/** Backfill FormFile / FormFileName on existing checklistbulk rows from Form Master. */
+const syncChecklistBulkFormFiles = async (catalyst) => {
+  try {
+    const dataStore = catalyst.datastore();
+    const table = dataStore.table(TABLE_NAME);
+    const formMasterLookup = await buildFormMasterFileLookup(catalyst);
+    if (formMasterLookup.size === 0) {
+      return {
+        status: 'success',
+        message: 'No Form Master templates with uploaded files found. Upload templates in Form Master first.',
+        updatedCount: 0,
+        totalRows: 0
+      };
+    }
+
+    const allRows = await table.getAllRows();
+    let updatedCount = 0;
+    let linkedCount = 0;
+    const errors = [];
+
+    for (const row of allRows || []) {
+      const rowId = row.ROWID;
+      if (!rowId) continue;
+      const appRow = {
+        formName: row.FormName,
+        act: row.Act,
+        description: row.Description,
+        sector: row.Sector,
+        state: row.State
+      };
+      const resolved = resolveFormFileForBulkRecord(appRow, formMasterLookup);
+      const prevFile = String(row.FormFile || '').trim();
+      if (!resolved.formFile) {
+        const exactKey =
+          formMasterLookup.get(buildChecklistBulkMatchKey(appRow)) ||
+          formMasterLookup.get(buildChecklistBulkIdentityKey(appRow));
+        if (prevFile && !exactKey?.formFile) {
+          try {
+            const patch = createChecklistBulkRecord(
+              {
+                sector: row.Sector,
+                state: row.State,
+                act: row.Act,
+                formName: row.FormName,
+                concernedGovtDepartment: row.ConcernedGovtDepartment,
+                dueDate: row.DueDate,
+                description: row.Description,
+                nameOfTheCode: row.Nameofthecode,
+                frequency: row.Frequency,
+                nameOfTheRule: row.NameoftheRule
+              },
+              { formFile: '', formFileName: '' }
+            );
+            await table.updateRow(rowId, patch);
+            updatedCount += 1;
+          } catch (updateErr) {
+            errors.push({ rowId, error: updateErr.message });
+          }
+        }
+        continue;
+      }
+      linkedCount += 1;
+      if (prevFile === String(resolved.formFile).trim()) {
+        continue;
+      }
+      try {
+        const patch = createChecklistBulkRecord(
+          {
+            sector: row.Sector,
+            state: row.State,
+            act: row.Act,
+            formName: row.FormName,
+            concernedGovtDepartment: row.ConcernedGovtDepartment,
+            dueDate: row.DueDate,
+            description: row.Description,
+            nameOfTheCode: row.Nameofthecode,
+            frequency: row.Frequency,
+            nameOfTheRule: row.NameoftheRule
+          },
+          resolved
+        );
+        await table.updateRow(rowId, patch);
+        updatedCount += 1;
+      } catch (updateErr) {
+        errors.push({ rowId, error: updateErr.message });
+      }
+    }
+
+    return {
+      status: errors.length > 0 && updatedCount === 0 ? 'error' : 'success',
+      message: `Linked ${linkedCount} row(s) to Form Master; updated ${updatedCount} record(s) in checklistbulk.`,
+      updatedCount,
+      linkedCount,
+      totalRows: (allRows || []).length,
+      errors: errors.length > 0 ? errors : undefined
+    };
+  } catch (error) {
+    console.error('Error syncing checklistbulk FormFile:', error);
+    return {
+      status: 'error',
+      message: 'Failed to sync FormFile from Form Master',
       error: error.message
     };
   }
@@ -1011,11 +1390,15 @@ app.get('/checklistbulk', async (req, res) => {
       case 'populate':
         result = await populateTableWithSampleData(catalyst);
         break;
+
+      case 'syncFormFiles':
+        result = await syncChecklistBulkFormFiles(catalyst);
+        break;
         
       default:
         result = {
           status: 'error',
-          message: 'Invalid action. Supported actions: getAll, getById, getBySector, getByState, getByAct, count, populate'
+          message: 'Invalid action. Supported actions: getAll, getById, getBySector, getByState, getByAct, count, populate, syncFormFiles'
         };
     }
     
@@ -1064,11 +1447,15 @@ app.post('/checklistbulk', async (req, res) => {
           result = await bulkImportChecklistData(catalyst, body);
         }
         break;
+
+      case 'syncFormFiles':
+        result = await syncChecklistBulkFormFiles(catalyst);
+        break;
         
       default:
         result = {
           status: 'error',
-          message: 'Invalid action. Supported actions: add, bulkImport'
+          message: 'Invalid actions: add, bulkImport, syncFormFiles'
         };
     }
     

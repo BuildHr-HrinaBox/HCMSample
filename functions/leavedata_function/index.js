@@ -3,52 +3,138 @@
 const axios = require('axios');
 const { IncomingMessage, ServerResponse } = require('http');
 
+/** Zoho bookedAndBalance returns at most 30 per call (docs); .in DC accepts up to 100. */
+const ZOHO_LEAVE_PAGE_SIZE = 100;
+const ZOHO_LEAVE_MAX_PAGES = 200;
+
 /**
  * Catalyst function to fetch Zoho People Leave data.
- * 
- * Authentication options:
- * 1. Direct Access Token (recommended for testing):
- *    - Set ZOHO_ACCESS_TOKEN environment variable with your bearer token
- *    - Token must have ZOHOPEOPLE.leave.READ or ZOHOPEOPLE.leave.ALL scope
- * 
- * 2. Refresh Token (for production):
- *    - Set ZOHO_REFRESH_TOKEN, ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET
- *    - Refresh token must generate access tokens with leave scope (e.g. ZOHOPEOPLE.leave.ALL)
- * 
- * Query parameters:
- *  - from: Start date (default: 01-Jan-2025)
- *  - to: End date (default: 31-Dec-2025)
- *  - unit: Time unit (default: Day)
- * 
- * Example: ?from=01-Jan-2025&to=31-Dec-2025&unit=Day
- * 
- * @param {IncomingMessage} req 
- * @param {ServerResponse} res 
+ *
+ * Token model (ZOHOPEOPLE.leave.ALL, api_domain: https://www.zohoapis.in):
+ *   - Use access_token when set (ZOHO_LEAVE_ACCESS_TOKEN or ZOHO_ACCESS_TOKEN).
+ *   - Else use refresh_token (ZOHO_LEAVE_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET).
+ *
+ * Query:
+ *   ?from=01-Apr-2026&to=31-Mar-2027&unit=Day
+ *   ?fetch_all=1 (default) — paginate until all employees are loaded
+ *   ?startIndex=0&limit=100 — single page when fetch_all=0
+ *
+ * @param {IncomingMessage} req
+ * @param {ServerResponse} res
  */
+function readQueryParam(req, name) {
+  const q = req && req.query;
+  if (q && typeof q === 'object' && q[name] != null && String(q[name]).trim() !== '') {
+    return String(q[name]).trim();
+  }
+  const raw = String(req.originalUrl || req.url || '');
+  const qMark = raw.indexOf('?');
+  if (qMark >= 0) {
+    try {
+      const v = new URLSearchParams(raw.slice(qMark + 1)).get(name);
+      if (v && String(v).trim()) return String(v).trim();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  try {
+    const v = new URL(raw, 'http://localhost').searchParams.get(name);
+    return v && String(v).trim() ? String(v).trim() : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatZohoApiError(data, fallback) {
+  if (!data) return fallback;
+  if (typeof data === 'string') return data;
+  if (typeof data !== 'object') return fallback;
+  const err = data.error;
+  if (typeof err === 'string') return err;
+  if (err && typeof err === 'object') {
+    const msg = err.message || err.error_description || err.description;
+    if (msg && err.code != null) return `[${err.code}] ${msg}`;
+    if (msg) return String(msg);
+  }
+  return data.message || data.error_description || data.msg || fallback;
+}
+
+function clampLeavePageSize(raw) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return ZOHO_LEAVE_PAGE_SIZE;
+  return Math.min(ZOHO_LEAVE_PAGE_SIZE, n);
+}
+
+function leaveEmployeeKey(record) {
+  if (!record || typeof record !== 'object') return '';
+  const emp = record.employee;
+  if (emp && typeof emp === 'object') {
+    return String(emp.id || emp.erecno || emp.zoho_id || '').trim();
+  }
+  return String(record.employeeId || record['Employee.ID'] || record.id || '').trim();
+}
+
+function mergeLeavePages(pages) {
+  const merged = { leavetypes: {}, report: {}, employees: [] };
+  for (const page of pages) {
+    if (!page || typeof page !== 'object') continue;
+    if (page.leavetypes && typeof page.leavetypes === 'object') {
+      Object.assign(merged.leavetypes, page.leavetypes);
+    }
+    if (page.report && typeof page.report === 'object') {
+      Object.assign(merged.report, page.report);
+    }
+    if (Array.isArray(page.employees)) {
+      merged.employees.push(...page.employees);
+    }
+  }
+  return merged;
+}
+
 module.exports = async (req, res) => {
   try {
-    const url = new URL(req.url, 'http://localhost');
-    const fromDate = url.searchParams.get('from') || '01-Jan-2025';
-    const toDate = url.searchParams.get('to') || '31-Dec-2025';
-    const unit = url.searchParams.get('unit') || 'Day';
+    const fromDate = readQueryParam(req, 'from') || '01-Jan-2025';
+    const toDate = readQueryParam(req, 'to') || '31-Dec-2025';
+    const unit = readQueryParam(req, 'unit') || 'Day';
+    const fetchAll = readQueryParam(req, 'fetch_all') !== '0';
+    const startIndex = Math.max(0, parseInt(readQueryParam(req, 'startIndex') || '0', 10) || 0);
+    const limit = clampLeavePageSize(readQueryParam(req, 'limit') || String(ZOHO_LEAVE_PAGE_SIZE));
 
-    // Try to get access token - first check for direct access token, then refresh token
     const accessToken = await getAccessToken();
     console.log('Access token obtained, length:', accessToken ? accessToken.length : 0);
-    
-    const rawData = await fetchLeaveData({ accessToken, fromDate, toDate, unit });
+
+    let rawData;
+    let meta;
+
+    if (fetchAll) {
+      const result = await fetchAllLeaveData({ accessToken, fromDate, toDate, unit });
+      rawData = result.data;
+      meta = result.meta;
+    } else {
+      rawData = await fetchLeavePage({ accessToken, fromDate, toDate, unit, startIndex, limit });
+      const count = Object.keys(rawData.report || {}).length;
+      meta = {
+        startIndex,
+        limit,
+        count,
+        has_more: count >= limit,
+        pageSize: limit,
+      };
+    }
+
     const leaveTypeLabels = extractLeaveTypeLabels(rawData);
     const leaveRecords = renameLeaveRecordKeys(normalizeLeaveResponse(rawData), leaveTypeLabels);
     const records = toRecordsMap(rawData, leaveRecords);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ records, leaveTypeLabels, leaveRecords }));
+    res.end(JSON.stringify({ success: true, records, leaveTypeLabels, leaveRecords, meta }));
   } catch (error) {
     console.error('leavedata_function error:', error);
-    const errorMessage = error.response?.data?.message || 
-                        error.response?.data?.error || 
-                        error.message || 
-                        'Unknown error occurred';
+    const errorMessage = formatZohoApiError(error.response?.data, error.message || 'Unknown error occurred');
     
     // Log full error details for debugging
     if (error.response) {
@@ -71,58 +157,56 @@ module.exports = async (req, res) => {
 };
 
 async function getAccessToken() {
-  // Direct access token only when set in env (short-lived; prefer refresh below).
-  const directAccessToken = process.env.ZOHO_ACCESS_TOKEN && String(process.env.ZOHO_ACCESS_TOKEN).trim();
-  if (directAccessToken) {
-    console.log('Using direct access token from ZOHO_ACCESS_TOKEN');
-    return directAccessToken;
+  // 1) Short-lived access_token (ZOHOPEOPLE.leave.ALL)
+  const envAccessToken = process.env.ZOHO_LEAVE_ACCESS_TOKEN || process.env.ZOHO_ACCESS_TOKEN;
+  if (envAccessToken && String(envAccessToken).trim().length > 10) {
+    return envAccessToken.trim();
   }
 
-  // Otherwise, use refresh token to get a new access token
-  // Prefer env vars but fall back to provided credentials to keep the
-  // function usable without additional configuration. Replace these with
-  // secure storage before production deployment.
-  // NOTE: Refresh token must have leave scope (e.g. ZOHOPEOPLE.leave.ALL); api_domain typically https://www.zohoapis.in
-  const refreshToken = process.env.ZOHO_REFRESH_TOKEN || '1000.57027fa862de594094ee23dc6605f7da.db624019552faf17386c5376896bf7e4';
-  const clientId = process.env.ZOHO_CLIENT_ID || '1000.ABC3VBH4REB9DC28WYZS3EY5AJD73B';
-  const clientSecret = process.env.ZOHO_CLIENT_SECRET || 'f2fca57c9b0436dcc6fe68d0f922015569bba642a8';
+  // 2) Refresh token → access_token (same client as People / Attendance)
+  const refreshToken =
+    process.env.ZOHO_LEAVE_REFRESH_TOKEN ||
+    process.env.ZOHO_REFRESH_TOKEN ||
+    '1000.8fb87613a10e02dfb9c11c8b3d44309f.d6c54b4a484ad7022c70accb35c4cef8';
+  const clientId = process.env.ZOHO_CLIENT_ID || '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
+  const clientSecret = process.env.ZOHO_CLIENT_SECRET || 'b6d3935145d59974934b981d6291b40af69a3ab150';
 
   if (!refreshToken || !clientId || !clientSecret) {
-    throw new Error('Missing Zoho OAuth environment variables. Please set ZOHO_REFRESH_TOKEN, ZOHO_CLIENT_ID, and ZOHO_CLIENT_SECRET, or set ZOHO_ACCESS_TOKEN for direct access.');
+    throw new Error(
+      'Missing Zoho OAuth env. Set ZOHO_LEAVE_ACCESS_TOKEN (access_token only) or ZOHO_LEAVE_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET.'
+    );
   }
 
+  const params = new URLSearchParams({
+    refresh_token: refreshToken,
+    client_id: clientId,
+    client_secret: clientSecret,
+    grant_type: 'refresh_token',
+  });
+
+  let data;
   try {
-    console.log('Refreshing access token...');
-    const params = new URLSearchParams({
-      refresh_token: refreshToken,
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: 'refresh_token',
+    const res = await axios.post('https://accounts.zoho.in/oauth/v2/token', params, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
-
-    const response = await axios.post('https://accounts.zoho.in/oauth/v2/token', params, {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-    });
-    
-    if (!response.data || !response.data.access_token) {
-      const errorMsg = response.data?.error || response.data?.error_description || 'Failed to obtain access token from Zoho.';
-      console.error('Token refresh failed:', errorMsg);
-      throw new Error(`Token refresh failed: ${errorMsg}`);
+    data = res.data;
+  } catch (err) {
+    const zoho = err.response && err.response.data;
+    if (zoho && (zoho.error === 'invalid_code' || zoho.error === 'invalid_token')) {
+      throw new Error('Invalid or expired leave refresh token. Set ZOHO_LEAVE_ACCESS_TOKEN to your access_token instead.');
     }
-    
-    console.log('Access token refreshed successfully');
-    return response.data.access_token;
-  } catch (error) {
-    if (error.response) {
-      const errorMsg = error.response.data?.error || error.response.data?.error_description || error.message;
-      console.error('Token refresh error response:', error.response.status, errorMsg);
-      throw new Error(`Token refresh error: ${errorMsg}`);
-    }
-    console.error('Token refresh error:', error.message);
-    throw new Error(`Token refresh error: ${error.message}`);
+    throw new Error(
+      zoho && (zoho.error || zoho.error_description)
+        ? `${zoho.error} - ${zoho.error_description || ''}`
+        : err.message
+    );
   }
+
+  if (data && data.access_token) {
+    return data.access_token;
+  }
+  const errorMsg = data?.error || data?.error_description || 'Failed to obtain access token from Zoho.';
+  throw new Error(`Token refresh failed: ${errorMsg}`);
 }
 
 /**
@@ -326,11 +410,10 @@ function toRecordsMap(raw, leaveRecords) {
   return records;
 }
 
-async function fetchLeaveData({ accessToken, fromDate, toDate, unit }) {
-  // Adjust domain if your account uses a different DC
+async function fetchLeavePage({ accessToken, fromDate, toDate, unit, startIndex = 0, limit = ZOHO_LEAVE_PAGE_SIZE }) {
   const base = process.env.ZOHO_PEOPLE_BASE_URL || 'https://people.zoho.in/people/api';
   const endpoint = `${base}/v2/leavetracker/reports/bookedAndBalance`;
-  
+
   try {
     const response = await axios.get(endpoint, {
       headers: {
@@ -342,8 +425,9 @@ async function fetchLeaveData({ accessToken, fromDate, toDate, unit }) {
         from: fromDate,
         to: toDate,
         unit: unit,
+        startIndex: String(startIndex),
+        limit: String(limit),
       },
-      // Always return response, don't throw on HTTP errors
       validateStatus: () => true,
     });
     
@@ -356,12 +440,10 @@ async function fetchLeaveData({ accessToken, fromDate, toDate, unit }) {
         // Response is a string (might be HTML or plain text)
         errorMessage = `HTTP ${response.status}: ${response.data.substring(0, 200)}`;
       } else if (response.data && typeof response.data === 'object') {
-        // Response is an object
-        errorMessage = response.data.message || 
-                      response.data.error || 
-                      response.data.error_description ||
-                      response.data.code ||
-                      `HTTP ${response.status}: ${response.statusText}`;
+        errorMessage = formatZohoApiError(
+          response.data,
+          `HTTP ${response.status}: ${response.statusText}`
+        );
       } else {
         errorMessage = `HTTP ${response.status}: ${response.statusText}`;
       }
@@ -418,4 +500,54 @@ async function fetchLeaveData({ accessToken, fromDate, toDate, unit }) {
       throw new Error(`Request setup error: ${error.message}`);
     }
   }
+}
+
+async function fetchAllLeaveData({ accessToken, fromDate, toDate, unit }) {
+  const pageSize = clampLeavePageSize(process.env.ZOHO_LEAVE_PAGE_SIZE || String(ZOHO_LEAVE_PAGE_SIZE));
+  const delayMs = Math.max(0, parseInt(process.env.ZOHO_LEAVE_PAGE_DELAY_MS || '300', 10) || 300);
+  const pages = [];
+  let startIndex = 0;
+  let firstPageKey = '';
+
+  for (let guard = 0; guard < ZOHO_LEAVE_MAX_PAGES; guard += 1) {
+    const page = await fetchLeavePage({
+      accessToken,
+      fromDate,
+      toDate,
+      unit,
+      startIndex,
+      limit: pageSize,
+    });
+    const batch = Object.values(page.report || {});
+    if (batch.length === 0) break;
+
+    const pageKey = leaveEmployeeKey(batch[0]);
+    if (guard === 0) {
+      firstPageKey = pageKey;
+    } else if (pageKey && pageKey === firstPageKey) {
+      console.warn(
+        `leavedata_function: page at startIndex=${startIndex} repeated first employee; stopping pagination`
+      );
+      break;
+    }
+
+    pages.push(page);
+    console.log(
+      `leavedata_function: page ${pages.length} startIndex=${startIndex} batch=${batch.length} total=${pages.reduce(
+        (sum, p) => sum + Object.keys(p.report || {}).length,
+        0
+      )}`
+    );
+
+    if (batch.length < pageSize) break;
+    startIndex += pageSize;
+    if (delayMs) await sleep(delayMs);
+  }
+
+  const data = mergeLeavePages(pages);
+  const total = Object.keys(data.report || {}).length;
+  return {
+    data,
+    meta: { total, pages: pages.length, pageSize, mode: 'fetch_all' },
+  };
 }

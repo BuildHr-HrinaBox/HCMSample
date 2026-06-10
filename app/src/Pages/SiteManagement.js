@@ -50,6 +50,11 @@ function siteIndustry(s) {
   return String(s.industry ?? s.Industry ?? '').trim();
 }
 
+function siteLocation(s) {
+  if (!s || typeof s !== 'object') return '';
+  return String(s.location ?? s.Location ?? '').trim();
+}
+
 /** Avoid opaque `Unexpected token '<'` when the server returns an HTML error page. */
 async function readJsonFromResponse(res) {
   const text = await res.text();
@@ -85,6 +90,7 @@ const initialForm = {
   inchargeEmail: '',
   inchargeDesignation: '',
   industry: '',
+  location: '',
   audit: 'false'
 };
 
@@ -123,6 +129,8 @@ function sanitizeSiteFormField(name, raw) {
       return v.slice(0, 200);
     case 'inchargeDesignation':
       return v.slice(0, 150);
+    case 'location':
+      return v.slice(0, 200);
     default:
       return v;
   }
@@ -273,7 +281,8 @@ const SiteManagement = ({ userEmail }) => {
         s.inchargePhone,
         siteInchargeEmail(s),
         s.inchargeDesignation,
-        siteIndustry(s)
+        siteIndustry(s),
+        siteLocation(s)
       ]
         .map((x) => String(x || '').toLowerCase())
         .join(' ');
@@ -393,7 +402,8 @@ const SiteManagement = ({ userEmail }) => {
       { key: 'inchargePhone', label: 'Phone' },
       { key: 'inchargeEmail', label: 'Mail Id' },
       { key: 'inchargeDesignation', label: 'Designation' },
-      { key: 'industry', label: 'Industry' }
+      { key: 'industry', label: 'Industry' },
+      { key: 'location', label: 'Location' }
     ];
     const CSV_EXCEL_TEXT_KEYS = new Set([
       'id',
@@ -417,6 +427,7 @@ const SiteManagement = ({ userEmail }) => {
     const cellValue = (site, key) => {
       if (key === 'inchargeEmail') return siteInchargeEmail(site) || site.inchargeEmail || '';
       if (key === 'industry') return siteIndustry(site) || site.industry || '';
+      if (key === 'location') return siteLocation(site) || site.location || '';
       if (key === 'sitePostalCode') {
         return String(site.sitePostalCode ?? site.SitePostalCode ?? site.site_postal_code ?? '').trim();
       }
@@ -593,6 +604,7 @@ const SiteManagement = ({ userEmail }) => {
       inchargeEmail: siteInchargeEmail(site) || site.inchargeEmail || '',
       inchargeDesignation: site.inchargeDesignation || '',
       industry: siteIndustry(site) || site.industry || '',
+      location: siteLocation(site) || site.location || '',
       audit: site.audit === true || site.audit === 'true' ? 'true' : 'false'
     });
     setFormErrors({});
@@ -621,6 +633,7 @@ const SiteManagement = ({ userEmail }) => {
       inchargeEmail: siteInchargeEmail(site) || site.inchargeEmail || '',
       inchargeDesignation: site.inchargeDesignation || '',
       industry: siteIndustry(site) || site.industry || '',
+      location: siteLocation(site) || site.location || '',
       audit: site.audit === true || site.audit === 'true' ? 'true' : 'false'
     });
     setFormErrors({});
@@ -716,6 +729,7 @@ const SiteManagement = ({ userEmail }) => {
         inchargeEmail: form.inchargeEmail.trim(),
         inchargeDesignation: form.inchargeDesignation.trim(),
         industry: form.industry.trim(),
+        location: form.location.trim(),
         audit: form.audit || 'false'
       };
 
@@ -782,7 +796,7 @@ const SiteManagement = ({ userEmail }) => {
 
   const subtitle = '';
 
-  const TABLE_COL_COUNT = 12;
+  const TABLE_COL_COUNT = 13;
 
   const siteFormModalTitle = viewOnly ? 'View Site' : editingId ? 'Edit Site' : 'Add Site';
 
@@ -1007,6 +1021,18 @@ const SiteManagement = ({ userEmail }) => {
                               {formErrors.industry}
                             </div>
                           )}
+                        </div>
+                        <div className="company-details-field">
+                          <label htmlFor="sm-location">Location</label>
+                          <input
+                            id="sm-location"
+                            name="location"
+                            value={form.location}
+                            onChange={handleChange}
+                            placeholder="Enter location"
+                            disabled={viewOnly}
+                            maxLength={200}
+                          />
                         </div>
                       </div>
                     </section>
@@ -1349,6 +1375,7 @@ const SiteManagement = ({ userEmail }) => {
                         <th scope="col">Phone</th>
                         <th scope="col">Mail Id</th>
                         <th scope="col">Industry</th>
+                        <th scope="col">Location</th>
                         <th className="company-details-th-actions" scope="col">
                           Actions
                         </th>
@@ -1388,6 +1415,9 @@ const SiteManagement = ({ userEmail }) => {
                             </td>
                             <td className="site-management-td-industry" title={siteIndustry(site)}>
                               {siteIndustry(site) || '—'}
+                            </td>
+                            <td className="site-management-td-clip" title={siteLocation(site)}>
+                              {siteLocation(site) || '—'}
                             </td>
                             <td>
                               <div className="company-details-table-actions">

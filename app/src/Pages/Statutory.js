@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
@@ -15,16 +15,27 @@ import {
 } from '../utils/siteInchargeScope';
 import { resolveLoginEmailString } from '../utils/resolveLoginEmail';
 import {
+  fetchAttendanceData,
   fetchFormTemplateArrayBuffer,
-  fetchPayrollBulkRows,
+  fetchLeaveData,
   fetchPeopleData,
+  fetchJsonWithTimeout,
+  flattenZohoPeopleEmployees,
+  getCachedPeopleData,
+  getCachedPayrollBulkRows,
+  getPayrollBulkRowsForAutofill,
+  yieldToMain,
+  processInChunks,
+  readPeopleCacheEmployeeCount,
   fetchSiteDetails,
   getFormTemplateCacheKey,
   prefetchFormTemplate,
   prefetchStatutoryAutofillData,
+  prefetchPeopleData,
   readSiteDetailsCache,
   writeSiteDetailsCache
 } from '../utils/statutoryAutofillCache';
+import { getPayrollOrganizationId } from '../utils/payrollOrgId';
 
 /** @returns {(number | 'ellipsis')[]} */
 function buildPaginationItems(currentPage, totalPages) {
@@ -62,6 +73,65 @@ const STATUTORY_DATA_REVISION_KEY = 'statutoryDataRevision';
 const STATUTORY_BROADCAST_CHANNEL_NAME = 'hcm-statutory-sync';
 /** Max wait for admin to see site submit on another device (background poll, no page reload). */
 const STATUTORY_LIVE_POLL_MS = 1000;
+/** Catalyst JSON body limit is low; omit SampleData snapshot when payload would exceed this. */
+const STATUTORY_SAVE_MAX_JSON_BYTES = 750000;
+
+function estimateJsonUtf8Bytes(value) {
+  try {
+    const json = JSON.stringify(value);
+    if (typeof TextEncoder !== 'undefined') {
+      return new TextEncoder().encode(json).byteLength;
+    }
+    return json.length;
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
+}
+
+function prepareSampleDataRowsForSave(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+    const out = {};
+    for (const [key, val] of Object.entries(row)) {
+      if (String(key).startsWith('__')) continue;
+      out[key] = val;
+    }
+    return out;
+  });
+}
+
+function omitStatutorySampleDataSnapshot(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  const {
+    sampleDataHeader: _h,
+    sampleData: _d,
+    sampleHeaderFormData: _hf,
+    ...rest
+  } = payload;
+  return rest;
+}
+
+function payloadIncludesSampleDataSnapshot(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  const rows = payload.sampleData;
+  const headers = payload.sampleDataHeader;
+  const headerFormData = payload.sampleHeaderFormData;
+  return (
+    (Array.isArray(rows) && rows.length > 0) ||
+    (Array.isArray(headers) && headers.length > 0) ||
+    (headerFormData && typeof headerFormData === 'object' && Object.keys(headerFormData).length > 0)
+  );
+}
+
+function isStatutoryPayloadTooLargeResponse(response, rawText) {
+  const status = Number(response?.status);
+  if (status === 413) return true;
+  const text = String(rawText || '');
+  if (/PayloadTooLargeError/i.test(text)) return true;
+  if (/request entity too large/i.test(text)) return true;
+  return false;
+}
 
 let statutoryBroadcastChannel = null;
 try {
@@ -335,7 +405,16 @@ function validateFormUTemplateForRow(item, sheetHints = {}) {
 
 /** When parseExcelForm returns no headers, use canonical Form U columns for the detected variant. */
 function resolveAutofillTableHeaders(currentHeaders, hints = {}) {
-  const trimmed = (Array.isArray(currentHeaders) ? currentHeaders : [])
+  const raw = Array.isArray(currentHeaders) ? currentHeaders : [];
+  if (isFormIIMaharashtraContext(
+    { title: hints.formHeaderTitle, subtitle: hints.formHeaderSubtitle },
+    hints.item,
+    hints.fileName || hints.formFileName,
+    raw
+  )) {
+    return normalizeFormIIMaharashtraTableHeaders(raw);
+  }
+  const trimmed = raw
     .map((h) => String(h || '').trim())
     .filter(Boolean);
   if (isFormUConfidentialCharacterContext(hints)) {
@@ -422,7 +501,42 @@ function isForm12StatutoryContext(item, fileName, formHeader) {
   return /\bform\s*[-"']?\s*12\b/i.test(blob);
 }
 
+const getForm12PresentAddress = (emp) =>
+  pickFirstNonEmptyString(
+    emp.Present_Address,
+    emp['Present_Address'],
+    emp['Present Address'],
+    emp.PresentAddress,
+    emp['PresentAddress'],
+    emp.presentAddress,
+    findNestedValueByNormalizedKey(emp, 'presentaddress')
+  );
+
+const getForm12PermanentAddress = (emp) =>
+  pickFirstNonEmptyString(
+    emp.Permanent_Address,
+    emp['Permanent_Address'],
+    emp['Permanent address'],
+    emp.Permanentaddress,
+    emp['Permanentaddress'],
+    emp.PermanentAddress,
+    emp['PermanentAddress'],
+    emp.permanentAddress,
+    findNestedValueByNormalizedKey(emp, 'permanentaddress')
+  );
+
+const isForm12PresentAddressHeader = (h) => {
+  const s = normalizeLooseHeaderText(h);
+  return s.includes('present') && s.includes('address');
+};
+
+const isForm12PermanentAddressHeader = (h) => {
+  const s = normalizeLooseHeaderText(h);
+  return s.includes('permanent') && s.includes('address');
+};
+
 function isFormJStatutoryContext(item, fileName, formHeader) {
+  if (isFormKRegisterOfEmploymentContext(formHeader, item, fileName, null)) return false;
   const blob = [
     item?.formName,
     item?.FormName,
@@ -435,6 +549,255 @@ function isFormJStatutoryContext(item, fileName, formHeader) {
     .join(' ');
   return /\bform\s*[-"']?\s*j\b/i.test(blob) || /register\s+of\s+employment/i.test(blob);
 }
+
+/** Form K — Register of Employment (hotel / restaurant / theatre; numbered "Hours worked on" columns). */
+function isFormKRegisterOfEmploymentContext(formHeader, rowItem, fileName, tableHeaders) {
+  const parts = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference,
+    Array.isArray(tableHeaders) ? tableHeaders.join(' ') : ''
+  ]
+    .join(' ')
+    .toLowerCase();
+  if (/\bform\s*k\b|\bform_k\b|\bform-k\b/i.test(parts)) return true;
+  return (
+    /register\s+of\s+employment/i.test(parts) &&
+    /residential\s+hotel|restaurant|eating\s+house|theatre|public\s+amusement|entertainment/i.test(parts)
+  );
+}
+
+/** Legacy spacer keys from earlier Form II builds — stripped on normalize/remap. */
+const FORM_II_MH_LEGACY_SPACER_HEADERS = ['__formII_col_margin_1__', '__formII_col_margin_2__'];
+
+const isFormIILegacySpacerHeader = (h) =>
+  FORM_II_MH_LEGACY_SPACER_HEADERS.includes(String(h || ''));
+
+const isBlankOrGeneratedTableHeader = (h) => {
+  const t = String(h || '').trim();
+  if (!t) return true;
+  return /^column\s+([a-z]+|\d+)$/i.test(t);
+};
+
+const countLeadingBlankTableHeaders = (headers) => {
+  if (!Array.isArray(headers)) return 0;
+  let n = 0;
+  for (let i = 0; i < headers.length; i += 1) {
+    if (isBlankOrGeneratedTableHeader(headers[i]) || isFormIILegacySpacerHeader(headers[i])) n += 1;
+    else break;
+  }
+  return n;
+};
+
+const normalizeFormIIHeaderKey = (h) =>
+  String(h || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, '')
+    .replace(/\s+/g, '');
+
+const isFormIISerialHeader = (h) => {
+  const s = String(h || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return (
+    /^sl\.?\s*no\.?$/.test(s) ||
+    /^s\.?\s*no\.?$/.test(s) ||
+    s === 'sl no' ||
+    s === 's no' ||
+    s === 'sr no' ||
+    /^sr\.?\s*no\.?$/.test(s)
+  );
+};
+
+const isFormIIDeputyHeader = (h) => /deputy\s*id/i.test(String(h || ''));
+
+const isFormIIEmployeeCodeHeader = (h) => {
+  const s = String(h || '').toLowerCase();
+  return s.includes('employee') && s.includes('code');
+};
+
+const isFormIIWorkmenNameHeader = (h) => /name\s+of\s+the\s+workmen/i.test(String(h || ''));
+
+const isFormIIMinimumRateBasicHeader = (h) => {
+  const s = normalizeFormIIHeaderKey(h);
+  return s.includes('minimum') && s.includes('rate') && s.includes('wage') && s.includes('basic');
+};
+
+const isFormIIActualRateHraHeader = (h) => {
+  const s = normalizeFormIIHeaderKey(h);
+  return s.includes('actual') && s.includes('rate') && (s.includes('hra') || (s.includes('wage') && s.includes('payable')));
+};
+
+const isFormIIConveyanceHeader = (h) => {
+  const s = normalizeFormIIHeaderKey(h);
+  return s.includes('conveyance') || /\bconv\b/.test(s);
+};
+
+const isFormIIBonusHeader = (h) => /\bbonus\b/i.test(String(h || ''));
+
+const isFormIIRecognizedDataHeader = (h) => {
+  const text = String(h || '').trim();
+  if (!text || isFormIILegacySpacerHeader(text)) return false;
+  return (
+    isFormIISerialHeader(text) ||
+    isFormIIDeputyHeader(text) ||
+    isFormIIEmployeeCodeHeader(text) ||
+    isFormIIWorkmenNameHeader(text) ||
+    isFormIIMinimumRateBasicHeader(text) ||
+    isFormIIActualRateHraHeader(text) ||
+    isFormIIConveyanceHeader(text) ||
+    isFormIIBonusHeader(text) ||
+    /total|product|case|piece|allow|wage|rate|payable|deduct|remark|signature/i.test(text)
+  );
+};
+
+/** How many leading Excel/UI columns to drop before Sl.No. for Form II. */
+const countLeadingFormIIColumnsToStrip = (headers) => {
+  if (!Array.isArray(headers)) return 0;
+  const withoutLegacy = headers.filter((h) => !isFormIILegacySpacerHeader(h));
+  const trimmed = withoutLegacy.map((h) => String(h || '').trim());
+  const slIdx = trimmed.findIndex((h) => h && isFormIISerialHeader(h));
+  if (slIdx > 0) return slIdx;
+  return countLeadingBlankTableHeaders(withoutLegacy);
+};
+
+/** Form II Maharashtra UI grid: Sl.No. is column A (leading blank Excel margin columns are not shown). */
+const normalizeFormIIMaharashtraTableHeaders = (headers) => {
+  if (!Array.isArray(headers) || headers.length === 0) return [];
+  let list = headers
+    .filter((h) => !isFormIILegacySpacerHeader(h))
+    .map((h) => String(h || '').trim())
+    .filter(Boolean);
+
+  const slIdx = list.findIndex((h) => isFormIISerialHeader(h));
+  if (slIdx > 0) {
+    list = list.slice(slIdx);
+  } else {
+    let drop = 0;
+    while (drop < list.length && !isFormIIRecognizedDataHeader(list[drop])) drop += 1;
+    if (drop > 0 && drop < list.length) list = list.slice(drop);
+  }
+
+  while (list.length > 1 && isFormIISerialHeader(list[0]) && isFormIISerialHeader(list[1])) {
+    list = list.slice(1);
+  }
+
+  return list;
+};
+
+const alignFormIIColumnGroupLabels = (labels, leadingColsToStrip) => {
+  if (!Array.isArray(labels) || leadingColsToStrip <= 0) return labels;
+  return labels.slice(leadingColsToStrip);
+};
+
+const extractLeadingFormIIJunkValue = (row, oldList, newH) => {
+  if (!row || typeof row !== 'object' || !isFormIISerialHeader(newH)) return '';
+  for (let si = 0; si < FORM_II_MH_LEGACY_SPACER_HEADERS.length; si += 1) {
+    const key = FORM_II_MH_LEGACY_SPACER_HEADERS[si];
+    const v = row[key];
+    if (v != null && String(v).trim() !== '') return v;
+  }
+  const rawOld = Array.isArray(oldList) ? oldList : [];
+  const strip = countLeadingFormIIColumnsToStrip(rawOld);
+  for (let i = 0; i < strip; i += 1) {
+    const key = rawOld[i];
+    if (key == null || isFormIILegacySpacerHeader(key)) continue;
+    const v = row[key];
+    if (v != null && String(v).trim() !== '') return v;
+  }
+  return '';
+};
+
+const remapFormIIRowsToHeaders = (rows, oldHeaders, newHeaders) => {
+  if (!Array.isArray(rows) || !Array.isArray(newHeaders) || newHeaders.length === 0) return rows || [];
+  const oldList = Array.isArray(oldHeaders) ? oldHeaders : [];
+  const oldDataHeaders = normalizeFormIIMaharashtraTableHeaders(oldList);
+
+  return rows.map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    const next = {};
+    newHeaders.forEach((newH, i) => {
+      if (row[newH] != null && String(row[newH]).trim() !== '') {
+        next[newH] = row[newH];
+        return;
+      }
+      const nk = normalizeFormIIHeaderKey(newH);
+      for (const key of Object.keys(row)) {
+        if (isFormIILegacySpacerHeader(key) || key.startsWith('__')) continue;
+        if (normalizeFormIIHeaderKey(key) === nk) {
+          next[newH] = row[key];
+          return;
+        }
+      }
+      const oldH = oldDataHeaders[i];
+      if (oldH && row[oldH] != null && String(row[oldH]).trim() !== '') {
+        next[newH] = row[oldH];
+        return;
+      }
+      const strip = countLeadingFormIIColumnsToStrip(oldList);
+      const offsetKey = oldList[strip + i];
+      if (offsetKey && row[offsetKey] != null && String(row[offsetKey]).trim() !== '') {
+        next[newH] = row[offsetKey];
+        return;
+      }
+      const leadingVal = extractLeadingFormIIJunkValue(row, oldList, newH);
+      if (leadingVal !== '') {
+        next[newH] = leadingVal;
+        return;
+      }
+      next[newH] = '';
+    });
+    return next;
+  });
+};
+
+function isFormIIMaharashtraContext(formHeader, rowItem, fileName, tableHeaders) {
+  const parts = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference,
+    Array.isArray(tableHeaders) ? tableHeaders.join(' ') : ''
+  ]
+    .join(' ')
+    .toLowerCase();
+  // Form_II / Form-II filenames — JS \b does not treat "_" as a word boundary.
+  if (/form[\s._-]*ii(?:[\s._-]|$)/i.test(parts) && !/form[\s._-]*iii/i.test(parts)) return true;
+  const hdrBlob = Array.isArray(tableHeaders) ? tableHeaders.join(' ').toLowerCase() : '';
+  return (
+    /deputy\s*id/.test(hdrBlob) &&
+    /name\s+of\s+(the\s+)?workmen?/.test(hdrBlob) &&
+    (/minimum\s+rate\s+of\s+wages/.test(hdrBlob) || /actual\s+rate\s+of\s+wages/.test(hdrBlob))
+  );
+}
+
+const FORM_K_HEADER_TO_SPEC_KEY = (rawHeader) => {
+  const n = String(rawHeader || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, '');
+  const hoursMatch = String(rawHeader || '').match(/hours?\s+worked\s+on[_\s-]+(\d{1,2})/i);
+  if (hoursMatch) return `hours_${parseInt(hoursMatch[1], 10)}`;
+  if (/name\s+of\s+the\s+employee/.test(n) || /employee.*establishment/.test(n)) return 'name';
+  if (/^name$/.test(n) || /employee\s+name/.test(n) || /name\s+of\s+employee/.test(n)) return 'name';
+  if (n === 'sex' || n === 'gender') return 'sex';
+  if (n === 'age') return 'age';
+  if (/employment\s+commence/.test(n) || /time\s+at\s+which\s+employment\s+commence/.test(n)) return 'commence';
+  if (/employment\s+cease/.test(n) || /time\s+at\s+which\s+employment\s+cease/.test(n)) return 'cease';
+  if (/rest\s+interval/.test(n)) return 'rest';
+  if (/total\s+hours/.test(n)) return 'total_hours';
+  if (/overtime/.test(n)) return 'overtime';
+  if (/days\s+on\s+which/.test(n)) return 'overtime_days';
+  return null;
+};
 
 /** Form J Register of Employment: title + (See Rule…) + multi-line register text (no S.No column). */
 const buildFormJRegisterHeaderFromSheet = ({
@@ -553,7 +916,21 @@ const normalizeFormJHeaderForDisplay = (formHeader, item, fileName) => {
 };
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const FORM_TABLE_PAGE_SIZE = 50;
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+const formTableRowHasMeaningfulData = (row) => {
+  if (!row || typeof row !== 'object') return false;
+  if (Array.isArray(row)) {
+    return row.some((v) => v != null && String(v).trim() !== '');
+  }
+  return Object.values(row).some((v) => v != null && String(v).trim() !== '');
+};
+
+const countMeaningfulFormTableRows = (rows) => {
+  if (!Array.isArray(rows)) return 0;
+  return rows.filter((row) => formTableRowHasMeaningfulData(row)).length;
+};
 
 /** Zoho People `bookedAndBalance` expects `from` / `to` as DD-Mon-YYYY (aligned with Statutory month picker). */
 function zohoBookedBalanceRangeForUiMonth(selectedMonthStr) {
@@ -579,6 +956,139 @@ function normalizeLooseHeaderText(value) {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+const pickFirstNonEmptyString = (...values) => {
+  for (let i = 0; i < values.length; i += 1) {
+    const s = String(values[i] ?? '').trim();
+    if (s) return s;
+  }
+  return '';
+};
+
+const findNestedValueByNormalizedKey = (obj, targetNormalizedKey, depth = 0) => {
+  if (!obj || typeof obj !== 'object' || depth > 5) return '';
+  const entries = Object.entries(obj);
+  for (let i = 0; i < entries.length; i += 1) {
+    const [k, v] = entries[i];
+    const nk = String(k || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (nk === targetNormalizedKey) {
+      if (v != null && String(v).trim() !== '') return String(v).trim();
+      const dv = obj[`${k}.displayValue`];
+      if (dv != null && String(dv).trim() !== '') return String(dv).trim();
+    }
+  }
+  for (let i = 0; i < entries.length; i += 1) {
+    const [, v] = entries[i];
+    if (v && typeof v === 'object') {
+      const nested = findNestedValueByNormalizedKey(v, targetNormalizedKey, depth + 1);
+      if (nested) return nested;
+    }
+  }
+  return '';
+};
+
+const getAttendanceTotalHoursRaw = (rec) => String(rec?.TotalHours ?? rec?.totalHours ?? '').trim();
+
+const recordHasAttendanceTotalHours = (rec) => {
+  if (!rec || typeof rec !== 'object') return false;
+  return 'TotalHours' in rec || 'totalHours' in rec;
+};
+
+const getAttendanceEmployeeFirstName = (obj) =>
+  pickFirstNonEmptyString(
+    obj?.FirstName,
+    obj?.firstName,
+    obj?.['First Name'],
+    obj?.['first name'],
+    obj?.First_Name,
+    findNestedValueByNormalizedKey(obj, 'firstname')
+  );
+
+const getAttendanceEmployeeLastName = (obj) =>
+  pickFirstNonEmptyString(
+    obj?.LastName,
+    obj?.lastName,
+    obj?.['Last Name'],
+    obj?.['last name'],
+    obj?.Last_Name,
+    findNestedValueByNormalizedKey(obj, 'lastname')
+  );
+
+const getAttendanceEmployeeDisplayName = (obj) => {
+  if (!obj || typeof obj !== 'object') return '';
+  const first = getAttendanceEmployeeFirstName(obj);
+  const last = getAttendanceEmployeeLastName(obj);
+  const full = `${first} ${last}`.trim();
+  return pickFirstNonEmptyString(
+    full,
+    obj?.EmployeeName,
+    obj?.['Employee Name'],
+    obj?.['EmployeeName'],
+    obj?.Name,
+    obj?.['Name'],
+    obj?.name,
+    obj?.['name'],
+    first,
+    findNestedValueByNormalizedKey(obj, 'name')
+  ).toLowerCase();
+};
+
+const getAttendanceEmployeeIdCandidates = (obj) => {
+  if (!obj || typeof obj !== 'object') return [];
+  const vals = [
+    obj.EmployeeID,
+    obj['EmployeeID'],
+    obj['Employee ID'],
+    obj.employee_id,
+    obj['employee_id'],
+    obj.Zoho_ID,
+    obj['Zoho_ID'],
+    obj.zoho_id,
+    obj['zoho_id'],
+    obj.ZohoID,
+    obj['ZohoID'],
+    obj.userId,
+    obj.UserID,
+    obj.UserId,
+    obj.employeeId,
+    obj.EmpID,
+    obj.EmpId,
+    obj.erecno,
+    obj['erecno'],
+    obj.Erecno,
+    obj.id,
+    obj['id'],
+    obj['employee id'],
+    findNestedValueByNormalizedKey(obj, 'employeeid'),
+    findNestedValueByNormalizedKey(obj, 'zohoid'),
+    findNestedValueByNormalizedKey(obj, 'userid'),
+    findNestedValueByNormalizedKey(obj, 'erecno')
+  ];
+  return vals.map((v) => String(v || '').trim()).filter(Boolean);
+};
+
+const findNestedValueByKeyPattern = (obj, pattern, depth = 0) => {
+  if (!obj || typeof obj !== 'object' || depth > 5) return '';
+  const entries = Object.entries(obj);
+  for (let i = 0; i < entries.length; i += 1) {
+    const [k, v] = entries[i];
+    if (pattern.test(String(k || '')) && v != null && String(v).trim() !== '') {
+      return String(v).trim();
+    }
+    const displayKey = `${k}.displayValue`;
+    if (pattern.test(displayKey) && obj[displayKey] != null && String(obj[displayKey]).trim() !== '') {
+      return String(obj[displayKey]).trim();
+    }
+  }
+  for (let i = 0; i < entries.length; i += 1) {
+    const [, v] = entries[i];
+    if (v && typeof v === 'object') {
+      const nested = findNestedValueByKeyPattern(v, pattern, depth + 1);
+      if (nested) return nested;
+    }
+  }
+  return '';
+};
 
 /** Metric type for Form X leave register sub-columns */
 function getLeaveColumnMetricType(header) {
@@ -607,6 +1117,80 @@ const OTHER_LEAVE_ZOHO_ALIASES = {
   sickleave: ['sick leave', 'sickleave', 'sick', 'sl'],
   weddingleave: ['wedding leave', 'weddingleave', 'marriage leave', 'wedding'],
 };
+
+const CONTINGENCY_LEAVE_ZOHO_ALIASES = ['contingency leave', 'contingency', 'cl'];
+
+function isForm15Part1AutofillContext(fileName, parsedFormHeader, item) {
+  const blob = [
+    fileName,
+    item?.formName,
+    item?.FormName,
+    parsedFormHeader?.title,
+    parsedFormHeader?.subtitle,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ');
+  return /form\s*15/.test(blob) && /part\s*1/.test(blob);
+}
+
+function isPrimaryEarnedLeaveZohoLabel(label) {
+  const normalized = normalizeLooseHeaderText(label);
+  if (!normalized || normalized.includes('legacy')) return false;
+  if (normalized === 'earned leave' || normalized === 'earned leave test') return true;
+  if (normalized.includes('earned') && normalized.includes('test')) return true;
+  return false;
+}
+
+function getEarnedLeaveTypeCell(leaveRecord, leaveTypeLabels = {}) {
+  if (!leaveRecord || typeof leaveRecord !== 'object') return null;
+  const skipKeys = new Set(['employee', 'employeeid', 'totals', 's.no', 'sno']);
+  for (const key of Object.keys(leaveRecord)) {
+    if (skipKeys.has(normalizeLooseHeaderText(key))) continue;
+    const labelsToCheck = [key, leaveTypeLabels[key]].filter(Boolean);
+    if (labelsToCheck.some((label) => isPrimaryEarnedLeaveZohoLabel(label))) {
+      return leaveRecord[key];
+    }
+  }
+  return null;
+}
+
+function leaveMetricsFromCell(raw) {
+  const parsed = parseLeaveCellObject(raw);
+  if (!parsed || typeof parsed !== 'object') {
+    return { beginning: '', availed: '', balance: '', hasData: false };
+  }
+  const balanceRaw = parsed.paidBalance ?? parsed.balance ?? parsed.Balance;
+  const availedRaw = parsed.paidBooked ?? parsed.booked ?? parsed.Booked;
+  const hasBalance = balanceRaw != null && balanceRaw !== '';
+  const hasAvailed = availedRaw != null && availedRaw !== '';
+  const balanceNum = hasBalance ? Number(balanceRaw) : NaN;
+  const availedNum = hasAvailed ? Number(availedRaw) : NaN;
+  const beginningRaw =
+    parsed.beginningBalance ??
+    parsed.openingBalance ??
+    parsed.opening ??
+    parsed.beginning ??
+    (Number.isFinite(balanceNum) && Number.isFinite(availedNum) ? balanceNum + availedNum : balanceNum);
+  const beginningNum = beginningRaw != null && beginningRaw !== '' ? Number(beginningRaw) : NaN;
+  const hasData = Number.isFinite(beginningNum) || Number.isFinite(availedNum) || Number.isFinite(balanceNum);
+  return {
+    beginning: Number.isFinite(beginningNum) ? String(beginningNum) : '',
+    availed: Number.isFinite(availedNum) ? String(availedNum) : '',
+    balance: Number.isFinite(balanceNum) ? String(balanceNum) : '',
+    hasData,
+  };
+}
+
+function getEarnedLeaveTypeMetrics(leaveRecord, leaveTypeLabels = {}) {
+  return leaveMetricsFromCell(getEarnedLeaveTypeCell(leaveRecord, leaveTypeLabels));
+}
+
+function getContingencyLeaveMetrics(leaveRecord, leaveTypeLabels = {}) {
+  const raw = getOtherLeaveTypeCell(leaveRecord, CONTINGENCY_LEAVE_ZOHO_ALIASES, leaveTypeLabels);
+  return leaveMetricsFromCell(raw);
+}
 
 function leaveLabelMatchesOtherType(label, aliases) {
   const normalized = normalizeLooseHeaderText(label);
@@ -698,9 +1282,13 @@ function resolveFormXLeaveSectionHeaders(headers, groupLabels) {
   const groups =
     Array.isArray(groupLabels) && groupLabels.length === headersArr.length ? groupLabels : null;
   const result = {
+    earnedBeginning: null,
     earnedEarned: null,
     earnedAvailed: null,
     earnedBalance: null,
+    medicalBeginning: null,
+    medicalAvailed: null,
+    medicalBalance: null,
     otherBeginning: null,
     otherAvailed: null,
     otherBalance: null,
@@ -718,9 +1306,15 @@ function resolveFormXLeaveSectionHeaders(headers, groupLabels) {
     if (!groups) return;
     const group = normalizeLooseHeaderText(groups[index]);
     if (group.includes('earned leave')) {
+      if (metric === 'beginning' && !result.earnedBeginning) result.earnedBeginning = header;
       if (metric === 'earned' && !result.earnedEarned) result.earnedEarned = header;
       if (metric === 'availed' && !result.earnedAvailed) result.earnedAvailed = header;
       if (metric === 'balance' && !result.earnedBalance) result.earnedBalance = header;
+    }
+    if (group.includes('medical leave')) {
+      if (metric === 'beginning' && !result.medicalBeginning) result.medicalBeginning = header;
+      if (metric === 'availed' && !result.medicalAvailed) result.medicalAvailed = header;
+      if (metric === 'balance' && !result.medicalBalance) result.medicalBalance = header;
     }
     if (group.includes('other leave')) {
       if (metric === 'beginning' && !result.otherBeginning) result.otherBeginning = header;
@@ -802,9 +1396,14 @@ const extractDayOfMonthFromDueDate = (dueDate) => {
 };
 
 const getMonthFromDueDate = (dueDateStr) => {
-  if (!dueDateStr || typeof dueDateStr !== 'string') return null;
-  const s = dueDateStr.trim().toLowerCase();
+  if (dueDateStr == null || dueDateStr === '') return null;
+  // Numeric due dates (e.g. 7 = 7th of month) are day-of-month, not calendar months.
+  if (typeof dueDateStr === 'number') return null;
+  const s = String(dueDateStr).trim().toLowerCase();
+  if (!s) return null;
   if (s.includes('monthly basis')) return null; // Don't change filter for "Monthly Basis"
+  // Pure day-of-month strings (e.g. "7", "15") must not be treated as month numbers.
+  if (/^\d{1,2}$/.test(s)) return null;
   for (let i = 0; i < MONTH_NAMES.length; i++) {
     if (s.includes(MONTH_NAMES[i].toLowerCase()) || s.includes(MONTH_ABBR[i].toLowerCase())) return MONTH_NAMES[i];
   }
@@ -1622,16 +2221,30 @@ function dedupeStatutoryRowsForDisplay(rows, uiMonthFallback, resolveSiteFn) {
   return out;
 }
 
-/** Persist MonthFilter in Catalyst (due-date-derived month, else UI month / row — needed when Due Date is "Monthly Basis"). */
+/** Persist MonthFilter in Catalyst (UI month for Monthly Basis / day-only due dates, else due-date month). */
 const resolveMonthFilterForSave = (dueDate, uiSelectedMonth, rowMonthOptional) => {
-  let candidate = getMonthFromDueDate(dueDate);
   const dueStr = dueDate != null ? String(dueDate).trim() : '';
-  if (!candidate && dueStr.toLowerCase().includes('monthly basis')) {
-    candidate = rowMonthOptional || uiSelectedMonth;
+  const dueLower = dueStr.toLowerCase();
+  const uiTrim = uiSelectedMonth != null ? String(uiSelectedMonth).trim() : '';
+  const rowTrim = rowMonthOptional != null ? String(rowMonthOptional).trim() : '';
+  const isMonthlyBasis = dueLower.includes('monthly basis');
+  const isDayOnlyDueDate =
+    (typeof dueDate === 'number' && Number.isInteger(dueDate) && dueDate >= 1 && dueDate <= 31) ||
+    /^\d{1,2}$/.test(dueLower);
+
+  // Monthly-basis and day-of-month due dates belong to the month the user selected in the filter.
+  if ((isMonthlyBasis || isDayOnlyDueDate) && (uiTrim || rowTrim)) {
+    const pick = uiTrim || rowTrim;
+    const full = resolveToFullMonthName(pick);
+    return monthForBackend(full || pick);
+  }
+
+  let candidate = getMonthFromDueDate(dueStr);
+  if (!candidate && isMonthlyBasis) {
+    candidate = rowTrim || uiTrim || null;
   }
   if (!candidate) {
-    const rowTrim = rowMonthOptional != null ? String(rowMonthOptional).trim() : '';
-    candidate = rowTrim || (uiSelectedMonth != null ? String(uiSelectedMonth).trim() : '') || null;
+    candidate = rowTrim || uiTrim || null;
   }
   // Final safety fallback: always persist a month when row exists.
   if (!candidate) {
@@ -1712,6 +2325,7 @@ const repairTruncatedYearsInWagePeriodLine = (line, year) => {
 /** Form V etc.: show "1".."31" under merged daily-hours header instead of repeating the full parent key. */
 const formatStatutoryTableHeaderLabel = (headerKey) => {
   const h = String(headerKey || '');
+  if (isFormIILegacySpacerHeader(h)) return '';
   const m = h.match(/^(.+)_(\d{1,2})$/);
   if (!m) return h;
   const day = parseInt(m[2], 10);
@@ -2260,6 +2874,272 @@ const isForm11EsicAccidentBookContext = (formHeader, rowItem, fileName, tableHea
   return /\bform\s*11\b|\bform_11\b|\bform-11\b/i.test(parts) && /accident\s+book/i.test(parts);
 };
 
+/** Tamil Nadu Form 26 — Register of Accidents. */
+const isForm26RegisterOfAccidentsContext = (formHeader, rowItem, fileName, tableHeaders) => {
+  const parts = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference,
+    Array.isArray(tableHeaders) ? tableHeaders.join(' ') : ''
+  ]
+    .join(' ')
+    .toLowerCase();
+  if (/\bform\s*26\b|\bform_26\b|\bform-26\b/i.test(parts)) return true;
+  if (/register\s+of\s+accident/i.test(parts) && /factories/i.test(parts)) return true;
+  if (Array.isArray(tableHeaders) && tableHeaders.length > 0) {
+    const joined = tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+    if (/nature.*extent.*injury|nature.*location.*injury/.test(joined) && /remarks.*initials/.test(joined)) {
+      return true;
+    }
+    if (/date.*time.*accident/.test(joined) && /exact\s+place.*accident/.test(joined) && /injury/.test(joined)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/** Form 26: manual injury/remarks columns — do not autofill from Zoho People. */
+const isForm26SkipAutofillHeader = (h) => {
+  const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const bare = s.replace(/^\(?\d+\)?\s*/, '').trim();
+  if (
+    /name/.test(bare) &&
+    (/designation/.test(bare) || /injured/.test(bare)) &&
+    (/person/.test(bare) || /injured/.test(bare))
+  ) {
+    return true;
+  }
+  if (/\(3\)|^3\)/.test(s) && /name/.test(bare) && /injured|designation|person/.test(bare)) return true;
+  if (/nature/.test(bare) && /extent/.test(bare) && /injury/.test(bare)) return true;
+  if (/location/.test(bare) && /injury/.test(bare) && /nature/.test(bare)) return true;
+  if (/\(6\)|^6\)/.test(s) && /injury|nature|extent|location/.test(bare)) return true;
+  if (/remarks/.test(bare) && (/initials/.test(bare) || /manager/.test(bare) || /manage/.test(bare))) return true;
+  if (/\(14\)|^14\)/.test(s) && /remarks/.test(bare)) return true;
+  return false;
+};
+
+/** Form 11 (ESIC Accident Book): manual accident/notice columns — do not autofill from Zoho People. */
+const isForm11SkipAutofillHeader = (h) => {
+  const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (/date\s+of\s+notice/.test(s)) return true;
+  if (/time\s+of\s+notice/.test(s)) return true;
+  if (/time\s+of\s+injury/.test(s)) return true;
+  if (/(^|\s)insurance\s+no\.?(\s|$)/.test(s) || s === 'insurance no' || s === 'insurance no.') return true;
+  if (/what\s+exactly/.test(s) && /injured/.test(s) && /accident/.test(s)) return true;
+  if (/injured\s+person\s+doing/.test(s) || /doing\s+at\s+time\s+of\s+accident/.test(s)) return true;
+  return false;
+};
+
+const getForm11EmployeeFullName = (emp) => {
+  const fn = pickFirstNonEmptyString(
+    emp.FirstName,
+    emp['FirstName'],
+    emp.firstName,
+    emp['First Name'],
+    findNestedValueByNormalizedKey(emp, 'firstname')
+  );
+  const ln = pickFirstNonEmptyString(
+    emp.LastName,
+    emp['LastName'],
+    emp.lastName,
+    emp['Last Name'],
+    findNestedValueByNormalizedKey(emp, 'lastname')
+  );
+  if (fn && ln) return `${fn} ${ln}`;
+  if (fn || ln) return fn || ln;
+  return pickFirstNonEmptyString(
+    emp.Full_Name,
+    emp['Full Name'],
+    emp.FullName,
+    emp.Name,
+    emp['Name'],
+    emp.Name1,
+    emp['Name1'],
+    emp.EmployeeName,
+    emp['Employee Name'],
+    emp['EmployeeName'],
+    emp.employeeName,
+    emp.Nameoftheemployee,
+    emp['Name of the employee'],
+    emp['Nameoftheemployee'],
+    emp.Employee_Name,
+    emp['Employee_Name'],
+    findNestedValueByNormalizedKey(emp, 'fullname'),
+    findNestedValueByNormalizedKey(emp, 'employeename'),
+    findNestedValueByNormalizedKey(emp, 'name')
+  );
+};
+
+const resolveForm11PersonName = (emp, row) =>
+  pickFirstNonEmptyString(
+    getForm11EmployeeFullName(emp),
+    row?.__employeeLookupName,
+    row?.__employeelookupname
+  );
+
+const buildForm11EmployeeAddress = (emp) => {
+  const addressLine1 = pickFirstNonEmptyString(
+    emp.Address_Line_1,
+    emp['Address_Line_1'],
+    emp.AddressLine1,
+    emp['Address Line 1'],
+    emp.Address_Line1,
+    findNestedValueByNormalizedKey(emp, 'addressline1'),
+    findNestedValueByKeyPattern(emp, /address.*line.*1/i)
+  );
+  const addressLine2 = pickFirstNonEmptyString(
+    emp.Address_Line_2,
+    emp['Address_Line_2'],
+    emp.AddressLine2,
+    emp['Address Line 2'],
+    emp.Address_Line2,
+    findNestedValueByNormalizedKey(emp, 'addressline2'),
+    findNestedValueByKeyPattern(emp, /address.*line.*2/i)
+  );
+  const city = pickFirstNonEmptyString(
+    emp.City,
+    emp['City'],
+    emp.City1,
+    emp['City1'],
+    findNestedValueByNormalizedKey(emp, 'city'),
+    findNestedValueByNormalizedKey(emp, 'city1')
+  );
+  const city2 = pickFirstNonEmptyString(emp.City2, emp['City2'], findNestedValueByNormalizedKey(emp, 'city2'));
+  const state = pickFirstNonEmptyString(
+    emp.State,
+    emp['State'],
+    emp.State1,
+    emp['State1'],
+    findNestedValueByNormalizedKey(emp, 'state')
+  );
+  const pincode = pickFirstNonEmptyString(
+    emp.Pincode,
+    emp['Pincode'],
+    emp.Pin_Code,
+    emp['Pin Code'],
+    emp.ZIP,
+    emp['ZIP'],
+    emp.Postal_Code,
+    emp['Postal Code'],
+    findNestedValueByNormalizedKey(emp, 'pincode'),
+    findNestedValueByNormalizedKey(emp, 'zipcode')
+  );
+  const country = pickFirstNonEmptyString(
+    emp.Country,
+    emp['Country'],
+    emp.Country1,
+    emp['Country1'],
+    findNestedValueByNormalizedKey(emp, 'country'),
+    findNestedValueByNormalizedKey(emp, 'country1')
+  );
+  const addressParts = [addressLine1, addressLine2, city, city2, state, pincode, country]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  if (addressParts.length > 0) return addressParts.join(', ');
+  return pickFirstNonEmptyString(
+    emp.PresentAddress,
+    emp['Present Address'],
+    emp['PresentAddress'],
+    emp.presentAddress,
+    emp['Present_Address'],
+    emp.Present_Address,
+    emp.Permanentaddress,
+    emp['Permanent address'],
+    emp['PermanentAddress'],
+    emp['Permanentaddress'],
+    emp.permanentAddress,
+    emp['Permanent_Address'],
+    emp.Permanent_Address,
+    findNestedValueByNormalizedKey(emp, 'presentaddress'),
+    findNestedValueByNormalizedKey(emp, 'permanentaddress'),
+    findNestedValueByKeyPattern(emp, /present.*address/i),
+    findNestedValueByKeyPattern(emp, /permanent.*address/i),
+    findNestedValueByKeyPattern(emp, /^address$/i)
+  );
+};
+
+const buildForm11NameAndAddressValue = (emp, row) => {
+  const name = resolveForm11PersonName(emp, row);
+  const address = buildForm11EmployeeAddress(emp);
+  return [name, address].filter(Boolean).join(', ');
+};
+
+const formatForm11NameAddressCellForExport = (value, header, row) => {
+  if (isForm11SkipAutofillHeader(header)) return '';
+  const sanitized = String(value ?? '').trim();
+  if (isForm11NameSubColumnHeader(header)) {
+    return pickFirstNonEmptyString(row?.__employeeLookupName, row?.__employeelookupname, sanitized);
+  }
+  if (isForm11AddressSubColumnHeader(header)) {
+    return sanitized;
+  }
+  if (
+    !isForm11InjuredPersonNameAddressHeader(header) &&
+    !isForm11NoticePersonHeader(header) &&
+    !isForm11WitnessesHeader(header)
+  ) {
+    return sanitized;
+  }
+  const lookupName = pickFirstNonEmptyString(row?.__employeeLookupName, row?.__employeelookupname);
+  if (!lookupName) return sanitized;
+  if (!sanitized) return lookupName;
+  if (sanitized.toLowerCase().includes(lookupName.toLowerCase())) return sanitized;
+  return `${lookupName}, ${sanitized}`;
+};
+
+const parseForm11ParentSubHeader = (h) => {
+  const raw = String(h || '').trim();
+  const m = raw.match(/^(.+)_([\s\S]+)$/);
+  if (!m) return { parent: raw, sub: null };
+  return { parent: m[1].trim(), sub: m[2].trim() };
+};
+
+const isForm11PersonSectionParent = (parentText) => {
+  const s = normalizeLooseHeaderText(parentText);
+  if (s.includes('injured') && s.includes('person')) return true;
+  if (s.includes('giving') && s.includes('notice')) return true;
+  if (s.includes('witness')) return true;
+  return false;
+};
+
+const isForm11InjuredPersonNameAddressHeader = (h) => {
+  const { parent, sub } = parseForm11ParentSubHeader(h);
+  if (sub) return false;
+  const s = normalizeLooseHeaderText(parent);
+  return s.includes('injured') && s.includes('person') && s.includes('name');
+};
+
+const isForm11NoticePersonHeader = (h) => {
+  const { parent, sub } = parseForm11ParentSubHeader(h);
+  if (sub) return false;
+  const s = normalizeLooseHeaderText(parent);
+  return s.includes('giving') && s.includes('notice') && s.includes('name');
+};
+
+const isForm11WitnessesHeader = (h) => {
+  const { parent, sub } = parseForm11ParentSubHeader(h);
+  if (sub) return false;
+  const s = normalizeLooseHeaderText(parent);
+  return s.includes('witness') && s.includes('name');
+};
+
+const isForm11NameSubColumnHeader = (h) => {
+  const { parent, sub } = parseForm11ParentSubHeader(h);
+  if (!sub) return false;
+  const subNorm = normalizeLooseHeaderText(sub);
+  return isForm11PersonSectionParent(parent) && subNorm === 'name';
+};
+
+const isForm11AddressSubColumnHeader = (h) => {
+  const { parent, sub } = parseForm11ParentSubHeader(h);
+  if (!sub) return false;
+  const subNorm = normalizeLooseHeaderText(sub);
+  return isForm11PersonSectionParent(parent) && subNorm === 'address';
+};
+
 const isFormTSEContext = (formHeader, rowItem, fileName) => {
   const parts = [
     rowItem?.formName,
@@ -2518,6 +3398,83 @@ const findSiteDetailByName = (siteDetailsList, siteName) => {
     if (match) return match;
   }
   return null;
+};
+
+const siteLocationFromRecord = (site) =>
+  String(site?.location ?? site?.Location ?? '').trim();
+
+const normalizeLocationCompareKey = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+
+const unwrapZohoEmployeeRecord = (empItem) => {
+  if (!empItem || typeof empItem !== 'object') return empItem;
+  if (empItem.Employee && typeof empItem.Employee === 'object') return empItem.Employee;
+  if (empItem.employee && typeof empItem.employee === 'object') return empItem.employee;
+  return empItem;
+};
+
+const getEmployeeWorkLocation = (empItem) => {
+  const emp = unwrapZohoEmployeeRecord(empItem);
+  if (!emp || typeof emp !== 'object') return '';
+  const raw =
+    emp.LocationName ??
+    emp['LocationName'] ??
+    emp['Location Name'] ??
+    emp['LocationName.displayValue'] ??
+    emp.Work_location ??
+    emp['Work_location'] ??
+    emp['Work Location'] ??
+    emp.work_location ??
+    emp.workLocation ??
+    emp.Location ??
+    emp.location ??
+    '';
+  if (raw && typeof raw === 'object') {
+    return String(raw.display_value ?? raw.name ?? raw.Name ?? '').trim();
+  }
+  return String(raw || '').trim();
+};
+
+const employeeMatchesSiteLocation = (empItem, targetLocation) => {
+  const target = normalizeLocationCompareKey(targetLocation);
+  if (!target) return true;
+  const empLoc = normalizeLocationCompareKey(getEmployeeWorkLocation(empItem));
+  if (!empLoc) return false;
+  return empLoc === target || empLoc.includes(target) || target.includes(empLoc);
+};
+
+/** Site Management `Location` values for one or more comma-joined site names. */
+const resolveSiteLocationsForAutofill = (siteName, siteDetailsList) => {
+  if (!siteName || !Array.isArray(siteDetailsList) || siteDetailsList.length === 0) return [];
+  const tokens = String(siteName)
+    .trim()
+    .split(/\s*,\s*/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const locations = [];
+  const seen = new Set();
+  for (const token of tokens) {
+    const site = findSiteDetailByName(siteDetailsList, token);
+    const loc = siteLocationFromRecord(site);
+    const key = normalizeLocationCompareKey(loc);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    locations.push(loc);
+  }
+  return locations;
+};
+
+const filterEmployeesBySiteLocation = (employees, siteName, siteDetailsList) => {
+  if (!Array.isArray(employees) || employees.length === 0) return employees;
+  const locations = resolveSiteLocationsForAutofill(siteName, siteDetailsList);
+  if (locations.length === 0) return employees;
+  const filtered = employees.filter((emp) =>
+    locations.some((loc) => employeeMatchesSiteLocation(emp, loc))
+  );
+  return filtered;
 };
 
 const buildSiteInchargeName = (site) =>
@@ -3592,9 +4549,15 @@ const Statutory = ({ userEmail, userRole }) => {
   const [formFileModalData, setFormFileModalData] = useState(null);
   const [formFileLoading, setFormFileLoading] = useState(false);
   const [tableAutofillLoading, setTableAutofillLoading] = useState(false);
+  const [tableAutofillProgress, setTableAutofillProgress] = useState('');
   const [formHeader, setFormHeader] = useState(null);
   const [headerFormData, setHeaderFormData] = useState({});
   const [formTableData, setFormTableData] = useState([]);
+  const [formTablePage, setFormTablePage] = useState(0);
+  const [formTablePageLoading, setFormTablePageLoading] = useState(false);
+  const [autofillTotalEmployees, setAutofillTotalEmployees] = useState(0);
+  const autofillEmployeesRef = useRef([]);
+  const autofillPayrollLookupRef = useRef(null);
   const [tableHeaders, setTableHeaders] = useState([]);
   const [subColumns, setSubColumns] = useState(null);
   const [formFields, setFormFields] = useState([]);
@@ -5159,12 +6122,10 @@ const Statutory = ({ userEmail, userRole }) => {
         setForm(initialForm);
         setEditingStatutoryId(null);
         setIsFormOpen(false);
-        if (form.dueDate) {
-          const monthFromDueDate = getMonthFromDueDate(form.dueDate);
-          if (monthFromDueDate) {
-            setSelectedMonth(monthFromDueDate);
-            persistMonthFilter(monthFromDueDate);
-          }
+        if (monthFilterValue) {
+          const savedMonth = resolveToFullMonthName(monthFilterValue) || monthFilterValue;
+          setSelectedMonth(savedMonth);
+          persistMonthFilter(savedMonth);
         }
         // When a new file was imported, clear old ChecklistBulk data automatically (like checklistbulk clear)
         if (isNewFormFile) {
@@ -7356,6 +8317,422 @@ const Statutory = ({ userEmail, userRole }) => {
     return { blob, fileName };
   };
 
+  /** Form K — Register of Employment (hotel/restaurant/theatre): preserve template + numbered "Hours worked on" columns. */
+  const buildFormKWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9 ]/g, '');
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const maxScanCols = 24;
+    let headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
+
+    if (headerRow < 1) {
+      for (let r = 1; r <= 30; r++) {
+        for (let c = 1; c <= maxScanCols; c++) {
+          const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+          if (/name\s+of\s+the\s+employee/.test(t) && /establishment/.test(t)) {
+            headerRow = r;
+            break;
+          }
+        }
+        if (headerRow > 0) break;
+      }
+    }
+    if (headerRow < 1) throw new Error('Could not locate Form K table header row in template.');
+
+    let tableStartCol = 2;
+    for (let c = 1; c <= maxScanCols; c++) {
+      const n = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (
+        /name\s+of\s+the\s+employee/.test(n) ||
+        n === 'sex' ||
+        n === 'age' ||
+        /employment\s+commence/.test(n) ||
+        /hours\s+worked\s+on/.test(n)
+      ) {
+        tableStartCol = c;
+        break;
+      }
+    }
+
+    const specColByKey = new Map();
+    const assignSpecCol = (specKey, col) => {
+      const writeCol = Math.max(col, tableStartCol);
+      if (!specColByKey.has(specKey)) specColByKey.set(specKey, writeCol);
+    };
+    for (let c = 1; c <= maxScanCols; c++) {
+      const raw = excelCellValueToString(worksheet.getCell(headerRow, c)?.value);
+      const n = normalize(raw);
+      if (!n) continue;
+      if (/name\s+of\s+the\s+employee/.test(n) || /employee.*establishment/.test(n)) assignSpecCol('name', c);
+      else if (n === 'sex') assignSpecCol('sex', c);
+      else if (n === 'age') assignSpecCol('age', c);
+      else if (/employment\s+commence/.test(n)) assignSpecCol('commence', c);
+      else if (/employment\s+cease/.test(n)) assignSpecCol('cease', c);
+      else if (/rest\s+interval/.test(n)) assignSpecCol('rest', c);
+      else if (/total\s+hours/.test(n)) assignSpecCol('total_hours', c);
+      else if (/extent\s+of\s+overtime/.test(n) && !/days\s+on/.test(n)) assignSpecCol('overtime', c);
+      else if (/days\s+on\s+which/.test(n)) assignSpecCol('overtime_days', c);
+    }
+
+    let hoursBandStart = -1;
+    let hoursBandEnd = -1;
+    for (let c = 1; c <= maxScanCols; c++) {
+      const n = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (/hours\s+worked\s+on/.test(n)) {
+        if (hoursBandStart < 0) hoursBandStart = Math.max(c, tableStartCol);
+        hoursBandEnd = c;
+      }
+    }
+    const numberedColByKey = new Map();
+    let numberedSubRow = -1;
+    for (let r = headerRow; r <= headerRow + 2; r++) {
+      const scanFrom = hoursBandStart > 0 ? hoursBandStart : 8;
+      const scanTo = hoursBandEnd > 0 ? hoursBandEnd + 2 : maxScanCols;
+      const cols = new Map();
+      for (let c = scanFrom; c <= scanTo; c++) {
+        const raw = String(excelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
+        if (!/^\d{1,2}$/.test(raw)) continue;
+        const num = parseInt(raw, 10);
+        if (num < 1 || num > 31) continue;
+        cols.set(num, c);
+      }
+      if (cols.size >= 2 && cols.size >= numberedColByKey.size) {
+        numberedColByKey.clear();
+        cols.forEach((col, num) => numberedColByKey.set(num, col));
+        numberedSubRow = r;
+      }
+    }
+    numberedColByKey.forEach((col, num) => specColByKey.set(`hours_${num}`, col));
+
+    const formKFallbackCols = [
+      ['name', tableStartCol],
+      ['sex', tableStartCol + 1],
+      ['age', tableStartCol + 2],
+      ['commence', tableStartCol + 3],
+      ['cease', tableStartCol + 4],
+      ['rest', tableStartCol + 5]
+    ];
+    formKFallbackCols.forEach(([key, col]) => {
+      if (!specColByKey.has(key)) specColByKey.set(key, col);
+    });
+    if (numberedColByKey.size === 0) {
+      const hoursBase = hoursBandStart > 0 ? hoursBandStart : tableStartCol + 6;
+      [1, 2, 3, 4].forEach((n, idx) => {
+        if (!specColByKey.has(`hours_${n}`)) specColByKey.set(`hours_${n}`, hoursBase + idx);
+      });
+    }
+
+    let dataStartRow = headerRow + 1;
+    if (numberedSubRow > headerRow) dataStartRow = numberedSubRow + 1;
+    const parsedStart = parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? (parsedDataStartIndex + 1) : 0;
+    if (parsedStart > dataStartRow && parsedStart > numberedSubRow) dataStartRow = parsedStart;
+    dataStartRow = Math.max(dataStartRow, headerRow + 1);
+
+    const hdrs = Array.isArray(headersToUse) ? headersToUse : [];
+    const specKeyToHeaderIndices = new Map();
+    for (let hi = 0; hi < hdrs.length; hi++) {
+      const specKey = FORM_K_HEADER_TO_SPEC_KEY(hdrs[hi]);
+      if (!specKey) continue;
+      if (!specKeyToHeaderIndices.has(specKey)) specKeyToHeaderIndices.set(specKey, []);
+      specKeyToHeaderIndices.get(specKey).push(hi);
+    }
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
+      if (row && typeof row === 'object') return Object.values(row).some((v) => String(v ?? '').trim() !== '');
+      return false;
+    };
+    const formKSpecFallbackPatterns = {
+      name: [/name\s+of\s+the\s+employee/i, /employee.*establishment/i, /employee\s+name/i, /^name$/i],
+      sex: [/^sex$/i, /gender/i],
+      age: [/^age$/i],
+      commence: [/employment\s+commence/i],
+      cease: [/employment\s+cease/i],
+      rest: [/rest\s+interval/i]
+    };
+    const getValueForSpecKey = (row, specKey, indices) => {
+      if (Array.isArray(row)) {
+        if (indices && indices.length > 0) {
+          for (const hi of indices) {
+            const v = row[hi];
+            if (v != null && String(v).trim() !== '') return v;
+          }
+        }
+        if (specKey === 'name' && row[0] != null && String(row[0]).trim() !== '') return row[0];
+        return '';
+      }
+      if (!row || typeof row !== 'object') return '';
+      if (indices && indices.length > 0) {
+        for (const hi of indices) {
+          const h = hdrs[hi];
+          const v = row?.[h];
+          if (v != null && String(v).trim() !== '') return v;
+        }
+      }
+      const patterns = formKSpecFallbackPatterns[specKey];
+      if (patterns) {
+        for (const key of Object.keys(row)) {
+          const nk = String(key || '').toLowerCase().replace(/\s+/g, ' ');
+          if (patterns.some((p) => p.test(nk))) {
+            const v = row[key];
+            if (v != null && String(v).trim() !== '') return v;
+          }
+        }
+      }
+      return '';
+    };
+
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary.filter((row) => rowLooksMeaningful(row));
+
+    const writeCols = Array.from(new Set(specColByKey.values())).filter((n) => Number.isFinite(n));
+    const minCol = writeCols.length > 0 ? Math.min(...writeCols) : tableStartCol;
+    const maxCol = writeCols.length > 0 ? Math.max(...writeCols) : tableStartCol + 9;
+
+    const rowHasTableBorder = (r) => {
+      for (let c = minCol; c <= maxCol; c++) {
+        const b = worksheet.getCell(r, c)?.border;
+        if (b && (b.top?.style || b.bottom?.style || b.left?.style || b.right?.style)) return true;
+      }
+      return false;
+    };
+    let templateBodyRows = 0;
+    for (let r = dataStartRow; r < dataStartRow + 24; r++) {
+      if (rowHasTableBorder(r)) templateBodyRows += 1;
+      else if (templateBodyRows > 0) break;
+    }
+    if (templateBodyRows < 1) templateBodyRows = 2;
+    const extraRowsNeeded = Math.max(0, sourceRows.length - templateBodyRows);
+    if (extraRowsNeeded > 0 && typeof worksheet.duplicateRow === 'function') {
+      try {
+        worksheet.duplicateRow(dataStartRow + templateBodyRows - 1, extraRowsNeeded, true);
+      } catch (dupErr) {
+        console.warn('Form K: could not duplicate template rows for extra employees', dupErr);
+      }
+    }
+
+    for (let i = 0; i < Math.min(sourceRows.length + 40, 200); i++) {
+      for (let c = minCol; c <= maxCol; c++) {
+        const clearCell = worksheet.getCell(dataStartRow + i, c);
+        const current = clearCell?.value;
+        if (current && typeof current === 'object' && Object.prototype.hasOwnProperty.call(current, 'formula')) continue;
+        clearCell.value = '';
+      }
+      if (tableStartCol > 1) {
+        const strayCell = worksheet.getCell(dataStartRow + i, tableStartCol - 1);
+        const strayVal = strayCell?.value;
+        if (strayVal != null && strayVal !== '' && !(typeof strayVal === 'object' && Object.prototype.hasOwnProperty.call(strayVal, 'formula'))) {
+          strayCell.value = '';
+        }
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      for (const [specKey, col] of specColByKey.entries()) {
+        const indices = specKeyToHeaderIndices.get(specKey);
+        const value = getValueForSpecKey(row, specKey, indices);
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(dataStartRow + i, col);
+        if (specKey === 'name' || specKey === 'sex') {
+          cell.value = String(value);
+        } else if (
+          specKey === 'age' &&
+          (typeof value === 'number' || (typeof value === 'string' && /^\d{1,3}$/.test(String(value).trim())))
+        ) {
+          const ageNum = parseInt(String(value).trim(), 10);
+          cell.value = Number.isFinite(ageNum) && ageNum <= 120 ? ageNum : String(value);
+        } else if (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim()))) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  /** Form II Maharashtra — UI starts at Sl.No. (col A); export writes from template Sl.No. column onward. */
+  const buildFormIIWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9 ]/g, '');
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const dataHdrs = normalizeFormIIMaharashtraTableHeaders(
+      Array.isArray(headersToUse) ? headersToUse : []
+    );
+
+    let headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
+    let dataStartCol = 3;
+    const maxScanCols = 80;
+
+    const findSlNoCol = (r) => {
+      for (let c = 1; c <= maxScanCols; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (t === 'slno' || t === 'sno' || /^sl\.?\s*no\.?$/.test(t) || (t.includes('sl') && t.includes('no'))) {
+          return c;
+        }
+      }
+      return -1;
+    };
+
+    if (headerRow < 1) {
+      for (let r = 1; r <= 40; r++) {
+        const slCol = findSlNoCol(r);
+        if (slCol > 0) {
+          headerRow = r;
+          dataStartCol = slCol;
+          break;
+        }
+      }
+    } else {
+      const slCol = findSlNoCol(headerRow);
+      if (slCol > 0) dataStartCol = slCol;
+    }
+    if (headerRow < 1) throw new Error('Could not locate Form II table header row in template.');
+
+    let dataStartRow = parsedDataStartIndex != null && parsedDataStartIndex >= 0
+      ? (parsedDataStartIndex + 1)
+      : (headerRow + 1);
+
+    const headerToCol = new Map();
+    for (let j = 0; j < dataHdrs.length; j++) {
+      headerToCol.set(dataHdrs[j], dataStartCol + j);
+    }
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
+      if (row && typeof row === 'object') {
+        return Object.entries(row).some(([k, v]) => !isFormIILegacySpacerHeader(k) && String(v ?? '').trim() !== '');
+      }
+      return false;
+    };
+    const getValueForHeader = (row, header, dataIndex) => {
+      if (!row || typeof row !== 'object') return '';
+      if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
+      if (Array.isArray(row) && dataIndex >= 0) return row[dataIndex] ?? '';
+      const nk = normalize(header);
+      for (const key of Object.keys(row)) {
+        if (isFormIILegacySpacerHeader(key)) continue;
+        if (normalize(key) === nk) return row[key];
+      }
+      return '';
+    };
+
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourceRows = sourcePrimary.filter((row) => rowLooksMeaningful(row));
+
+    const lastCol = dataStartCol + Math.max(dataHdrs.length - 1, 0);
+    for (let i = 0; i < Math.min(sourceRows.length + 40, 200); i++) {
+      for (let c = 1; c < dataStartCol; c++) {
+        const clearCell = worksheet.getCell(dataStartRow + i, c);
+        const cur = clearCell?.value;
+        if (cur && typeof cur === 'object' && Object.prototype.hasOwnProperty.call(cur, 'formula')) continue;
+        clearCell.value = '';
+      }
+      for (let c = dataStartCol; c <= lastCol + 2; c++) {
+        const clearCell = worksheet.getCell(dataStartRow + i, c);
+        const cur = clearCell?.value;
+        if (cur && typeof cur === 'object' && Object.prototype.hasOwnProperty.call(cur, 'formula')) continue;
+        clearCell.value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || {};
+      for (let j = 0; j < dataHdrs.length; j++) {
+        const header = dataHdrs[j];
+        const value = getValueForHeader(row, header, j);
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(dataStartRow + i, dataStartCol + j);
+        if (
+          j === 0 &&
+          (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))
+        ) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName = formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
   const buildForm10WorkbookWithTemplateStyles = async ({
     templateArrayBuffer,
     mappedData,
@@ -7516,11 +8893,14 @@ const Statutory = ({ userEmail, userRole }) => {
     return { blob, fileName };
   };
 
-  const buildForm25WorkbookWithTemplateStyles = async ({
+  /** Form 11 (ESIC Accident Book): preserve template grid + numeric column marker row (1..N). */
+  const buildForm11WorkbookWithTemplateStyles = async ({
     templateArrayBuffer,
     mappedData,
     mappedRowMatrix,
     headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
     parsedFormHeader,
     formFileName
   }) => {
@@ -7546,37 +8926,36 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       return '';
     };
-
-    let headerRow = -1;
-    let startCol = 1;
-    const maxScanRows = Math.max(120, worksheet.rowCount + 10);
-    for (let r = 1; r <= maxScanRows; r++) {
-      let hits = 0;
-      let firstCol = null;
-      for (let c = 1; c <= 260; c++) {
-        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
-        if (!t) continue;
-        const looksHeader =
-          /serial|name\s*of\s*worker|worker\s*id|time\s*at\s*which|overtime|rest\s*interval|dates/.test(t);
-        if (looksHeader) {
-          hits++;
-          if (firstCol == null) firstCol = c;
-        }
+    const sanitizeForm11ExportCell = (value, header) => {
+      if (isForm11SkipAutofillHeader(header)) return '';
+      if (value == null || value === '') return '';
+      const text = String(value).trim();
+      if (!text) return '';
+      const headerNorm = normalizeLooseHeaderText(header);
+      if (headerNorm.includes('time') || headerNorm.includes('date of notice') || headerNorm.includes('time of injury')) {
+        if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(text) && Number(text) > 1e9) return '';
       }
-      if (hits >= 3) {
-        headerRow = r;
-        startCol = firstCol || 1;
+      return text;
+    };
+
+    const maxScanRows = Math.max(120, worksheet.rowCount + 10);
+    const maxScanCols = 260;
+    let headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? parsedHeaderRowIndex + 1 : -1;
+    if (headerRow < 1) throw new Error('Could not locate Form 11 header row from parser.');
+    let startCol = 1;
+    for (let c = 1; c <= maxScanCols; c++) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (t) {
+        startCol = c;
         break;
       }
     }
-    if (headerRow < 0) throw new Error('Could not locate Form 25 header row.');
 
-    // Numeric row for dates (1..31) is common in Form 25; keep it intact and write below.
-    let markerRow = -1;
+    let markerRow = parsedDataStartIndex != null && parsedDataStartIndex > 0 ? parsedDataStartIndex : -1;
     let markerCols = [];
-    for (let r = headerRow; r <= Math.min(headerRow + 4, maxScanRows); r++) {
+    for (let r = Math.max(headerRow, markerRow > 0 ? markerRow - 1 : headerRow); r <= Math.min(headerRow + 6, maxScanRows); r++) {
       const cols = [];
-      for (let c = startCol; c <= 300; c++) {
+      for (let c = startCol; c <= maxScanCols; c++) {
         const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
         if (/^\d+$/.test(t)) cols.push(c);
       }
@@ -7585,11 +8964,17 @@ const Statutory = ({ userEmail, userRole }) => {
         markerRow = r;
       }
     }
-    const dataStartRow = markerCols.length >= 5 && markerRow > 0 ? (markerRow + 1) : (headerRow + 1);
-    const orderedCols = Array.from(
-      { length: Math.max(8, Array.isArray(headersToUse) ? headersToUse.length : 8) },
-      (_, i) => startCol + i
-    );
+    const dataStartRow =
+      parsedDataStartIndex != null && parsedDataStartIndex >= 0
+        ? parsedDataStartIndex + 1
+        : markerCols.length >= 5 && markerRow > 0
+          ? markerRow + 1
+          : headerRow + 1;
+    const orderedCols =
+      markerCols.length >= 5
+        ? markerCols
+        : Array.from({ length: Math.max(18, Array.isArray(headersToUse) ? headersToUse.length : 18) }, (_, i) => startCol + i);
+    const hdrs = Array.isArray(headersToUse) ? headersToUse : [];
 
     const rowLooksMeaningful = (row) => {
       if (Array.isArray(row)) {
@@ -7605,9 +8990,212 @@ const Statutory = ({ userEmail, userRole }) => {
       return false;
     };
 
-    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
-      ? mappedData
-      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourcePrimary =
+      Array.isArray(mappedData) && mappedData.length > 0
+        ? mappedData
+        : Array.isArray(mappedRowMatrix)
+          ? mappedRowMatrix
+          : [];
+    const sourceRows = sourcePrimary
+      .filter((row) => rowLooksMeaningful(row))
+      .map((row, idx) => {
+        if (Array.isArray(row)) {
+          const out = [...row];
+          if (out[0] == null || String(out[0]).trim() === '') out[0] = idx + 1;
+          return out;
+        }
+        const arr = hdrs.map((h) => formatForm11NameAddressCellForExport(row?.[h], h, row));
+        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = String(idx + 1);
+        return arr;
+      });
+
+    const isNumericMarkerTemplateRow = (r) => {
+      if (!markerCols || markerCols.length < 5) return false;
+      let numericHits = 0;
+      for (let i = 0; i < markerCols.length; i++) {
+        const v = normalize(excelCellValueToString(worksheet.getCell(r, markerCols[i])?.value));
+        if (/^\d+$/.test(v)) numericHits++;
+      }
+      return numericHits >= Math.max(5, Math.floor(markerCols.length * 0.6));
+    };
+    const clearFromRow = Math.max(1, dataStartRow);
+    const clearToRow = Math.min(maxScanRows, Math.max(dataStartRow + sourceRows.length + 30, clearFromRow + 30));
+    for (let r = clearFromRow; r <= clearToRow; r++) {
+      if (isNumericMarkerTemplateRow(r)) continue;
+      for (let j = 0; j < orderedCols.length; j++) {
+        worksheet.getCell(r, orderedCols[j]).value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i++) {
+      const row = sourceRows[i] || [];
+      let maxVisualLines = 1;
+      for (let j = 0; j < orderedCols.length; j++) {
+        worksheet.getCell(dataStartRow + i, orderedCols[j]).value = '';
+      }
+      for (let j = 0; j < orderedCols.length; j++) {
+        const header = hdrs[j] || '';
+        const rawValue = row[j];
+        const value = sanitizeForm11ExportCell(rawValue, header);
+        if (value == null || value === '') continue;
+        const cell = worksheet.getCell(dataStartRow + i, orderedCols[j]);
+        const isSerialCol =
+          j === 0 ||
+          /^(s\.?\s*no\.?|sl\.?\s*no\.?|serial)$/i.test(normalizeLooseHeaderText(header));
+        if (isSerialCol && /^-?\d+(\.\d+)?$/.test(String(value).trim())) {
+          cell.value = Number(value);
+        } else {
+          const text = String(value);
+          cell.value = text;
+          cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'top' };
+          const approxCharsPerLine = 22;
+          const visualLines = Math.max(1, Math.ceil(text.length / approxCharsPerLine));
+          if (visualLines > maxVisualLines) maxVisualLines = visualLines;
+        }
+      }
+      const targetRow = worksheet.getRow(dataStartRow + i);
+      const baseHeight = 18;
+      targetRow.height = Math.max(baseHeight, Math.min(120, baseHeight * maxVisualLines));
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName =
+      formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_11_Accident_Book_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildForm25WorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName,
+    headerFormData
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const maxScanRows = Math.max(120, worksheet.rowCount + 10);
+    const maxScanCols = 300;
+    let headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? parsedHeaderRowIndex + 1 : -1;
+    if (headerRow < 1) {
+      for (let r = 1; r <= maxScanRows; r++) {
+        let hits = 0;
+        for (let c = 1; c <= maxScanCols; c++) {
+          const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+          if (!t) continue;
+          if (/serial|name\s*of\s*worker|worker\s*id|time\s*at\s*which|overtime|rest\s*interval|dates/.test(t)) {
+            hits++;
+          }
+        }
+        if (hits >= 3) {
+          headerRow = r;
+          break;
+        }
+      }
+    }
+    if (headerRow < 1) throw new Error('Could not locate Form 25 header row.');
+
+    let startCol = 1;
+    for (let c = 1; c <= maxScanCols; c++) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(headerRow, c)?.value));
+      if (t) {
+        startCol = c;
+        break;
+      }
+    }
+
+    let markerRow = parsedDataStartIndex != null && parsedDataStartIndex > 0 ? parsedDataStartIndex : -1;
+    let markerCols = [];
+    for (let r = Math.max(headerRow, markerRow > 0 ? markerRow - 1 : headerRow); r <= Math.min(headerRow + 6, maxScanRows); r++) {
+      const cols = [];
+      for (let c = startCol; c <= maxScanCols; c++) {
+        const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (/^\d+$/.test(t)) cols.push(c);
+      }
+      if (cols.length > markerCols.length) {
+        markerCols = cols;
+        markerRow = r;
+      }
+    }
+    const dataStartRow =
+      parsedDataStartIndex != null && parsedDataStartIndex >= 0
+        ? parsedDataStartIndex + 1
+        : markerCols.length >= 5 && markerRow > 0
+          ? markerRow + 1
+          : headerRow + 1;
+    const hdrLen = Array.isArray(headersToUse) ? headersToUse.length : 12;
+    const orderedCols = Array.from({ length: Math.max(12, hdrLen) }, (_, i) => startCol + i);
+    const hdrs = Array.isArray(headersToUse) ? headersToUse : [];
+
+    const headerFields = parsedFormHeader?.fields;
+    const headerValues = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+    if (Array.isArray(headerFields) && headerFields.length > 0) {
+      for (let r = 1; r < headerRow; r++) {
+        for (let c = 1; c <= 80; c++) {
+          const cellStr = String(excelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
+          if (!cellStr) continue;
+          for (const field of headerFields) {
+            const label = String(field?.label || '').trim();
+            if (!label) continue;
+            if (cellStr === label || cellStr.startsWith(label) || label.startsWith(cellStr)) {
+              const value = headerValues[field.key] ?? field.value ?? '';
+              if (value != null && String(value).trim() !== '') {
+                worksheet.getCell(r, c + 1).value = String(value);
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    const rowLooksMeaningful = (row) => {
+      if (Array.isArray(row)) {
+        const vals = row.map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      if (row && typeof row === 'object') {
+        const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
+        if (vals.length === 0) return false;
+        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+      }
+      return false;
+    };
+
+    const sourcePrimary =
+      Array.isArray(mappedData) && mappedData.length > 0
+        ? mappedData
+        : Array.isArray(mappedRowMatrix)
+          ? mappedRowMatrix
+          : [];
     const sourceRows = sourcePrimary
       .filter((row) => rowLooksMeaningful(row))
       .map((row, idx) => {
@@ -7622,17 +9210,25 @@ const Statutory = ({ userEmail, userRole }) => {
           if (out[0] == null || String(out[0]).trim() === '') out[0] = idx + 1;
           return out;
         }
-        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
         const arr = hdrs.map((h) => row?.[h] ?? '');
         if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
         return arr;
       });
 
-    // Clear stale rows but keep header/marker rows.
-    const clearFromRow = Math.max(1, headerRow + 1);
+    const isNumericMarkerTemplateRow = (r) => {
+      if (!markerCols || markerCols.length < 5) return false;
+      let numericHits = 0;
+      for (let i = 0; i < markerCols.length; i++) {
+        const v = normalize(excelCellValueToString(worksheet.getCell(r, markerCols[i])?.value));
+        if (/^\d+$/.test(v)) numericHits++;
+      }
+      return numericHits >= Math.max(5, Math.floor(markerCols.length * 0.6));
+    };
+    const isHeaderBandRow = (r) => r >= headerRow && r < dataStartRow;
+    const clearFromRow = Math.max(1, dataStartRow);
     const clearToRow = Math.min(maxScanRows, Math.max(dataStartRow + sourceRows.length + 30, clearFromRow + 30));
     for (let r = clearFromRow; r <= clearToRow; r++) {
-      if (r === headerRow || r === markerRow) continue;
+      if (isNumericMarkerTemplateRow(r) || isHeaderBandRow(r)) continue;
       for (let j = 0; j < orderedCols.length; j++) {
         worksheet.getCell(r, orderedCols[j]).value = '';
       }
@@ -7640,6 +9236,9 @@ const Statutory = ({ userEmail, userRole }) => {
 
     for (let i = 0; i < sourceRows.length; i++) {
       const row = sourceRows[i] || [];
+      for (let j = 0; j < orderedCols.length; j++) {
+        worksheet.getCell(dataStartRow + i, orderedCols[j]).value = '';
+      }
       for (let j = 0; j < orderedCols.length; j++) {
         const value = row[j];
         if (value == null || value === '') continue;
@@ -7653,9 +9252,10 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     const out = await workbook.xlsx.writeBuffer();
-    const fileName = formFileName ||
+    const fileName =
+      formFileName ||
       parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
-      `Form_${Date.now()}.xlsx`;
+      `Form_25_${Date.now()}.xlsx`;
     const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     return { blob, fileName };
   };
@@ -8688,6 +10288,16 @@ const Statutory = ({ userEmail, userRole }) => {
           headersIndicateFormUConfidential(sampleHeadersForTemplate));
       let mappedData = null;
       let usedLiveModalGrid = false;
+      const expectedAutofillEmployeeTotal =
+        autofillTotalEmployees || autofillEmployeesRef.current.length || 0;
+      const liveModalGridLoadedRowCount = countMeaningfulFormTableRows(formTableDataRef.current);
+      const canUseLiveModalGridForDownload =
+        expectedAutofillEmployeeTotal > 0 &&
+        liveModalGridLoadedRowCount >= expectedAutofillEmployeeTotal;
+      const copyLiveModalGridRowsForDownload = () =>
+        formTableDataRef.current
+          .filter((row) => formTableRowHasMeaningfulData(row))
+          .map((row) => ({ ...row }));
       let usedSnapshot = false;
       let usedSavedDraftFile = false;
       let savedDraftRowMatrix = null;
@@ -8723,12 +10333,27 @@ const Statutory = ({ userEmail, userRole }) => {
       const isFormDDownload =
         /\bform\s*[-"']?\s*d\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform\s*[-"']?\s*d\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormIIDownload = isFormIIMaharashtraContext(
+        parsed?.formHeader,
+        item,
+        templateMeta.formFileName || resolvedFormFileItem.formFileName || '',
+        headersToUse
+      );
       const isFormIDownload =
-        /\bform\s*[-"']?\s*i\b/i.test(String(item?.formName || item?.FormName || '')) ||
-        /\bform\s*[-"']?\s*i\b/i.test(String(parsed?.formHeader?.title || ''));
+        !isFormIIDownload &&
+        (/\bform\s*[-"']?\s*i\b/i.test(String(item?.formName || item?.FormName || '')) ||
+          /\bform\s*[-"']?\s*i\b/i.test(String(parsed?.formHeader?.title || '')));
+      const isFormKDownload = isFormKRegisterOfEmploymentContext(
+        parsed?.formHeader,
+        item,
+        templateMeta.formFileName || resolvedFormFileItem.formFileName || '',
+        headersToUse
+      );
       const isFormJDownload =
-        /\bform\s*[-"']?\s*j\b/i.test(String(item?.formName || item?.FormName || '')) ||
-        /\bform\s*[-"']?\s*j\b/i.test(String(parsed?.formHeader?.title || ''));
+        !isFormKDownload &&
+        (/\bform\s*[-"']?\s*j\b/i.test(String(item?.formName || item?.FormName || '')) ||
+          /\bform\s*[-"']?\s*j\b/i.test(String(parsed?.formHeader?.title || '')) ||
+          isFormJStatutoryContext(item, templateMeta.formFileName || '', parsed?.formHeader));
       const isFormVDownload =
         /\bform\s*[-"']?\s*v\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform\s*[-"']?\s*v\b/i.test(String(parsed?.formHeader?.title || '')) ||
@@ -8750,6 +10375,12 @@ const Statutory = ({ userEmail, userRole }) => {
         /form[\s._-]*t[\s._-]*s[\s._-]*e/i.test(
           `${item?.formName || ''} ${item?.FormName || ''} ${parsed?.formHeader?.title || ''}`
         );
+      const isForm11Download = isForm11EsicAccidentBookContext(
+        parsed?.formHeader,
+        item,
+        templateMeta.formFileName || resolvedFormFileItem.formFileName || '',
+        headersToUse
+      );
 
       const countFilledRowCells = (row, headers) => {
         if (!row || typeof row !== 'object' || !Array.isArray(headers)) return 0;
@@ -8779,11 +10410,10 @@ const Statutory = ({ userEmail, userRole }) => {
 
       if (
         sameStatutoryLineAsModal &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8794,11 +10424,10 @@ const Statutory = ({ userEmail, userRole }) => {
       // Row-id matching can fail for merged/statutory placeholders and then stale draft gets downloaded.
       if (
         isFormUDownload &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8814,11 +10443,10 @@ const Statutory = ({ userEmail, userRole }) => {
       // so alignment matches the modal (avoid stale/shifted draft matrix rows).
       if (
         isForm12Download &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8830,11 +10458,21 @@ const Statutory = ({ userEmail, userRole }) => {
       // Form 10 hard preference: use live Autofill grid rows directly when available.
       if (
         isForm10Download &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (isForm11Download && canUseLiveModalGridForDownload) {
+        usedLiveModalGrid = true;
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8845,11 +10483,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isForm25Download &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8860,11 +10497,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isFormBDownload &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8875,11 +10511,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isFormWDownload &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8890,11 +10525,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isFormXDownload &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8905,11 +10539,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isFormCDownload &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8920,11 +10553,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isFormDDownload &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8935,11 +10567,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isFormIDownload &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8950,11 +10581,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isFormJDownload &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8964,12 +10594,39 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
       if (
-        isFormVDownload &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        isFormKDownload &&
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
+        isFormIIDownload &&
+        canUseLiveModalGridForDownload
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = copyLiveModalGridRowsForDownload();
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = normalizeFormIIMaharashtraTableHeaders(modalHdrs);
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = normalizeFormIIMaharashtraTableHeaders(Object.keys(mappedData[0]));
+        }
+        savedDraftRowMatrix = null;
+      }
+      if (
+        isFormVDownload &&
+        canUseLiveModalGridForDownload
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -8980,11 +10637,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isFormVIDownload &&
-        Array.isArray(formTableDataRef.current) &&
-        formTableDataRef.current.length > 0
+        canUseLiveModalGridForDownload
       ) {
         usedLiveModalGrid = true;
-        mappedData = formTableDataRef.current.map((row) => ({ ...row }));
+        mappedData = copyLiveModalGridRowsForDownload();
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -9029,7 +10685,7 @@ const Statutory = ({ userEmail, userRole }) => {
         !usedLiveModalGrid &&
         !usedSnapshot &&
         !formUConfidentialDownload &&
-        (isFormADownload || isFormUDownload || isForm12Download || isForm10Download || isForm25Download || isFormBDownload || isFormWDownload || isFormXDownload || isFormCDownload || isFormDDownload || isFormIDownload || isFormJDownload || isFormVDownload || isFormVIDownload || !Array.isArray(mappedData) || mappedData.length === 0)
+        (isFormADownload || isFormUDownload || isForm12Download || isForm10Download || isForm11Download || isForm25Download || isFormBDownload || isFormWDownload || isFormXDownload || isFormCDownload || isFormDDownload || isFormIIDownload || isFormIDownload || isFormJDownload || isFormKDownload || isFormVDownload || isFormVIDownload || !Array.isArray(mappedData) || mappedData.length === 0)
       ) {
         const draftStatutoryId =
           resolveNumericStatutoryIdForProofRow(item, draftIdOpts) ||
@@ -9240,17 +10896,49 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isForm10Download && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      // Form 11: refresh People autofill on download so Name + Address columns include employee name.
+      if (isForm11Download && !usedLiveModalGrid) {
         try {
-          const refreshedForm10Rows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
-          if (Array.isArray(refreshedForm10Rows) && refreshedForm10Rows.length > 0) {
-            mappedData = refreshedForm10Rows;
+          const refreshedForm11Rows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedForm11Rows) && refreshedForm11Rows.length > 0) {
+            mappedData = refreshedForm11Rows;
             savedDraftRowMatrix = null;
-            usedSnapshot = false;
-            usedSavedDraftFile = false;
           }
         } catch (_) {
           // keep existing mappedData if refresh fails
+        }
+      }
+      if (isForm10Download) {
+        const form10CurrentRowCount = countMeaningfulFormTableRows(
+          Array.isArray(mappedData) ? mappedData : []
+        );
+        const form10HasAllEmployees =
+          usedLiveModalGrid &&
+          expectedAutofillEmployeeTotal > 0 &&
+          form10CurrentRowCount >= expectedAutofillEmployeeTotal;
+        if (!form10HasAllEmployees) {
+          try {
+            const refreshedForm10Rows = await fetchAndPopulateEmployeeData(headersToUse, {
+              returnMappedData: true,
+              forcePeopleRefresh: true,
+              formFileModalData: formFileModalData || {
+                item,
+                parsedTableHeaders: headersToUse,
+                parsedFormHeader: parsed.formHeader,
+                fileName: fn,
+                formFileName: templateMeta.formFileName
+              }
+            });
+            if (Array.isArray(refreshedForm10Rows) && refreshedForm10Rows.length > 0) {
+              mappedData = refreshedForm10Rows;
+              savedDraftRowMatrix = null;
+              usedSnapshot = false;
+              usedSavedDraftFile = false;
+              usedLiveModalGrid = false;
+            }
+          } catch (_) {
+            // keep existing mappedData if refresh fails
+          }
         }
       }
       if (isForm25Download && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
@@ -9355,6 +11043,19 @@ const Statutory = ({ userEmail, userRole }) => {
           const refreshedFormJRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormJRows) && refreshedFormJRows.length > 0) {
             mappedData = refreshedFormJRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          // keep existing mappedData if refresh fails
+        }
+      }
+      if (isFormKDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+        try {
+          const refreshedFormKRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          if (Array.isArray(refreshedFormKRows) && refreshedFormKRows.length > 0) {
+            mappedData = refreshedFormKRows;
             savedDraftRowMatrix = null;
             usedSnapshot = false;
             usedSavedDraftFile = false;
@@ -9479,10 +11180,19 @@ const Statutory = ({ userEmail, userRole }) => {
       if (isFormJDownload && Array.isArray(mappedData) && mappedData.length > 0) {
         savedDraftRowMatrix = null;
       }
+      if (isFormKDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isFormIIDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
       if (isFormVDownload && Array.isArray(mappedData) && mappedData.length > 0) {
         savedDraftRowMatrix = null;
       }
       if (isFormVIDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        savedDraftRowMatrix = null;
+      }
+      if (isForm11Download && Array.isArray(mappedData) && mappedData.length > 0) {
         savedDraftRowMatrix = null;
       }
 
@@ -9529,12 +11239,25 @@ const Statutory = ({ userEmail, userRole }) => {
                   parsedFormHeader: parsed.formHeader,
                   formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
                 })
+              : isForm11Download
+                ? await buildForm11WorkbookWithTemplateStyles({
+                    templateArrayBuffer: arrayBuffer,
+                    mappedData,
+                    mappedRowMatrix: savedDraftRowMatrix,
+                    headersToUse,
+                    parsedHeaderRowIndex: parsed.headerRowIndex,
+                    parsedDataStartIndex: parsed.dataStartIndex,
+                    parsedFormHeader: parsed.formHeader,
+                    formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                  })
               : isForm25Download
                 ? await buildForm25WorkbookWithTemplateStyles({
                     templateArrayBuffer: arrayBuffer,
                     mappedData,
                     mappedRowMatrix: savedDraftRowMatrix,
                     headersToUse,
+                    parsedHeaderRowIndex: parsed.headerRowIndex,
+                    parsedDataStartIndex: parsed.dataStartIndex,
                     parsedFormHeader: parsed.formHeader,
                     formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
                   })
@@ -9593,8 +11316,8 @@ const Statutory = ({ userEmail, userRole }) => {
                           parsedFormHeader: parsed.formHeader,
                           formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
                         })
-                      : isFormIDownload
-                        ? await buildFormIWorkbookWithTemplateStyles({
+                      : isFormIIDownload
+                        ? await buildFormIIWorkbookWithTemplateStyles({
                             templateArrayBuffer: arrayBuffer,
                             mappedData,
                             mappedRowMatrix: savedDraftRowMatrix,
@@ -9604,8 +11327,8 @@ const Statutory = ({ userEmail, userRole }) => {
                             parsedFormHeader: parsed.formHeader,
                             formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
                           })
-                        : isFormJDownload
-                          ? await buildFormJWorkbookWithTemplateStyles({
+                        : isFormIDownload
+                          ? await buildFormIWorkbookWithTemplateStyles({
                               templateArrayBuffer: arrayBuffer,
                               mappedData,
                               mappedRowMatrix: savedDraftRowMatrix,
@@ -9615,6 +11338,28 @@ const Statutory = ({ userEmail, userRole }) => {
                               parsedFormHeader: parsed.formHeader,
                               formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
                             })
+                          : isFormKDownload
+                          ? await buildFormKWorkbookWithTemplateStyles({
+                              templateArrayBuffer: arrayBuffer,
+                              mappedData,
+                              mappedRowMatrix: savedDraftRowMatrix,
+                              headersToUse,
+                              parsedHeaderRowIndex: parsed.headerRowIndex,
+                              parsedDataStartIndex: parsed.dataStartIndex,
+                              parsedFormHeader: parsed.formHeader,
+                              formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                            })
+                          : isFormJDownload
+                            ? await buildFormJWorkbookWithTemplateStyles({
+                                templateArrayBuffer: arrayBuffer,
+                                mappedData,
+                                mappedRowMatrix: savedDraftRowMatrix,
+                                headersToUse,
+                                parsedHeaderRowIndex: parsed.headerRowIndex,
+                                parsedDataStartIndex: parsed.dataStartIndex,
+                                parsedFormHeader: parsed.formHeader,
+                                formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                              })
                         : isFormVDownload
                           ? await buildFormVWorkbookWithTemplateStyles({
                               templateArrayBuffer: arrayBuffer,
@@ -9684,6 +11429,24 @@ const Statutory = ({ userEmail, userRole }) => {
       isFormUAutofillContext({ formName: sourceItem?.formName, item: sourceItem }) ||
       isFormUAutofillContext({ formName: resolvedFormFileItem?.formName, item: resolvedFormFileItem });
     if (isFormUDownloadRow) {
+      await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem);
+      return;
+    }
+    const isForm11DownloadRow = isForm11EsicAccidentBookContext(
+      null,
+      sourceItem || resolvedFormFileItem,
+      fileName || sourceItem?.draftFileName || resolvedFormFileItem?.formFileName || '',
+      null
+    );
+    if (isForm11DownloadRow) {
+      await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem);
+      return;
+    }
+    const isForm25DownloadRow =
+      /\bform\s*[-"']?\s*25\b/i.test(String(sourceItem?.formName || sourceItem?.FormName || '')) ||
+      /\bform\s*[-"']?\s*25\b/i.test(String(resolvedFormFileItem?.formName || resolvedFormFileItem?.FormName || '')) ||
+      /\bform\s*[-"']?\s*25\b/i.test(String(fileName || ''));
+    if (isForm25DownloadRow) {
       await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem);
       return;
     }
@@ -9904,11 +11667,25 @@ const Statutory = ({ userEmail, userRole }) => {
         draftFileNameForSave,
         parsedFormHeaderForSave || formHeader
       );
-      const formJSave = isFormJStatutoryContext(
+      const formIISave = isFormIIMaharashtraContext(
+        parsedFormHeaderForSave || formHeader,
         currentItem,
         draftFileNameForSave,
-        parsedFormHeaderForSave || formHeader
+        headersToUse
       );
+      const formKSave = isFormKRegisterOfEmploymentContext(
+        parsedFormHeaderForSave || formHeader,
+        currentItem,
+        draftFileNameForSave,
+        headersToUse
+      );
+      const formJSave =
+        !formKSave &&
+        isFormJStatutoryContext(
+          currentItem,
+          draftFileNameForSave,
+          parsedFormHeaderForSave || formHeader
+        );
       const formUSave =
         isFormUAutofillContext({
           formName: currentItem?.formName || currentItem?.FormName,
@@ -9916,6 +11693,16 @@ const Statutory = ({ userEmail, userRole }) => {
         }) ||
         headersIndicateFormUConfidential(headersToUse) ||
         headersIndicateFormUEmployeeRegister(headersToUse);
+      const form11Save = isForm11EsicAccidentBookContext(
+        parsedFormHeaderForSave || formHeader,
+        currentItem,
+        draftFileNameForSave,
+        headersToUse
+      );
+      const form25Save =
+        /\bform\s*[-"']?\s*25\b/i.test(String(currentItem?.formName || currentItem?.FormName || '')) ||
+        /\bform\s*[-"']?\s*25\b/i.test(String(parsedFormHeaderForSave?.title || '')) ||
+        /\bform\s*[-"']?\s*25\b/i.test(String(draftFileNameForSave || ''));
       let blob;
       let fileName;
       if (form12Save && templateWb) {
@@ -9929,6 +11716,32 @@ const Statutory = ({ userEmail, userRole }) => {
           mappedData: tableDataForSave,
           mappedRowMatrix: null,
           headersToUse: form12Headers,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave
+        }));
+      } else if (formIISave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        ({ blob, fileName } = await buildFormIIWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: tableDataForSave,
+          mappedRowMatrix: null,
+          headersToUse: normalizeFormIIMaharashtraTableHeaders(
+            Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : []
+          ),
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave
+        }));
+      } else if (formKSave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        ({ blob, fileName } = await buildFormKWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: tableDataForSave,
+          mappedRowMatrix: null,
+          headersToUse: Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [],
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           formFileName: draftFileNameForSave
         }));
@@ -9963,6 +11776,31 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           formFileName: draftFileNameForSave
         }));
+      } else if (form11Save && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        ({ blob, fileName } = await buildForm11WorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: tableDataForSave,
+          mappedRowMatrix: null,
+          headersToUse: Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [],
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave
+        }));
+      } else if (form25Save && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        ({ blob, fileName } = await buildForm25WorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: tableDataForSave,
+          mappedRowMatrix: null,
+          headersToUse: Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [],
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave,
+          headerFormData
+        }));
       } else {
         ({ blob, fileName } = buildDraftWorkbook({
           currentItem,
@@ -9990,22 +11828,21 @@ const Statutory = ({ userEmail, userRole }) => {
       });
 
       let draftUploadData;
+      const draftRawText = await draftUploadResp.text();
       const draftContentType = draftUploadResp.headers.get('content-type') || '';
 
       if (draftContentType.includes('application/json')) {
         try {
-          draftUploadData = await draftUploadResp.json();
+          draftUploadData = draftRawText ? JSON.parse(draftRawText) : {};
         } catch (jsonErr) {
-          const textResponse = await draftUploadResp.text();
-          console.error('Failed to parse JSON response:', textResponse);
-          setError(`Draft file upload failed: ${textResponse || 'Invalid server response'}`);
+          console.error('Failed to parse JSON response:', draftRawText);
+          setError(`Draft file upload failed: ${draftRawText || 'Invalid server response'}`);
           setSubmitting(false);
           return;
         }
       } else {
-        const textResponse = await draftUploadResp.text();
-        console.error('Non-JSON response received:', textResponse);
-        setError(`Draft file upload failed: ${textResponse || 'Server error occurred'}`);
+        console.error('Non-JSON response received:', draftRawText);
+        setError(`Draft file upload failed: ${draftRawText || 'Server error occurred'}`);
         setSubmitting(false);
         return;
       }
@@ -10113,7 +11950,7 @@ const Statutory = ({ userEmail, userRole }) => {
           headerFormData && typeof headerFormData === 'object' && !Array.isArray(headerFormData)
             ? headerFormData
             : {},
-        sampleData: Array.isArray(tableDataForSave) ? tableDataForSave : []
+        sampleData: prepareSampleDataRowsForSave(tableDataForSave)
       };
 
       // Autofill → Save: UPDATE if this is an existing Statutory record; otherwise POST to create (e.g. when opened from form master row).
@@ -10135,36 +11972,81 @@ const Statutory = ({ userEmail, userRole }) => {
         });
       };
 
-      let response = await sendDraftSaveRequest(payload);
+      const parseStatutorySaveResponse = async (resp) => {
+        const rawText = await resp.text();
+        try {
+          return { data: rawText ? JSON.parse(rawText) : {}, rawText };
+        } catch (parseErr) {
+          return { data: null, rawText, parseErr };
+        }
+      };
 
-      let data;
-      try {
-        data = await response.json();
-      } catch (jsonErr) {
-        const textResponse = await response.text();
-        console.error('Failed to parse response:', textResponse);
-        setError(`Failed to save draft: ${textResponse || 'Invalid server response'}`);
-        setSubmitting(false);
-        return;
+      const saveWithoutSampleSnapshot = async (basePayload) => {
+        const stripped = omitStatutorySampleDataSnapshot(basePayload);
+        const retryResp = await sendDraftSaveRequest(stripped);
+        const retryParsed = await parseStatutorySaveResponse(retryResp);
+        return { response: retryResp, ...retryParsed };
+      };
+
+      let sampleSnapshotOmitted = false;
+      let requestPayload = payload;
+      if (
+        estimateJsonUtf8Bytes(requestPayload) > STATUTORY_SAVE_MAX_JSON_BYTES &&
+        payloadIncludesSampleDataSnapshot(requestPayload)
+      ) {
+        requestPayload = omitStatutorySampleDataSnapshot(requestPayload);
+        sampleSnapshotOmitted = true;
       }
 
-      // Backend can return 400 for very large SampleData payloads.
-      // Retry once without sampleData snapshot so Draft file save still succeeds.
-      if (!response.ok && Number(response.status) === 400) {
+      let response = await sendDraftSaveRequest(requestPayload);
+      let { data, rawText: saveRawText } = await parseStatutorySaveResponse(response);
+
+      const shouldRetryWithoutSample =
+        payloadIncludesSampleDataSnapshot(requestPayload) &&
+        (!response.ok || data == null) &&
+        (Number(response.status) === 400 || isStatutoryPayloadTooLargeResponse(response, saveRawText));
+
+      if (shouldRetryWithoutSample) {
         try {
-          const { sampleDataHeader: _h, sampleData: _d, ...payloadWithoutSample } = payload;
-          const retryResp = await sendDraftSaveRequest(payloadWithoutSample);
-          if (retryResp.ok) {
-            response = retryResp;
-            data = await retryResp.json().catch(() => ({}));
+          const retry = await saveWithoutSampleSnapshot(requestPayload);
+          response = retry.response;
+          if (retry.data != null) {
+            data = retry.data;
+            saveRawText = retry.rawText;
           }
+          sampleSnapshotOmitted = true;
         } catch (retryErr) {
           console.warn('Retry without sampleData failed:', retryErr);
         }
       }
 
+      if (data == null && payloadIncludesSampleDataSnapshot(payload) && !sampleSnapshotOmitted) {
+        try {
+          const retry = await saveWithoutSampleSnapshot(payload);
+          response = retry.response;
+          if (retry.data != null) {
+            data = retry.data;
+            saveRawText = retry.rawText;
+            sampleSnapshotOmitted = true;
+          }
+        } catch (retryErr) {
+          console.warn('Fallback retry without sampleData failed:', retryErr);
+        }
+      }
+
+      if (data == null) {
+        console.error('Failed to parse response:', saveRawText);
+        setError(`Failed to save draft: ${saveRawText || 'Invalid server response'}`);
+        setSubmitting(false);
+        return;
+      }
+
       if (response.ok && data.status === 'success') {
-        setSuccess('Draft saved. To add Proof Submission, click the blue Edit button and save with a proof file.');
+        setSuccess(
+          sampleSnapshotOmitted
+            ? 'Draft saved (Excel file). Grid snapshot was omitted due to size limits.'
+            : 'Draft saved. To add Proof Submission, click the blue Edit button and save with a proof file.'
+        );
        
         // Delete stale Catalyst rows same form/act/month/site but no draft (common after POST from checklist bulk).
         const keeperStatutoryId =
@@ -10298,9 +12180,49 @@ const Statutory = ({ userEmail, userRole }) => {
   const fetchAndPopulateEmployeeData = async (headersToUse = null, options = {}) => {
     const returnMappedData = options.returnMappedData === true;
     const modalData = options.formFileModalData || formFileModalData;
+    const useEmployeePagination = !returnMappedData && options.paginateEmployees !== false;
+    const employeePageSize = useEmployeePagination
+      ? Math.max(1, parseInt(options.employeePageSize, 10) || FORM_TABLE_PAGE_SIZE)
+      : Number.MAX_SAFE_INTEGER;
+    const employeePage = useEmployeePagination ? Math.max(0, parseInt(options.employeePage, 10) || 0) : 0;
+    const employeePageOffset = employeePage * employeePageSize;
+    const skipPeopleLoad =
+      options.skipPeopleFetch === true &&
+      (Array.isArray(options.employeesOverride) && options.employeesOverride.length > 0
+        ? true
+        : autofillEmployeesRef.current.length > 0);
+    const fastModalAutofill =
+      !returnMappedData && useEmployeePagination && employeePage === 0 && !skipPeopleLoad;
+    const fastPaginatedAutofill = !returnMappedData && useEmployeePagination;
+
+    const mergeMappedIntoFormTable = (rows, urgent = false) => {
+      if (returnMappedData || !Array.isArray(rows)) return;
+      const apply = () => {
+        setFormTableData((prev) => {
+          if (!useEmployeePagination) return rows;
+          const next = [...prev];
+          while (next.length < employeePageOffset + rows.length) next.push({});
+          rows.forEach((row, i) => {
+            next[employeePageOffset + i] = row;
+          });
+          return next;
+        });
+      };
+      if (urgent) apply();
+      else startTransition(apply);
+    };
+
     try {
       if (!returnMappedData) {
-        setTableAutofillLoading(true);
+        if (!skipPeopleLoad) {
+          const cachedQuick = getCachedPeopleData();
+          const quickCacheCount = flattenZohoPeopleEmployees(cachedQuick).length;
+          const cacheReady = cachedQuick?.success && quickCacheCount > 0;
+          if (!(fastModalAutofill && cacheReady)) {
+            setTableAutofillLoading(true);
+            setTableAutofillProgress('Loading employee data…');
+          }
+        }
         setError('');
         setSuccess('');
       }
@@ -10338,6 +12260,15 @@ const Statutory = ({ userEmail, userRole }) => {
         formHeaderTitle: modalData?.parsedFormHeader?.title,
         item: modalData?.item
       });
+      const formIIAutofillHeadersNormalized = isFormIIMaharashtraContext(
+        modalData?.parsedFormHeader || {},
+        modalData?.item,
+        String(modalData?.fileName || modalData?.formFileName || ''),
+        currentHeaders
+      );
+      if (formIIAutofillHeadersNormalized) {
+        currentHeaders = normalizeFormIIMaharashtraTableHeaders(currentHeaders);
+      }
       if (currentHeaders.length > 0 && !returnMappedData) {
         setFormFileModalData((prev) =>
           prev ? { ...prev, parsedTableHeaders: currentHeaders } : prev
@@ -10348,7 +12279,10 @@ const Statutory = ({ userEmail, userRole }) => {
       if (!currentHeaders || currentHeaders.length === 0) {
         console.error('⚠️ Table headers not available');
         if (!returnMappedData) setError('Table headers not available. Please try again.');
-        if (!returnMappedData) setTableAutofillLoading(false);
+        if (!returnMappedData) {
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+        }
         if (returnMappedData) return [];
         return;
       }
@@ -10357,6 +12291,7 @@ const Statutory = ({ userEmail, userRole }) => {
       if (isFixedRowAggregateComplianceTable(currentHeaders)) {
         if (!returnMappedData) {
           setTableAutofillLoading(false);
+          setTableAutofillProgress('');
           setSuccess(
             'This form uses fixed rows from your Excel template (not per-employee autofill). Edit values directly or Import.'
           );
@@ -10368,98 +12303,111 @@ const Statutory = ({ userEmail, userRole }) => {
      
       console.log('Using table headers:', currentHeaders);
      
-      // Fetch employee data from peopledata_function (cached when prefetched on Statutory load)
-      let result;
-      try {
-        result = await fetchPeopleData();
-      } catch (peopleErr) {
-        const friendly = friendlyZohoPeopleAutofillError(peopleErr?.message);
-        console.warn('Zoho People autofill skipped:', friendly);
+      let employees;
+      if (skipPeopleLoad) {
+        employees = Array.isArray(options.employeesOverride) && options.employeesOverride.length > 0
+          ? options.employeesOverride
+          : autofillEmployeesRef.current;
         if (!returnMappedData) {
-          setError(
-            `${friendly} The form template is still open — fill contractor/header fields manually or retry after fixing Zoho People connection.`
+          const pageEnd = Math.min(employeePageOffset + employeePageSize, employees.length);
+          setTableAutofillProgress(
+            `Loading employees ${employeePageOffset + 1}–${pageEnd} of ${employees.length}…`
           );
-          setTableAutofillLoading(false);
         }
-        if (returnMappedData) return [];
-        return;
-      }
-
-      console.log('Zoho People API Response:', result);
-
-      if (!result?.success) {
-        const friendly = friendlyZohoPeopleAutofillError(result.error);
-        console.warn('Zoho People autofill skipped:', friendly);
-        if (!returnMappedData) {
-          setError(
-            `${friendly} The form template is still open — fill contractor/header fields manually or retry after fixing Zoho People connection.`
-          );
-          setTableAutofillLoading(false);
-        }
-        if (returnMappedData) return [];
-        return;
-      }
-
-      if (!result.data) {
-        const friendly = 'No employee data received from Zoho People API';
-        if (!returnMappedData) {
-          setError(friendly);
-          setTableAutofillLoading(false);
-        }
-        if (returnMappedData) return [];
-        return;
-      }
-     
-      // Extract employee records from Zoho People response
-      // Structure: { response: { result: [{ "ID": [{ employee data }] }] } }
-      let employees = [];
-      const data = result.data;
-     
-      // Handle Zoho People nested structure
-      if (data.response && data.response.result) {
-        if (Array.isArray(data.response.result)) {
-          // Flatten the nested structure: result is array of objects like { "ID": [employeeData] }
-          data.response.result.forEach(resultItem => {
-            if (typeof resultItem === 'object' && resultItem !== null) {
-              // Each resultItem has keys that are IDs, values are arrays of employee objects
-              Object.keys(resultItem).forEach(idKey => {
-                const employeeArray = resultItem[idKey];
-                if (Array.isArray(employeeArray)) {
-                  // Add all employees from this array
-                  employees.push(...employeeArray);
-                } else if (employeeArray && typeof employeeArray === 'object') {
-                  // Single employee object
-                  employees.push(employeeArray);
-                }
-              });
-            } else if (resultItem && typeof resultItem === 'object') {
-              // Direct employee object
-              employees.push(resultItem);
+      } else {
+        // Prefer in-memory/localStorage cache (from People page) — avoids slow Zoho pagination on every autofill.
+        let result;
+        try {
+          if (options.forcePeopleRefresh === true) {
+            if (!returnMappedData) setTableAutofillProgress('Refreshing employee list from Zoho…');
+            result = await fetchPeopleData({ force: true });
+          } else {
+            result = getCachedPeopleData();
+            let loadedCount = flattenZohoPeopleEmployees(result).length;
+            if (result?.success && loadedCount > 0) {
+              console.log(`Statutory autofill using cached People data (${loadedCount} employees).`);
+            } else if (!result?.success || loadedCount === 0) {
+              if (!returnMappedData) setTableAutofillProgress('Fetching employees from Zoho People…');
+              result = await fetchPeopleData({ force: false });
+              loadedCount = flattenZohoPeopleEmployees(result).length;
             }
-          });
-        } else if (data.response.result.Employee) {
-          employees = [data.response.result];
-        } else if (typeof data.response.result === 'object') {
-          // Try to extract from object structure
-          const keys = Object.keys(data.response.result);
-          if (keys.length > 0) {
-            const firstKey = keys[0];
-            if (Array.isArray(data.response.result[firstKey])) {
-              employees = data.response.result[firstKey];
-            } else {
-              employees = [data.response.result[firstKey]];
+            if ((!result?.success || loadedCount === 0) && !fastModalAutofill) {
+              if (!returnMappedData) setTableAutofillProgress('Refreshing employee list from Zoho…');
+              result = await fetchPeopleData({ force: true });
             }
           }
+        } catch (peopleErr) {
+          const friendly = friendlyZohoPeopleAutofillError(peopleErr?.message, peopleErr?.httpStatus);
+          console.warn('Zoho People autofill skipped:', friendly);
+          if (!returnMappedData) {
+            setError(
+              `${friendly} The form template is still open — fill contractor/header fields manually or retry after fixing Zoho People connection.`
+            );
+            setTableAutofillLoading(false);
+            setTableAutofillProgress('');
+          }
+          if (returnMappedData) return [];
+          return;
         }
-      } else if (Array.isArray(data)) {
-        employees = data;
-      } else if (data.records && Array.isArray(data.records)) {
-        employees = data.records;
-      } else if (data.result) {
-        if (Array.isArray(data.result)) {
-          employees = data.result;
-        } else if (data.result.Employee) {
-          employees = [data.result];
+
+        console.log('Zoho People API Response:', result);
+
+        if (!result?.success) {
+          const friendly = friendlyZohoPeopleAutofillError(result.error);
+          console.warn('Zoho People autofill skipped:', friendly);
+          if (!returnMappedData) {
+            setError(
+              `${friendly} The form template is still open — fill contractor/header fields manually or retry after fixing Zoho People connection.`
+            );
+            setTableAutofillLoading(false);
+            setTableAutofillProgress('');
+          }
+          if (returnMappedData) return [];
+          return;
+        }
+
+        if (!result.data) {
+          const friendly = 'No employee data received from Zoho People API';
+          if (!returnMappedData) {
+            setError(friendly);
+            setTableAutofillLoading(false);
+            setTableAutofillProgress('');
+          }
+          if (returnMappedData) return [];
+          return;
+        }
+
+        employees = flattenZohoPeopleEmployees(result);
+      }
+
+      if (!skipPeopleLoad) {
+        const resolvedSiteForEmployeeFilter = resolveStatutorySiteNameForContractorAutofill(
+          modalData?.item,
+          {
+            siteFromUrl,
+            allowedSiteNameList,
+            resolveSiteFn: resolveSiteDisplayName,
+            allRows: statutoryData
+          }
+        );
+        const sitesForEmployeeFilter =
+          Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+            ? siteDetailsList
+            : readSiteDetailsCache() || [];
+        const locationTargets = resolveSiteLocationsForAutofill(
+          resolvedSiteForEmployeeFilter,
+          sitesForEmployeeFilter
+        );
+        if (locationTargets.length > 0) {
+          const beforeCount = employees.length;
+          employees = filterEmployeesBySiteLocation(
+            employees,
+            resolvedSiteForEmployeeFilter,
+            sitesForEmployeeFilter
+          );
+          console.log(
+            `Statutory autofill location filter (${locationTargets.join(', ')}): ${beforeCount} → ${employees.length} employees`
+          );
         }
       }
      
@@ -10468,8 +12416,35 @@ const Statutory = ({ userEmail, userRole }) => {
       console.log('Table headers:', currentHeaders);
      
       if (!Array.isArray(employees) || employees.length === 0) {
-        console.error('No employees found. Full response:', JSON.stringify(result, null, 2));
-        throw new Error('No employee data found in response. Please check the API response structure.');
+        const resolvedSiteForEmptyMsg = resolveStatutorySiteNameForContractorAutofill(
+          modalData?.item,
+          {
+            siteFromUrl,
+            allowedSiteNameList,
+            resolveSiteFn: resolveSiteDisplayName,
+            allRows: statutoryData
+          }
+        );
+        const sitesForEmptyMsg =
+          Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+            ? siteDetailsList
+            : readSiteDetailsCache() || [];
+        const emptyLocationTargets = resolveSiteLocationsForAutofill(
+          resolvedSiteForEmptyMsg,
+          sitesForEmptyMsg
+        );
+        console.error('No employees found for autofill page.', {
+          skipPeopleLoad,
+          employeePage,
+          employeePageOffset,
+          totalEmployees: autofillEmployeesRef.current.length,
+          locationFilter: emptyLocationTargets.length > 0 ? emptyLocationTargets : null,
+        });
+        const emptyMsg =
+          emptyLocationTargets.length > 0
+            ? `No employees found for location ${emptyLocationTargets.join(', ')}. Check LocationName in Zoho People matches Site Management Location.`
+            : 'No employee data found in response. Please check the API response structure.';
+        throw new Error(emptyMsg);
       }
 
       const normalizeEmployeeLookupKey = (value) =>
@@ -10513,7 +12488,7 @@ const Statutory = ({ userEmail, userRole }) => {
         return `${firstName} ${lastName}`.trim();
       };
 
-      try {
+      if (!fastModalAutofill) try {
         const cmsResponse = await fetch('/server/cms_function/employees');
         const cmsJson = await cmsResponse.json().catch(() => null);
         const cmsEmployees = Array.isArray(cmsJson?.data?.employees) ? cmsJson.data.employees : [];
@@ -10655,6 +12630,25 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       } catch (cmsEmployeeErr) {
         console.warn('Could not enrich statutory employees from CMS employee data:', cmsEmployeeErr);
+      }
+
+      if (useEmployeePagination && !skipPeopleLoad) {
+        autofillEmployeesRef.current = employees;
+        setAutofillTotalEmployees(employees.length);
+        if (employeePage === 0) setFormTablePage(0);
+      }
+
+      const employeesForMapping = useEmployeePagination
+        ? employees.slice(employeePageOffset, employeePageOffset + employeePageSize)
+        : employees;
+
+      if (!Array.isArray(employeesForMapping) || employeesForMapping.length === 0) {
+        if (!returnMappedData) {
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+        }
+        if (returnMappedData) return [];
+        return;
       }
 
       /** Form B table: infer from column titles when modal title/act is incomplete (merged TN LWF headers). */
@@ -10995,6 +12989,88 @@ const Statutory = ({ userEmail, userRole }) => {
         currentHeaders
       );
 
+      const form11AutofillContext =
+        isForm11EsicAccidentBookContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          currentHeaders
+        ) ||
+        (isFormFileModalOpen &&
+          isForm11EsicAccidentBookContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            currentHeaders
+          ));
+
+      const form26AutofillContext =
+        isForm26RegisterOfAccidentsContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          currentHeaders
+        ) ||
+        (isFormFileModalOpen &&
+          isForm26RegisterOfAccidentsContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            currentHeaders
+          ));
+
+      const looksLikeForm12EmployeeTable = () => {
+        const joined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+        if (/present\s+address/.test(joined) && /permanent\s+address/.test(joined) && /worker\s+identity/.test(joined)) {
+          return true;
+        }
+        if (/name\s+of\s+the\s+worker/.test(joined) && /present\s+address/.test(joined)) return true;
+        return false;
+      };
+      const form12AutofillContext =
+        looksLikeForm12EmployeeTable() ||
+        isForm12StatutoryContext(
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {}
+        ) ||
+        (isFormFileModalOpen &&
+          isForm12StatutoryContext(
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            formFileModalData?.parsedFormHeader || {}
+          ));
+
+      const looksLikeEmploymentRegisterTable = () => {
+        const joined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+        if (/name\s+of\s+the\s+employee\s+and\s+the\s+establishment/.test(joined)) return true;
+        if (
+          /time\s+at\s+which\s+employment\s+commence/.test(joined) &&
+          /time\s+at\s+which\s+employment\s+cease/.test(joined)
+        ) {
+          return true;
+        }
+        if (/rest\s+interval/.test(joined) && /hours\s+worked/.test(joined) && /employment\s+commence/.test(joined)) {
+          return true;
+        }
+        if (/\bsex\b/.test(joined) && /\bage\b/.test(joined) && /employee/.test(joined)) return true;
+        return false;
+      };
+      const formEmploymentRegisterAutofillContext =
+        looksLikeEmploymentRegisterTable() ||
+        isFormKRegisterOfEmploymentContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          currentHeaders
+        ) ||
+        (isFormFileModalOpen &&
+          isFormJStatutoryContext(
+            modalData?.item,
+            String(modalData?.fileName || modalData?.formFileName || ''),
+            modalData?.parsedFormHeader || {}
+          ));
+
       const looksLikeFormXVIIITable = () => {
         const joined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
         return (
@@ -11136,6 +13212,13 @@ const Statutory = ({ userEmail, userRole }) => {
         );
       };
 
+      const formIIAutofillContext = isFormIIMaharashtraContext(
+        modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+        modalData?.item || options?.item || null,
+        String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+        currentHeaders
+      );
+
       const looksLikeFormTSEPayrollTable = () => {
         const joined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
         return (
@@ -11146,9 +13229,10 @@ const Statutory = ({ userEmail, userRole }) => {
         );
       };
       const formTSEAutofillContext =
-        looksLikeFormTSEPayrollTable() ||
-        isFormTSEContext(modalData?.parsedFormHeader || {}, modalData?.item, autofillProbeText) ||
-        /form[\s._-]*t[\s._-]*s[\s._-]*e/i.test(autofillProbeText);
+        !formIIAutofillContext &&
+        (looksLikeFormTSEPayrollTable() ||
+          isFormTSEContext(modalData?.parsedFormHeader || {}, modalData?.item, autofillProbeText) ||
+          /form[\s._-]*t[\s._-]*s[\s._-]*e/i.test(autofillProbeText));
 
       if (formXVIAutofillContext || formXVIIIAutofillContext || formTSEAutofillContext) {
         console.log('Statutory payroll/form25 autofill enabled:', {
@@ -11950,22 +14034,47 @@ const Statutory = ({ userEmail, userRole }) => {
         return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
       };
 
-      const getOvertimeWorkedValue = (emp) => {
-        const raw =
-          emp.OverTime ||
-          emp['OverTime'] ||
-          emp.overtime ||
-          emp['overtime'] ||
-          emp.OTHours ||
-          emp['OTHours'] ||
-          emp.OvertimeHours ||
-          emp['OvertimeHours'] ||
-          emp['Total overtime worked or production in case of piece workers'] ||
-          '';
+      const getOvertimeWorkedValue = (source) => {
+        const raw = firstPresent(
+          source?.OverTime,
+          source?.['OverTime'],
+          source?.overtime,
+          source?.['overtime'],
+          source?.OTHours,
+          source?.['OTHours'],
+          source?.OvertimeHours,
+          source?.['OvertimeHours'],
+          source?.OverTimeHours,
+          source?.['OverTimeHours'],
+          source?.['Total overtime worked or production in case of piece workers'],
+          findValueByNormalizedKey(source || {}, 'overtime'),
+          findValueByNormalizedKey(source || {}, 'othours')
+        );
         const n = Number(raw);
         if (Number.isFinite(n) && n > 0) return n;
         const s = String(raw || '').trim();
-        return s || '';
+        if (!s || /^0{1,2}:0{2}$/.test(s)) return '';
+        return s;
+      };
+
+      const parseOvertimeHoursNumber = (source) => {
+        const raw = getOvertimeWorkedValue(source);
+        if (raw === '' || raw == null) return 0;
+        const n = Number(raw);
+        if (Number.isFinite(n) && n > 0) return n;
+        const timeMins = parseTimeToMinutes(String(raw));
+        if (timeMins != null && timeMins > 0) return timeMins / 60;
+        return 0;
+      };
+
+      const formatOvertimeHoursDisplay = (hoursNum) => {
+        if (!Number.isFinite(hoursNum) || hoursNum <= 0) return '';
+        if (Math.abs(hoursNum - Math.round(hoursNum)) < 0.01) return String(Math.round(hoursNum));
+        const whole = Math.floor(hoursNum);
+        const mins = Math.round((hoursNum - whole) * 60);
+        if (whole <= 0) return `${mins} min`;
+        if (mins <= 0) return String(whole);
+        return `${whole}:${String(mins).padStart(2, '0')}`;
       };
 
       const getOvertimeDateValue = (emp, hasOvertime) => {
@@ -12003,10 +14112,15 @@ const Statutory = ({ userEmail, userRole }) => {
             toNumber(p.gross_amount) ||
             ''
           );
+        const monthlyNum = toNumber(monthlySalaryRaw);
+        const hourlyNormalRate =
+          monthlyNum > 0 ? Math.round((monthlyNum / 26 / 8) * 100) / 100 : '';
         return {
           totalEarnings,
           normalEarnings: totalEarnings,
-          totalOvertimeWorked: overtimeAmount
+          totalOvertimeWorked: overtimeAmount,
+          normalRateOfPay: hourlyNormalRate,
+          overtimeRateOfPay: hourlyNormalRate !== '' ? Math.round(hourlyNormalRate * 2 * 100) / 100 : ''
         };
       };
 
@@ -12563,13 +14677,13 @@ const Statutory = ({ userEmail, userRole }) => {
       const formTSEPayrollHeaderSet = formTSEAutofillContext
         ? getFormTSEPayrollHeaderSet(formTSEHeadersResolved)
         : new Set();
-      const payrollOrgIdForForms =
-        process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
+      const payrollOrgIdForForms = getPayrollOrganizationId();
       const needsPayrollBulkPreload =
         isLikelyFormW ||
         isLikelyForm10 ||
         formBAutofillContext ||
         formDAutofillContext ||
+        formIIAutofillContext ||
         formTSEAutofillContext ||
         formXVIIIAutofillContext;
 
@@ -12577,38 +14691,8 @@ const Statutory = ({ userEmail, userRole }) => {
         formWHeadersResolved = resolveFormWTableHeaders(currentHeaders);
       }
 
-      if (needsPayrollBulkPreload) {
-        try {
-          const bulkPayrollRows = await fetchPayrollBulkRows();
-          if (Array.isArray(bulkPayrollRows) && bulkPayrollRows.length > 0) {
-            if (formTSEAutofillContext || formXVIIIAutofillContext) {
-              statutoryPayrollRows = bulkPayrollRows;
-            }
-            if (
-              isLikelyFormW ||
-              isLikelyForm10 ||
-              formBAutofillContext ||
-              formDAutofillContext
-            ) {
-              formWPayrollLookup = buildPayrollLookupFromRows(bulkPayrollRows);
-            }
-          } else if (formTSEAutofillContext) {
-            const listQs = new URLSearchParams({
-              list_employees: '1',
-              organization_id: payrollOrgIdForForms,
-            });
-            const listRes = await fetch(`/server/payroll_function?${listQs.toString()}`);
-            const listJson = await listRes.json();
-            if (listRes.ok && listJson?.success && Array.isArray(listJson.data)) {
-              statutoryPayrollRows = listJson.data;
-            }
-          }
-        } catch (payPreloadErr) {
-          console.warn('Statutory payroll preload skipped:', payPreloadErr?.message || payPreloadErr);
-        }
-      }
-
-      const mappedData = employees.map((empItem, index) => {
+      const mappedData = employeesForMapping.map((empItem, index) => {
+        const globalRowIndex = employeePageOffset + index;
         // Initialize all headers with empty strings to ensure no undefined/null values
         const row = {};
         currentHeaders.forEach((header) => {
@@ -12626,6 +14710,39 @@ const Statutory = ({ userEmail, userRole }) => {
        
         // Map to table headers if they exist
         currentHeaders.forEach((header, colIndex) => {
+          if (isFormIILegacySpacerHeader(header)) {
+            row[header] = '';
+            return;
+          }
+          if (formIIAutofillContext) {
+            if (isFormIISerialHeader(header)) {
+              row[header] = String(globalRowIndex + 1);
+              return;
+            }
+            if (isFormIIDeputyHeader(header)) {
+              row[header] = '';
+              return;
+            }
+            if (isFormIIEmployeeCodeHeader(header)) {
+              row[header] = sanitizeValue(getFallbackEmployeeId(emp));
+              return;
+            }
+            if (isFormIIWorkmenNameHeader(header)) {
+              row[header] = sanitizeValue(getFallbackName(emp));
+              return;
+            }
+            if (
+              isFormIIMinimumRateBasicHeader(header) ||
+              isFormIIActualRateHraHeader(header) ||
+              isFormIIConveyanceHeader(header) ||
+              isFormIIBonusHeader(header)
+            ) {
+              row[header] = '';
+              return;
+            }
+            row[header] = '';
+            return;
+          }
           const headerLower = header.toLowerCase().trim();
           const normalizedHeader = headerLower.replace(/[^a-z0-9]/g, '');
           if (formQAutofillContext) {
@@ -12638,7 +14755,7 @@ const Statutory = ({ userEmail, userRole }) => {
               normalizedHeader === 'sno' ||
               (headerLower.includes('sr') && headerLower.includes('no'))
             ) {
-              row[header] = String(index + 1);
+              row[header] = String(globalRowIndex + 1);
               return;
             }
             if (/full\s+name\s+of\s+the\s+worker/.test(headerLower)) {
@@ -12756,6 +14873,46 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
+          if (form11AutofillContext && isForm11SkipAutofillHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (form26AutofillContext && isForm26SkipAutofillHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (form11AutofillContext && isForm11NameSubColumnHeader(header)) {
+            row[header] = sanitizeValue(resolveForm11PersonName(emp, row));
+            return;
+          }
+
+          if (form11AutofillContext && isForm11AddressSubColumnHeader(header)) {
+            row[header] = sanitizeValue(buildForm11EmployeeAddress(emp));
+            return;
+          }
+
+          if (
+            form11AutofillContext &&
+            (isForm11InjuredPersonNameAddressHeader(header) ||
+              isForm11NoticePersonHeader(header) ||
+              isForm11WitnessesHeader(header))
+          ) {
+            row[header] = sanitizeValue(buildForm11NameAndAddressValue(emp, row));
+            return;
+          }
+
+          if (form12AutofillContext && isForm12PresentAddressHeader(header)) {
+            row[header] = sanitizeValue(getForm12PresentAddress(emp));
+            return;
+          }
+
+          if (form12AutofillContext && isForm12PermanentAddressHeader(header)) {
+            row[header] = sanitizeValue(getForm12PermanentAddress(emp));
+            return;
+          }
+
           if (formXXIIIAutofillContext && isFormXXIIIWorkmenNameHeader(header)) {
             row[header] = sanitizeValue(getFormXXIIIEmployeeFullName(emp));
             return;
@@ -12844,7 +15001,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 !headerLower.includes('workmen') &&
                 !headerLower.includes('workman')))
           ) {
-            row[header] = String(index + 1);
+            row[header] = String(globalRowIndex + 1);
           }
           else if (/name\s+of\s+the\s+person/.test(headerLower)) {
             row[header] = sanitizeValue(getEmployeeLookupName(emp));
@@ -12978,9 +15135,9 @@ const Statutory = ({ userEmail, userRole }) => {
               console.warn(`✗ Could not find name field for employee ${index + 1}. Available name fields:`, Object.keys(emp).filter(k => k.toLowerCase().includes('name')));
             }
           }
-          // Form A: Age from date of birth (or explicit Age field)
+          // Age from date of birth (Form A muster, Form J/K employment registers)
           else if (
-            formAAutofillContext &&
+            (formAAutofillContext || formEmploymentRegisterAutofillContext) &&
             (normalizedHeader === 'age' || /^age\b/i.test(headerLower)) &&
             !headerLower.includes('wage') &&
             !headerLower.includes('average') &&
@@ -13094,19 +15251,33 @@ const Statutory = ({ userEmail, userRole }) => {
                 Object.keys(emp).filter(k => k.toLowerCase().includes('zoho') || k.toLowerCase().includes('id')));
             }
           }
-          // Gender
+          // Gender / Sex
           else if (
             headerLower.includes('gender') ||
             headerLower.includes('sex') ||
             headerLower.includes('male/female') ||
             (headerLower.includes('male') && headerLower.includes('female'))
           ) {
-            row[header] = emp.Sex ||
-                         emp.Gender ||
-                         emp.gender ||
-                         emp['Gender.displayValue'] ||
-                         emp['Sex'] ||
-                         '';
+            const rawSex =
+              emp.Sex ||
+              emp.Gender ||
+              emp.gender ||
+              emp['Gender.displayValue'] ||
+              emp['Sex'] ||
+              findValueByNormalizedKey(emp, 'gender') ||
+              findValueByNormalizedKey(emp, 'sex') ||
+              '';
+            const sexStr = String(rawSex || '').trim();
+            if (!sexStr) {
+              row[header] = '';
+            } else if (formEmploymentRegisterAutofillContext) {
+              const sl = sexStr.toLowerCase();
+              row[header] = sl === 'm' || sl === 'male' ? 'Male'
+                : sl === 'f' || sl === 'female' ? 'Female'
+                : sexStr;
+            } else {
+              row[header] = sexStr;
+            }
           }
           // Father/Spouse Name - prioritize Father_s_Name, fallback to Spouse_Name
           else if (headerLower.includes('father') || headerLower.includes('spouse')) {
@@ -13244,12 +15415,22 @@ const Statutory = ({ userEmail, userRole }) => {
             const hasOvertime = Number(overtimeWorked) > 0 || String(overtimeWorked || '').trim() !== '';
             row[header] = getOvertimeDateValue(emp, hasOvertime);
           }
+          // Form 10: Extent of overtime on each occasion
+          else if (headerLower.includes('extent') && headerLower.includes('overtime')) {
+            row[header] = getOvertimeWorkedValue(emp);
+          }
           // Form 10: Total overtime worked or production in case of piece workers
           else if (
             (headerLower.includes('total') && headerLower.includes('overtime') && headerLower.includes('worked')) ||
             (headerLower.includes('overtime') && headerLower.includes('production'))
           ) {
             row[header] = getOvertimeWorkedValue(emp);
+          }
+          // Form 10: Normal / overtime rate of pay (filled from payroll when available)
+          else if (headerLower.includes('normal') && headerLower.includes('rate') && headerLower.includes('pay')) {
+            row[header] = '';
+          } else if (headerLower.includes('overtime') && headerLower.includes('rate') && headerLower.includes('pay')) {
+            row[header] = '';
           }
           // Form 10: Normal hours from ShiftStartTime and ShiftEndTime
           else if (headerLower.includes('normal hours')) {
@@ -13478,9 +15659,16 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           // Department mapping
           else if (headerLower.includes('department')) {
-            row[header] = emp.Department ||
-                         emp.department ||
-                         '';
+            row[header] =
+              emp.Department ||
+              emp.department ||
+              emp['Department.displayValue'] ||
+              emp['Department'] ||
+              (emp.Department && typeof emp.Department === 'object'
+                ? emp.Department.displayValue || emp.Department.name || emp.Department.Name || ''
+                : '') ||
+              findValueByNormalizedKey(emp, 'department') ||
+              '';
           }
           // Bank fields from People API: Bank_Name, Account_Number, IFSC_Code, Branch_Name
           // Combined Bank Header: "Bank A/c Number, Name of Bank, Branch (Indian Financial System Code) (IFSC Code)"
@@ -13861,6 +16049,22 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
 
+        if (formIIAutofillContext && statutoryPayrollRows?.length) {
+          const pr = resolvePayrollRowForPeople(emp, statutoryPayrollRows);
+          if (pr && !pr.fetch_error) {
+            const formIIPayrollMap = buildFormTSEPayrollMap(pr);
+            currentHeaders.forEach((header) => {
+              if (isFormIIMinimumRateBasicHeader(header) && formIIPayrollMap.basic !== '') {
+                row[header] = sanitizeValue(formIIPayrollMap.basic);
+              } else if (isFormIIActualRateHraHeader(header) && formIIPayrollMap.hra !== '') {
+                row[header] = sanitizeValue(formIIPayrollMap.hra);
+              } else if (isFormIIConveyanceHeader(header) && formIIPayrollMap.conv !== '') {
+                row[header] = sanitizeValue(formIIPayrollMap.conv);
+              }
+            });
+          }
+        }
+
         if (formXVIIIAutofillContext && statutoryPayrollRows?.length) {
           const pr = resolvePayrollRowForPeople(emp, statutoryPayrollRows);
           if (pr && !pr.fetch_error) {
@@ -13932,6 +16136,12 @@ const Statutory = ({ userEmail, userRole }) => {
                     (headerLower.includes('overtime') && headerLower.includes('production'))
                   ) {
                     payrollVal = form10PayrollMap.totalOvertimeWorked;
+                  } else if (headerLower.includes('extent') && headerLower.includes('overtime')) {
+                    payrollVal = form10PayrollMap.totalOvertimeWorked;
+                  } else if (headerLower.includes('normal') && headerLower.includes('rate') && headerLower.includes('pay')) {
+                    payrollVal = form10PayrollMap.normalRateOfPay;
+                  } else if (headerLower.includes('overtime') && headerLower.includes('rate') && headerLower.includes('pay')) {
+                    payrollVal = form10PayrollMap.overtimeRateOfPay;
                   } else if (headerLower.includes('date of which overtime') || (headerLower.includes('date') && headerLower.includes('overtime'))) {
                     const hasOvertime = toNumber(form10PayrollMap.totalOvertimeWorked) > 0;
                     if (hasOvertime && !row[header]) {
@@ -13953,6 +16163,146 @@ const Statutory = ({ userEmail, userRole }) => {
         return row;
       });
 
+      if (!returnMappedData) {
+        setTableAutofillLoading(false);
+        if (fastPaginatedAutofill) {
+          mergeMappedIntoFormTable(mappedData, true);
+          await yieldToMain();
+        } else {
+          mergeMappedIntoFormTable(mappedData);
+        }
+
+        if (skipPeopleLoad) {
+          const cachedLookup = autofillPayrollLookupRef.current;
+          const byPayrollPayload = cachedLookup?.byPayrollPayload;
+          if (byPayrollPayload?.size > 0 && (isLikelyFormW || isLikelyForm10 || formDAutofillContext)) {
+            const formWHeaders =
+              formWHeadersResolved || (isLikelyFormW ? resolveFormWTableHeaders(currentHeaders) : null);
+            const normalEarningsHeader = currentHeaders.find((h) => {
+              const t = String(h || '').toLowerCase();
+              return t.includes('normal') && t.includes('earning');
+            });
+            const totalEarningsHeader = currentHeaders.find((h) => {
+              const t = String(h || '').toLowerCase();
+              return t.includes('total') && t.includes('earning');
+            });
+            mappedData.forEach((row, rowIndex) => {
+              const empItem = employeesForMapping[rowIndex];
+              const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+              const rowNameCandidates =
+                formWHeaders?.employeeName && row[formWHeaders.employeeName]
+                  ? [String(row[formWHeaders.employeeName]).trim().toLowerCase()]
+                  : [];
+              const matchedPayrollRow = resolvePayrollRowForEmployee(
+                byPayrollPayload,
+                emp,
+                row,
+                rowNameCandidates
+              );
+              if (!matchedPayrollRow) return;
+              if (isLikelyFormW && formWHeaders) {
+                applyFormWPayrollToRow(row, buildFormWPayrollMap(matchedPayrollRow), formWHeaders);
+              }
+              if (isLikelyForm10) {
+                const form10PayrollMap = buildForm10PayrollMap(matchedPayrollRow);
+                currentHeaders.forEach((header) => {
+                  const headerLower = String(header || '').toLowerCase();
+                  let payrollVal = '';
+                  if (
+                    (headerLower.includes('total') && headerLower.includes('earning')) ||
+                    headerLower.includes('total earnings')
+                  ) {
+                    payrollVal = form10PayrollMap.totalEarnings;
+                  } else if (headerLower.includes('normal') && headerLower.includes('earning')) {
+                    payrollVal = form10PayrollMap.normalEarnings;
+                  } else if (
+                    (headerLower.includes('total') && headerLower.includes('overtime') && headerLower.includes('worked')) ||
+                    (headerLower.includes('overtime') && headerLower.includes('production'))
+                  ) {
+                    payrollVal = form10PayrollMap.totalOvertimeWorked;
+                  } else if (headerLower.includes('extent') && headerLower.includes('overtime')) {
+                    payrollVal = form10PayrollMap.totalOvertimeWorked;
+                  } else if (headerLower.includes('normal') && headerLower.includes('rate') && headerLower.includes('pay')) {
+                    payrollVal = form10PayrollMap.normalRateOfPay;
+                  } else if (headerLower.includes('overtime') && headerLower.includes('rate') && headerLower.includes('pay')) {
+                    payrollVal = form10PayrollMap.overtimeRateOfPay;
+                  }
+                  if (payrollVal !== '' && payrollVal != null) {
+                    row[header] = sanitizeValue(payrollVal);
+                  }
+                });
+                if (normalEarningsHeader && !String(row[normalEarningsHeader] || '').trim() && form10PayrollMap.totalEarnings !== '') {
+                  row[normalEarningsHeader] = sanitizeValue(form10PayrollMap.totalEarnings);
+                }
+                if (totalEarningsHeader && !String(row[totalEarningsHeader] || '').trim() && form10PayrollMap.totalEarnings !== '') {
+                  row[totalEarningsHeader] = sanitizeValue(form10PayrollMap.totalEarnings);
+                }
+              }
+              if (formDAutofillContext) {
+                const formDPayrollMap = buildFormDPayrollMap(matchedPayrollRow);
+                currentHeaders.forEach((header) => {
+                  if (isFormDBasicSalaryHeader(header) && formDPayrollMap.basicSalary !== '' && formDPayrollMap.basicSalary != null) {
+                    row[header] = sanitizeValue(formDPayrollMap.basicSalary);
+                  } else if (isFormDDearnessAllowanceHeader(header) && formDPayrollMap.dearnessAllowance !== '' && formDPayrollMap.dearnessAllowance != null) {
+                    row[header] = sanitizeValue(formDPayrollMap.dearnessAllowance);
+                  } else if (isFormDHouseRentAllowanceHeader(header) && formDPayrollMap.houseRentAllowance !== '' && formDPayrollMap.houseRentAllowance != null) {
+                    row[header] = sanitizeValue(formDPayrollMap.houseRentAllowance);
+                  } else if (isFormDOtherAllowanceHeader(header) && formDPayrollMap.otherAllowance !== '' && formDPayrollMap.otherAllowance != null) {
+                    row[header] = sanitizeValue(formDPayrollMap.otherAllowance);
+                  }
+                });
+              }
+            });
+            mergeMappedIntoFormTable(mappedData, true);
+          }
+          setTableAutofillProgress('');
+          return;
+        }
+      }
+
+      const runPayrollPreload = async () => {
+        if (!needsPayrollBulkPreload) return;
+        try {
+          let bulkPayrollRows = getCachedPayrollBulkRows();
+          if ((!Array.isArray(bulkPayrollRows) || bulkPayrollRows.length === 0) && !skipPeopleLoad) {
+            const listQs = new URLSearchParams({
+              list_employees: '1',
+              organization_id: payrollOrgIdForForms,
+            });
+            const listUrl = `/server/payroll_function?${listQs.toString()}`;
+            const { resp: listRes, json: listJson } = await fetchJsonWithTimeout(
+              listUrl,
+              { cache: 'no-store' },
+              fastModalAutofill ? 5000 : 15000
+            );
+            if (listRes.ok && listJson?.success && Array.isArray(listJson.data)) {
+              bulkPayrollRows = listJson.data;
+            }
+          }
+          if (Array.isArray(bulkPayrollRows) && bulkPayrollRows.length > 0) {
+            if (formTSEAutofillContext || formXVIIIAutofillContext || formIIAutofillContext) {
+              statutoryPayrollRows = bulkPayrollRows;
+            }
+            if (
+              isLikelyFormW ||
+              isLikelyForm10 ||
+              formBAutofillContext ||
+              formDAutofillContext
+            ) {
+              formWPayrollLookup = buildPayrollLookupFromRows(bulkPayrollRows);
+              autofillPayrollLookupRef.current = formWPayrollLookup;
+            }
+          }
+        } catch (payPreloadErr) {
+          console.warn('Statutory payroll preload skipped:', payPreloadErr?.message || payPreloadErr);
+        }
+      };
+
+      if (!returnMappedData) {
+        setTableAutofillProgress('Enriching payroll & attendance…');
+      }
+      await runPayrollPreload();
+
       // Form B: Zoho Payroll `employee_id` often differs from People `EmployeeID` — merge earnings from all_salaries by mail/name.
       if (formBAutofillContext) {
         try {
@@ -13963,7 +16313,7 @@ const Statutory = ({ userEmail, userRole }) => {
             (formWPayrollLookup
               ? Array.from(formWPayrollLookup.byPayrollPayload.values())
               : null) ||
-            (await fetchPayrollBulkRows());
+            getPayrollBulkRowsForAutofill();
           if (Array.isArray(payrollRows) && payrollRows.length > 0) {
             const emolHeader = currentHeaders.find((h) => isFormBTotalEmolumentsBasicEarningsHeader(h));
             const otherDedHeader = currentHeaders.find((h) => isFormBOtherDeductionsOtherAllowanceHeader(h));
@@ -13993,7 +16343,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 );
               };
               mappedData.forEach((row, rowIndex) => {
-                const empItem = employees[rowIndex];
+                const empItem = employeesForMapping[rowIndex];
                 const em = unwrapEmp(empItem);
                 const pr = resolvePayrollRowForPeople(em);
                 if (!pr || pr.fetch_error) return;
@@ -14018,12 +16368,12 @@ const Statutory = ({ userEmail, userRole }) => {
         try {
           let payrollRows = statutoryPayrollRows;
           if (!Array.isArray(payrollRows) || payrollRows.length === 0) {
-            payrollRows = await fetchPayrollBulkRows();
+            payrollRows = getPayrollBulkRowsForAutofill();
           }
           if (Array.isArray(payrollRows) && payrollRows.length > 0) {
             for (let rowIndex = 0; rowIndex < mappedData.length; rowIndex++) {
               const row = mappedData[rowIndex];
-              const empItem = employees[rowIndex];
+              const empItem = employeesForMapping[rowIndex];
               const em = unwrapEmp(empItem);
               const pr = resolvePayrollRowForPeople(em, payrollRows);
               if (!pr) continue;
@@ -14078,7 +16428,7 @@ const Statutory = ({ userEmail, userRole }) => {
         try {
           let byPayrollPayload = formWPayrollLookup?.byPayrollPayload;
           if (!byPayrollPayload || byPayrollPayload.size === 0) {
-            const bulkRows = await fetchPayrollBulkRows();
+            const bulkRows = getPayrollBulkRowsForAutofill();
             if (Array.isArray(bulkRows) && bulkRows.length > 0) {
               byPayrollPayload = buildPayrollLookupFromRows(bulkRows).byPayrollPayload;
             }
@@ -14097,7 +16447,7 @@ const Statutory = ({ userEmail, userRole }) => {
 
           if (byPayrollPayload && ((isLikelyFormW && formWHeaders) || normalEarningsHeader || totalEarningsHeader)) {
             mappedData.forEach((row, rowIndex) => {
-              const empItem = employees[rowIndex];
+              const empItem = employeesForMapping[rowIndex];
               const emp = empItem && (empItem.Employee || empItem.employee || empItem);
               const rowNameCandidates =
                 formWHeaders?.employeeName && row[formWHeaders.employeeName]
@@ -14135,14 +16485,14 @@ const Statutory = ({ userEmail, userRole }) => {
         try {
           let byPayrollPayload = formWPayrollLookup?.byPayrollPayload;
           if (!byPayrollPayload || byPayrollPayload.size === 0) {
-            const bulkRows = await fetchPayrollBulkRows();
+            const bulkRows = getPayrollBulkRowsForAutofill();
             if (Array.isArray(bulkRows) && bulkRows.length > 0) {
               byPayrollPayload = buildPayrollLookupFromRows(bulkRows).byPayrollPayload;
             }
           }
           if (byPayrollPayload && byPayrollPayload.size > 0) {
               mappedData.forEach((row, rowIndex) => {
-                const empItem = employees[rowIndex];
+                const empItem = employeesForMapping[rowIndex];
                 const emp = empItem && (empItem.Employee || empItem.employee || empItem);
                 const matchedPayrollRow = resolvePayrollRowForEmployee(byPayrollPayload, emp, row, []);
                 if (!matchedPayrollRow) return;
@@ -14185,6 +16535,8 @@ const Statutory = ({ userEmail, userRole }) => {
           console.warn('Form D all_salaries payroll fallback skipped:', formDPayErr?.message || formDPayErr);
         }
       }
+
+      if (!returnMappedData) await yieldToMain();
      
       // Fetch attendance data and populate Total Hours / Daily worked hours columns
       let attendanceHoursPopulated = 0;
@@ -14216,13 +16568,25 @@ const Statutory = ({ userEmail, userRole }) => {
           );
         }
 
-        const attendanceRes =
-          attendanceMonthNotYetStarted
-            ? { ok: false }
-            : await fetch(`/server/attendance_function?limit=200&sdate=${encodeURIComponent(sdate)}&edate=${encodeURIComponent(edate)}`);
-        const attendanceJson = attendanceMonthNotYetStarted ? {} : await attendanceRes.json();
+        const attendanceJson = attendanceMonthNotYetStarted
+          ? {}
+          : await fetchAttendanceData({
+              sdate,
+              edate,
+              force: !fastModalAutofill || form25SkipLossPayAndNationalHolidayBenefit,
+              timeoutMs: fastModalAutofill
+                ? form25SkipLossPayAndNationalHolidayBenefit
+                  ? 12000
+                  : 4000
+                : 20000,
+            }).catch((err) => {
+              console.warn('Attendance autofill fetch failed:', err?.message || err);
+              return {};
+            });
 
-        if (attendanceRes.ok && attendanceJson.success && attendanceJson.data) {
+        if (!returnMappedData) await yieldToMain();
+
+        if (!attendanceMonthNotYetStarted && attendanceJson.success && attendanceJson.data) {
           const tryParseJson = (val) => {
             if (!val) return null;
             if (typeof val === 'object') return val;
@@ -14407,16 +16771,23 @@ const Statutory = ({ userEmail, userRole }) => {
             if (dailyWorkedHoursHeader) {
               hasDailyHoursColumn = true;
             }
+            if (dateDayHeaders.length > 0 && form25SkipLossPayAndNationalHolidayBenefit) {
+              hasDailyHoursColumn = true;
+            }
 
-            if (
+            const needsAttendanceHoursMerge =
               totalHoursHeader ||
               totalHoursWorkedAggHeader ||
               totalWorkedDaysHeader ||
               dailyWorkedHoursHeader ||
               normalHoursHeader ||
-              dateDayHeaders.length > 0
-            ) {
+              dateDayHeaders.length > 0;
+            const needsForm10OvertimeMerge = isLikelyForm10;
+
+            if (needsAttendanceHoursMerge || needsForm10OvertimeMerge) {
               const getAttendanceCandidateIds = (obj) => {
+                const fromModule = getAttendanceEmployeeIdCandidates(obj);
+                if (fromModule.length > 0) return fromModule;
                 if (!obj || typeof obj !== 'object') return [];
                 const vals = [
                   obj.EmployeeID,
@@ -14444,6 +16815,8 @@ const Statutory = ({ userEmail, userRole }) => {
               };
 
               const getAttendanceDisplayName = (obj) => {
+                const fromModule = getAttendanceEmployeeDisplayName(obj);
+                if (fromModule) return fromModule;
                 if (!obj || typeof obj !== 'object') return '';
                 const first = String(
                   obj.firstName ||
@@ -14533,6 +16906,14 @@ const Statutory = ({ userEmail, userRole }) => {
               /** True only when explicit daily hours exist OR both shift ends are present (times required). */
               const hasValidAttendanceTime = (rec) => minutesFromExplicitDailyOrShift(rec) != null;
 
+              const shouldIndexAttendanceForDayLookup = (rec) => {
+                if (!rec || typeof rec !== 'object') return false;
+                if (form25SkipLossPayAndNationalHolidayBenefit && recordHasAttendanceTotalHours(rec)) {
+                  return true;
+                }
+                return hasValidAttendanceTime(rec);
+              };
+
               const formatHoursForDayCell = (rec) => {
                 const daily = getExplicitDailyHoursRaw(rec);
                 if (daily) {
@@ -14546,6 +16927,13 @@ const Statutory = ({ userEmail, userRole }) => {
                   return nh || '';
                 }
                 return '';
+              };
+
+              const formatForm25DayHoursCell = (rec) => {
+                if (!rec || typeof rec !== 'object') return '';
+                const totalHours = getAttendanceTotalHoursRaw(rec);
+                if (totalHours) return totalHours;
+                return formatHoursForDayCell(rec);
               };
 
               const recordDateKey = recordDateKeyStable;
@@ -14567,30 +16955,40 @@ const Statutory = ({ userEmail, userRole }) => {
                 return `${h}:${String(m).padStart(2, '0')}`;
               };
 
+              const recordsByEmployeeId = new Map();
+              const recordsByEmployeeName = new Map();
+              const recordsByFirstName = new Map();
+              const pushIndexedRecord = (map, key, rec) => {
+                if (!key) return;
+                if (!map.has(key)) map.set(key, []);
+                map.get(key).push(rec);
+              };
+
+              sortedRecords.forEach((rec) => {
+                const dk = recordDateKeyStable(rec);
+                if (!dk || dk < sdate || dk > edate) return;
+                getAttendanceCandidateIds(rec).forEach((id) => pushIndexedRecord(recordsByEmployeeId, id, rec));
+                const nmIdx = getAttendanceDisplayName(rec);
+                if (nmIdx) pushIndexedRecord(recordsByEmployeeName, nmIdx, rec);
+                const firstNmIdx = getAttendanceEmployeeFirstName(rec).toLowerCase();
+                if (firstNmIdx) pushIndexedRecord(recordsByFirstName, firstNmIdx, rec);
+              });
+
               const aggregateWorkedDaysAndMinutesForEmployee = (idCands, nameCand, firstCand) => {
+                const candidateRecs = new Set();
+                idCands.forEach((id) => {
+                  (recordsByEmployeeId.get(id) || []).forEach((rec) => candidateRecs.add(rec));
+                });
+                if (nameCand) {
+                  (recordsByEmployeeName.get(nameCand) || []).forEach((rec) => candidateRecs.add(rec));
+                }
+                if (firstCand) {
+                  (recordsByFirstName.get(firstCand) || []).forEach((rec) => candidateRecs.add(rec));
+                }
                 const byDate = new Map();
-                sortedRecords.forEach((rec) => {
+                candidateRecs.forEach((rec) => {
                   const dk = recordDateKeyStable(rec);
                   if (!dk || dk < sdate || dk > edate) return;
-                  let match = false;
-                  const idsRec = getAttendanceCandidateIds(rec);
-                  if (idCands.some((id) => idsRec.includes(id))) match = true;
-                  else if (nameCand && getAttendanceDisplayName(rec) === nameCand) match = true;
-                  else if (
-                    firstCand &&
-                    String(
-                      rec?.firstName ||
-                        rec?.FirstName ||
-                        rec?.First_Name ||
-                        findValueByNormalizedKey(rec, 'firstname') ||
-                        ''
-                    )
-                      .trim()
-                      .toLowerCase() === firstCand
-                  ) {
-                    match = true;
-                  }
-                  if (!match) return;
                   const prev = byDate.get(dk);
                   if (!prev || (hasValidAttendanceTime(rec) && !hasValidAttendanceTime(prev))) byDate.set(dk, rec);
                 });
@@ -14611,17 +17009,10 @@ const Statutory = ({ userEmail, userRole }) => {
                 });
                 const nm = getAttendanceDisplayName(rec);
                 if (nm && !attendanceByName.has(nm)) attendanceByName.set(nm, rec);
-                const firstNm = String(
-                  rec?.firstName ||
-                  rec?.FirstName ||
-                  rec?.First_Name ||
-                  rec?.['First_Name'] ||
-                  findValueByNormalizedKey(rec, 'firstname') ||
-                  ''
-                ).trim().toLowerCase();
+                const firstNm = getAttendanceEmployeeFirstName(rec).toLowerCase();
                 if (firstNm && !attendanceByFirstName.has(firstNm)) attendanceByFirstName.set(firstNm, rec);
                 const rDate = recordDateKey(rec);
-                if (rDate && hasValidAttendanceTime(rec)) {
+                if (rDate && shouldIndexAttendanceForDayLookup(rec)) {
                   getAttendanceCandidateIds(rec).forEach((id) => {
                     const key = `${id}::${rDate}`;
                     if (!attendanceByIdDate.has(key)) attendanceByIdDate.set(key, rec);
@@ -14637,8 +17028,75 @@ const Statutory = ({ userEmail, userRole }) => {
                 }
               });
 
-              mappedData.forEach((row, rowIndex) => {
-                const empItem = employees[rowIndex];
+              const extentOvertimeHeader = currentHeaders.find((header) => {
+                const h = String(header || '').toLowerCase();
+                return h.includes('extent') && h.includes('overtime');
+              });
+              const dateOvertimeHeader = currentHeaders.find((header) => {
+                const h = String(header || '').toLowerCase();
+                return h.includes('date of which overtime') || (h.includes('date') && h.includes('overtime'));
+              });
+              const totalOvertimeHeader = currentHeaders.find((header) => {
+                const h = String(header || '').toLowerCase();
+                return (
+                  (h.includes('total') && h.includes('overtime') && h.includes('worked')) ||
+                  (h.includes('overtime') && h.includes('production'))
+                );
+              });
+              const form10NormalHoursHeader =
+                normalHoursHeader ||
+                currentHeaders.find((header) => String(header || '').toLowerCase().includes('normal hours'));
+
+              const otRecordsByEmployeeKey = new Map();
+              const pushOtRecord = (key, rec) => {
+                if (!key) return;
+                if (!otRecordsByEmployeeKey.has(key)) otRecordsByEmployeeKey.set(key, []);
+                otRecordsByEmployeeKey.get(key).push(rec);
+              };
+              if (needsForm10OvertimeMerge) {
+                sortedRecords.forEach((rec) => {
+                  if (parseOvertimeHoursNumber(rec) <= 0) return;
+                  const dk = recordDateKeyStable(rec);
+                  if (!dk || dk < sdate || dk > edate) return;
+                  getAttendanceCandidateIds(rec).forEach((id) => pushOtRecord(`id:${id}`, rec));
+                  const nmOt = getAttendanceDisplayName(rec);
+                  if (nmOt) pushOtRecord(`name:${nmOt}`, rec);
+                  const firstOt = String(
+                    rec?.firstName ||
+                      rec?.FirstName ||
+                      rec?.First_Name ||
+                      findValueByNormalizedKey(rec, 'firstname') ||
+                      ''
+                  )
+                    .trim()
+                    .toLowerCase();
+                  if (firstOt) pushOtRecord(`first:${firstOt}`, rec);
+                });
+              }
+
+              const collectEmployeeOtRecords = (idCandidates, nameCandidate, firstNameCandidate) => {
+                const seen = new Set();
+                const out = [];
+                const addFromKey = (key) => {
+                  (otRecordsByEmployeeKey.get(key) || []).forEach((rec) => {
+                    if (seen.has(rec)) return;
+                    seen.add(rec);
+                    out.push(rec);
+                  });
+                };
+                idCandidates.forEach((id) => addFromKey(`id:${id}`));
+                if (nameCandidate) addFromKey(`name:${nameCandidate}`);
+                if (firstNameCandidate) addFromKey(`first:${firstNameCandidate}`);
+                out.sort((a, b) =>
+                  String(recordDateKeyStable(a) || a.date || '').localeCompare(
+                    String(recordDateKeyStable(b) || b.date || '')
+                  )
+                );
+                return out;
+              };
+
+              await processInChunks(mappedData, 30, (row, rowIndex) => {
+                const empItem = employeesForMapping[rowIndex];
                 const emp = empItem && (empItem.Employee || empItem.employee || empItem);
                 const idCandidates = [
                   ...getAttendanceCandidateIds(emp || {}),
@@ -14646,15 +17104,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 ].filter(Boolean);
                 const nameCandidates = getEmployeeNameCandidates(emp || {});
                 const nameCandidate = nameCandidates[0] || '';
-                const firstNameCandidate = String(
-                  (emp && (
-                    emp.FirstName ||
-                    emp['FirstName'] ||
-                    emp.First_Name ||
-                    emp['First_Name'] ||
-                    ''
-                  )) || ''
-                ).trim().toLowerCase();
+                const firstNameCandidate = getAttendanceEmployeeFirstName(emp || {}).toLowerCase();
 
                 let matchedAttendance = null;
                 for (let i = 0; i < idCandidates.length; i++) {
@@ -14686,89 +17136,125 @@ const Statutory = ({ userEmail, userRole }) => {
                 });
                 if (firstNameCandidate) attendanceAggByEmployeeKey.set(`first:${firstNameCandidate}`, agg);
 
-                if (totalWorkedDaysHeader) {
-                  row[totalWorkedDaysHeader] = String(agg.days);
-                }
-                if (form25LossOfPayHeader) {
-                  const daysInMonth = new Date(targetYear, targetMonthIndex + 1, 0).getDate();
-                  row[form25LossOfPayHeader] = String(Math.max(0, daysInMonth - agg.days));
-                }
-                if (totalHoursWorkedAggHeader) {
-                  row[totalHoursWorkedAggHeader] = formatCumulativeHoursMM(agg.totalMins);
-                }
+                if (needsAttendanceHoursMerge) {
+                  if (totalWorkedDaysHeader) {
+                    row[totalWorkedDaysHeader] = String(agg.days);
+                  }
+                  if (form25LossOfPayHeader) {
+                    const daysInMonth = new Date(targetYear, targetMonthIndex + 1, 0).getDate();
+                    row[form25LossOfPayHeader] = String(Math.max(0, daysInMonth - agg.days));
+                  }
+                  if (totalHoursWorkedAggHeader) {
+                    row[totalHoursWorkedAggHeader] = formatCumulativeHoursMM(agg.totalMins);
+                  }
 
-                const totalHoursValue = matchedAttendance
-                  ? String(matchedAttendance.TotalHours || matchedAttendance.totalHours || '')
-                  : '';
-                const dailyWorkedHoursValue = matchedAttendance
-                  ? String(
-                      matchedAttendance.WorkingHours ||
-                        matchedAttendance.workingHours ||
-                        matchedAttendance.DailyWorkedHours ||
-                        matchedAttendance.dailyWorkedHours ||
-                        ''
-                    )
-                  : '';
+                  const totalHoursValue = matchedAttendance
+                    ? String(matchedAttendance.TotalHours || matchedAttendance.totalHours || '')
+                    : '';
+                  const dailyWorkedHoursValue = matchedAttendance
+                    ? String(
+                        matchedAttendance.WorkingHours ||
+                          matchedAttendance.workingHours ||
+                          matchedAttendance.DailyWorkedHours ||
+                          matchedAttendance.dailyWorkedHours ||
+                          ''
+                      )
+                    : '';
 
-                if (totalHoursHeader && totalHoursValue) row[totalHoursHeader] = totalHoursValue;
-                if (dailyWorkedHoursHeader && dailyWorkedHoursValue) row[dailyWorkedHoursHeader] = dailyWorkedHoursValue;
-                if (normalHoursHeader) {
-                  let normalFromAttendance = computeNormalHoursFromAttendanceRecord(matchedAttendance);
-                  if (!normalFromAttendance && matchedAttendance) {
-                    const idsEmp = new Set(getAttendanceCandidateIds(matchedAttendance));
-                    const nmEmp = getAttendanceDisplayName(matchedAttendance);
-                    const sameEmpShiftRec = sortedRecords.find((rec) => {
-                      const sameEmp =
-                        (idsEmp.size && getAttendanceCandidateIds(rec).some((id) => idsEmp.has(id))) ||
-                        Boolean(nmEmp && getAttendanceDisplayName(rec) === nmEmp);
-                      return sameEmp && computeNormalHoursFromAttendanceRecord(rec);
+                  if (totalHoursHeader && totalHoursValue) row[totalHoursHeader] = totalHoursValue;
+                  if (dailyWorkedHoursHeader && dailyWorkedHoursValue) row[dailyWorkedHoursHeader] = dailyWorkedHoursValue;
+                  if (normalHoursHeader) {
+                    let normalFromAttendance = computeNormalHoursFromAttendanceRecord(matchedAttendance);
+                    if (!normalFromAttendance && matchedAttendance) {
+                      const idsEmp = new Set(getAttendanceCandidateIds(matchedAttendance));
+                      const nmEmp = getAttendanceDisplayName(matchedAttendance);
+                      const sameEmpShiftRec = sortedRecords.find((rec) => {
+                        const sameEmp =
+                          (idsEmp.size && getAttendanceCandidateIds(rec).some((id) => idsEmp.has(id))) ||
+                          Boolean(nmEmp && getAttendanceDisplayName(rec) === nmEmp);
+                        return sameEmp && computeNormalHoursFromAttendanceRecord(rec);
+                      });
+                      normalFromAttendance = computeNormalHoursFromAttendanceRecord(sameEmpShiftRec);
+                    }
+                    if (normalFromAttendance) {
+                      row[normalHoursHeader] = normalFromAttendance;
+                    } else if (!String(row[normalHoursHeader] || '').trim() && (dailyWorkedHoursValue || totalHoursValue)) {
+                      row[normalHoursHeader] = dailyWorkedHoursValue || totalHoursValue;
+                    }
+                  }
+                  if (dateDayHeaders.length > 0) {
+                    const today = new Date();
+                    const isCurrentSelectedMonth =
+                      targetYear === today.getFullYear() && targetMonthIndex === today.getMonth();
+                    const isWeekendCalendarDay = (d) => {
+                      const dow = d.getDay();
+                      return dow === 0 || dow === 6;
+                    };
+                    dateDayHeaders.forEach(({ header, day }) => {
+                      const dayDate = new Date(targetYear, targetMonthIndex, day);
+                      if (dayDate.getMonth() !== targetMonthIndex) return;
+                      if (isCurrentSelectedMonth && day > today.getDate()) {
+                        row[header] = '';
+                        return;
+                      }
+                      const iso = formatLocalDateYYYYMMDD(dayDate);
+                      const byId = idCandidates
+                        .map((id) => attendanceByIdDate.get(`${id}::${iso}`))
+                        .find(Boolean);
+                      const byName = !byId && nameCandidate ? attendanceByNameDate.get(`${nameCandidate}::${iso}`) : null;
+                      const byFirstName = !byId && !byName && firstNameCandidate
+                        ? attendanceByFirstNameDate.get(`${firstNameCandidate}::${iso}`)
+                        : null;
+                      const rec = byId || byName || byFirstName;
+                      if (form25SkipLossPayAndNationalHolidayBenefit) {
+                        row[header] = rec ? formatForm25DayHoursCell(rec) : '';
+                        return;
+                      }
+                      if (rec && hasValidAttendanceTime(rec)) {
+                        row[header] = formatHoursForDayCell(rec);
+                      } else if (isWeekendCalendarDay(dayDate)) {
+                        const fromAtt = rec ? formatHoursForDayCell(rec) : '';
+                        row[header] = fromAtt || computeNormalHoursFromShift(emp || {}) || '';
+                      } else {
+                        row[header] = '';
+                      }
                     });
-                    normalFromAttendance = computeNormalHoursFromAttendanceRecord(sameEmpShiftRec);
                   }
-                  if (normalFromAttendance) {
-                    row[normalHoursHeader] = normalFromAttendance;
-                  } else if (!String(row[normalHoursHeader] || '').trim() && (dailyWorkedHoursValue || totalHoursValue)) {
-                    row[normalHoursHeader] = dailyWorkedHoursValue || totalHoursValue;
+                  attendanceHoursPopulated++;
+                }
+
+                if (needsForm10OvertimeMerge) {
+                  const employeeOtRecords = collectEmployeeOtRecords(
+                    idCandidates,
+                    nameCandidate,
+                    firstNameCandidate
+                  );
+                  if (employeeOtRecords.length > 0) {
+                    const latestOtRec = employeeOtRecords[employeeOtRecords.length - 1];
+                    const latestOtHours = parseOvertimeHoursNumber(latestOtRec);
+                    const totalOtHours = employeeOtRecords.reduce(
+                      (sum, rec) => sum + parseOvertimeHoursNumber(rec),
+                      0
+                    );
+                    const latestOtDate = recordDateKeyStable(latestOtRec) || getOvertimeDateValue(latestOtRec, true);
+
+                    if (extentOvertimeHeader && !String(row[extentOvertimeHeader] || '').trim()) {
+                      row[extentOvertimeHeader] = formatOvertimeHoursDisplay(latestOtHours);
+                    }
+                    if (dateOvertimeHeader && !String(row[dateOvertimeHeader] || '').trim()) {
+                      row[dateOvertimeHeader] = latestOtDate;
+                    }
+                    if (totalOvertimeHeader && !String(row[totalOvertimeHeader] || '').trim()) {
+                      row[totalOvertimeHeader] = formatOvertimeHoursDisplay(totalOtHours);
+                    }
+                    if (form10NormalHoursHeader && !String(row[form10NormalHoursHeader] || '').trim()) {
+                      const normalFromOtDay = computeNormalHoursFromAttendanceRecord(latestOtRec);
+                      if (normalFromOtDay) row[form10NormalHoursHeader] = normalFromOtDay;
+                    }
                   }
                 }
-                if (dateDayHeaders.length > 0) {
-                  const today = new Date();
-                  const isCurrentSelectedMonth =
-                    targetYear === today.getFullYear() && targetMonthIndex === today.getMonth();
-                  const isWeekendCalendarDay = (d) => {
-                    const dow = d.getDay();
-                    return dow === 0 || dow === 6;
-                  };
-                  dateDayHeaders.forEach(({ header, day }) => {
-                    const dayDate = new Date(targetYear, targetMonthIndex, day);
-                    if (dayDate.getMonth() !== targetMonthIndex) return; // skip impossible days for selected month
-                    if (isCurrentSelectedMonth && day > today.getDate()) {
-                      row[header] = '';
-                      return;
-                    }
-                    const iso = formatLocalDateYYYYMMDD(dayDate);
-                    const byId = idCandidates
-                      .map((id) => attendanceByIdDate.get(`${id}::${iso}`))
-                      .find(Boolean);
-                    const byName = !byId && nameCandidate ? attendanceByNameDate.get(`${nameCandidate}::${iso}`) : null;
-                    const byFirstName = !byId && !byName && firstNameCandidate
-                      ? attendanceByFirstNameDate.get(`${firstNameCandidate}::${iso}`)
-                      : null;
-                    const rec = byId || byName || byFirstName;
-                    if (rec && hasValidAttendanceTime(rec)) {
-                      row[header] = formatHoursForDayCell(rec);
-                    } else if (isWeekendCalendarDay(dayDate)) {
-                      // Saturday/Sunday: prefer any formatted hours from attendance row, else shift from People
-                      const fromAtt = rec ? formatHoursForDayCell(rec) : '';
-                      row[header] = fromAtt || computeNormalHoursFromShift(emp || {}) || '';
-                    } else {
-                      row[header] = '';
-                    }
-                  });
-                }
-                attendanceHoursPopulated++;
               });
-              console.log(`Attendance hours populated for ${sdate}..${edate}; rows=${mappedData.length}`);
+              console.log(`Attendance merge for ${sdate}..${edate}; rows=${mappedData.length}`);
             }
           }
         }
@@ -14833,7 +17319,7 @@ const Statutory = ({ userEmail, userRole }) => {
           if (daysWorkedHeader && form25Records.length > 0) {
             let daysWorkedPopulated = 0;
             mappedData.forEach((row, rowIndex) => {
-              const empItem = employees[rowIndex];
+              const empItem = employeesForMapping[rowIndex];
               const emp = empItem && (empItem.Employee || empItem.employee || empItem);
               if (!emp) return;
 
@@ -14949,7 +17435,7 @@ const Statutory = ({ userEmail, userRole }) => {
 
             let daysPopulated = 0;
             mappedData.forEach((row, rowIndex) => {
-              const empItem = employees[rowIndex];
+              const empItem = employeesForMapping[rowIndex];
               const emp = empItem && (empItem.Employee || empItem.employee || empItem);
               if (!emp) return;
 
@@ -15015,7 +17501,7 @@ const Statutory = ({ userEmail, userRole }) => {
         console.log('Form XVIII resolved columns:', form18Headers);
 
         const form18PayrollOrgId =
-          process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
+          getPayrollOrganizationId();
 
         if (!Array.isArray(statutoryPayrollRows) || statutoryPayrollRows.length === 0) {
           try {
@@ -15118,7 +17604,7 @@ const Statutory = ({ userEmail, userRole }) => {
 
         for (let rowIndex = 0; rowIndex < mappedData.length; rowIndex += 1) {
           const row = mappedData[rowIndex];
-          const empItem = employees[rowIndex];
+          const empItem = employeesForMapping[rowIndex];
           const emp = empItem && (empItem.Employee || empItem.employee || empItem);
           if (!emp) continue;
 
@@ -15312,7 +17798,7 @@ const Statutory = ({ userEmail, userRole }) => {
 
           // Populate Form A fields from Form 25 data
           mappedData.forEach((row, rowIndex) => {
-            const empItem = employees[rowIndex];
+            const empItem = employeesForMapping[rowIndex];
             const emp = empItem && (empItem.Employee || empItem.employee || empItem);
 
             if (!emp) return;
@@ -15451,10 +17937,16 @@ const Statutory = ({ userEmail, userRole }) => {
         console.log('Fetching leave data...');
         const { fromDate, toDate } = zohoBookedBalanceRangeForUiMonth(selectedMonth);
         const unit = 'Day';
-        const leaveUrl = `/server/leavedata_function?from=${encodeURIComponent(fromDate)}&to=${encodeURIComponent(toDate)}&unit=${encodeURIComponent(unit)}`;
-       
-        const leaveResponse = await fetch(leaveUrl);
-        const leaveResult = await leaveResponse.json();
+        const leaveResult = await fetchLeaveData({
+          fromDate,
+          toDate,
+          unit,
+          force: !fastModalAutofill,
+          timeoutMs: fastModalAutofill ? 4000 : 300000,
+        }).catch((err) => {
+          console.warn('Leave autofill fetch failed:', err?.message || err);
+          return null;
+        });
         const leaveTypeLabels = (leaveResult && leaveResult.leaveTypeLabels) || {};
 
         if (leaveResult && typeof leaveResult === 'object') {
@@ -15515,6 +18007,14 @@ const Statutory = ({ userEmail, userRole }) => {
             normalizedCurrentHeaders,
             parsedGroupLabels
           );
+          const leaveFormFileName = String(
+            modalData?.fileName || formFileModalData?.fileName || options?.fileName || ''
+          );
+          const form15Part1LeaveMapping = isForm15Part1AutofillContext(
+            leaveFormFileName,
+            modalData?.parsedFormHeader || formFileModalData?.parsedFormHeader || options?.parsedFormHeader,
+            modalData?.item || formFileModalData?.item || options?.item
+          );
           const directFormFLeavesEarnedHeader = normalizedCurrentHeaders.find(
             (header) => normalizeLooseHeaderText(header) === 'leaves earned'
           );
@@ -15529,33 +18029,48 @@ const Statutory = ({ userEmail, userRole }) => {
             availed: formXLeaveSections.otherAvailed,
             balance: formXLeaveSections.otherBalance,
           };
+          const medicalLeaveHeaders = [
+            formXLeaveSections.medicalBeginning,
+            formXLeaveSections.medicalAvailed,
+            formXLeaveSections.medicalBalance,
+          ].filter(Boolean);
           const useFormFEarnedLeaveMapping = !!(
+            !form15Part1LeaveMapping &&
             leaveEarnedHeader &&
             leaveReturnBalanceHeader &&
             directFormFLeavesEarnedHeader &&
             directFormFReturnBalanceHeader
           );
 
-          const leaveBeginningHeader = normalizedCurrentHeaders.find((header) => {
-            const headerLower = header.toLowerCase().trim();
-            return (
-              headerLower.includes('leave') &&
-              headerLower.includes('beginning') &&
-              headerLower.includes('month')
-            );
-          });
+          const leaveBeginningHeader = form15Part1LeaveMapping
+            ? null
+            : normalizedCurrentHeaders.find((header) => {
+                const headerLower = header.toLowerCase().trim();
+                return (
+                  headerLower.includes('leave') &&
+                  headerLower.includes('beginning') &&
+                  headerLower.includes('month')
+                );
+              });
 
-          const leaveBalanceHeader = normalizedCurrentHeaders.find((header) => {
-            const headerLower = header.toLowerCase().trim();
-            return (
-              headerLower.includes('leave') &&
-              headerLower.includes('balance') &&
-              headerLower.includes('end') &&
-              headerLower.includes('month')
-            );
-          });
+          const leaveBalanceHeader = form15Part1LeaveMapping
+            ? null
+            : normalizedCurrentHeaders.find((header) => {
+                const headerLower = header.toLowerCase().trim();
+                return (
+                  headerLower.includes('leave') &&
+                  headerLower.includes('balance') &&
+                  headerLower.includes('end') &&
+                  headerLower.includes('month')
+                );
+              });
 
-          if (leaveBeginningHeader || leaveBalanceHeader || leaveReturnBalanceHeader) {
+          if (
+            leaveBeginningHeader ||
+            leaveBalanceHeader ||
+            leaveReturnBalanceHeader ||
+            formXLeaveSections.earnedBalance
+          ) {
             hasLeaveBalanceColumn = true;
           }
 
@@ -15721,7 +18236,27 @@ const Statutory = ({ userEmail, userRole }) => {
               const { names: nameKeys, ids: idKeys } = collectLeaveApiIdentityKeys(leaveRecord);
               const { balance: earnedBalanceStr, booked: earnedBookedStr } = getEarnedLeaveTestBalanceBooked(leaveRecord);
               const balance = getLeaveRowAllBalance(leaveRecord);
-              const otherLeaveMetrics = getCombinedOtherLeaveMetrics(leaveRecord, leaveTypeLabels);
+              const earnedLeaveMetrics = form15Part1LeaveMapping
+                ? getEarnedLeaveTypeMetrics(leaveRecord, leaveTypeLabels)
+                : null;
+              const contingencyLeaveMetrics = form15Part1LeaveMapping
+                ? getContingencyLeaveMetrics(leaveRecord, leaveTypeLabels)
+                : null;
+              const otherLeaveMetrics = form15Part1LeaveMapping
+                ? contingencyLeaveMetrics || { beginning: '', availed: '', balance: '' }
+                : getCombinedOtherLeaveMetrics(leaveRecord, leaveTypeLabels);
+
+              const earnedDuringStr = form15Part1LeaveMapping
+                ? earnedLeaveMetrics?.balance || ''
+                : useFormFEarnedLeaveMapping
+                  ? earnedBookedStr
+                  : earnedBalanceStr;
+              const earnedAvailedStr = form15Part1LeaveMapping
+                ? earnedLeaveMetrics?.availed || ''
+                : earnedBookedStr;
+              const earnedBalanceEndStr = form15Part1LeaveMapping
+                ? earnedLeaveMetrics?.balance || ''
+                : earnedBalanceStr;
 
               const setIdentityLeaveMaps = (identityKey) => {
                 if (!identityKey) return;
@@ -15730,42 +18265,28 @@ const Statutory = ({ userEmail, userRole }) => {
                 if (otherLeaveMetrics.balance !== '') otherLeaveMaps.balance.set(identityKey, otherLeaveMetrics.balance);
               };
 
-              nameKeys.forEach((nameKey) => {
+              const applyLeaveMaps = (identityKey) => {
+                if (!identityKey) return;
                 if (leaveBeginningHeader) {
-                  leaveBeginningMap.set(nameKey, balance);
+                  leaveBeginningMap.set(identityKey, balance);
                 }
                 if (leaveBalanceHeader) {
-                  leaveBalanceMap.set(nameKey, balance);
+                  leaveBalanceMap.set(identityKey, balance);
                 }
-                if (leaveEarnedHeader && (useFormFEarnedLeaveMapping ? earnedBookedStr !== '' : earnedBalanceStr !== '')) {
-                  leaveEarnedMap.set(nameKey, useFormFEarnedLeaveMapping ? earnedBookedStr : earnedBalanceStr);
+                if (leaveEarnedHeader && earnedDuringStr !== '') {
+                  leaveEarnedMap.set(identityKey, earnedDuringStr);
                 }
-                if (leaveAvailedHeader && earnedBookedStr !== '') {
-                  leaveAvailedMap.set(nameKey, earnedBookedStr);
+                if (leaveAvailedHeader && earnedAvailedStr !== '') {
+                  leaveAvailedMap.set(identityKey, earnedAvailedStr);
                 }
-                if (leaveReturnBalanceHeader && earnedBalanceStr !== '') {
-                  leaveReturnBalanceMap.set(nameKey, earnedBalanceStr);
+                if (leaveReturnBalanceHeader && earnedBalanceEndStr !== '') {
+                  leaveReturnBalanceMap.set(identityKey, earnedBalanceEndStr);
                 }
-                setIdentityLeaveMaps(nameKey);
-              });
-              idKeys.forEach((idKey) => {
-                if (leaveBeginningHeader) {
-                  leaveBeginningMap.set(idKey, balance);
-                }
-                if (leaveBalanceHeader) {
-                  leaveBalanceMap.set(idKey, balance);
-                }
-                if (leaveEarnedHeader && (useFormFEarnedLeaveMapping ? earnedBookedStr !== '' : earnedBalanceStr !== '')) {
-                  leaveEarnedMap.set(idKey, useFormFEarnedLeaveMapping ? earnedBookedStr : earnedBalanceStr);
-                }
-                if (leaveAvailedHeader && earnedBookedStr !== '') {
-                  leaveAvailedMap.set(idKey, earnedBookedStr);
-                }
-                if (leaveReturnBalanceHeader && earnedBalanceStr !== '') {
-                  leaveReturnBalanceMap.set(idKey, earnedBalanceStr);
-                }
-                setIdentityLeaveMaps(idKey);
-              });
+                setIdentityLeaveMaps(identityKey);
+              };
+
+              nameKeys.forEach(applyLeaveMaps);
+              idKeys.forEach(applyLeaveMaps);
             });
            
             console.log('Leave beginning map:', Array.from(leaveBeginningMap.entries()));
@@ -15792,7 +18313,7 @@ const Statutory = ({ userEmail, userRole }) => {
            
             // Populate leave values for each employee
             mappedData.forEach((row, index) => {
-              const empItem = employees[index];
+              const empItem = employeesForMapping[index];
               const emp = empItem && (empItem.Employee || empItem.employee || empItem);
               const empNameCandidates = getEmployeeNameCandidates(emp || {});
               const empWorkerId = String(getFallbackWorkerId(emp || {}) || '').toLowerCase().trim();
@@ -15953,18 +18474,24 @@ const Statutory = ({ userEmail, userRole }) => {
                 console.log(`✓ Populated leave return balance for employee ${index + 1}: ${matchedReturnBalance}`);
               }
 
-              // Earned Leave (Test) paidBalance → "Leave earned during the Period"
+              if (form15Part1LeaveMapping) {
+                medicalLeaveHeaders.forEach((header) => {
+                  row[header] = '';
+                });
+              }
+
+              // Earned Leave → "Leave earned during the Period" (balance)
               if (matchedEarned != null && leaveEarnedHeader) {
                 row[leaveEarnedHeader] = String(matchedEarned);
                 leaveEarnedPopulated++;
-                console.log(`✓ Populated leave earned (Earned Leave Test balance) for employee ${index + 1}: ${matchedEarned}`);
+                console.log(`✓ Populated leave earned for employee ${index + 1}: ${matchedEarned}`);
               }
 
-              // Earned Leave (Test) paidBooked → "Leave availed during the Month"
+              // Earned Leave booked → "Leave availed during the Month"
               if (matchedAvailed != null && leaveAvailedHeader) {
                 row[leaveAvailedHeader] = String(matchedAvailed);
                 leaveAvailedPopulated++;
-                console.log(`✓ Populated leave availed (Earned Leave Test booked) for employee ${index + 1}: ${matchedAvailed}`);
+                console.log(`✓ Populated leave availed for employee ${index + 1}: ${matchedAvailed}`);
               }
               if (otherLeaveHeaderMap.beginning && matchedOtherLeave.beginning != null) {
                 row[otherLeaveHeaderMap.beginning] = String(matchedOtherLeave.beginning);
@@ -15981,9 +18508,13 @@ const Statutory = ({ userEmail, userRole }) => {
             });
 
             console.log(`Leave balance populated for ${leaveBalancePopulated} out of ${mappedData.length} employees`);
-            console.log(`Leave earned (Earned Leave Test balance) populated for ${leaveEarnedPopulated} out of ${mappedData.length} employees`);
-            console.log(`Leave availed (Earned Leave Test booked) populated for ${leaveAvailedPopulated} out of ${mappedData.length} employees`);
-            console.log(`Other leave (Privilege/LWP/Sick/Wedding totals) populated for ${otherLeavePopulated} cell(s)`);
+            console.log(`Leave earned populated for ${leaveEarnedPopulated} out of ${mappedData.length} employees`);
+            console.log(`Leave availed populated for ${leaveAvailedPopulated} out of ${mappedData.length} employees`);
+            console.log(
+              form15Part1LeaveMapping
+                ? `Form 15 Part 1 other leave (Contingency Leave) populated for ${otherLeavePopulated} cell(s)`
+                : `Other leave (Privilege/LWP/Sick/Wedding totals) populated for ${otherLeavePopulated} cell(s)`
+            );
           } else {
             if (!leaveBalanceHeader && !leaveEarnedHeader && !leaveAvailedHeader && !hasOtherLeaveColumn) {
               console.warn('⚠️ No leave columns matched (earned / other leave / balance at end).');
@@ -16015,6 +18546,28 @@ const Statutory = ({ userEmail, userRole }) => {
           console.log(`Cleared Form XXIII manual columns: ${skipHeaders.join(', ')}`);
         }
       }
+      if (form11AutofillContext) {
+        const skipHeaders = currentHeaders.filter((header) => isForm11SkipAutofillHeader(header));
+        if (skipHeaders.length > 0) {
+          mappedData.forEach((row) => {
+            skipHeaders.forEach((header) => {
+              row[header] = '';
+            });
+          });
+          console.log(`Cleared Form 11 manual columns: ${skipHeaders.join(', ')}`);
+        }
+      }
+      if (form26AutofillContext) {
+        const skipHeaders = currentHeaders.filter((header) => isForm26SkipAutofillHeader(header));
+        if (skipHeaders.length > 0) {
+          mappedData.forEach((row) => {
+            skipHeaders.forEach((header) => {
+              row[header] = '';
+            });
+          });
+          console.log(`Cleared Form 26 manual columns: ${skipHeaders.join(', ')}`);
+        }
+      }
       if (isFormHLeaveBookContext(parsedFormHeaderForAutofill, modalData?.item || formFileModalData?.item, currentFormFileName || `${currentFormTitle} ${currentFormSubtitle}`)) {
         const formHLeavePaidHeader = currentHeaders.find((header) =>
           normalizeLooseHeaderText(header).includes('date on which wages for leave paid and amount paid')
@@ -16029,11 +18582,21 @@ const Statutory = ({ userEmail, userRole }) => {
      
       // Update form table data with employee data (including leave balance and leave earned)
       let tableDataToSet = mappedData;
-      if (formQAutofillContext) {
+      if (formIIAutofillContext) {
+        tableDataToSet = remapFormIIRowsToHeaders(
+          mappedData,
+          modalData?.parsedTableHeaders || tableHeaders,
+          currentHeaders
+        );
+      } else if (formQAutofillContext) {
         tableDataToSet = mappedData;
       }
-      if (!returnMappedData) setFormTableData(tableDataToSet);
-      let successMessage = `Successfully loaded ${mappedData.length} employee records`;
+      if (!returnMappedData) {
+        mergeMappedIntoFormTable(tableDataToSet);
+      }
+      let successMessage = useEmployeePagination
+        ? `Loaded employees ${employeePageOffset + 1}–${employeePageOffset + mappedData.length} of ${employees.length}`
+        : `Successfully loaded ${mappedData.length} employee records`;
       const populatedFields = [];
       if (hasTotalHoursColumn && attendanceHoursPopulated > 0) {
         populatedFields.push(`total hours (${attendanceHoursPopulated} populated)`);
@@ -16073,7 +18636,10 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (returnMappedData) throw err;
     } finally {
-      if (!returnMappedData) setTableAutofillLoading(false);
+      if (!returnMappedData) {
+        setTableAutofillLoading(false);
+        setTableAutofillProgress('');
+      }
     }
   };
 
@@ -18000,6 +20566,146 @@ const Statutory = ({ userEmail, userRole }) => {
       };
     }
 
+    // Form K (Maharashtra): multi-row header band — Sex, Age, Hours worked on_1..4.
+    const formKSheetProbe = [
+      formHeaderInfo?.title,
+      formHeaderInfo?.subtitle,
+      firstSheetName,
+      ...(headersToUse || [])
+    ]
+      .join(' ')
+      .toLowerCase();
+    const looksLikeFormKSheet =
+      /\bform\s*k\b/.test(formKSheetProbe) ||
+      ( /register\s+of\s+employment/i.test(formKSheetProbe) &&
+        /residential\s+hotel|restaurant|eating\s+house|theatre|public\s+amusement|entertainment/i.test(formKSheetProbe));
+    if (looksLikeFormKSheet) {
+      const normK = (txt) =>
+        String(txt || '')
+          .replace(/\r?\n/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9 ]/g, '');
+      let formKHeaderRow = -1;
+      let formKTableStartCol = 1;
+      for (let r = 0; r < Math.min(35, jsonData.length); r++) {
+        let hasName = false;
+        let hasSex = false;
+        let hasAge = false;
+        let nameCol = -1;
+        for (let c = 0; c < Math.max(effectiveSheetCols, 15); c++) {
+          const t = normK(getMergedAwareCellText(r, c));
+          if (/name\s+of\s+the\s+employee/.test(t) && /establishment/.test(t)) {
+            hasName = true;
+            if (nameCol < 0) nameCol = c;
+          }
+          if (t === 'sex') hasSex = true;
+          if (t === 'age') hasAge = true;
+        }
+        if (hasName && hasSex && hasAge) {
+          formKHeaderRow = r;
+          formKTableStartCol = nameCol >= 0 ? nameCol : 1;
+          break;
+        }
+      }
+      if (formKHeaderRow >= 0) {
+        const rebuiltK = [];
+        let hoursMain = '';
+        let hoursBandStart = -1;
+        for (let c = formKTableStartCol; c < Math.max(effectiveSheetCols, formKTableStartCol + 12); c++) {
+          let label = '';
+          for (let r = formKHeaderRow; r <= Math.min(formKHeaderRow + 2, jsonData.length - 1); r++) {
+            const t = String(getMergedAwareCellText(r, c) || '').trim();
+            if (!t) continue;
+            const n = normK(t);
+            if (/^\d{1,2}$/.test(t)) continue;
+            if (/hours\s+worked\s+on/.test(n)) {
+              hoursMain = t.replace(/\s+/g, ' ').trim();
+              if (hoursBandStart < 0) hoursBandStart = c;
+              break;
+            }
+            if (!label && n.length > 1) label = t.replace(/\s+/g, ' ').trim();
+          }
+          if (/hours\s+worked\s+on/i.test(hoursMain) && hoursBandStart >= 0 && c >= hoursBandStart) {
+            rebuiltK.push('');
+            continue;
+          }
+          rebuiltK.push(label);
+        }
+        while (rebuiltK.length > 0 && !rebuiltK[rebuiltK.length - 1]) rebuiltK.pop();
+
+        let numberedSubRow = -1;
+        const hoursNums = new Map();
+        for (let r = formKHeaderRow; r <= Math.min(formKHeaderRow + 2, jsonData.length - 1); r++) {
+          const cols = new Map();
+          const scanFrom = hoursBandStart >= 0 ? hoursBandStart : formKTableStartCol + 6;
+          for (let c = scanFrom; c < scanFrom + 8; c++) {
+            const raw = String(getMergedAwareCellText(r, c) || '').trim();
+            if (!/^\d{1,2}$/.test(raw)) continue;
+            const num = parseInt(raw, 10);
+            if (num >= 1 && num <= 31) cols.set(num, c);
+          }
+          if (cols.size >= 2 && cols.size >= hoursNums.size) {
+            hoursNums.clear();
+            cols.forEach((col, num) => hoursNums.set(num, col));
+            numberedSubRow = r;
+          }
+        }
+
+        const expandedK = [];
+        for (let ci = 0; ci < rebuiltK.length; ci++) {
+          const h = rebuiltK[ci];
+          const col = formKTableStartCol + ci;
+          if (!h && hoursBandStart >= 0 && col >= hoursBandStart) {
+            const nums = [...hoursNums.keys()].sort((a, b) => a - b);
+            const num = nums.find((n) => hoursNums.get(n) === col);
+            if (num != null) {
+              expandedK.push(`Hours worked on_${num}`);
+              continue;
+            }
+          }
+          if (h) expandedK.push(h);
+        }
+        if (expandedK.some((h) => h && (/^sex$/i.test(h) || /^age$/i.test(h) || /employee/i.test(h)))) {
+          headersToUse = expandedK.filter((h) => h);
+          headerRowIndex = formKHeaderRow;
+          startIndex = numberedSubRow >= formKHeaderRow ? numberedSubRow + 1 : formKHeaderRow + 1;
+          subColumnsData = {};
+          if (hoursMain && hoursNums.size > 0) {
+            subColumnsData[hoursMain] = [...hoursNums.keys()].sort((a, b) => a - b).map(String);
+          }
+        }
+      }
+    }
+
+    const formIIProbe = isFormIIMaharashtraContext(
+      formHeaderInfo,
+      null,
+      firstSheetName,
+      headersToUse
+    );
+    if (formIIProbe && Array.isArray(headersToUse) && headersToUse.length > 0) {
+      const priorHeaders = [...headersToUse];
+      const priorRows = tableData.map((row) => ({ ...row }));
+      const leadingStrip = countLeadingFormIIColumnsToStrip(headersToUse);
+      const normalizedHeaders = normalizeFormIIMaharashtraTableHeaders(headersToUse);
+      if (normalizedHeaders.length > 0) {
+        headersToUse = normalizedHeaders;
+        if (Array.isArray(columnGroupLabels) && columnGroupLabels.length > 0) {
+          const alignedLabels = alignFormIIColumnGroupLabels(columnGroupLabels, leadingStrip);
+          columnGroupLabels =
+            alignedLabels.length === headersToUse.length && alignedLabels.some((x) => String(x || '').trim())
+              ? alignedLabels
+              : null;
+        }
+        if (priorRows.length > 0) {
+          tableData.length = 0;
+          remapFormIIRowsToHeaders(priorRows, priorHeaders, headersToUse).forEach((r) => tableData.push(r));
+        }
+      }
+    }
+
     return {
       formHeader: formHeaderInfo,
       tableData: tableData,
@@ -18540,7 +21246,7 @@ const Statutory = ({ userEmail, userRole }) => {
           item,
           displayFileName
         );
-        const tableHeadersForModal = formQFileOpen
+        let tableHeadersForModal = formQFileOpen
           ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
           : resolveAutofillTableHeaders(parsed.headers || [], {
               fileName: displayFileName,
@@ -18550,6 +21256,15 @@ const Statutory = ({ userEmail, userRole }) => {
               sheetText: sheetTextForVariant,
               item
             });
+        const formIIModalOpen = isFormIIMaharashtraContext(
+          formHeaderForModal,
+          item,
+          displayFileName,
+          tableHeadersForModal
+        );
+        if (formIIModalOpen) {
+          tableHeadersForModal = normalizeFormIIMaharashtraTableHeaders(tableHeadersForModal);
+        }
         parsed.headers = tableHeadersForModal;
         setFormHeader(formHeaderForModal);
         setTableHeaders(tableHeadersForModal);
@@ -18636,7 +21351,7 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedHeaderFormData: initialHeaderFormData,
           headerRowIndex: parsed.headerRowIndex,
           dataStartIndex: parsed.dataStartIndex,
-          parsedColumnGroupLabels: parsed.columnGroupLabels ?? null,
+          parsedColumnGroupLabels: formIIModalOpen ? null : (parsed.columnGroupLabels ?? null),
           originalHeaderRowIndex: parsed.originalHeaderRowIndex ?? parsed.headerRowIndex
         };
         setFormFileModalData(modalPayloadForAutofill);
@@ -18648,7 +21363,11 @@ const Statutory = ({ userEmail, userRole }) => {
         if (shouldAutofill) {
           console.log('🔄 Autofill: template from Form File – headers:', tableHeadersForModal.length);
           // Show the selected form file immediately on first click, then replace rows with Autofill data.
-          setFormTableData(parsed.tableData || []);
+          setFormTableData(
+            formIIModalOpen
+              ? remapFormIIRowsToHeaders(parsed.tableData || [], parsed.headers || [], tableHeadersForModal)
+              : (parsed.tableData || [])
+          );
           const shouldPreferSavedDraftData = !!options?.preferSavedDraftData;
           if (shouldPreferSavedDraftData) {
             let loadedSavedData = false;
@@ -18688,9 +21407,17 @@ const Statutory = ({ userEmail, userRole }) => {
                         prev.fileName || '',
                         sampleHeaders
                       );
+                      const formIISaved = isFormIIMaharashtraContext(
+                        prev.parsedFormHeader,
+                        prev.item,
+                        prev.fileName || '',
+                        sampleHeaders
+                      );
                       const normalizedSampleHeaders = formQSaved
                         ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
-                        : sampleHeaders;
+                        : formIISaved
+                          ? normalizeFormIIMaharashtraTableHeaders(sampleHeaders)
+                          : sampleHeaders;
                       if (normalizedSampleHeaders.length > 0) {
                         next.parsedTableHeaders = normalizedSampleHeaders;
                       }
@@ -18716,13 +21443,23 @@ const Statutory = ({ userEmail, userRole }) => {
                       displayFileName,
                       sampleHeaders
                     );
+                    const formIISaved = isFormIIMaharashtraContext(
+                      formFileModalData?.parsedFormHeader,
+                      item,
+                      displayFileName,
+                      sampleHeaders
+                    );
                     const hdrsForRows = formQSaved
                       ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
-                      : sampleHeaders;
+                      : formIISaved
+                        ? normalizeFormIIMaharashtraTableHeaders(sampleHeaders)
+                        : sampleHeaders;
                     setFormTableData(
                       formQSaved
                         ? remapFormQRowsToHeaders(sampleRows, sampleHeaders, hdrsForRows)
-                        : sampleRows
+                        : formIISaved
+                          ? remapFormIIRowsToHeaders(sampleRows, sampleHeaders, hdrsForRows)
+                          : sampleRows
                     );
                   }
                   if ((Array.isArray(sampleRows) && sampleRows.length > 0) || hasSavedHeaderFormData) {
@@ -18796,6 +21533,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 setError('Could not load the saved draft. Loading employee data from Zoho People…');
                 setTimeout(() => setError(''), 4000);
               }
+              prefetchPeopleData();
               setTableAutofillLoading(true);
               fetchAndPopulateEmployeeData(tableHeadersForModal, {
                 columnGroupLabels: parsed.columnGroupLabels ?? null,
@@ -18818,6 +21556,7 @@ const Statutory = ({ userEmail, userRole }) => {
               });
             }
           } else {
+            prefetchPeopleData();
             setTableAutofillLoading(true);
             fetchAndPopulateEmployeeData(tableHeadersForModal, {
               columnGroupLabels: parsed.columnGroupLabels ?? null,
@@ -18863,6 +21602,12 @@ const Statutory = ({ userEmail, userRole }) => {
     setIsAutofillMode(false);
     setAutofillItem(null);
     setTableAutofillLoading(false);
+    setTableAutofillProgress('');
+    setFormTablePage(0);
+    setFormTablePageLoading(false);
+    setAutofillTotalEmployees(0);
+    autofillEmployeesRef.current = [];
+    autofillPayrollLookupRef.current = null;
     setError('');
     setSuccess('');
     // Clean up blob URLs if any
@@ -19453,6 +22198,9 @@ const Statutory = ({ userEmail, userRole }) => {
       formHeaderTitle: formFileModalData?.parsedFormHeader?.title,
       item
     });
+    if (isFormIIMaharashtraContext(displayFormHeader, item, fn, baseHeaders)) {
+      baseHeaders = normalizeFormIIMaharashtraTableHeaders(baseHeaders);
+    }
     const effectiveSelectedMonth = resolveToFullMonthName(selectedMonth) || '';
     if (isFormQContext(displayFormHeader, item, fn, baseHeaders)) {
       const formQMonthIdx = MONTH_NAMES.findIndex((m) =>
@@ -19510,10 +22258,13 @@ const Statutory = ({ userEmail, userRole }) => {
     const item = formFileModalData?.item;
     const fn = formFileModalData?.fileName || '';
     const hdrs = displayTableHeaders;
-    if (!isFormQContext(displayFormHeader, item, fn, hdrs)) return rows;
     const rawHeaders = formFileModalData?.parsedTableHeaders?.length
       ? formFileModalData.parsedTableHeaders
       : tableHeaders || [];
+    if (isFormIIMaharashtraContext(displayFormHeader, item, fn, hdrs)) {
+      return remapFormIIRowsToHeaders(rows, rawHeaders, hdrs);
+    }
+    if (!isFormQContext(displayFormHeader, item, fn, hdrs)) return rows;
     return remapFormQRowsToHeaders(rows, rawHeaders, hdrs);
   }, [
     formTableData,
@@ -19525,13 +22276,64 @@ const Statutory = ({ userEmail, userRole }) => {
     displayFormHeader
   ]);
 
+  const paginatedRowTotal = Math.max(autofillTotalEmployees || 0, displayFormTableData.length || 0);
+
+  const formTableTotalPages = Math.max(1, Math.ceil(paginatedRowTotal / FORM_TABLE_PAGE_SIZE));
+
+  const pagedDisplayFormTableData = useMemo(() => {
+    const all = displayFormTableData;
+    if (!Array.isArray(all) || all.length === 0) return [];
+    if (paginatedRowTotal <= FORM_TABLE_PAGE_SIZE) return all;
+    const start = formTablePage * FORM_TABLE_PAGE_SIZE;
+    return all.slice(start, start + FORM_TABLE_PAGE_SIZE);
+  }, [displayFormTableData, formTablePage, paginatedRowTotal]);
+
+  const loadFormTablePage = useCallback(
+    async (targetPage) => {
+      const total = autofillTotalEmployees || autofillEmployeesRef.current.length;
+      const start = targetPage * FORM_TABLE_PAGE_SIZE;
+      if (targetPage < 0 || start >= total) return;
+
+      const firstRow = formTableData[start];
+      const pageLoaded =
+        firstRow &&
+        typeof firstRow === 'object' &&
+        Object.values(firstRow).some((v) => v != null && String(v).trim() !== '');
+
+      setFormTablePage(targetPage);
+
+      if (!pageLoaded && autofillEmployeesRef.current.length > 0) {
+        setFormTablePageLoading(true);
+        try {
+          const headers = formFileModalData?.parsedTableHeaders?.length
+            ? formFileModalData.parsedTableHeaders
+            : tableHeaders;
+          await fetchAndPopulateEmployeeData(headers, {
+            formFileModalData: formFileModalData || undefined,
+            skipPeopleFetch: true,
+            employeesOverride: autofillEmployeesRef.current,
+            employeePage: targetPage,
+            paginateEmployees: true,
+          });
+        } finally {
+          setFormTablePageLoading(false);
+          setTableAutofillProgress('');
+        }
+      }
+    },
+    [formFileModalData, tableHeaders, formTableData, autofillTotalEmployees]
+  );
+
   const displayColumnGroupLabels = useMemo(() => {
     const g = formFileModalData?.parsedColumnGroupLabels;
     if (!Array.isArray(g) || !displayTableHeaders.length) return null;
-    if (g.length !== displayTableHeaders.length) return null;
-    if (!g.some((x) => String(x || '').trim())) return null;
     const item = formFileModalData?.item;
     const fn = String(formFileModalData?.fileName || '');
+    if (isFormIIMaharashtraContext(displayFormHeader, item, fn, displayTableHeaders)) {
+      return null;
+    }
+    if (g.length !== displayTableHeaders.length) return null;
+    if (!g.some((x) => String(x || '').trim())) return null;
     if (isFormQContext(displayFormHeader, item, fn, displayTableHeaders)) return null;
     const formContext = [
       item?.formName,
@@ -19585,6 +22387,40 @@ const Statutory = ({ userEmail, userRole }) => {
   }, [formFileModalData?.item, siteFromUrl]);
 
   /** Form W: mirror Excel’s multi-row merged header (Deductions, Advances, …) using sheet !merges. */
+  const formIIMaharashtraThead = useMemo(() => {
+    const hdrs = displayTableHeaders;
+    const item = formFileModalData?.item;
+    const fn = formFileModalData?.fileName || '';
+    if (!Array.isArray(hdrs) || hdrs.length === 0) return null;
+    if (!isFormIIMaharashtraContext(displayFormHeader, item, fn, hdrs)) return null;
+    const thStyle = {
+      backgroundColor: STAT_FORM_FILE_ACCENT_BG,
+      color: 'white',
+      padding: '12px',
+      textAlign: 'left',
+      fontWeight: '600',
+      fontSize: '14px',
+      border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
+      position: 'sticky',
+      top: 0,
+      zIndex: 10
+    };
+    return (
+      <tr>
+        {hdrs.map((header, index) => (
+          <th key={`form-ii-h-${index}`} title={header} style={thStyle}>
+            {formatStatutoryTableHeaderLabel(header)}
+          </th>
+        ))}
+      </tr>
+    );
+  }, [
+    displayTableHeaders,
+    displayFormHeader,
+    formFileModalData?.item,
+    formFileModalData?.fileName
+  ]);
+
   const registerOfWagesMergedTheadRows = useMemo(() => {
     const wb = formFileModalData?.rawData;
     const ds = formFileModalData?.dataStartIndex;
@@ -20853,8 +23689,6 @@ const Statutory = ({ userEmail, userRole }) => {
                                       ? String(draftSourceItem.id)
                                       : null) ||
                                     (isNumericStatutoryBackendId(item?.id) ? String(item.id) : null);
-                                  const canLoadSavedDraft = hasSavedDraftForRow && !!draftApiRowId;
-                                  const openSavedDraftForReview = canLoadSavedDraft;
                                   return (
                                     <button
                                       className="statutory-autofill-btn-ui"
@@ -20864,8 +23698,9 @@ const Statutory = ({ userEmail, userRole }) => {
                                         e.stopPropagation();
                                         if (hasFormFileForRow && !rowLocked) {
                                           handleAutofill(resolvedFormFileItem, {
-                                            preferSavedDraftData: openSavedDraftForReview,
-                                            readOnly: showApprovalColumn || openSavedDraftForReview,
+                                            // Autofill always loads current Zoho People rows; saved drafts open via View Draft File.
+                                            preferSavedDraftData: false,
+                                            readOnly: showApprovalColumn,
                                             savedDraftSourceItem: draftSourceItem || item
                                           });
                                         }
@@ -20874,9 +23709,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                         rowLocked
                                           ? 'Approved row is locked for editing'
                                           : hasFormFileForRow
-                                            ? openSavedDraftForReview
-                                              ? 'Review the saved site draft'
-                                              : 'Autofill using same form format as View File'
+                                            ? 'Autofill from Zoho People, Attendance, Leave and Payroll'
                                             : 'No form file – upload or link a form to enable Autofill'
                                       }
                                       disabled={!hasFormFileForRow || rowLocked}
@@ -21736,8 +24569,10 @@ const Statutory = ({ userEmail, userRole }) => {
               width: '90%',
               maxWidth: registerOfWagesMergedTheadRows || formVDailyHoursThead || formDRemunerationThead ? 'min(98vw, 1900px)' : '1200px',
               maxHeight: '90vh',
+              minHeight: 0,
               display: 'flex',
               flexDirection: 'column',
+              overflow: 'hidden',
               boxShadow: '0 10px 40px rgba(0, 0, 0, 0.3)'
             }}
           >
@@ -21784,12 +24619,15 @@ const Statutory = ({ userEmail, userRole }) => {
             </div>
 
             {/* Modal Body */}
-            <div style={{
-              padding: '24px',
-              overflow: 'auto',
-              flex: 1,
-              backgroundColor: '#f9fafb'
-            }}>
+            <div
+              className="form-file-modal-body"
+              style={{
+                padding: '24px',
+                flex: 1,
+                minHeight: 0,
+                backgroundColor: '#f9fafb'
+              }}
+            >
               {formFileLoading && !formFileModalData?.parsedTableHeaders?.length ? (
                 <div style={{
                   display: 'flex',
@@ -21811,13 +24649,14 @@ const Statutory = ({ userEmail, userRole }) => {
                   </div>
                 </div>
               ) : formFileModalData?.fileType === 'excel-form' ? (
-                <div style={{
-                  backgroundColor: 'white',
-                  padding: '32px',
-                  borderRadius: '8px',
-                  maxHeight: 'calc(90vh - 200px)',
-                  overflow: 'auto'
-                }}>
+                <div
+                  className="form-file-modal-excel-panel"
+                  style={{
+                    backgroundColor: 'white',
+                    padding: '32px',
+                    borderRadius: '8px'
+                  }}
+                >
                   {/* Error/Success Messages */}
                   {error && (
                     <div style={{
@@ -22207,24 +25046,25 @@ const Statutory = ({ userEmail, userRole }) => {
                     {/* Autofill button - Hide if draft file exists */}
                     {!isFormFileReadOnly && displayTableHeaders.length > 0 && !formFileModalData?.item?.draftFile && (
                       <button
-                        onClick={() =>
+                        onClick={() => {
+                          prefetchPeopleData();
                           fetchAndPopulateEmployeeData(
                             formFileModalData?.parsedTableHeaders?.length
                               ? formFileModalData.parsedTableHeaders
                               : tableHeaders,
                             { formFileModalData: formFileModalData || undefined }
-                          )
-                        }
-                        disabled={formFileLoading || tableAutofillLoading}
+                          );
+                        }}
+                        disabled={formFileLoading || tableAutofillLoading || Boolean(tableAutofillProgress)}
                         style={{
                           padding: '10px 20px',
-                          backgroundColor: formFileLoading || tableAutofillLoading ? '#9ca3af' : STAT_FORM_FILE_ACCENT_BG,
+                          backgroundColor: formFileLoading || tableAutofillLoading || tableAutofillProgress ? '#9ca3af' : STAT_FORM_FILE_ACCENT_BG,
                           color: 'white',
                           border: 'none',
                           borderRadius: '6px',
                           fontSize: '14px',
                           fontWeight: '500',
-                          cursor: formFileLoading || tableAutofillLoading ? 'not-allowed' : 'pointer',
+                          cursor: formFileLoading || tableAutofillLoading || tableAutofillProgress ? 'not-allowed' : 'pointer',
                           display: 'flex',
                           alignItems: 'center',
                           gap: '8px',
@@ -22242,7 +25082,7 @@ const Statutory = ({ userEmail, userRole }) => {
                         }}
                         title="Fetch employee data from Zoho People and populate the form"
                       >
-                        {formFileLoading || tableAutofillLoading ? 'Loading...' : 'Autofill'}
+                        {formFileLoading || tableAutofillLoading || tableAutofillProgress ? 'Loading...' : 'Autofill'}
                       </button>
                     )}
                     {/* Import button (after Autofill) */}
@@ -22373,7 +25213,7 @@ const Statutory = ({ userEmail, userRole }) => {
                   </div>
 
                   {/* Form table + employer / signatory footer (Form I layout and all statutory excel forms) */}
-                  {tableAutofillLoading ? (
+                  {tableAutofillProgress ? (
                     <div style={{
                       marginBottom: '12px',
                       padding: '10px 14px',
@@ -22381,9 +25221,10 @@ const Statutory = ({ userEmail, userRole }) => {
                       border: '1px solid #bfdbfe',
                       borderRadius: '6px',
                       color: '#1d4ed8',
-                      fontSize: '14px'
+                      fontSize: '14px',
+                      pointerEvents: 'none'
                     }}>
-                      Loading employee rows…
+                      {tableAutofillProgress}
                     </div>
                   ) : null}
 
@@ -22400,7 +25241,9 @@ const Statutory = ({ userEmail, userRole }) => {
                         backgroundColor: 'white'
                       }}>
                         <thead>
-                          {registerOfWagesCumMusterRollThead ? (
+                          {formIIMaharashtraThead ? (
+                            formIIMaharashtraThead
+                          ) : registerOfWagesCumMusterRollThead ? (
                             registerOfWagesCumMusterRollThead
                           ) : formQGroupedThead ? (
                             formQGroupedThead
@@ -22535,7 +25378,7 @@ const Statutory = ({ userEmail, userRole }) => {
                           )}
                         </thead>
                         <tbody>
-                          {!tableAutofillLoading && formTableData.length === 0 ? (
+                          {!tableAutofillLoading && !tableAutofillProgress && formTableData.length === 0 ? (
                             <tr>
                               <td
                                 colSpan={displayTableHeaders.length}
@@ -22550,8 +25393,10 @@ const Statutory = ({ userEmail, userRole }) => {
                               </td>
                             </tr>
                           ) : null}
-                          {displayFormTableData.map((row, rowIndex) => (
-                            <tr key={rowIndex} style={{
+                          {pagedDisplayFormTableData.map((row, rowIndex) => {
+                            const actualRowIndex = formTablePage * FORM_TABLE_PAGE_SIZE + rowIndex;
+                            return (
+                            <tr key={actualRowIndex} style={{
                               backgroundColor: rowIndex % 2 === 0 ? '#fff' : '#f9fafb'
                             }}>
                               {displayTableHeaders.map((header, colIndex) => (
@@ -22567,8 +25412,8 @@ const Statutory = ({ userEmail, userRole }) => {
                                     onChange={(e) => {
                                       if (isFormFileReadOnly) return;
                                       const newData = [...formTableData];
-                                      newData[rowIndex] = {
-                                        ...(displayFormTableData[rowIndex] || newData[rowIndex] || {}),
+                                      newData[actualRowIndex] = {
+                                        ...(pagedDisplayFormTableData[rowIndex] || newData[actualRowIndex] || {}),
                                         [header]: e.target.value
                                       };
                                       setFormTableData(newData);
@@ -22582,15 +25427,49 @@ const Statutory = ({ userEmail, userRole }) => {
                                       fontSize: '14px',
                                       backgroundColor: isFormFileReadOnly ? '#f9fafb' : 'white'
                                     }}
-                                    placeholder={`Enter ${formatStatutoryTableHeaderLabel(header)}`}
+                                    placeholder={
+                                      isFormIILegacySpacerHeader(header)
+                                        ? ''
+                                        : `Enter ${formatStatutoryTableHeaderLabel(header)}`
+                                    }
                                   />
                                 </td>
                               ))}
                             </tr>
-                          ))}
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
+                    {paginatedRowTotal > FORM_TABLE_PAGE_SIZE ? (
+                      <div className="form-file-modal-pagination">
+                        <button
+                          type="button"
+                          className="form-file-modal-pagination__btn"
+                          disabled={formTablePage === 0 || formTablePageLoading || Boolean(tableAutofillProgress)}
+                          onClick={() => loadFormTablePage(formTablePage - 1)}
+                        >
+                          Previous
+                        </button>
+                        <span className="form-file-modal-pagination__info">
+                          {formTablePageLoading
+                            ? 'Loading page…'
+                            : `Page ${formTablePage + 1} of ${formTableTotalPages} · Rows ${formTablePage * FORM_TABLE_PAGE_SIZE + 1}–${Math.min((formTablePage + 1) * FORM_TABLE_PAGE_SIZE, paginatedRowTotal)} of ${paginatedRowTotal}`}
+                        </span>
+                        <button
+                          type="button"
+                          className="form-file-modal-pagination__btn form-file-modal-pagination__btn--primary"
+                          disabled={
+                            formTablePage >= formTableTotalPages - 1 ||
+                            formTablePageLoading ||
+                            Boolean(tableAutofillProgress)
+                          }
+                          onClick={() => loadFormTablePage(formTablePage + 1)}
+                        >
+                          Next
+                        </button>
+                      </div>
+                    ) : null}
                     <div className="statutory-form-signature-footer" aria-label="Employer signature block">
                       <div className="statutory-form-signature-footer__inner">
                         <div className="statutory-form-signature-footer__for">

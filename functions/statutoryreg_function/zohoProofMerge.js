@@ -298,7 +298,31 @@ function mapOneField(emp, header, index) {
   }
 
   if (headerLower.includes('esic') || (headerLower.includes('insurance') && headerLower.includes('state'))) {
-    return emp['Employee\'s State Insurance Corporation No.'] || emp.ESICNo || emp.esicNo || '';
+    return (
+      emp.ESI_Number ||
+      emp['ESI_Number'] ||
+      emp['ESI Number'] ||
+      emp['Employee\'s State Insurance Corporation No.'] ||
+      emp.ESICNo ||
+      emp.esicNo ||
+      ''
+    );
+  }
+
+  if (
+    (/\bpt\b/.test(headerLower) || headerLower.includes('professional tax')) &&
+    (headerLower.includes('no') || headerLower.includes('number') || /\(\s*22\s*\)/.test(headerLower))
+  ) {
+    return emp.PT_Number || emp['PT_Number'] || emp['PT Number'] || emp.ptNumber || emp['ptNumber'] || '';
+  }
+
+  if (
+    (/\blwf\b/.test(headerLower) ||
+      headerLower.includes('labour welfare') ||
+      headerLower.includes('labor welfare')) &&
+    (headerLower.includes('no') || headerLower.includes('number') || /\(\s*22\s*\)/.test(headerLower))
+  ) {
+    return emp.LWF_Number || emp['LWF_Number'] || emp['LWF Number'] || emp.lwfNumber || emp['lwfNumber'] || '';
   }
 
   if (headerLower.includes('aadhaar') || headerLower.includes('aadhar')) {

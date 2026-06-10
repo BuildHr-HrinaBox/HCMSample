@@ -57,29 +57,155 @@ function squashKeyPart(v) {
     .replace(/\s+/g, ' ');
 }
 
+function inferFormUVariantFromMasterRow(data) {
+  const blob = [
+    data.description,
+    data.Description,
+    data.act,
+    data.Act,
+    data.formName,
+    data.FormName,
+    data.templateFileName,
+    data.TemplateFileName
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (/confidential|rule\s*34|confidential\s+character/.test(blob)) {
+    return 'confidential_character';
+  }
+  if (
+    /employee|particulars|register\s+of\s+employees|shops\s+and\s+establishment|wage\s+register/.test(
+      blob
+    )
+  ) {
+    return 'employee_register';
+  }
+  return null;
+}
+
+function inferFormXVariantFromMasterRow(data) {
+  const blob = [
+    data.description,
+    data.Description,
+    data.act,
+    data.Act,
+    data.state,
+    data.State,
+    data.sector,
+    data.Sector,
+    data.formName,
+    data.FormName,
+    data.templateFileName,
+    data.TemplateFileName
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (/identity\s+card/i.test(blob)) return 'identity_card';
+  if (/register\s+of\s+fines|fines\s+register|fine\s+register/i.test(blob)) {
+    return 'register_of_fines';
+  }
+  if (/leave\s+with\s+wages|leave\s+register|register\s+of\s+leave|earned\s+leave/i.test(blob)) {
+    return 'leave_register';
+  }
+  if (
+    /\bform\s*[-"']?\s*x\b/i.test(blob) &&
+    /andhra\s+pradesh|telangana|\bap\b/.test(blob) &&
+    /shops?\s*(and|&)\s*establishment/i.test(blob) &&
+    !/identity\s+card|leave\s+with\s+wages|leave\s+register|register\s+of\s+leave|earned\s+leave/i.test(blob)
+  ) {
+    return 'register_of_fines';
+  }
+  return null;
+}
+
+function inferFormMasterVariantFromRow(data) {
+  return inferFormUVariantFromMasterRow(data) || inferFormXVariantFromMasterRow(data) || null;
+}
+
 /** Unique template per row: same form name + different act/description/sector/state => different file */
 function buildFormMasterMatchKey(data) {
-  return [
+  const base = [
     squashKeyPart(data.formName),
     squashKeyPart(data.act),
     squashKeyPart(data.description),
     squashKeyPart(data.sector) || 'nosector',
     squashKeyPart(data.state) || 'nostate'
   ].join('|');
+  const variant = inferFormMasterVariantFromRow(data);
+  return variant ? `${base}|${variant}` : base;
 }
 
-function createFormMasterRecord(data) {
+function isDatastoreColumnError(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    err?.code === 'INVALID_INPUT' ||
+    msg.includes('column name') ||
+    msg.includes('invalid column') ||
+    msg.includes('no such column')
+  );
+}
+
+const FORM_MASTER_OPTIONAL_COLUMNS = ['TemplateFileName', 'StorageFileName', 'Size', 'Action'];
+
+function createFormMasterRecord(data, opts = {}) {
+  const includeEmptyOptionals = opts.includeEmptyOptionals === true;
   const record = {
     Act: toStoreStr(data.act),
     Description: toStoreStr(data.description),
     Sector: toStoreStr(data.sector),
     State: toStoreStr(data.state),
-    FormName: toStoreStr(data.formName),
+    FormName: toStoreStr(data.formName)
+  };
+  const optionals = {
     TemplateFileName: toStoreStr(data.templateFileName),
     Action: toStoreStr(data.action),
     Size: toStoreStr(data.size)
   };
+  for (const [key, value] of Object.entries(optionals)) {
+    if (includeEmptyOptionals || value) record[key] = value;
+  }
   return record;
+}
+
+function stripColumnsFromRecords(records, columns) {
+  return records.map((rec) => {
+    const next = { ...rec };
+    for (const col of columns) delete next[col];
+    return next;
+  });
+}
+
+/** Some FormMaster tables use Name instead of FormName. */
+function remapFormNameToName(records) {
+  return records.map((rec) => {
+    const next = { ...rec };
+    if (next.FormName != null && next.FormName !== '' && next.Name == null) {
+      next.Name = next.FormName;
+    }
+    delete next.FormName;
+    return next;
+  });
+}
+
+async function insertFormMasterRowsWithRetry(table, records) {
+  const attempts = [
+    records,
+    stripColumnsFromRecords(records, FORM_MASTER_OPTIONAL_COLUMNS),
+    remapFormNameToName(stripColumnsFromRecords(records, FORM_MASTER_OPTIONAL_COLUMNS))
+  ];
+  let lastErr;
+  for (let i = 0; i < attempts.length; i += 1) {
+    try {
+      return await table.insertRows(attempts[i]);
+    } catch (err) {
+      lastErr = err;
+      if (!isDatastoreColumnError(err) || i >= attempts.length - 1) throw err;
+      console.warn(`FormMaster insertRows: retry attempt ${i + 2}:`, err.message);
+    }
+  }
+  throw lastErr;
 }
 
 function readRecordAction(record) {
@@ -96,7 +222,7 @@ function readRecordAction(record) {
 
 function convertRecordToAppFormat(record) {
   const action = readRecordAction(record);
-  const formName = record.FormName || '';
+  const formName = record.FormName || record.Name || '';
   const templateFileName = buildDisplayTemplateFileName(record);
   return {
     id: record.ROWID,
@@ -115,7 +241,8 @@ function convertRecordToAppFormat(record) {
       act: record.Act,
       description: record.Description,
       sector: record.Sector,
-      state: record.State
+      state: record.State,
+      templateFileName
     }),
     createdTime: record.CREATEDTIME,
     modifiedTime: record.MODIFIEDTIME
@@ -247,7 +374,7 @@ const getAllFormMasterRecords = async (catalyst) => {
 const bulkImportFormMasterRecords = async (catalyst, dataArray) => {
   const table = catalyst.datastore().table(TABLE_NAME);
   const records = dataArray.map((d) => createFormMasterRecord(d));
-  const result = await table.insertRows(records);
+  const result = await insertFormMasterRowsWithRetry(table, records);
   return {
     status: 'success',
     message: `Imported ${result.length} record(s).`,
@@ -313,7 +440,12 @@ app.post('/records', async (req, res) => {
     return res.status(400).json({ status: 'failure', message: 'Unsupported action. Use action=bulkImport.' });
   } catch (err) {
     console.error('Formmaster records POST error:', err);
-    res.status(500).json({ status: 'failure', message: err.message || 'Operation failed.' });
+    const status = err?.statusCode === 400 ? 400 : 500;
+    res.status(status).json({
+      status: 'failure',
+      message: err.message || 'Operation failed.',
+      code: err.code || undefined
+    });
   }
 });
 

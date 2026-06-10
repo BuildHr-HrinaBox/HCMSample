@@ -171,6 +171,7 @@ app.post('/sitemanagement', async (req, res) => {
       inchargeEmail,
       inchargeDesignation,
       industry,
+      location,
       audit
     } = req.body;
 
@@ -232,6 +233,7 @@ app.post('/sitemanagement', async (req, res) => {
       InchargeEmail: inchargeEmail,
       InchargeDesignation: inchargeDesignation,
       Industry: industry,
+      Location: location || '',
       Audit: audit || 'false'
     };
     
@@ -263,6 +265,7 @@ app.post('/sitemanagement', async (req, res) => {
       InchargeEmail: created.InchargeEmail || inchargeEmail,
       InchargeDesignation: created.InchargeDesignation || inchargeDesignation,
       Industry: created.Industry || industry,
+      Location: created.Location || location || '',
       Audit: created.Audit || 'false',
       CREATEDTIME: created.CREATEDTIME,
       MODIFIEDTIME: created.MODIFIEDTIME
@@ -301,6 +304,7 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
       inchargeEmail,
       inchargeDesignation,
       industry,
+      location,
       audit
     } = req.body;
 
@@ -360,6 +364,7 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
       InchargeEmail: inchargeEmail,
       InchargeDesignation: inchargeDesignation,
       Industry: industry,
+      Location: location || '',
       Audit: audit || 'false'
     };
 
@@ -386,6 +391,7 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
       InchargeEmail: updated.InchargeEmail || inchargeEmail,
       InchargeDesignation: updated.InchargeDesignation || inchargeDesignation,
       Industry: updated.Industry || industry,
+      Location: updated.Location || location || '',
       Audit: updated.Audit || audit || 'false',
       CREATEDTIME: updated.CREATEDTIME,
       MODIFIEDTIME: updated.MODIFIEDTIME
@@ -420,9 +426,9 @@ app.get('/sitemanagement', async (req, res) => {
     
     console.log('Executing data query...');
     const siteSelectFull =
-      'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, CREATEDTIME, MODIFIEDTIME';
+      'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, Location, CREATEDTIME, MODIFIEDTIME';
     const siteSelectBase =
-      'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, CREATEDTIME, MODIFIEDTIME';
+      'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, Location, CREATEDTIME, MODIFIEDTIME';
     let rows;
     let hasContractorColumns = true;
     try {
@@ -462,6 +468,7 @@ app.get('/sitemanagement', async (req, res) => {
       inchargeEmail: r.Site.InchargeEmail,
       inchargeDesignation: r.Site.InchargeDesignation,
       industry: r.Site.Industry,
+      location: r.Site.Location,
       audit: false, // Temporarily set to false since Audit column is commented out
       createdTime: r.Site.CREATEDTIME,
       modifiedTime: r.Site.MODIFIEDTIME

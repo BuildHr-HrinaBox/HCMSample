@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import './People.css';
-
-const API_BASE = '/server/attendance_function';
+import { fetchAttendanceAll, flattenAttendanceRecords } from '../utils/attendanceApi';
 
 const formatDate = (d) => d.toISOString().slice(0, 10);
 const getMonthStart = () => {
@@ -11,6 +10,7 @@ const getMonthStart = () => {
 
 const Attendance = ({ userRole, userEmail }) => {
   const [data, setData] = useState(null);
+  const [meta, setMeta] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [sdate, setSdate] = useState(getMonthStart());
@@ -25,22 +25,14 @@ const Attendance = ({ userRole, userEmail }) => {
     setLoading(true);
     setError('');
     setData(null);
+    setMeta(null);
     try {
-      const qs = new URLSearchParams({
-        limit: '200',
-        sdate,
-        edate,
-      });
-      const res = await fetch(`${API_BASE}?${qs.toString()}`);
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json.error || json.message || 'Request failed');
+      const result = await fetchAttendanceAll(sdate, edate, 120000);
+      if (!result.success || result.data === undefined) {
+        throw new Error('Invalid response');
       }
-      if (json.success && json.data !== undefined) {
-        setData(json.data);
-      } else {
-        throw new Error(json.error || 'Invalid response');
-      }
+      setData(result.data);
+      setMeta(result.meta || null);
     } catch (err) {
       setError(err.message || 'Failed to fetch attendance data');
       setData(null);
@@ -49,17 +41,7 @@ const Attendance = ({ userRole, userEmail }) => {
     }
   };
 
-  // Same as People: Zoho API may return { response: { result: { record: [...] } } } or similar
-  const records = (() => {
-    if (!data) return [];
-    if (Array.isArray(data)) return data;
-    const res = data.response || data.result || data;
-    if (Array.isArray(res)) return res;
-    const rec = res?.record ?? res?.records ?? res?.data;
-    if (Array.isArray(rec)) return rec;
-    if (res && typeof res === 'object') return [res];
-    return [];
-  })();
+  const records = flattenAttendanceRecords(data);
 
   const firstRecord = records[0];
   const keys = firstRecord && typeof firstRecord === 'object'
@@ -112,7 +94,7 @@ const Attendance = ({ userRole, userEmail }) => {
 
       {loading && (
         <div className="people-loading">
-          Loading attendance data...
+          Loading attendance data (this may take a minute for large teams)...
         </div>
       )}
 
@@ -149,7 +131,9 @@ const Attendance = ({ userRole, userEmail }) => {
             </div>
           )}
           <p className="people-meta">
-            Fetched {records.length} record(s).
+            Fetched {records.length} record(s)
+            {meta?.pages ? ` across ${meta.pages} page(s)` : ''}
+            {meta?.mode ? ` (${meta.mode})` : ''}.
           </p>
         </div>
       )}

@@ -10,6 +10,7 @@ const { IncomingMessage, ServerResponse } = require('http');
  *   - organization_id (required) — Zoho Payroll organisation ID
  *   - employee_id (optional) — fetch merged employee + salary for one employee
  *   - all_salaries=1 (optional) — list employees and attach each employee's salary (for Statutory autofill)
+ *   - salary_offset / salary_limit (optional) — process a slice of employees per request (avoids HTTP 408)
  *   - list_employees=1 (optional) — fast employee list without per-employee salary calls
  *
  * OAuth (same pattern as peopledata_function / leavedata_function):
@@ -52,9 +53,26 @@ function readQueryParam(req, name) {
   }
 }
 
+const DEFAULT_PAYROLL_ORGANIZATION_ID = '60065031807';
+/** Wrong org IDs seen in Catalyst env / old builds — remap before calling Zoho. */
+const LEGACY_WRONG_ORG_IDS = new Set(['60006183023']);
+
+function resolveOrganizationId(req) {
+  const fromEnv = envOr('ZOHO_PAYROLL_ORGANIZATION_ID', '');
+  if (fromEnv) return fromEnv;
+  const fromQuery = readQueryParam(req, 'organization_id');
+  if (LEGACY_WRONG_ORG_IDS.has(fromQuery)) {
+    console.warn(
+      `payroll_function: remapping organization_id ${fromQuery} -> ${DEFAULT_PAYROLL_ORGANIZATION_ID}`
+    );
+    return DEFAULT_PAYROLL_ORGANIZATION_ID;
+  }
+  return fromQuery || DEFAULT_PAYROLL_ORGANIZATION_ID;
+}
+
 module.exports = async (req, res) => {
   try {
-    const organizationId = readQueryParam(req, 'organization_id');
+    const organizationId = resolveOrganizationId(req);
     if (!organizationId) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: 'organization_id is required' }));
@@ -79,22 +97,56 @@ module.exports = async (req, res) => {
     }
 
     if (allSalaries) {
-      let data;
+      const salaryOffset = Math.max(
+        0,
+        parseInt(readQueryParam(req, 'salary_offset') || '0', 10) || 0
+      );
+      const salaryLimitRaw = readQueryParam(req, 'salary_limit');
+      const salaryLimit = salaryLimitRaw
+        ? Math.max(1, parseInt(salaryLimitRaw, 10) || 1)
+        : null;
+
+      let payload;
       try {
-        data = await fetchAllEmployeesWithSalary({ accessToken, organizationId });
+        payload = await fetchAllEmployeesWithSalary({
+          accessToken,
+          organizationId,
+          offset: salaryOffset,
+          limit: salaryLimit,
+        });
       } catch (salaryBatchErr) {
         console.warn('payroll_function: all_salaries batch failed, returning employee list only:', salaryBatchErr.message);
         const employees = await fetchAllEmployeePages({ accessToken, organizationId });
-        data = employees.map((emp) => ({
-          ...emp,
-          employee_id: getEmployeeRecordId(emp) || emp.employee_id,
-          salary: null,
-          fetch_error: true,
-          error: salaryBatchErr.message,
-        }));
+        const slice =
+          salaryLimit != null
+            ? employees.slice(salaryOffset, salaryOffset + salaryLimit)
+            : employees;
+        payload = {
+          rows: slice.map((emp) => ({
+            ...emp,
+            employee_id: getEmployeeRecordId(emp) || emp.employee_id,
+            salary: null,
+            fetch_error: true,
+            error: salaryBatchErr.message,
+          })),
+          total: employees.length,
+          offset: salaryOffset,
+          limit: slice.length,
+          has_more: salaryLimit != null && salaryOffset + slice.length < employees.length,
+        };
+      }
+
+      const body = { success: true, data: payload.rows };
+      if (salaryLimit != null) {
+        body.meta = {
+          total: payload.total,
+          offset: payload.offset,
+          limit: payload.limit,
+          has_more: payload.has_more,
+        };
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, data }));
+      res.end(JSON.stringify(body));
       return;
     }
 
@@ -134,14 +186,13 @@ module.exports = async (req, res) => {
  * Scopes: ZohoPayroll.salary.ALL ZohoPayroll.employee.ALL ZohoPayroll.settings.ALL ZohoPayroll.worklocation.ALL ZohoPayroll.payrollrun.ALL
  * Env vars override when set.
  */
-const DEFAULT_ZOHO_PAYROLL_CLIENT_ID = '1000.ABC3VBH4REB9DC28WYZS3EY5AJD73B';
-const DEFAULT_ZOHO_PAYROLL_CLIENT_SECRET = 'f2fca57c9b0436dcc6fe68d0f922015569bba642a8';
+const DEFAULT_ZOHO_PAYROLL_CLIENT_ID = '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
+const DEFAULT_ZOHO_PAYROLL_CLIENT_SECRET = 'b6d3935145d59974934b981d6291b40af69a3ab150';
 /** Default refresh_token from Zoho Payroll OAuth response (grant_type=refresh_token). */
 const DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN =
-  '1000.7ccd97d408dd8a4a0200cf00bd5b6294.86100525ae8f515b1ef0a3d4d4ffa5e1';
+  '1000.5aac4ac693ef072d01fd9a7cfdb48164.d29c4e3270ef4b70a60fb90227799a59';
 /** Fallback if primary refresh is revoked — set ZOHO_PAYROLL_REFRESH_TOKEN in Catalyst to override. */
-const DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN_ALT =
-  '1000.c3aa12f23b83e92bc1ab890ce0b43602.2a4e622edafc2d24d3d5315c1f3b9fd6';
+const DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN_ALT = '';
 
 /** Reuse access token within one function invocation (avoids multiple refresh calls per request). */
 let cachedPayrollAccessToken = null;
@@ -159,8 +210,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function backoffMsFor429(headers, attempt) {
+  const maxBackoff = Math.max(
+    5000,
+    parseInt(process.env.ZOHO_PAYROLL_429_MAX_BACKOFF_MS || '30000', 10) || 30000
+  );
+  const retryAfter = parseInt(headers?.['retry-after'], 10);
+  if (Number.isFinite(retryAfter) && retryAfter > 0) {
+    return Math.min(maxBackoff, retryAfter * 1000);
+  }
+  return Math.min(maxBackoff, 1500 * 2 ** (attempt - 1));
+}
+
 async function axiosRequestWith429Retry(requestFn, label) {
-  const maxAttempts = Math.max(1, parseInt(process.env.ZOHO_PAYROLL_HTTP_RETRIES || '5', 10) || 5);
+  const maxAttempts = Math.max(1, parseInt(process.env.ZOHO_PAYROLL_HTTP_RETRIES || '3', 10) || 3);
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -171,10 +234,7 @@ async function axiosRequestWith429Retry(requestFn, label) {
       const code = e.response?.data?.code;
       const is429 = status === 429 || code === 43;
       if (!is429 || attempt === maxAttempts) throw e;
-      const retryAfter = parseInt(e.response?.headers?.['retry-after'], 10);
-      const backoffMs = Number.isFinite(retryAfter)
-        ? retryAfter * 1000
-        : Math.min(30000, 1500 * 2 ** (attempt - 1));
+      const backoffMs = backoffMsFor429(e.response?.headers, attempt);
       console.warn(`${label}: HTTP 429, retry ${attempt}/${maxAttempts} after ${backoffMs}ms`);
       await sleep(backoffMs);
     }
@@ -404,13 +464,27 @@ async function fetchMergedEmployeeSalary({ accessToken, organizationId, employee
   };
 }
 
-async function fetchAllEmployeesWithSalary({ accessToken, organizationId }) {
+async function fetchAllEmployeesWithSalary({
+  accessToken,
+  organizationId,
+  offset = 0,
+  limit = null,
+}) {
   const employees = await fetchAllEmployeePages({ accessToken, organizationId });
-  /** Sequential by default — Zoho returns 429 if salary endpoints are called in parallel. */
-  const concurrency = 1;
+  const total = employees.length;
+  const start = Math.min(Math.max(0, offset), total);
+  const batch =
+    limit != null && limit > 0
+      ? employees.slice(start, start + limit)
+      : employees.slice(start);
+  /** Sequential by default — parallel salary calls trigger Zoho HTTP 429. */
+  const concurrency = Math.max(
+    1,
+    parseInt(process.env.ZOHO_PAYROLL_SALARY_CONCURRENCY || '1', 10) || 1
+  );
   const delayMs = Math.max(
-    400,
-    parseInt(process.env.ZOHO_PAYROLL_SALARY_DELAY_MS || '500', 10) || 500
+    500,
+    parseInt(process.env.ZOHO_PAYROLL_SALARY_DELAY_MS || '700', 10) || 700
   );
   const mapOne = async (emp) => {
     const id = getEmployeeRecordId(emp);
@@ -444,24 +518,36 @@ async function fetchAllEmployeesWithSalary({ accessToken, organizationId }) {
 
   if (concurrency <= 1) {
     const out = [];
-    for (let i = 0; i < employees.length; i++) {
+    for (let i = 0; i < batch.length; i++) {
       if (delayMs > 0 && i > 0) await sleep(delayMs);
-      out.push(await mapOne(employees[i]));
+      out.push(await mapOne(batch[i]));
     }
-    return out;
+    return {
+      rows: out,
+      total,
+      offset: start,
+      limit: batch.length,
+      has_more: start + batch.length < total,
+    };
   }
 
-  const results = new Array(employees.length);
+  const results = new Array(batch.length);
   let idx = 0;
   async function worker() {
-    while (idx < employees.length) {
+    while (idx < batch.length) {
       const my = idx++;
       if (delayMs > 0) await sleep(delayMs);
-      results[my] = await mapOne(employees[my]);
+      results[my] = await mapOne(batch[my]);
     }
   }
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, employees.length) }, () => worker())
+    Array.from({ length: Math.min(concurrency, batch.length) }, () => worker())
   );
-  return results;
+  return {
+    rows: results,
+    total,
+    offset: start,
+    limit: batch.length,
+    has_more: start + batch.length < total,
+  };
 }

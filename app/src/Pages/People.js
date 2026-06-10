@@ -1,52 +1,82 @@
 import React, { useState } from 'react';
 import './People.css';
+import { flattenZohoPeopleEmployees, fetchPeopleData } from '../utils/statutoryAutofillCache';
 
-const API_BASE = '/server/peopledata_function';
+
+const PREFERRED_COLUMNS = [
+  'EmployeeID',
+  'FirstName',
+  'LastName',
+  'EmailID',
+  'Mobile',
+  'parent_department',
+  'Dateofjoining',
+  'Date_of_birth',
+  'employee_status',
+  'LocationName',
+  'Work_location',
+  'Pan_Number',
+  'UAN_Number',
+  'Bank_Name',
+  'Account_Number',
+  'IFSC_Code',
+  'Branch_Name',
+];
+
+function formatCellValue(value) {
+  if (value == null || value === '') return '';
+  if (typeof value !== 'object') return String(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => formatCellValue(item)).filter(Boolean).join(', ');
+  }
+  if (value.display_value != null) return String(value.display_value);
+  if (value.name != null) return String(value.name);
+  if (value.ID != null) return String(value.ID);
+  return JSON.stringify(value);
+}
+
+function collectColumnKeys(records) {
+  const keySet = new Set();
+  records.forEach((row) => {
+    if (row && typeof row === 'object') {
+      Object.keys(row).forEach((k) => {
+        if (!/^_|^\./.test(k)) keySet.add(k);
+      });
+    }
+  });
+  const preferred = PREFERRED_COLUMNS.filter((k) => keySet.has(k));
+  const rest = [...keySet].filter((k) => !preferred.includes(k)).sort();
+  return [...preferred, ...rest];
+}
 
 const People = ({ userRole, userEmail }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [progress, setProgress] = useState('');
 
   const fetchData = async () => {
     setLoading(true);
     setError('');
+    setProgress('Loading employees…');
     setData(null);
     try {
-      const res = await fetch(`${API_BASE}?form=employee&limit=50`);
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json.error || json.message || 'Request failed');
-      }
-      if (json.success && json.data !== undefined) {
-        setData(json.data);
-      } else {
-        throw new Error(json.error || 'Invalid response');
-      }
+      const result = await fetchPeopleData({ force: true });
+      const merged = flattenZohoPeopleEmployees({ data: result.data });
+      setData(result.data);
+      setProgress(`Loaded ${merged.length} employees`);
     } catch (err) {
       setError(err.message || 'Failed to fetch people data');
       setData(null);
     } finally {
       setLoading(false);
+      setProgress('');
     }
   };
 
-  // Zoho People API may return { response: { result: { record: [...] } } } or similar
-  const records = (() => {
-    if (!data) return [];
-    if (Array.isArray(data)) return data;
-    const res = data.response || data.result || data;
-    if (Array.isArray(res)) return res;
-    const rec = res?.record ?? res?.records ?? res?.data;
-    if (Array.isArray(rec)) return rec;
-    if (res && typeof res === 'object') return [res];
-    return [];
-  })();
-
-  const firstRecord = records[0];
-  const keys = firstRecord && typeof firstRecord === 'object'
-    ? Object.keys(firstRecord).filter(k => !/^_|^\./.test(k))
-    : [];
+  const records = data ? flattenZohoPeopleEmployees({ data }) : [];
+  const keys = collectColumnKeys(records);
+  const gridColumns = `56px repeat(${keys.length}, minmax(130px, max-content))`;
 
   return (
     <div className="people-page">
@@ -74,7 +104,7 @@ const People = ({ userRole, userEmail }) => {
 
       {loading && (
         <div className="people-loading">
-          Loading people data...
+          {progress || 'Loading people data...'}
         </div>
       )}
 
@@ -84,30 +114,31 @@ const People = ({ userRole, userEmail }) => {
             <p className="people-empty">No records in response. Raw data structure may differ.</p>
           ) : (
             <div className="people-table-wrap">
-              <table className="people-table">
-                <thead>
-                  <tr>
-                    <th>S.No</th>
-                    {keys.map(k => (
-                      <th key={k}>{k}</th>
+              <div className="people-data-grid" style={{ gridTemplateColumns: gridColumns }}>
+                <div className="people-data-cell people-data-cell--header people-data-cell--sn">S.No</div>
+                {keys.map((k) => (
+                  <div key={`h-${k}`} className="people-data-cell people-data-cell--header" title={k}>
+                    {k}
+                  </div>
+                ))}
+                {records.map((row, i) => (
+                  <React.Fragment key={i}>
+                    <div className="people-data-cell people-data-cell--sn" data-row={i}>
+                      {i + 1}
+                    </div>
+                    {keys.map((k) => (
+                      <div
+                        key={`${i}-${k}`}
+                        className="people-data-cell"
+                        data-row={i}
+                        title={formatCellValue(row[k])}
+                      >
+                        {formatCellValue(row[k])}
+                      </div>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {records.map((row, i) => (
-                    <tr key={i}>
-                      <td>{i + 1}</td>
-                      {keys.map(k => (
-                        <td key={k}>
-                          {row[k] != null && typeof row[k] === 'object'
-                            ? JSON.stringify(row[k])
-                            : String(row[k] ?? '')}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </React.Fragment>
+                ))}
+              </div>
             </div>
           )}
           <p className="people-meta">

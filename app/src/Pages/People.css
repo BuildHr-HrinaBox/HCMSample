@@ -1,3 +1,9 @@
+/* Embedded in HcmDashboardPageShell — compact height, no full-viewport stretch */
+main.nd-content.nd-content--embedded-page > .people-page {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
 .people-page {
   box-sizing: border-box;
   padding: 24px 28px 32px;
@@ -5,7 +11,7 @@
   max-width: 100%;
   margin: 0;
   background: #ffffff;
-  min-height: 100%;
+  min-height: 0;
 }
 
 .people-header {
@@ -75,6 +81,7 @@
   padding: 24px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
   border: 1px solid #e5e7eb;
+  flex: 0 0 auto;
 }
 
 .people-empty {
@@ -86,8 +93,51 @@
 .people-table-wrap {
   overflow-x: auto;
   margin-bottom: 16px;
+  max-width: 100%;
 }
 
+.people-data-grid {
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: var(--hcm-data-table-body-font-size);
+}
+
+.people-data-cell {
+  padding: 10px 12px;
+  text-align: left;
+  color: #4b5563;
+  font-size: var(--hcm-data-table-body-font-size);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.people-data-cell--header {
+  font-weight: 600;
+  color: #374151;
+  font-size: var(--hcm-data-table-header-font-size);
+  background: #f7f8fa;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.people-data-cell[data-row]:hover {
+  background: #f9fafb;
+}
+
+.people-data-cell--sn {
+  text-align: center;
+  width: 56px;
+  min-width: 56px;
+  max-width: 56px;
+}
+
+/* Legacy class names used by Attendance / Payroll */
 .people-table {
   width: 100%;
   min-width: 600px;

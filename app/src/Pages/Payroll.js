@@ -1,11 +1,30 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import './People.css';
+import { getPayrollOrganizationId } from '../utils/payrollOrgId';
 
 const API_BASE = '/server/payroll_function';
+const SALARY_BATCH_SIZE = 6;
 
-const getOrgId = () =>
-  process.env.REACT_APP_ZOHO_PAYROLL_ORGANIZATION_ID || '60006183023';
+async function fetchPayrollJson(qs) {
+  const res = await fetch(`${API_BASE}?${qs.toString()}`);
+  const text = await res.text();
+  let json = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(
+      `Payroll server returned HTTP ${res.status} (not JSON). Redeploy payroll_function and check Catalyst logs.`
+    );
+  }
+  if (!res.ok) {
+    throw new Error(json.error || json.message || `Request failed (HTTP ${res.status})`);
+  }
+  if (!json.success || json.data === undefined) {
+    throw new Error(json.error || 'Invalid response');
+  }
+  return json;
+}
 
 /**
  * Zoho Payroll salary list — same UX as People / Leave (fetch on open + Refresh button).
@@ -16,47 +35,65 @@ const Payroll = ({ userRole, userEmail }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [loadMode, setLoadMode] = useState('list');
+  const [progress, setProgress] = useState('');
 
   const fetchData = useCallback(async (mode = 'list') => {
-    const organizationId = getOrgId();
+    const organizationId = getPayrollOrganizationId();
     setLoading(true);
     setError('');
-    setData(null);
+    setProgress('');
+    if (mode !== 'full') {
+      setData(null);
+    }
     setLoadMode(mode);
     try {
-      const qs = new URLSearchParams({
-        organization_id: organizationId,
-      });
       if (mode === 'full') {
-        qs.set('all_salaries', '1');
+        const merged = [];
+        let offset = 0;
+        let total = null;
+
+        while (true) {
+          const qs = new URLSearchParams({
+            organization_id: organizationId,
+            all_salaries: '1',
+            salary_offset: String(offset),
+            salary_limit: String(SALARY_BATCH_SIZE),
+          });
+          const json = await fetchPayrollJson(qs);
+          const batch = Array.isArray(json.data) ? json.data : [];
+          merged.push(...batch);
+
+          const meta = json.meta || {};
+          if (total == null && Number.isFinite(meta.total)) {
+            total = meta.total;
+          }
+          const loaded = merged.length;
+          const displayTotal = total ?? loaded;
+          setProgress(`Loading salary breakdown… ${loaded} / ${displayTotal}`);
+          setData([...merged]);
+
+          const hasMore =
+            meta.has_more === true ||
+            (meta.has_more !== false && batch.length >= SALARY_BATCH_SIZE);
+          if (!hasMore || batch.length === 0) break;
+          offset += batch.length;
+        }
       } else {
-        qs.set('list_employees', '1');
-      }
-      const res = await fetch(`${API_BASE}?${qs.toString()}`);
-      const text = await res.text();
-      let json = {};
-      try {
-        json = text ? JSON.parse(text) : {};
-      } catch {
-        throw new Error(
-          `Payroll server returned HTTP ${res.status} (not JSON). Redeploy payroll_function and check Catalyst logs.`
-        );
-      }
-      if (!res.ok) {
-        throw new Error(
-          json.error || json.message || `Request failed (HTTP ${res.status})`
-        );
-      }
-      if (json.success && json.data !== undefined) {
+        const qs = new URLSearchParams({
+          organization_id: organizationId,
+          list_employees: '1',
+        });
+        const json = await fetchPayrollJson(qs);
         setData(json.data);
-      } else {
-        throw new Error(json.error || 'Invalid response');
       }
     } catch (err) {
       setError(err.message || 'Failed to fetch payroll data');
-      setData(null);
+      if (mode !== 'full') {
+        setData(null);
+      }
     } finally {
       setLoading(false);
+      setProgress('');
     }
   }, []);
 
@@ -113,7 +150,9 @@ const Payroll = ({ userRole, userEmail }) => {
       {error && <div className="people-error">{error}</div>}
 
       {loading && (
-        <div className="people-loading">Loading payroll data from Zoho Payroll...</div>
+        <div className="people-loading">
+          {progress || 'Loading payroll data from Zoho Payroll...'}
+        </div>
       )}
 
       {!loading && data !== null && (

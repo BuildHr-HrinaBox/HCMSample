@@ -39,7 +39,7 @@ function buildChecklistBulkMatchKey(data) {
     squashKeyPart(data.sector || data.Sector) || 'nosector',
     squashKeyPart(data.state || data.State) || 'nostate'
   ].join('|');
-  const variant = inferFormUVariantFromBulkRow(data);
+  const variant = inferBulkFormVariantFromRow(data);
   return variant ? `${base}|${variant}` : base;
 }
 
@@ -102,6 +102,46 @@ function inferFormUVariantFromBulkRow(data) {
   return null;
 }
 
+function inferFormXVariantFromBulkRow(data) {
+  const blob = [
+    data.description,
+    data.Description,
+    data.act,
+    data.Act,
+    data.state,
+    data.State,
+    data.sector,
+    data.Sector,
+    data.formName,
+    data.FormName,
+    data.formFileName,
+    data.FormFileName
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (/identity\s+card/i.test(blob)) return 'identity_card';
+  if (/register\s+of\s+fines|fines\s+register|fine\s+register/i.test(blob)) {
+    return 'register_of_fines';
+  }
+  if (/leave\s+with\s+wages|leave\s+register|register\s+of\s+leave|earned\s+leave/i.test(blob)) {
+    return 'leave_register';
+  }
+  if (
+    /\bform\s*[-"']?\s*x\b/i.test(blob) &&
+    /andhra\s+pradesh|telangana|\bap\b/.test(blob) &&
+    /shops?\s*(and|&)\s*establishment/i.test(blob) &&
+    !/identity\s+card|leave\s+with\s+wages|leave\s+register|register\s+of\s+leave|earned\s+leave/i.test(blob)
+  ) {
+    return 'register_of_fines';
+  }
+  return null;
+}
+
+function inferBulkFormVariantFromRow(data) {
+  return inferFormUVariantFromBulkRow(data) || inferFormXVariantFromBulkRow(data) || null;
+}
+
 /** When checklist row has State, template must use the same State (not another state's file). */
 function statesCompatibleForFormTemplateLink(bulkState, masterState) {
   const b = squashKeyPart(bulkState);
@@ -129,9 +169,10 @@ function scoreBulkToFormMasterLine(bulkLine, masterLine) {
   if (bd && md) {
     if (bd === md) score += 12;
     else if (bd.includes(md) || md.includes(bd)) score += 7;
+    else score -= 40;
   }
-  const bv = inferFormUVariantFromBulkRow(bulkLine);
-  const mv = inferFormUVariantFromBulkRow(masterLine);
+  const bv = inferBulkFormVariantFromRow(bulkLine);
+  const mv = inferBulkFormVariantFromRow(masterLine);
   if (bv && mv) {
     if (bv === mv) score += 25;
     else score -= 200;

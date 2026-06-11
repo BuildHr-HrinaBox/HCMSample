@@ -63,6 +63,75 @@ export function flattenAttendanceRecords(apiResult) {
   return [];
 }
 
+/** Normalize Zoho attendance date keys (yyyy-mm-dd, dd-MMM-yyyy, etc.) to yyyy-mm-dd. */
+export function normalizeAttendanceDateKey(key) {
+  const s = String(key || '').trim();
+  if (!s || s === '-') return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+  return '';
+}
+
+/** Expand Zoho getUserReport rows into one record per employee per day (for statutory autofill). */
+export function expandAttendanceToDailyRows(apiResult) {
+  const employees = flattenAttendanceRecords(apiResult);
+  const rows = [];
+
+  employees.forEach((rec) => {
+    if (!rec || typeof rec !== 'object') return;
+
+    const empMeta =
+      tryParseJson(rec.employeeDetails) ||
+      tryParseJson(rec.EmployeeDetails) ||
+      rec.employeeDetails ||
+      rec.EmployeeDetails ||
+      null;
+    const attRaw =
+      tryParseJson(rec.attendanceDetails) ||
+      tryParseJson(rec.AttendanceDetails) ||
+      rec.attendanceDetails ||
+      rec.AttendanceDetails ||
+      null;
+
+    const mergeMeta = (date, dayVal) => {
+      const base = dayVal && typeof dayVal === 'object' && !Array.isArray(dayVal) ? dayVal : {};
+      const meta = empMeta && typeof empMeta === 'object' ? empMeta : {};
+      return { date, ...meta, ...base };
+    };
+
+    if (attRaw && typeof attRaw === 'object' && !Array.isArray(attRaw)) {
+      Object.keys(attRaw).forEach((rawDate) => {
+        const date = normalizeAttendanceDateKey(rawDate);
+        if (!date) return;
+        const val = attRaw[rawDate];
+        if (Array.isArray(val)) {
+          val.forEach((item) => {
+            if (item && typeof item === 'object') rows.push(mergeMeta(date, item));
+          });
+          return;
+        }
+        if (val && typeof val === 'object') rows.push(mergeMeta(date, val));
+      });
+      return;
+    }
+
+    Object.keys(rec).forEach((rawKey) => {
+      const date = normalizeAttendanceDateKey(rawKey);
+      if (!date) return;
+      const val = rec[rawKey];
+      if (val && typeof val === 'object' && !Array.isArray(val)) rows.push(mergeMeta(date, val));
+    });
+  });
+
+  return rows;
+}
+
 function wrapAttendanceResponse(records) {
   return {
     result: records,

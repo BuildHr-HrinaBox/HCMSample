@@ -286,13 +286,61 @@ function rowStateMatchesSiteState(row, siteState) {
   return rowStatesMatchInchargeScope(stateRaw, [siteState]);
 }
 
-function filterBulkRowsForSiteScope(bulkRows, siteRow, allowedActCategories) {
+function filterBulkRowsForSiteScope(bulkRows, siteRow, allowedActCategories, siteParam = '') {
   let scoped = filterRowsByActCategoryScope(bulkRows, allowedActCategories);
   const siteState = getSiteStateFromSiteRow(siteRow);
   if (siteState) {
     scoped = scoped.filter((r) => rowStateMatchesSiteState(r, siteState));
   }
+  if (siteParam) {
+    const want = String(siteParam).trim().toLowerCase();
+    scoped = scoped.filter((r) => {
+      const rowSite = String(r.Site || r.site || '')
+        .trim()
+        .toLowerCase();
+      return !rowSite || rowSite === want;
+    });
+  }
   return scoped;
+}
+
+/** Bulk master rows for report — site filter, else incharge state scope, else all. */
+function filterBulkForReportScope(
+  bulkAll,
+  { siteParam, siteRow, narrowActCategories, inchargeStateLabels }
+) {
+  if (siteParam && siteRow) {
+    return filterBulkRowsForSiteScope(bulkAll, siteRow, narrowActCategories, siteParam);
+  }
+  let scoped = filterRowsByActCategoryScope(bulkAll, narrowActCategories);
+  if (Array.isArray(inchargeStateLabels) && inchargeStateLabels.length > 0) {
+    scoped = scoped.filter((r) => {
+      const stateRaw = getStateFromAnyRow(r);
+      if (!stateRaw) return false;
+      if (isPanIndiaOrBlankState(stateRaw)) return true;
+      return rowStatesMatchInchargeScope(stateRaw, inchargeStateLabels);
+    });
+  }
+  return scoped;
+}
+
+function reportRowMatchesSelectedSiteScope(row, siteState, siteParam) {
+  if (!siteParam || !siteState) return true;
+  const rowState = String(row?.state || '').trim();
+  if (!rowState || isPanIndiaOrBlankState(rowState)) return true;
+  return rowStatesMatchInchargeScope(rowState, [siteState]);
+}
+
+function finalizeReportRowForSite(row, siteParam, siteState) {
+  if (!siteParam) return row;
+  const next = { ...row, site: siteParam };
+  if (siteState) {
+    const rowState = String(next.state || '').trim();
+    if (!rowState || isPanIndiaOrBlankState(rowState)) {
+      next.state = siteState;
+    }
+  }
+  return next;
 }
 
 function filterStatutoryRowsForSite(rows, siteParam) {
@@ -904,8 +952,16 @@ async function buildMainReportEntries(catalyst, { year, month, userEmail, sitePa
   const bulkAllRaw = await bulkTable.getAllRows();
   const bulkAll = (Array.isArray(bulkAllRaw) ? bulkAllRaw : []).map(normalizeChecklistBulkRowForReport);
 
+  const selectedSiteState = siteRow ? getSiteStateFromSiteRow(siteRow) : '';
+  const bulkForReport = filterBulkForReportScope(bulkAll, {
+    siteParam,
+    siteRow,
+    narrowActCategories,
+    inchargeStateLabels: inchargeScope.stateLabels
+  });
+
   const siteStateByName = await buildSiteStateByNameMap(catalyst);
-  const sectorStateMap = buildSectorStateMap(bulkAll);
+  const sectorStateMap = buildSectorStateMap(bulkForReport);
   const reportMonthNorm = normalizeMonth(month);
   const resolveOptsBase = {
     siteStateByName,
@@ -926,8 +982,8 @@ async function buildMainReportEntries(catalyst, { year, month, userEmail, sitePa
   const pushReportRowForBulkMeta = (listKey, meta, formKey) => {
     const masterState =
       getStateFromAnyRow(meta) ||
-      findStateForMasterKey(formKey, bulkAll, statutoryAll) ||
-      findStateByFormNameLoose(meta?.formName, bulkAll, statutoryAll) ||
+      findStateForMasterKey(formKey, bulkForReport, statutoryForMatch) ||
+      findStateByFormNameLoose(meta?.formName, bulkForReport, statutoryForMatch) ||
       String(meta?.state || '').trim();
     const candidates = statutoryForMatch.filter((r) => getMasterKeyFromAnyRow(r) === formKey);
     const monthCandidates = candidates.filter((r) => statutoryRowMatchesMonth(r, month));
@@ -941,7 +997,7 @@ async function buildMainReportEntries(catalyst, { year, month, userEmail, sitePa
       built.state = resolveReportState(picked, meta?.state, siteStateByName, siteParam, stateOptions);
       built.monthFilter = getStatutoryMonthFilterDisplay(picked, reportMonthNorm) || reportMonthNorm;
       built.bulkRowId = listKey;
-      return built;
+      return finalizeReportRowForSite(built, siteParam, selectedSiteState);
     }
     const emptyState = resolveReportState(null, meta?.state, siteStateByName, siteParam, stateOptions);
     const empty = buildEmptyFormRow(
@@ -954,14 +1010,11 @@ async function buildMainReportEntries(catalyst, { year, month, userEmail, sitePa
       emptyState
     );
     empty.bulkRowId = listKey;
-    return empty;
+    return finalizeReportRowForSite(empty, siteParam, selectedSiteState);
   };
 
   const out = [];
   const bulkFormKeysSeen = new Set();
-
-  const bulkForReport =
-    siteParam && siteRow ? filterBulkRowsForSiteScope(bulkAll, siteRow, narrowActCategories) : bulkAll;
 
   for (const row of bulkForReport) {
     const name = getFormNameFromAnyRow(row);
@@ -999,8 +1052,13 @@ async function buildMainReportEntries(catalyst, { year, month, userEmail, sitePa
 
   out.sort((a, b) => String(a.formName || '').localeCompare(String(b.formName || ''), undefined, { sensitivity: 'base' }));
 
+  let rows = out;
+  if (siteParam && selectedSiteState) {
+    rows = out.filter((row) => reportRowMatchesSelectedSiteScope(row, selectedSiteState, siteParam));
+  }
+
   const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
-  return { rows: out, siteNames };
+  return { rows, siteNames, selectedSiteState: siteParam ? selectedSiteState : '' };
 }
 
 /**
@@ -1063,11 +1121,16 @@ app.get('/mainreport/entries', async (req, res) => {
 
     const siteParam = req.query.site != null ? String(req.query.site).trim() : '';
     const { catalyst } = res.locals;
-    const { rows, siteNames } = await buildMainReportEntries(catalyst, { year, month, userEmail, siteParam });
+    const { rows, siteNames, selectedSiteState } = await buildMainReportEntries(catalyst, {
+      year,
+      month,
+      userEmail,
+      siteParam
+    });
 
     res.status(200).json({
       status: 'success',
-      data: { rows, siteNames }
+      data: { rows, siteNames, selectedSiteState: selectedSiteState || '' }
     });
   } catch (err) {
     console.error('mainreport/entries:', err);

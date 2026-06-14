@@ -4,8 +4,9 @@ import { getPayrollOrganizationId } from './payrollOrgId';
 const SITE_DETAILS_CACHE_KEY = 'statutorySiteDetails_v1';
 const PEOPLE_CACHE_KEY = 'statutoryPeopleData_v3';
 const PEOPLE_CACHE_TTL_MS = 5 * 60 * 1000;
-const PEOPLE_PAGE_SIZE = 200;
-const PEOPLE_PAGE_DELAY_MS = 300;
+const PEOPLE_PAGE_SIZE = 300;
+const PEOPLE_PAGE_DELAY_MS = 0;
+const PEOPLE_FAST_FIRST_PAGE_SIZE = 300;
 const ATTENDANCE_CACHE_TTL_MS = 5 * 60 * 1000;
 const LEAVE_CACHE_TTL_MS = 5 * 60 * 1000;
 const PAYROLL_BULK_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -322,6 +323,64 @@ export function fetchPeopleData(options = {}) {
   return peopleInflight;
 }
 
+/** Continue loading full employee list after a fast first-page autofill response. */
+export function startPeopleDataBackgroundRefresh(options = {}) {
+  const cached = readPeopleCacheRaw();
+  if (cached?.success && flattenZohoPeopleEmployees(cached).length >= PEOPLE_FAST_FIRST_PAGE_SIZE) {
+    return Promise.resolve(cached);
+  }
+  if (peopleInflight) return peopleInflight;
+  return fetchPeopleData({ ...options, force: false }).catch(() => null);
+}
+
+/**
+ * Statutory Autofill: return cached or first Zoho page immediately (<1s target),
+ * then refresh the full list in the background for pagination.
+ */
+export async function fetchPeopleDataForAutofillDisplay(options = {}) {
+  const cached = readPeopleCacheRaw();
+  if (cached?.success) {
+    const count = flattenZohoPeopleEmployees(cached).length;
+    if (count > 0) return cached;
+  }
+  if (peopleInflight) {
+    try {
+      return await peopleInflight;
+    } catch (_) {
+      /* fall through to first-page fetch */
+    }
+  }
+
+  const pageSize = Math.min(
+    PEOPLE_FAST_FIRST_PAGE_SIZE,
+    Math.max(1, parseInt(options.limit, 10) || PEOPLE_FAST_FIRST_PAGE_SIZE)
+  );
+  const qs = new URLSearchParams({
+    form: 'employee',
+    limit: String(pageSize),
+    sIndex: '1',
+  });
+  const response = await fetch(`/server/peopledata_function?${qs.toString()}`, {
+    cache: 'no-store',
+    credentials: 'include',
+  });
+  const pageResult = await parsePeopleApiResponse(response);
+
+  if (response.ok && pageResult.success) {
+    const batch = flattenZohoPeopleEmployees({ data: pageResult.data });
+    if (batch.length > 0) {
+      startPeopleDataBackgroundRefresh(options);
+      return {
+        success: true,
+        data: { response: { result: batch, status: 0 } },
+        meta: { total: batch.length, mode: 'fast_first_page' },
+      };
+    }
+  }
+
+  return fetchPeopleData(options);
+}
+
 /** Minimum employees expected when cache is considered usable for statutory autofill. */
 export function readPeopleCacheEmployeeCount() {
   const cached = readPeopleCacheRaw();
@@ -448,6 +507,11 @@ function readAttendanceCacheRaw(sdate, edate) {
   return null;
 }
 
+/** Synchronous attendance read for instant statutory autofill when prefetch already ran. */
+export function getCachedAttendanceData(sdate, edate) {
+  return readAttendanceCacheRaw(sdate, edate);
+}
+
 function writeAttendanceCache(sdate, edate, data) {
   const key = attendanceCacheKey(sdate, edate);
   attendanceMemory.set(key, { ts: Date.now(), data });
@@ -500,6 +564,11 @@ function readLeaveCacheRaw(fromDate, toDate, unit) {
   const entry = leaveMemory.get(key);
   if (entry && Date.now() - entry.ts < LEAVE_CACHE_TTL_MS) return entry.data;
   return null;
+}
+
+/** Synchronous leave read for instant statutory autofill when prefetch already ran. */
+export function getCachedLeaveData(fromDate, toDate, unit = 'Day') {
+  return readLeaveCacheRaw(fromDate, toDate, unit);
 }
 
 function writeLeaveCache(fromDate, toDate, unit, data) {

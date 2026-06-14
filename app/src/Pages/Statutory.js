@@ -19,11 +19,15 @@ import {
   fetchFormTemplateArrayBuffer,
   fetchLeaveData,
   fetchPeopleData,
+  fetchPeopleDataForAutofillDisplay,
   fetchJsonWithTimeout,
   flattenZohoPeopleEmployees,
+  getCachedAttendanceData,
+  getCachedLeaveData,
   getCachedPeopleData,
   getCachedPayrollBulkRows,
   getPayrollBulkRowsForAutofill,
+  startPeopleDataBackgroundRefresh,
   yieldToMain,
   processInChunks,
   readPeopleCacheEmployeeCount,
@@ -89,6 +93,13 @@ function estimateJsonUtf8Bytes(value) {
   }
 }
 
+function normalizeSampleDataGridKey(key) {
+  return String(key || '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function prepareSampleDataRowsForSave(rows) {
   if (!Array.isArray(rows)) return [];
   return rows.map((row) => {
@@ -96,10 +107,15 @@ function prepareSampleDataRowsForSave(rows) {
     const out = {};
     for (const [key, val] of Object.entries(row)) {
       if (String(key).startsWith('__')) continue;
-      out[key] = val;
+      out[normalizeSampleDataGridKey(key)] = val;
     }
     return out;
   });
+}
+
+function prepareSampleDataHeadersForSave(headers) {
+  if (!Array.isArray(headers)) return [];
+  return headers.map((h) => normalizeSampleDataGridKey(h));
 }
 
 function omitStatutorySampleDataSnapshot(payload) {
@@ -123,6 +139,343 @@ function payloadIncludesSampleDataSnapshot(payload) {
     (Array.isArray(headers) && headers.length > 0) ||
     (headerFormData && typeof headerFormData === 'object' && Object.keys(headerFormData).length > 0)
   );
+}
+
+async function postStatutorySampleDataSnapshot(statutoryId, payload) {
+  const parseResponse = async (resp) => {
+    const rawText = await resp.text();
+    let data = null;
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch (_) {
+      data = null;
+    }
+    return { ok: resp.ok, status: resp.status, data, rawText };
+  };
+
+  const postResp = await fetch(`/server/statutoryreg_function/statutory/${statutoryId}/sampledata`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const postParsed = await parseResponse(postResp);
+  if (postParsed.ok && postParsed.data?.status === 'success') {
+    return postParsed;
+  }
+
+  // Fallback for Catalyst deployments that have PUT /statutory but not POST /sampledata yet.
+  const shouldTryPutFallback =
+    postParsed.status === 404 ||
+    postParsed.status === 405 ||
+    /Cannot POST/i.test(String(postParsed.rawText || '')) ||
+    /not found/i.test(String(postParsed.data?.message || postParsed.rawText || ''));
+
+  if (shouldTryPutFallback) {
+    const putResp = await fetch(`/server/statutoryreg_function/statutory/${statutoryId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const putParsed = await parseResponse(putResp);
+    if (
+      putParsed.ok &&
+      putParsed.data?.status === 'success' &&
+      putParsed.data?.data?.sampleDataSaved === true
+    ) {
+      return { ...putParsed, data: { ...putParsed.data, status: 'success' } };
+    }
+    return putParsed;
+  }
+
+  return postParsed;
+}
+
+function resolveStatutorySampleDataSaveId(item) {
+  if (!item) return '';
+
+  const linkedId = String(item?.draftStatutoryRowIdForFile ?? '').trim();
+  if (/^\d+$/.test(linkedId)) {
+    return linkedId;
+  }
+
+  const fetchId = String(item?.formFetchRowId ?? '').trim();
+  if (/^\d+$/.test(fetchId) && !isSyntheticStatutoryRowId(fetchId)) {
+    return fetchId;
+  }
+
+  const idStr = item?.id != null ? String(item.id).trim() : '';
+  if (!idStr || isSyntheticStatutoryRowId(idStr) || !isNumericStatutoryBackendId(idStr)) {
+    return '';
+  }
+  if (item?.isFromChecklist || idStr.startsWith('checklist_')) {
+    return '';
+  }
+  return idStr;
+}
+
+/** Fetch latest SampleData grid snapshot for a statutory ROWID (import/autofill/save). */
+async function fetchStatutorySampleDataSnapshot(statutoryId, context = {}) {
+  const idStr = String(statutoryId || '').trim();
+  const formNameCtx = String(context?.formName || '').trim();
+  const monthCtx = String(
+    context?.monthFilter || context?.MonthFilter || context?.monthfilter || ''
+  ).trim();
+  const formMonthOnlyLookup = formNameCtx && (idStr === '0' || !/^\d+$/.test(idStr));
+  if (!formMonthOnlyLookup && !/^\d+$/.test(idStr)) return null;
+  try {
+    const params = new URLSearchParams({ _ts: String(Date.now()) });
+    if (formNameCtx) params.set('formName', formNameCtx);
+    if (monthCtx) params.set('monthFilter', monthCtx);
+    if (formMonthOnlyLookup) params.set('matchByFormMonth', '1');
+    const lookupId = /^\d+$/.test(idStr) ? idStr : '0';
+    const resp = await fetch(
+      `/server/statutoryreg_function/statutory/${lookupId}/sampledata?${params.toString()}`
+    );
+    if (!resp.ok) return null;
+    const json = await resp.json().catch(() => null);
+    const block = json?.data?.sampleData;
+    if (!block || !Array.isArray(block.rows) || block.rows.length === 0) return null;
+    return normalizeSampleDataSnapshotBlock(block);
+  } catch {
+    return null;
+  }
+}
+
+/** Try several statutory ids (bulk row vs linked ROWID) until SampleData is found. */
+async function fetchFirstAvailableStatutorySampleDataSnapshot(...args) {
+  const seen = new Set();
+  let context = null;
+  const statutoryIds = [];
+  for (const raw of args) {
+    if (raw && typeof raw === 'object' && !Array.isArray(raw) && raw.formName != null) {
+      context = raw;
+      continue;
+    }
+    statutoryIds.push(raw);
+  }
+  // Prefer form + month match (not statutoryId) — user imports are keyed by form/month.
+  if (context?.formName) {
+    const byFormMonth = await fetchStatutorySampleDataSnapshot('0', context);
+    if (byFormMonth) return byFormMonth;
+  }
+  for (const raw of statutoryIds) {
+    const idStr = String(raw || '').trim();
+    if (!/^\d+$/.test(idStr) || seen.has(idStr)) continue;
+    seen.add(idStr);
+    const block = await fetchStatutorySampleDataSnapshot(idStr, context || {});
+    if (block) return block;
+  }
+  return null;
+}
+
+function uniqueNumericStatutoryIds(...candidates) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of candidates) {
+    const idStr = String(raw ?? '').trim();
+    if (!/^\d+$/.test(idStr) || seen.has(idStr)) continue;
+    seen.add(idStr);
+    out.push(idStr);
+  }
+  return out;
+}
+
+/** Normalize header/row keys saved from Excel (may contain \\r\\n in column names). */
+function normalizeSampleDataSnapshotBlock(block) {
+  if (!block || typeof block !== 'object') return null;
+  const rawHeaders = Array.isArray(block.headers) ? block.headers : [];
+  const headers = rawHeaders.map((h) => normalizeSampleDataGridKey(h));
+  const rows = Array.isArray(block.rows)
+    ? block.rows.map((row) => {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+        const out = {};
+        for (const [key, val] of Object.entries(row)) {
+          if (String(key).startsWith('__')) continue;
+          const normKey = normalizeSampleDataGridKey(key);
+          const headerMatchIdx = rawHeaders.findIndex(
+            (h, idx) => normalizeSampleDataGridKey(h) === normKey || headers[idx] === normKey
+          );
+          const targetKey =
+            headerMatchIdx >= 0 ? headers[headerMatchIdx] || normKey : normKey;
+          out[targetKey] = val;
+        }
+        return out;
+      })
+    : [];
+  return {
+    ...block,
+    headers,
+    rows,
+    monthfilter: block.monthfilter || block.MonthFilter || null,
+    MonthFilter: block.MonthFilter || block.monthfilter || null
+  };
+}
+
+/** Overlay SampleData / imported manual columns onto autofill rows (all forms). */
+function overlaySampleDataRowsOntoBase(baseRows, sampleRows, sampleHeaders, baseHeaders, options = {}) {
+  return overlayImportRowsOntoBase(baseRows, sampleRows, sampleHeaders, baseHeaders, {
+    fillOnlyEmpty: options.fillOnlyEmpty !== false,
+    allowIndexFallback: options.allowIndexFallback === true
+  });
+}
+
+/** Overlay live modal / imported rows; when fillOnlyEmpty=false, non-empty import values always win. */
+function overlayImportRowsOntoBase(baseRows, importRows, importHeaders, baseHeaders, options = {}) {
+  const fillOnlyEmpty = options.fillOnlyEmpty !== false;
+  const allowIndexFallback = options.allowIndexFallback === true;
+  const base = Array.isArray(baseRows) ? baseRows : [];
+  const imports = Array.isArray(importRows) ? importRows : [];
+  if (imports.length === 0) return base;
+  if (base.length === 0) return imports.map((r) => ({ ...r }));
+  const importHdrs = Array.isArray(importHeaders) ? importHeaders : [];
+  const baseHdrs = Array.isArray(baseHeaders) ? baseHeaders : [];
+  const norm = (v) =>
+    String(v || '')
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  const rowSerial = (row, hdrs) => {
+    if (!row || typeof row !== 'object') return '';
+    const serialHdr =
+      hdrs.find((h) =>
+        /s\.?\s*no|serial\s*number|sl\.?\s*no|number\s+in\s+register|register\s+number/i.test(String(h || ''))
+      ) || hdrs[0];
+    if (serialHdr && row[serialHdr] != null) return String(row[serialHdr]).trim();
+    const vals = Object.values(row);
+    return vals.length ? String(vals[0] ?? '').trim() : '';
+  };
+  const findMatchingImportRow = (baseRow, idx) => {
+    const baseSerial = normRegisterSerial(rowSerial(baseRow, baseHdrs));
+    if (baseSerial) {
+      for (const ir of imports) {
+        if (!ir || typeof ir !== 'object') continue;
+        if (normRegisterSerial(rowSerial(ir, importHdrs)) === baseSerial) return ir;
+        for (const val of Object.values(ir)) {
+          if (normRegisterSerial(val) === baseSerial) return ir;
+        }
+      }
+    }
+    if (allowIndexFallback && imports[idx] && typeof imports[idx] === 'object') {
+      return imports[idx];
+    }
+    return null;
+  };
+  const findBaseHeaderForImportHeader = (importHeader, outRow) => {
+    const target = norm(importHeader);
+    if (!target) return importHeader;
+    const exact = baseHdrs.find((h) => norm(h) === target);
+    if (exact) return exact;
+    const outKey = Object.keys(outRow || {}).find((k) => norm(k) === target);
+    if (outKey) return outKey;
+    const fuzzy = baseHdrs.find((h) => {
+      const nh = norm(h);
+      return nh && (nh.includes(target) || target.includes(nh));
+    });
+    return fuzzy || importHeader;
+  };
+  const applyImportValue = (out, importHeader, val) => {
+    if (val == null || String(val).trim() === '') return;
+    const baseKey = findBaseHeaderForImportHeader(importHeader, out);
+    const existing = String(out[baseKey] ?? '').trim();
+    if (!fillOnlyEmpty || existing === '') {
+      out[baseKey] = val;
+    }
+  };
+  return base.map((baseRow, idx) => {
+    const importRow = findMatchingImportRow(baseRow, idx);
+    if (!importRow) return { ...baseRow };
+    const out = { ...baseRow };
+    importHdrs.forEach((ih) => applyImportValue(out, ih, importRow[ih]));
+    Object.entries(importRow).forEach(([k, v]) => {
+      if (v == null || String(v).trim() === '') return;
+      const nk = norm(k);
+      const existingKey = Object.keys(out).find((bk) => norm(bk) === nk);
+      if (existingKey) {
+        const existing = String(out[existingKey] ?? '').trim();
+        if (!fillOnlyEmpty || existing === '') out[existingKey] = v;
+      } else {
+        out[k] = v;
+      }
+    });
+    return out;
+  });
+}
+
+/** Live Autofill modal edits always win over SampleData/Zoho on download. */
+function overlayLiveModalRowsOntoDownload(baseRows, liveRows, liveHeaders, baseHeaders) {
+  return overlayImportRowsOntoBase(baseRows, liveRows, liveHeaders, baseHeaders, {
+    fillOnlyEmpty: false,
+    allowIndexFallback: false
+  });
+}
+
+/** Normalize employee register / serial for row matching (VE1044 === VE 1044). */
+function normRegisterSerial(value) {
+  const s = String(value ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '');
+  if (!s) return '';
+  return s.replace(/[^A-Z0-9]/g, '');
+}
+
+/** Apply SampleData snapshot rows/headers to download payload (imported/saved grid). */
+function applyStatutorySampleDataBlockToDownload(mappedData, headersToUse, sampleBlock, options = {}) {
+  if (!sampleBlock || !Array.isArray(sampleBlock.rows) || sampleBlock.rows.length === 0) {
+    return { mappedData, headersToUse, usedSnapshot: false, headerFormData: null };
+  }
+  const sampleRows = sampleBlock.rows;
+  const sampleHeaders = Array.isArray(sampleBlock.headers) ? sampleBlock.headers : [];
+  const headerFormData =
+    sampleBlock.headerFormData &&
+    typeof sampleBlock.headerFormData === 'object' &&
+    !Array.isArray(sampleBlock.headerFormData)
+      ? sampleBlock.headerFormData
+      : null;
+  const preferSampleOnly = options.preferSampleOnly === true;
+  const forceOverlay = options.forceOverlay === true;
+  const hasBaseRows = Array.isArray(mappedData) && mappedData.length > 0;
+  if ((preferSampleOnly && !forceOverlay) || !hasBaseRows) {
+    return {
+      mappedData: sampleRows,
+      headersToUse: sampleHeaders.length > 0 ? [...sampleHeaders] : headersToUse,
+      usedSnapshot: true,
+      headerFormData
+    };
+  }
+  return {
+    mappedData: overlaySampleDataRowsOntoBase(mappedData, sampleRows, sampleHeaders, headersToUse),
+    headersToUse: sampleHeaders.length > 0 ? [...sampleHeaders] : headersToUse,
+    usedSnapshot: true,
+    headerFormData
+  };
+}
+
+function buildSampleDataDownloadApplyOptions(options = {}) {
+  const {
+    isForm10Download = false,
+    isForm12Download = false,
+    usedLiveModalGrid = false
+  } = options;
+  const forceOverlay = isForm10Download || isForm12Download || usedLiveModalGrid;
+  return {
+    preferSampleOnly: !forceOverlay,
+    forceOverlay
+  };
+}
+
+async function resolveStatutorySampleDataBlockForDownload(fetchIds, context = {}) {
+  const ids = Array.isArray(fetchIds) ? fetchIds : [...fetchIds];
+  return fetchFirstAvailableStatutorySampleDataSnapshot(...ids, context);
+}
+
+/** Overlay SampleData / imported manual columns onto Zoho autofill rows (Form 12). */
+function overlayForm12SampleRowsOntoBase(baseRows, sampleRows, sampleHeaders, baseHeaders) {
+  return overlaySampleDataRowsOntoBase(baseRows, sampleRows, sampleHeaders, baseHeaders, {
+    fillOnlyEmpty: true,
+    allowIndexFallback: false
+  });
 }
 
 function isStatutoryPayloadTooLargeResponse(response, rawText) {
@@ -255,6 +608,40 @@ const FORM_U_FORMAT2_HEADERS = [
 /** Form U Rule 34 – confidential character (Sr. No. + Name of the person). */
 const FORM_U_CONFIDENTIAL_HEADERS = ['Sr. No.', 'Name of the person'];
 
+/** Tamil Nadu Form I (listed as "Form 1") — Register of Workmen under Conferment of Permanent Status Act. */
+const FORM_I_TABLE_HEADERS = [
+  'S No',
+  'Emp ID',
+  'Name and Address of the workman',
+  'Designation of the workmen',
+  'Whether Temporary, casual, Badli, or Apprentice (other than those covered under the Apprentices Act, 1961)',
+  'Date of first entry into service',
+  'Date on which he completed 480 days of service',
+  'Date on which made permanent',
+  'Remarks',
+  'Signature of the workman with date (to attest the entries)'
+];
+
+/** Ensure Form I workmen register shows all statutory columns (older saves/templates may omit trailing fields). */
+const normalizeFormIWorkmenTableHeaders = (headers) => {
+  const canonical = [...FORM_I_TABLE_HEADERS];
+  const trimmed = (headers || []).map((h) => String(h || '').trim()).filter(Boolean);
+  if (trimmed.length === 0) return canonical;
+  if (trimmed.length >= canonical.length) return trimmed;
+  return [...trimmed, ...canonical.slice(trimmed.length)];
+};
+
+const padFormIWorkmenRowsForHeaders = (rows, headers) => {
+  if (!Array.isArray(rows) || !Array.isArray(headers) || headers.length === 0) return rows;
+  return rows.map((row) => {
+    const next = row && typeof row === 'object' && !Array.isArray(row) ? { ...row } : {};
+    headers.forEach((h) => {
+      if (next[h] == null) next[h] = '';
+    });
+    return next;
+  });
+};
+
 const rowHasTableSerialHeader = (rowTextLower) =>
   /\bs\.?\s*no\.?\b/.test(rowTextLower) ||
   /\bsr\.?\s*no\.?\b/.test(rowTextLower) ||
@@ -315,6 +702,16 @@ function detectFormUSheetVariant(hints = {}) {
 }
 
 function inferFormUVariantFromRow(item) {
+  if (
+    isFormIRegisterOfWorkmenContext(
+      item,
+      item?.formFileName || item?.FormFileName,
+      null,
+      null
+    )
+  ) {
+    return null;
+  }
   const blob = [
     item?.description,
     item?.Description,
@@ -342,6 +739,16 @@ function inferFormUVariantFromRow(item) {
 }
 
 function isFormUEmployeeRegisterContext(hints = {}) {
+  if (
+    isFormIRegisterOfWorkmenContext(
+      hints.item || hints,
+      hints.fileName || hints.formFileName,
+      { title: hints.formHeaderTitle, subtitle: hints.formHeaderSubtitle },
+      hints.tableHeaders
+    )
+  ) {
+    return false;
+  }
   const variant = detectFormUSheetVariant(hints);
   if (variant === 'employee_register') return true;
   if (variant === 'confidential_character') return false;
@@ -405,8 +812,49 @@ function validateFormUTemplateForRow(item, sheetHints = {}) {
 }
 
 /** When parseExcelForm returns no headers, use canonical Form U columns for the detected variant. */
+const mapFormXVRowsToCanonicalHeaders = (rows, priorHeaders, canonicalHeaders) => {
+  const list = Array.isArray(rows) ? rows : [];
+  const canon = Array.isArray(canonicalHeaders) && canonicalHeaders.length > 0
+    ? canonicalHeaders
+    : [...FORM_XV_TABLE_HEADERS];
+  const prior = Array.isArray(priorHeaders) ? priorHeaders : [];
+  const pickValue = (row, targetHeader, colIndex) => {
+    if (!row || typeof row !== 'object') return '';
+    if (Object.prototype.hasOwnProperty.call(row, targetHeader)) return row[targetHeader];
+    const targetNorm = normalizeFormXVTableHeader(targetHeader);
+    const key = Object.keys(row).find((k) => {
+      const n = normalizeFormXVTableHeader(k);
+      return n === targetNorm || n.includes(targetNorm) || targetNorm.includes(n);
+    });
+    if (key) return row[key];
+    const priorKey = prior[colIndex];
+    if (priorKey && Object.prototype.hasOwnProperty.call(row, priorKey)) return row[priorKey];
+    return '';
+  };
+  return list.map((row, rowIndex) => {
+    const out = {};
+    canon.forEach((header, colIndex) => {
+      let value = pickValue(row, header, colIndex);
+      if ((value == null || String(value).trim() === '') && colIndex === 0) {
+        value = rowIndex + 1;
+      }
+      out[header] = value != null ? value : '';
+    });
+    return out;
+  });
+};
+
 function resolveAutofillTableHeaders(currentHeaders, hints = {}) {
   const raw = Array.isArray(currentHeaders) ? currentHeaders : [];
+  if (
+    isFormXVContext(
+      { title: hints.formHeaderTitle, subtitle: hints.formHeaderSubtitle },
+      hints.item,
+      hints.fileName || hints.formFileName
+    )
+  ) {
+    return [...FORM_XV_TABLE_HEADERS];
+  }
   if (isFormIIMaharashtraContext(
     { title: hints.formHeaderTitle, subtitle: hints.formHeaderSubtitle },
     hints.item,
@@ -438,6 +886,38 @@ function resolveAutofillTableHeaders(currentHeaders, hints = {}) {
     .filter(Boolean);
   if (isFormUConfidentialCharacterContext(hints)) {
     return normalizeFormUConfidentialHeaders(trimmed, hints);
+  }
+  const formIWorkmenCtx = isFormIRegisterOfWorkmenContext(
+    hints.item,
+    hints.fileName || hints.formFileName,
+    { title: hints.formHeaderTitle, subtitle: hints.formHeaderSubtitle },
+    trimmed.length > 0 ? trimmed : raw,
+    hints.sheetText
+  );
+  if (formIWorkmenCtx) {
+    if (trimmed.length > 0 && !headersIndicateFormUEmployeeRegister(trimmed)) {
+      return normalizeFormIWorkmenTableHeaders(trimmed);
+    }
+    return [...FORM_I_TABLE_HEADERS];
+  }
+  const formAMusterCtx = isFormAMusterRollRowContext(
+    { title: hints.formHeaderTitle, subtitle: hints.formHeaderSubtitle, reference: hints.formHeaderReference },
+    hints.item,
+    hints.fileName || hints.formFileName,
+    hints.sheetText
+  );
+  if (formAMusterCtx) {
+    if (trimmed.length > 0 && headersIndicateFormAMusterRoll(trimmed) && !headersLookLikePivotOrWrongFormATable(trimmed)) {
+      return trimmed;
+    }
+    if (headersLookLikePivotOrWrongFormATable(trimmed)) {
+      const workbookHeaders = hints?.formAWorkbookHeaders;
+      if (Array.isArray(workbookHeaders) && workbookHeaders.length >= 3 && !headersLookLikePivotOrWrongFormATable(workbookHeaders)) {
+        return workbookHeaders;
+      }
+      return [];
+    }
+    return trimmed.filter((h) => String(h || '').trim());
   }
   if (trimmed.length > 0) return trimmed;
   if (isFormUEmployeeRegisterContext(hints) && FORM_U_FORMAT2_HEADERS.length > 0) {
@@ -518,6 +998,155 @@ function isForm12StatutoryContext(item, fileName, formHeader) {
     .map((s) => String(s || ''))
     .join(' ');
   return /\bform\s*[-"']?\s*12\b/i.test(blob);
+}
+
+/** Minimum Wages Act Form I — Register of Fines (PW Form I), not Tamil Nadu workmen register. */
+function isFormIRegisterOfFinesContext(item, fileName, formHeader, tableHeaders, sheetText) {
+  const blob = [
+    item?.formName,
+    item?.FormName,
+    item?.act,
+    item?.Act,
+    item?.description,
+    item?.Description,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference,
+    sheetText
+  ]
+    .map((s) => String(s || ''))
+    .join(' ')
+    .toLowerCase();
+
+  if (/register\s+of\s+fines/.test(blob) || /register\s+of\s+fine\b/.test(blob)) return true;
+  if (
+    (/\bform\s*[-–]?\s*i\b/.test(blob) ||
+      (/\bform[\s._-]*1(?:[\s._-]|$)/i.test(blob) && !/\bform[\s._-]*1[0-9]/i.test(blob))) &&
+    (/minimum\s+wages?/.test(blob) || /payment\s+of\s+wages/.test(blob))
+  ) {
+    return true;
+  }
+  if (/pw\s+form\s*i\b/.test(blob)) return true;
+
+  if (Array.isArray(tableHeaders) && tableHeaders.length > 0) {
+    const joined = tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+    if (/act\s+or\s+omission.*fine\s+imposed|fine\s+imposed/.test(joined)) return true;
+    if (/fine\s+realised|fine\s+realized/.test(joined)) return true;
+    if (/date\s+on\s+which\s+fine/.test(joined)) return true;
+  }
+  return false;
+}
+
+/** Tamil Nadu Form I (statutory name "Form 1") — Register of Workmen, not Form U Employee Register. */
+function isFormIRegisterOfWorkmenContext(item, fileName, formHeader, tableHeaders, sheetText) {
+  if (isFormIRegisterOfFinesContext(item, fileName, formHeader, tableHeaders, sheetText)) return false;
+  const blob = [
+    item?.formName,
+    item?.FormName,
+    item?.act,
+    item?.Act,
+    item?.description,
+    item?.Description,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference,
+    sheetText
+  ]
+    .map((s) => String(s || ''))
+    .join(' ')
+    .toLowerCase();
+
+  if (/register\s+of\s+workmen/.test(blob)) return true;
+  if (/\bform\s*[-–]?\s*i\b/.test(blob) && /workmen|workman|conferment|permanent\s+status/.test(blob)) {
+    return true;
+  }
+  if (/\bform[\s._-]*1(?:[\s._-]|$)/i.test(blob) && !/\bform[\s._-]*1[0-9]/i.test(blob)) {
+    if (/workmen|workman|conferment|permanent\s+status|register\s+of\s+workmen/.test(blob)) return true;
+  }
+
+  if (Array.isArray(tableHeaders) && tableHeaders.length > 0) {
+    const joined = tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+    if (/name\s+and\s+address\s+of\s+the\s+workman/.test(joined)) return true;
+    if (/emp\s*id/.test(joined) && /480\s+days/.test(joined)) return true;
+  }
+  return false;
+}
+
+/** Shops & Establishments employee register (Form U style) — not Tamil Nadu Form I workmen register. */
+function isForm1EmployeeRegisterContext(item, fileName, formHeader, tableHeaders) {
+  if (isFormIRegisterOfWorkmenContext(item, fileName, formHeader, tableHeaders)) return false;
+
+  const blob = [
+    item?.formName,
+    item?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference
+  ]
+    .map((s) => String(s || ''))
+    .join(' ')
+    .toLowerCase();
+
+  if (/\bform[\s._-]*1(?:[\s._-]|$)/i.test(blob) && !/\bform[\s._-]*1[0-9]/i.test(blob)) return false;
+  if (/employee\s+register/.test(blob) && !/\bform[\s._-]*1[0-9]/i.test(blob)) return true;
+
+  if (Array.isArray(tableHeaders) && tableHeaders.length > 0) {
+    const joined = tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+    if (
+      /present\s+address/.test(joined) &&
+      /permanent\s+address/.test(joined) &&
+      /name\s+of\s+the\s+employee/.test(joined) &&
+      !/worker\s+identity/.test(joined)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function inferFormIVariantFromRow(item, extra = {}) {
+  const formHeader = {
+    title: extra.formHeaderTitle,
+    subtitle: extra.formHeaderSubtitle,
+    reference: extra.formHeaderReference
+  };
+  const fileName =
+    extra.fileName ||
+    extra.formFileName ||
+    item?.formFileName ||
+    item?.FormFileName ||
+    '';
+  const headers = extra.sampleHeaders || extra.tableHeaders || null;
+  const sheetText = extra.sheetText || '';
+  if (isFormIRegisterOfFinesContext(item, fileName, formHeader, headers, sheetText)) {
+    return 'register_of_fines';
+  }
+  if (isFormIRegisterOfWorkmenContext(item, fileName, formHeader, headers, sheetText)) {
+    return 'register_of_workmen';
+  }
+  return null;
+}
+
+function inferFormIVariantFromSavedHeaders(headers) {
+  if (!Array.isArray(headers) || headers.length === 0) return null;
+  if (isFormIRegisterOfFinesContext(null, null, '', headers, '')) return 'register_of_fines';
+  if (isFormIRegisterOfWorkmenContext(null, null, '', headers, '')) return 'register_of_workmen';
+  return null;
+}
+
+function inferFormIVariantFromSheetHints(hints = {}) {
+  return inferFormIVariantFromRow(hints.item || null, {
+    fileName: hints.fileName,
+    formFileName: hints.formFileName,
+    formHeaderTitle: hints.formHeaderTitle,
+    formHeaderSubtitle: hints.formHeaderSubtitle,
+    formHeaderReference: hints.formHeaderReference,
+    tableHeaders: hints.tableHeaders,
+    sheetText: hints.sheetText
+  });
 }
 
 const getForm12PresentAddress = (emp) =>
@@ -946,6 +1575,72 @@ const formTableRowHasMeaningfulData = (row) => {
   return Object.values(row).some((v) => v != null && String(v).trim() !== '');
 };
 
+/** Ignore template sample rows that only contain serial numbers (1, 2, 3…) without employee data. */
+const draftTableRowHasSubstantiveData = (row, headers = []) => {
+  if (!formTableRowHasMeaningfulData(row)) return false;
+  if (isStatutoryTableFooterOrSignatoryRow(row, headers)) return false;
+  if (formTablePageHasEmployeeAutofillData(row, headers)) return true;
+  let substantiveCells = 0;
+  Object.entries(row || {}).forEach(([key, v]) => {
+    const val = String(v ?? '').trim();
+    if (!val) return;
+    const k = String(key || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (/^(s\.?\s*no\.?|serial(\s+number)?|sr\.?\s*no\.?)$/.test(k)) return;
+    if (/^\d{1,3}$/.test(val) && /^(s\.?\s*no\.?|serial|sr\.?\s*no\.?)/.test(k)) return;
+    substantiveCells += 1;
+    if (/[a-z]{2,}/i.test(val)) substantiveCells += 1;
+  });
+  return substantiveCells >= 1;
+};
+
+/** Excel footer / signatory block must not appear as editable table rows when opening saved drafts. */
+const isStatutoryTableFooterOrSignatoryRow = (row, headers = []) => {
+  const vals = collectFixedAggregateRowValues(row, headers);
+  if (vals.length === 0) return false;
+  if (vals.some((v) => cellValueIsSignatureFooterText(v))) return true;
+  const joined = vals.join(' ').toLowerCase();
+  if (/for\s*\(\s*company/.test(joined)) return true;
+  if (/signature\s+of\s+(the\s+)?(employee|workman|worker|employer|manager)/.test(joined)) return true;
+  if (/authorised\s+signatory|authorized\s+signatory/.test(joined)) return true;
+  return false;
+};
+
+const filterStatutoryDraftTableRows = (rows, headers = [], { trustSavedSnapshot = false } = {}) => {
+  if (!Array.isArray(rows)) return [];
+  return rows.filter((row) => {
+    if (isStatutoryTableFooterOrSignatoryRow(row, headers)) return false;
+    if (trustSavedSnapshot) return formTableRowHasMeaningfulData(row);
+    return draftTableRowHasSubstantiveData(row, headers);
+  });
+};
+
+/** Paginated autofill: S.No-only template rows must not skip fetching employee + attendance data. */
+const formTablePageHasEmployeeAutofillData = (row, headers = []) => {
+  if (!row || typeof row !== 'object') return false;
+  for (let i = 0; i < headers.length; i += 1) {
+    const header = headers[i];
+    const k = String(header || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!k) continue;
+    const isWorkerName = k.includes('worker') && k.includes('name');
+    const isWorkerId =
+      k.includes('worker') && (k.includes('identity') || k.includes('identify') || k.includes('id'));
+    const isEmpId = /^emp\s*id$/.test(k) || (k.includes('emp') && k.includes('id'));
+    const isEmployeeName = k.includes('employee') && k.includes('name');
+    if ((isWorkerName || isWorkerId || isEmpId || isEmployeeName) && String(row[header] || '').trim()) {
+      return true;
+    }
+  }
+  return Object.entries(row).some(([key, v]) => {
+    if (v == null || String(v).trim() === '') return false;
+    const k = String(key || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    if (/^(s\.?\s*no\.?|serial(\s+number)?|sr\.?\s*no\.?)$/.test(k)) return false;
+    if (/^\d{1,2}$/.test(String(key || '').trim())) return false;
+    if (/^(10|dates)[_-]\d{1,2}$/i.test(String(key || '').trim())) return false;
+    if (/^column\s+\d+$/i.test(k)) return false;
+    return /[a-zA-Z]{2,}/.test(String(v));
+  });
+};
+
 const countMeaningfulFormTableRows = (rows) => {
   if (!Array.isArray(rows)) return 0;
   return rows.filter((row) => formTableRowHasMeaningfulData(row)).length;
@@ -1091,6 +1786,98 @@ const getAttendanceShiftEndRaw = (rec) =>
     findNestedValueByNormalizedKey(rec, 'lastout')
   );
 
+const getAttendanceShiftNameRaw = (rec) =>
+  pickFirstNonEmptyString(
+    rec?.ShiftName,
+    rec?.['ShiftName'],
+    rec?.shiftName,
+    rec?.Shift,
+    rec?.['Shift'],
+    findNestedValueByNormalizedKey(rec, 'shiftname'),
+    findNestedValueByNormalizedKey(rec, 'shift')
+  );
+
+const formatAttendanceShiftTimeDisplay = (raw) => {
+  const s = String(raw || '').trim();
+  if (!s || s === '-') return '';
+  return s;
+};
+
+const getAttendanceOvertimeHoursNumber = (source) => {
+  const raw = pickFirstNonEmptyString(
+    source?.OverTime,
+    source?.['OverTime'],
+    source?.overtime,
+    source?.['overtime'],
+    source?.OTHours,
+    source?.['OTHours'],
+    source?.OvertimeHours,
+    source?.['OvertimeHours'],
+    findNestedValueByNormalizedKey(source || {}, 'overtime'),
+    findNestedValueByNormalizedKey(source || {}, 'othours')
+  );
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return n;
+  const s = String(raw || '').trim();
+  if (!s || /^0{1,2}:0{2}$/.test(s)) return 0;
+  const m = parseAttendanceTimeToMinutes(s);
+  if (m != null && m > 0) return m / 60;
+  return 0;
+};
+
+const attendanceRecordMinutesWorked = (rec) => {
+  if (!rec || typeof rec !== 'object') return null;
+  const daily = pickFirstNonEmptyString(
+    rec?.WorkingHours,
+    rec?.workingHours,
+    rec?.DailyWorkedHours,
+    rec?.dailyWorkedHours
+  );
+  if (daily) {
+    if (/^0{1,2}:0{2}$/.test(daily)) return null;
+    const m = parseAttendanceTimeToMinutes(daily);
+    if (m != null && m > 0) return m;
+    const n = Number(String(daily).replace(/,/g, '').trim());
+    if (Number.isFinite(n) && n > 0 && n <= 24 && !daily.includes(':')) return Math.round(n * 60);
+  }
+  const st = getAttendanceShiftStartRaw(rec);
+  const et = getAttendanceShiftEndRaw(rec);
+  if (st && et && st !== '-' && et !== '-') {
+    const startMin = parseAttendanceTimeToMinutes(st);
+    const endMin = parseAttendanceTimeToMinutes(et);
+    if (startMin != null && endMin != null) {
+      let diff = endMin - startMin;
+      if (diff < 0) diff += 24 * 60;
+      if (diff > 0) return diff;
+    }
+  }
+  const total = getAttendanceTotalHoursRaw(rec);
+  if (total && total !== '-' && total !== '00:00') {
+    const m = parseAttendanceTimeToMinutes(total);
+    if (m != null && m > 0) return m;
+  }
+  return null;
+};
+
+const formatMinutesAsHoursCell = (totalMins) => {
+  if (!Number.isFinite(totalMins) || totalMins <= 0) return '';
+  const h = Math.floor(totalMins / 60);
+  const m = Math.round(totalMins % 60);
+  return `${h}:${String(m).padStart(2, '0')}`;
+};
+
+const isForm25WorkCommencesHeader = (h) =>
+  /time\s+at\s+which\s+work\s+commence/.test(String(h || '').toLowerCase().replace(/\s+/g, ' '));
+
+const isForm25WorkEndsHeader = (h) =>
+  /time\s+at\s+which\s+work\s+end/.test(String(h || '').toLowerCase().replace(/\s+/g, ' '));
+
+const isForm25SchemeOfShiftsHeader = (h) =>
+  /scheme\s+of\s+shift/.test(String(h || '').toLowerCase().replace(/\s+/g, ' '));
+
+const isForm25AttendanceOnlyHeader = (h) =>
+  isForm25WorkCommencesHeader(h) || isForm25WorkEndsHeader(h) || isForm25SchemeOfShiftsHeader(h);
+
 const getAttendanceTotalHoursRaw = (rec) =>
   pickFirstNonEmptyString(rec?.TotalHours, rec?.totalHours, rec?.['Total Hours']);
 
@@ -1129,7 +1916,7 @@ const isForm25StatutoryContext = (hints = {}) => {
   return /\bform[\s._-]*25\b/i.test(blob);
 };
 
-/** Form 25 daily grid: show Present / Absent (not punch times or hours). */
+/** Form 25 daily grid: Present / Absent, or daily hours when the template has a daily-hours band. */
 const formatForm25DayAttendanceStatus = (rec) => {
   if (!rec || typeof rec !== 'object') return '';
   const statusRaw = String(rec?.Status ?? rec?.status ?? '').trim();
@@ -1180,6 +1967,96 @@ const formatForm25DayAttendanceStatus = (rec) => {
   if (recordHasAttendancePresence(rec)) return 'Present';
 
   return 'Absent';
+};
+
+const normalizeForm25StatusToken = (statusRaw) =>
+  String(statusRaw || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+const getAttendanceStatusRaw = (rec) => {
+  if (!rec || typeof rec !== 'object') return '';
+  const raw = pickFirstNonEmptyString(
+    rec?.Status,
+    rec?.['Status'],
+    rec?.status,
+    findNestedValueByNormalizedKey(rec, 'status')
+  );
+  const s = String(raw || '').trim();
+  return s && s !== '-' ? s : '';
+};
+
+/** Daily grid cell: raw Status from attendance API. */
+const getForm25DayCellDisplay = (rec) => getAttendanceStatusRaw(rec);
+
+const form25StatusIsHalfDay = (statusRaw) => {
+  const s = normalizeForm25StatusToken(statusRaw);
+  return /half\s*day|halfday|\bhd\b|\b0\.5\b/.test(s);
+};
+
+const form25StatusIsAbsentOrLop = (statusRaw) => {
+  const s = normalizeForm25StatusToken(statusRaw);
+  if (!s || s === '-') return true;
+  return (
+    /^absent$/.test(s) ||
+    /^a$/.test(s) ||
+    /loss of pay|\blop\b|unpaid|not present/.test(s)
+  );
+};
+
+/** Total Days Worked: Present, Weekend, paid leave, half day (0.5) — Absent/Tour do not add. */
+const form25DayCountFromStatus = (statusRaw) => {
+  const s = normalizeForm25StatusToken(statusRaw);
+  if (!s || form25StatusIsAbsentOrLop(s)) return 0;
+  if (/weekend|week off|weekoff/.test(s)) return 1;
+  if (/\btour\b/.test(s)) return 0;
+  if (/comp\s*off|\bco\b|compensatory/.test(s)) return 0;
+  if (form25StatusIsHalfDay(s)) return 0.5;
+  if (/^present$|^p$|on duty|wfh|work from home/.test(s)) return 1;
+  if (/^cl$|casual leave|^pl$|privilege leave|^sl$|sick leave|^el$|earned leave|^ml$|maternity/.test(s)) {
+    return 1;
+  }
+  if (/\bleave\b/.test(s) && !/unpaid|loss/.test(s)) return 1;
+  return 0;
+};
+
+const computeForm25LossOfPayDays = (workedDays, year, monthIndex) => {
+  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+  return Math.max(0, daysInMonth - Math.round(Number(workedDays) || 0));
+};
+
+/** Total Hours Worked: Present=8, Half day=4, Comp off / Weekend=8 (rounded sum). */
+const form25HoursCreditFromStatus = (statusRaw) => {
+  const s = normalizeForm25StatusToken(statusRaw);
+  if (!s || form25StatusIsAbsentOrLop(s)) return 0;
+  if (form25StatusIsHalfDay(s)) return 4;
+  if (/^present$|^p$|on duty|wfh|work from home/.test(s)) return 8;
+  if (/comp\s*off|\bco\b|compensatory/.test(s)) return 8;
+  if (/weekend|week off|weekoff/.test(s)) return 8;
+  return 0;
+};
+
+const aggregateForm25WorkedTotalsFromRecords = (records) => {
+  let days = 0;
+  let totalHours = 0;
+  (records || []).forEach((rec) => {
+    const status = getForm25DayCellDisplay(rec);
+    if (!status) return;
+    days += form25DayCountFromStatus(status);
+    totalHours += form25HoursCreditFromStatus(status);
+  });
+  return {
+    days: Math.round(days),
+    totalHours: Math.round(totalHours)
+  };
+};
+
+/** Form 25 daily hours column: worked hours + overtime from attendance. */
+const formatForm25DailyHoursWithOvertime = (rec) => {
+  if (!rec || typeof rec !== 'object') return '';
+  if (formatForm25DayAttendanceStatus(rec) === 'Absent') return '';
+  let totalMins = attendanceRecordMinutesWorked(rec);
+  const otHours = getAttendanceOvertimeHoursNumber(rec);
+  if (otHours > 0) totalMins = (totalMins || 0) + Math.round(otHours * 60);
+  return formatMinutesAsHoursCell(totalMins);
 };
 
 const getAttendanceEmployeeFirstName = (obj) => {
@@ -1804,16 +2681,78 @@ function statesCompatibleForStatutoryFormLink(rowState, templateState) {
   return true;
 }
 
+function inferFormIVariantFromTemplateFileName(fileName) {
+  const fn = String(fileName || '').toLowerCase().replace(/\s+/g, ' ');
+  if (!fn) return null;
+  if (/pw[\s._-]*form[\s._-]*i|register[\s._-]*of[\s._-]*fine|minimum[\s._-]*wage/.test(fn)) {
+    return 'register_of_fines';
+  }
+  if (
+    /tamil[\s._-]*nadu|register[\s._-]*of[\s._-]*workmen|conferment|permanent[\s._-]*status/.test(fn)
+  ) {
+    return 'register_of_workmen';
+  }
+  return null;
+}
+
+function normalizeStatutoryFormNameKey(v) {
+  const raw = String(v || '').trim();
+  const s = squashStatutoryKeyPart(v);
+  if (!s) return s;
+  const compact = raw.replace(/\s+/g, ' ');
+  if (/^form[\s._-]*i$/i.test(raw.replace(/\s+/g, ''))) return 'form i';
+  if (/^form[\s._-]*1(?:[\s._-]|$)/i.test(raw) && !/^form[\s._-]*1[0-9]/i.test(raw)) return 'form i';
+  if (/pw[\s._-]*form[\s._-]*i/i.test(compact)) return 'form i';
+  return s;
+}
+
+function scoreFormIVariantTemplateMatch(gridRow, templateRow, requiredVariant) {
+  const templateFileName = templateRow?.formFileName || '';
+  const templateVariant =
+    inferFormIVariantFromRow(templateRow) ||
+    inferFormIVariantFromTemplateFileName(templateFileName);
+  if (templateVariant !== requiredVariant) return -999;
+
+  const norm = (v) => squashStatutoryKeyPart(v);
+  let score = 40;
+  const gridForm = normalizeStatutoryFormNameKey(gridRow?.formName || gridRow?.FormName);
+  const templateForm = normalizeStatutoryFormNameKey(templateRow?.formName || templateRow?.FormName);
+  if (gridForm && templateForm && gridForm === templateForm) score += 15;
+  else if (gridForm === 'form i') score += 10;
+
+  if (!statesCompatibleForStatutoryFormLink(gridRow?.state, templateRow?.state)) {
+    if (norm(gridRow?.state) && norm(templateRow?.state)) return -999;
+  }
+  if (norm(gridRow?.state) && norm(gridRow?.state) === norm(templateRow?.state)) score += 8;
+  if (norm(gridRow?.act) && norm(gridRow?.act) === norm(templateRow?.act)) score += 12;
+  const gd = norm(gridRow?.description);
+  const td = norm(templateRow?.description);
+  if (gd && td) {
+    if (gd === td) score += 15;
+    else if (gd.includes(td) || td.includes(gd)) score += 8;
+  }
+  if (requiredVariant === 'register_of_fines' && /pw[\s._-]*form[\s._-]*i/i.test(String(templateFileName))) {
+    score += 25;
+  }
+  if (
+    requiredVariant === 'register_of_workmen' &&
+    /tamil[\s._-]*nadu|register[\s._-]*of[\s._-]*workmen/i.test(String(templateFileName))
+  ) {
+    score += 20;
+  }
+  return score;
+}
+
 /** Form Master / Statutory: one template per formName+act+description+sector+state (not form name alone). */
 function buildFormmasterMatchKey(item) {
   const base = [
-    squashStatutoryKeyPart(item?.formName || item?.FormName),
+    normalizeStatutoryFormNameKey(item?.formName || item?.FormName),
     squashStatutoryKeyPart(item?.act || item?.Act),
     squashStatutoryKeyPart(item?.description || item?.Description),
     squashStatutoryKeyPart(item?.sector || item?.Sector) || 'nosector',
     squashStatutoryKeyPart(item?.state || item?.State) || 'nostate'
   ].join('|');
-  const variant = inferFormUVariantFromRow(item);
+  const variant = inferFormUVariantFromRow(item) || inferFormIVariantFromRow(item);
   return variant ? `${base}|${variant}` : base;
 }
 
@@ -1825,7 +2764,9 @@ function buildFormmasterMatchKey(item) {
 function scoreFormMasterTemplateMatch(gridRow, templateRow) {
   const norm = (v) => squashStatutoryKeyPart(v);
   let score = 0;
-  if (norm(gridRow?.formName) !== norm(templateRow?.formName)) return -999;
+  const gridForm = normalizeStatutoryFormNameKey(gridRow?.formName || gridRow?.FormName);
+  const templateForm = normalizeStatutoryFormNameKey(templateRow?.formName || templateRow?.FormName);
+  if (gridForm !== templateForm) return -999;
   if (!statesCompatibleForStatutoryFormLink(gridRow?.state, templateRow?.state)) return -999;
   if (norm(gridRow?.act) && norm(gridRow?.act) === norm(templateRow?.act)) score += 5;
   if (norm(gridRow?.state) && norm(gridRow?.state) === norm(templateRow?.state)) score += 5;
@@ -1836,8 +2777,11 @@ function scoreFormMasterTemplateMatch(gridRow, templateRow) {
     if (gd === td) score += 12;
     else if (gd.includes(td) || td.includes(gd)) score += 7;
   }
-  const gv = inferFormUVariantFromRow(gridRow);
-  const tv = inferFormUVariantFromRow(templateRow);
+  const gv = inferFormUVariantFromRow(gridRow) || inferFormIVariantFromRow(gridRow);
+  const tv =
+    inferFormUVariantFromRow(templateRow) ||
+    inferFormIVariantFromRow(templateRow) ||
+    inferFormIVariantFromTemplateFileName(templateRow?.formFileName);
   if (gv && tv) {
     if (gv === tv) score += 25;
     else score -= 200;
@@ -1909,17 +2853,105 @@ function inferFormUVariantFromSavedHeaders(headers) {
   return null;
 }
 
+function pickFormMasterTemplateByFormIVariant(item, templates, variant) {
+  if (!variant || !Array.isArray(templates) || templates.length === 0) return null;
+  let best = null;
+  let bestScore = -Infinity;
+  templates.forEach((t) => {
+    const fileId = t.id != null ? String(t.id) : t.fileId != null ? String(t.fileId) : '';
+    if (!fileId) return;
+    const templateFileName = t.templateFileName || t.name || t.fileName || '';
+    const templateRow = {
+      formName: t.formName,
+      act: t.act,
+      description: t.description,
+      sector: t.sector,
+      state: t.state,
+      formFileName: templateFileName
+    };
+    const tv =
+      inferFormIVariantFromRow(templateRow) ||
+      inferFormIVariantFromTemplateFileName(templateFileName);
+    if (tv !== variant) return;
+    const s = scoreFormIVariantTemplateMatch(item, templateRow, variant);
+    if (s > bestScore) {
+      bestScore = s;
+      best = {
+        formFile: fileId,
+        formFileName: templateFileName || 'template.xlsx',
+        isFromFormmaster: true
+      };
+    }
+  });
+  return best && bestScore > 0 ? best : null;
+}
+
+function inferFormIVariantFromFormFileId(formFileId, templates) {
+  const id = String(formFileId || '').trim();
+  if (!id || !Array.isArray(templates)) return null;
+  const match = templates.find((t) => String(t.id ?? t.fileId ?? '').trim() === id);
+  if (!match) return null;
+  const templateFileName = match.templateFileName || match.name || match.fileName || '';
+  return (
+    inferFormIVariantFromRow({
+      formName: match.formName,
+      act: match.act,
+      description: match.description,
+      formFileName: templateFileName
+    }) || inferFormIVariantFromTemplateFileName(templateFileName)
+  );
+}
+
+/** View File / Download / Autofill — same Form Master template id for a statutory row. */
+function resolveStatutoryFormTemplateForRow(lineItem, lookups = {}, opts = {}) {
+  const resolvedItem = resolveFormFileItemForStatutoryRow(lineItem, lookups);
+  return resolveDraftDownloadTemplateMeta(lineItem, resolvedItem, lookups, opts);
+}
+
 /** Draft download: prefer Form Master variant match over a stale/wrong row FormFile id. */
 function resolveDraftDownloadTemplateMeta(lineItem, resolvedFormFileItem, lookups = {}, opts = {}) {
   const expectedVariant =
+    opts.expectedVariant ||
     inferFormUVariantFromRow(lineItem) ||
+    inferFormIVariantFromRow(lineItem, {
+      sampleHeaders: opts.sampleHeaders,
+      tableHeaders: opts.sampleHeaders,
+      formHeaderTitle: opts.formHeaderTitle,
+      formHeaderSubtitle: opts.formHeaderSubtitle,
+      sheetText: opts.sheetText
+    }) ||
     inferFormUVariantFromSavedHeaders(opts.sampleHeaders) ||
+    inferFormIVariantFromSavedHeaders(opts.sampleHeaders) ||
     null;
   const rowHasFile =
     resolvedFormFileItem?.formFile &&
     resolvedFormFileItem.formFile !== 'null' &&
     String(resolvedFormFileItem.formFile).trim() !== '';
-  const picked = pickFormMasterFileForRow(lineItem, lookups, { expectedVariant });
+  const linkedFileVariant =
+    inferFormIVariantFromTemplateFileName(
+      resolvedFormFileItem?.formFileName || resolvedFormFileItem?.FormFileName
+    ) ||
+    inferFormIVariantFromFormFileId(resolvedFormFileItem?.formFile, lookups.formmasterTemplates);
+  const picked = pickFormMasterFileForRow(lineItem, lookups, { expectedVariant, ...opts });
+
+  if (expectedVariant && (expectedVariant === 'register_of_fines' || expectedVariant === 'register_of_workmen')) {
+    const chosen =
+      pickFormMasterTemplateByFormIVariant(
+        lineItem,
+        lookups.formmasterTemplates,
+        expectedVariant
+      ) ||
+      picked;
+    if (chosen?.formFile) {
+      return {
+        ...resolvedFormFileItem,
+        ...chosen,
+        formFile: chosen.formFile,
+        formFileName: chosen.formFileName || resolvedFormFileItem?.formFileName,
+        isFromFormmaster: true
+      };
+    }
+  }
 
   if (expectedVariant && picked?.formFile) {
     return {
@@ -1930,7 +2962,14 @@ function resolveDraftDownloadTemplateMeta(lineItem, resolvedFormFileItem, lookup
       isFromFormmaster: true
     };
   }
-  if (rowHasFile) return resolvedFormFileItem;
+  if (rowHasFile) {
+    const linkedMismatch =
+      expectedVariant &&
+      linkedFileVariant &&
+      linkedFileVariant !== expectedVariant &&
+      (expectedVariant === 'register_of_fines' || expectedVariant === 'register_of_workmen');
+    if (!linkedMismatch) return resolvedFormFileItem;
+  }
   if (picked?.formFile) {
     return { ...resolvedFormFileItem, ...picked };
   }
@@ -1942,9 +2981,12 @@ function pickFormMasterFileForRow(item, lookups = {}, opts = {}) {
   const { formmasterFormFileByMatchKey, formmasterTemplates } = lookups;
   const rowLineKey = buildFormmasterMatchKey(item);
   const rowBulkKey = checklistBulkRowIdentityKey(item);
-  const rowVariant = forcedVariant || inferFormUVariantFromRow(item);
+  const rowVariant = forcedVariant || inferFormUVariantFromRow(item) || inferFormIVariantFromRow(item, opts);
   const baseLineKey = rowVariant
-    ? rowLineKey.replace(/\|(?:confidential_character|employee_register)$/, '')
+    ? rowLineKey.replace(
+        /\|(?:confidential_character|employee_register|register_of_fines|register_of_workmen)$/,
+        ''
+      )
     : rowLineKey;
   const exact =
     formmasterFormFileByMatchKey?.get?.(rowLineKey) ||
@@ -1967,7 +3009,10 @@ function pickFormMasterFileForRow(item, lookups = {}, opts = {}) {
       state: t.state,
       formFileName: t.templateFileName || t.name || t.fileName || ''
     };
-    const templateVariant = inferFormUVariantFromRow(templateRow);
+    const templateVariant =
+      inferFormUVariantFromRow(templateRow) ||
+      inferFormIVariantFromRow(templateRow) ||
+      inferFormIVariantFromTemplateFileName(templateRow.formFileName);
     if (forcedVariant && templateVariant && templateVariant !== forcedVariant) return;
     const s = scoreFormMasterTemplateMatch(item, templateRow);
     if (s > bestScore) {
@@ -1992,6 +3037,38 @@ function resolveFormFileItemForStatutoryRow(item, lookups = {}) {
     rowFormFile && rowFormFile !== 'null' && String(rowFormFile).trim() !== '';
 
   if (rowHasFormFile) {
+    const expectedVariant =
+      inferFormUVariantFromRow(item) || inferFormIVariantFromRow(item);
+    const picked = pickFormMasterFileForRow(item, lookups, { expectedVariant });
+    if (
+      expectedVariant &&
+      (expectedVariant === 'register_of_fines' || expectedVariant === 'register_of_workmen')
+    ) {
+      const chosen =
+        pickFormMasterTemplateByFormIVariant(
+          item,
+          lookups.formmasterTemplates,
+          expectedVariant
+        ) || picked;
+      if (chosen?.formFile) {
+        return {
+          ...item,
+          formFile: chosen.formFile,
+          formFileName: chosen.formFileName || rowFormFileName || buildStatutoryFormFileLabel(item),
+          isFromFormmaster: true,
+          formFetchRowId: rowId
+        };
+      }
+    }
+    if (expectedVariant && picked?.formFile) {
+      return {
+        ...item,
+        formFile: picked.formFile,
+        formFileName: picked.formFileName || rowFormFileName || buildStatutoryFormFileLabel(item),
+        isFromFormmaster: true,
+        formFetchRowId: rowId
+      };
+    }
     return {
       ...item,
       formFile: rowFormFile,
@@ -2038,20 +3115,13 @@ function resolveDraftTemplateLayout(templateWb, opts = {}) {
   if (!Number.isFinite(headerRowIndex)) headerRowIndex = -1;
   if (!Number.isFinite(dataStartIndex)) dataStartIndex = -1;
 
-  if (!templateWb || headersToUse.length === 0) {
+  if (!templateWb) {
     return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: false };
-  }
-  if (headerRowIndex >= 0 && dataStartIndex >= 0) {
-    return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: true };
   }
 
   const firstSheetName = templateWb.SheetNames?.[0];
   const ws = firstSheetName ? templateWb.Sheets?.[firstSheetName] : null;
-  if (!ws) {
-    return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: false };
-  }
-
-  const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const jsonData = ws ? XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) : [];
   const sheetText = jsonData
     .slice(0, Math.min(45, jsonData.length))
     .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
@@ -2060,8 +3130,30 @@ function resolveDraftTemplateLayout(templateWb, opts = {}) {
     fileName: opts.fileName || '',
     formName: opts.formName || '',
     formHeaderTitle: opts.parsedFormHeader?.title || '',
-    sheetText
+    formHeaderSubtitle: opts.parsedFormHeader?.subtitle || '',
+    sheetText,
+    item: opts.item
   };
+  const formAHeaderOnlySave =
+    isFormAHeaderFieldLayoutFormHeader(opts.parsedFormHeader) ||
+    ((isFormAMusterRollContext(opts.parsedFormHeader) ||
+      isFormAMusterRollRowContext(opts.parsedFormHeader, opts.item, opts.fileName || firstSheetName, sheetText)) &&
+      sheetTextIndicatesFormAHeaderFields(sheetText) &&
+      headersToUse.length === 0);
+  if (formAHeaderOnlySave) {
+    return { templateWb, headersToUse: [], headerRowIndex: -1, dataStartIndex: 0, ok: true };
+  }
+
+  if (headersToUse.length === 0) {
+    return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: false };
+  }
+  if (headerRowIndex >= 0 && dataStartIndex >= 0) {
+    return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: true };
+  }
+
+  if (!ws) {
+    return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: false };
+  }
   if (headersToUse.length === 0) {
     headersToUse = resolveAutofillTableHeaders([], hints);
   }
@@ -2102,6 +3194,36 @@ function resolveDraftTemplateLayout(templateWb, opts = {}) {
     if (headerRowIndex < 0) {
       headerRowIndex = Math.min(10, Math.max(0, jsonData.length - 3));
       dataStartIndex = headerRowIndex + 1;
+    }
+  }
+
+  if (
+    headerRowIndex < 0 &&
+    isFormIRegisterOfWorkmenContext(
+      opts.item,
+      opts.fileName || firstSheetName,
+      opts.parsedFormHeader,
+      headersToUse,
+      sheetText
+    ) &&
+    FORM_I_TABLE_HEADERS.length > 0
+  ) {
+    if (!headersToUse.length) headersToUse = [...FORM_I_TABLE_HEADERS];
+    for (let r = 0; r < Math.min(45, jsonData.length); r += 1) {
+      const rowText = (jsonData[r] || []).map((c) => String(c || '').toLowerCase()).join(' ');
+      if (
+        rowHasTableSerialHeader(rowText) ||
+        rowText.includes('name and address of the workman') ||
+        rowText.includes('emp id')
+      ) {
+        headerRowIndex = r;
+        dataStartIndex = r + 2;
+        break;
+      }
+    }
+    if (headerRowIndex < 0) {
+      headerRowIndex = Math.min(10, Math.max(0, jsonData.length - 3));
+      dataStartIndex = headerRowIndex + 2;
     }
   }
 
@@ -2162,6 +3284,244 @@ function buildStatutoryFormFileLabel(item) {
   const ext = raw.includes('.') ? raw.slice(raw.lastIndexOf('.')) : '.xlsx';
   return `${parts.join(' - ')}${ext}`.replace(/[/\\?%*:|"<>]/g, '_');
 }
+
+const pickNonEmptyStatutoryMeta = (...values) => {
+  for (const v of values) {
+    const s = String(v ?? '').trim();
+    if (s && s !== 'null' && s !== 'undefined') return s;
+  }
+  return '';
+};
+
+const findFormMasterTemplateRecord = (formFileId, templates) => {
+  const id = String(formFileId || '').trim();
+  if (!id || !Array.isArray(templates)) return null;
+  return (
+    templates.find((t) => String(t.id ?? '').trim() === id) ||
+    templates.find((t) => String(t.fileId ?? '').trim() === id) ||
+    templates.find((t) => String(t.recordId ?? '').trim() === id) ||
+    null
+  );
+};
+
+/** Resolve Form Master row by file id, match key, or form/file name scoring. */
+const findFormMasterTemplateForStatutoryItem = (item, templates, formmasterFormFileByMatchKey) => {
+  if (!item || !Array.isArray(templates) || !templates.length) return null;
+  const direct = findFormMasterTemplateRecord(item?.formFile ?? item?.FormFile, templates);
+  if (direct) return direct;
+  const picked = pickFormMasterFileForRow(item, {
+    formmasterFormFileByMatchKey,
+    formmasterTemplates: templates
+  });
+  if (picked?.formFile) {
+    const byPick = findFormMasterTemplateRecord(picked.formFile, templates);
+    if (byPick) return byPick;
+  }
+  const fileHint = String(item?.formFileName || item?.FormFileName || '')
+    .toLowerCase()
+    .replace(/\.xlsx$/i, '')
+    .trim();
+  let best = null;
+  let bestScore = -Infinity;
+  templates.forEach((t) => {
+    const templateRow = {
+      formName: t.formName,
+      act: t.act,
+      description: t.description,
+      sector: t.sector,
+      state: t.state,
+      formFileName: t.templateFileName || t.name || t.fileName || ''
+    };
+    let s = scoreFormMasterTemplateMatch(item, templateRow);
+    const tFile = String(templateRow.formFileName).toLowerCase().replace(/\.xlsx$/i, '').trim();
+    if (fileHint && tFile && (tFile === fileHint || fileHint.includes(tFile) || tFile.includes(fileHint))) {
+      s += 12;
+    }
+    if (s > bestScore) {
+      bestScore = s;
+      best = t;
+    }
+  });
+  return bestScore > 0 ? best : null;
+};
+
+const inferStateFromStatutoryFormHints = (...parts) => {
+  const blob = parts.filter(Boolean).join(' ').toLowerCase();
+  if (/tamil[\s._-]*nadu|tamilnadu|\(tn\)|\btn\b/.test(blob)) return 'Tamil Nadu';
+  if (/maharashtra|\(mh\)/.test(blob)) return 'Maharashtra';
+  if (/karnataka|\(ka\)/.test(blob)) return 'Karnataka';
+  if (/andhra/.test(blob)) return 'Andhra Pradesh';
+  if (/telangana/.test(blob)) return 'Telangana';
+  if (/kerala/.test(blob)) return 'Kerala';
+  if (/gujarat/.test(blob)) return 'Gujarat';
+  if (/delhi/.test(blob)) return 'Delhi';
+  return '';
+};
+
+const inferSectorFromStatutoryFormHints = (...parts) => {
+  const blob = parts.filter(Boolean).join(' ').toLowerCase();
+  if (/shops\s*(?:&|and)\s*establishment|commercial\s*establishment|\bse\b/.test(blob)) {
+    return 'Shops and Establishment';
+  }
+  if (/factories\s*act|\bfactory\b/.test(blob)) return 'Factories';
+  if (/contract\s*labou?r|\bclra\b/.test(blob)) return 'CLRA';
+  if (/maternity\s*benefit|form[\s._-]*a\b/.test(blob)) return 'Shops and Establishment';
+  return '';
+};
+
+const findStatutoryRowMetadataDonor = (rows, item, normalizedFormName) => {
+  if (!Array.isArray(rows) || !normalizedFormName) return null;
+  const formFileId = String(item?.formFile ?? item?.FormFile ?? '').trim();
+  const candidates = rows.filter((r) => {
+    const rForm = String(r?.formName || r?.FormName || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+    return rForm === normalizedFormName;
+  });
+  if (!candidates.length) return null;
+  const score = (r) => {
+    let s = 0;
+    if (String(r?.sector || r?.Sector || '').trim()) s += 2;
+    if (String(r?.state || r?.State || '').trim()) s += 2;
+    if (String(r?.act || r?.Act || '').trim()) s += 1;
+    if (formFileId && String(r?.formFile ?? r?.FormFile ?? '').trim() === formFileId) s += 5;
+    if (/^\d+$/.test(String(r?.id ?? '').trim())) s += 1;
+    return s;
+  };
+  return [...candidates].sort((a, b) => score(b) - score(a))[0] || null;
+};
+
+const resolveSiteStateFromSiteDetails = (siteName, sites = []) => {
+  const target = String(siteName || '').trim().toLowerCase();
+  if (!target || !Array.isArray(sites)) return '';
+  const site = sites.find((s) => {
+    const names = [s?.siteName, s?.SiteName, s?.name, s?.Name].map((n) =>
+      String(n || '').trim().toLowerCase()
+    );
+    return names.some((n) => n && (n === target || n.includes(target) || target.includes(n)));
+  });
+  return String(site?.siteState ?? site?.SiteState ?? site?.state ?? site?.State ?? '').trim();
+};
+
+const resolveStatutorySectorStateForSave = ({
+  currentItem,
+  latestRecord,
+  statutoryRows,
+  formmasterTemplates,
+  formmasterFormFileByMatchKey,
+  normalizedFormName,
+  parsedFormHeader,
+  formFileNameHints = [],
+  siteName,
+  siteDetailsList,
+  organizationSitesMeta,
+  inchargeSitesMeta
+}) => {
+  const templateMeta = findFormMasterTemplateForStatutoryItem(
+    currentItem || latestRecord,
+    formmasterTemplates,
+    formmasterFormFileByMatchKey
+  );
+  const metadataDonor = findStatutoryRowMetadataDonor(statutoryRows, currentItem, normalizedFormName);
+  const templateFileName =
+    templateMeta?.templateFileName || templateMeta?.name || templateMeta?.fileName || '';
+  const hintBlob = [
+    ...formFileNameHints,
+    currentItem?.formFileName,
+    currentItem?.FormFileName,
+    latestRecord?.formFileName,
+    latestRecord?.FormFileName,
+    templateFileName,
+    currentItem?.formName,
+    currentItem?.FormName,
+    parsedFormHeader?.title,
+    parsedFormHeader?.subtitle,
+    parsedFormHeader?.reference,
+    currentItem?.act,
+    currentItem?.Act,
+    currentItem?.description,
+    templateMeta?.act,
+    templateMeta?.description,
+    templateMeta?.sector,
+    templateMeta?.state
+  ];
+  const siteStateHint =
+    resolveSiteStateFromSiteDetails(siteName, siteDetailsList) ||
+    resolveSiteStateFromSiteDetails(siteName, organizationSitesMeta) ||
+    resolveSiteStateFromSiteDetails(siteName, inchargeSitesMeta);
+
+  const sector = pickNonEmptyStatutoryMeta(
+    currentItem?.sector,
+    currentItem?.Sector,
+    latestRecord?.sector,
+    latestRecord?.Sector,
+    metadataDonor?.sector,
+    metadataDonor?.Sector,
+    templateMeta?.sector,
+    templateMeta?.Sector,
+    inferSectorFromStatutoryFormHints(...hintBlob)
+  );
+
+  const state = pickNonEmptyStatutoryMeta(
+    currentItem?.state,
+    currentItem?.State,
+    latestRecord?.state,
+    latestRecord?.State,
+    metadataDonor?.state,
+    metadataDonor?.State,
+    templateMeta?.state,
+    templateMeta?.State,
+    siteStateHint,
+    inferStateFromStatutoryFormHints(...hintBlob)
+  );
+
+  return { sector, state, metadataDonor, templateMeta };
+};
+
+const enrichStatutoryItemWithFormMasterMeta = (item, formmasterTemplates, formmasterFormFileByMatchKey) => {
+  if (!item || !Array.isArray(formmasterTemplates)) return item;
+  const template = findFormMasterTemplateForStatutoryItem(
+    item,
+    formmasterTemplates,
+    formmasterFormFileByMatchKey
+  );
+  if (!template) return item;
+  const hintBlob = [
+    item?.formFileName,
+    item?.FormFileName,
+    template?.templateFileName,
+    template?.name,
+    item?.formName,
+    item?.act,
+    item?.description,
+    template?.act,
+    template?.description
+  ];
+  return {
+    ...item,
+    sector: pickNonEmptyStatutoryMeta(
+      item?.sector,
+      item?.Sector,
+      template?.sector,
+      template?.Sector,
+      inferSectorFromStatutoryFormHints(...hintBlob)
+    ),
+    state: pickNonEmptyStatutoryMeta(
+      item?.state,
+      item?.State,
+      template?.state,
+      template?.State,
+      inferStateFromStatutoryFormHints(...hintBlob)
+    ),
+    act: pickNonEmptyStatutoryMeta(item?.act, item?.Act, template?.act),
+    description: pickNonEmptyStatutoryMeta(
+      item?.description,
+      item?.Description,
+      template?.description
+    )
+  };
+};
 
 function statutorySendForApprovalIsSent(row) {
   if (!row) return false;
@@ -2588,6 +3948,30 @@ const buildRegisterWagePeriodLine = (monthName, year) => {
   return `Wage Period from ${ordinalDay(1)} ${mon} ${y} to ${ordinalDay(lastDay)} ${mon} ${y}`;
 };
 
+/** Form 25: "For the period from 1st April 2026 to 30th April 2026" */
+const buildForm25PeriodLine = (monthName, year) => {
+  const idx = MONTH_NAMES.findIndex((m) => m.toLowerCase() === String(monthName || '').toLowerCase().trim());
+  if (idx < 0) return '';
+  const y = Number(year);
+  if (!Number.isFinite(y) || y < 1900) return '';
+  const lastDay = new Date(y, idx + 1, 0).getDate();
+  const mon = MONTH_NAMES[idx];
+  return `For the period from ${ordinalDay(1)} ${mon} ${y} to ${ordinalDay(lastDay)} ${mon} ${y}`;
+};
+
+const resolveForm25PeriodMonthYear = (selectedMonthStr, item, fallbackLine = '') => {
+  const fullMonth =
+    resolveToFullMonthName(selectedMonthStr) ||
+    getMonthFromDueDate(item?.dueDate || item?.DueDate || '') ||
+    inferMonthFromWagePeriodLine(fallbackLine) ||
+    MONTH_NAMES[new Date().getMonth()];
+  const year =
+    extractYearFromDueDate(item?.dueDate || item?.DueDate || '') ||
+    extractYearFromWagePeriodLine(fallbackLine) ||
+    new Date().getFullYear();
+  return { fullMonth, year };
+};
+
 /** Infer calendar month from an existing wage-period sentence in the template (e.g. "…April 202…"). */
 const inferMonthFromWagePeriodLine = (line) => {
   if (!line || typeof line !== 'string') return null;
@@ -2636,7 +4020,10 @@ const formatStatutoryTableHeaderLabel = (headerKey) => {
     (parent.includes('daily') && parent.includes('work'));
   const looksFormQMonthBand =
     parent.includes('date') && parent.includes('month');
-  if (looksDatesBand || looksDailyHoursBand || looksFormQMonthBand) return String(day);
+  const looksNumericColumnBand = /^\d{1,2}$/.test(parent.trim());
+  if (looksDatesBand || looksDailyHoursBand || looksFormQMonthBand || looksNumericColumnBand) {
+    return String(day);
+  }
   const comp = h.match(/^(.+)_([\s\S]+)$/);
   if (comp) {
     const parentNorm = comp[1].toLowerCase().replace(/\s+/g, ' ').trim();
@@ -2648,6 +4035,16 @@ const formatStatutoryTableHeaderLabel = (headerKey) => {
     if (isFormQSectionMarkerSub(sub, parentNorm)) return comp[1].trim();
   }
   return h;
+};
+
+/** Day-of-month column under a daily-hours band (e.g. Form XXVI `10_15` → day 15). */
+const isStatutoryDailyHoursDayColumn = (headerKey) => {
+  const h = String(headerKey || '');
+  const m = h.match(/^(.+)_(\d{1,2})$/);
+  if (!m) return false;
+  const day = parseInt(m[2], 10);
+  if (day < 1 || day > 31) return false;
+  return formatStatutoryTableHeaderLabel(h) === String(day);
 };
 
 /**
@@ -2671,6 +4068,19 @@ const getDailyHoursGridGroupInfo = (tableHeaders) => {
       parent.includes('date') && parent.includes('month');
     if (looksDatesBand || looksDailyHoursBand || looksFormQMonthBand) {
       return { startIndex: i, parentLabel: m[1].trim() };
+    }
+    if (/^\d{1,2}$/.test(m[1].trim())) {
+      let run = 1;
+      for (let j = i + 1; j < tableHeaders.length; j += 1) {
+        const m2 = String(tableHeaders[j] || '').match(/^(\d{1,2})_(\d{1,2})$/);
+        if (!m2 || m2[1] !== m[1]) break;
+        const d2 = parseInt(m2[2], 10);
+        if (d2 < 1 || d2 > 31) break;
+        run += 1;
+      }
+      if (run >= 5) {
+        return { startIndex: i, parentLabel: m[1].trim(), numericColumnBand: true };
+      }
     }
   }
   return null;
@@ -3157,19 +4567,42 @@ const isFormHLeaveBookContext = (formHeader, rowItem, fileName) => {
   return /\bform\s*h\b|\bform_h\b|\bform-h\b/i.test(parts) && /leave\s+book/i.test(parts);
 };
 
-const isForm11EsicAccidentBookContext = (formHeader, rowItem, fileName, tableHeaders) => {
+const headersIndicateForm11AccidentBook = (tableHeaders) => {
+  if (!Array.isArray(tableHeaders) || tableHeaders.length === 0) return false;
+  const joined = tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+  if (/date\s+of\s+notice/.test(joined) && /insurance\s+no/.test(joined)) return true;
+  if (/time\s+of\s+notice/.test(joined) && /cause\s+of\s+injury/.test(joined)) return true;
+  if (/injured/.test(joined) && /insurance\s+no/.test(joined) && /nature\s+of\s+injury/.test(joined)) {
+    return true;
+  }
+  return false;
+};
+
+const isForm11EsicAccidentBookContext = (formHeader, rowItem, fileName, tableHeaders, sheetText = '') => {
   const parts = [
     rowItem?.formName,
     rowItem?.FormName,
+    rowItem?.formFileName,
+    rowItem?.FormFileName,
     fileName,
     formHeader?.title,
     formHeader?.subtitle,
     formHeader?.reference,
+    sheetText,
     Array.isArray(tableHeaders) ? tableHeaders.join(' ') : ''
   ]
     .join(' ')
     .toLowerCase();
-  return /\bform\s*11\b|\bform_11\b|\bform-11\b/i.test(parts) && /accident\s+book/i.test(parts);
+  if (/\bform\s*11\b|\bform_11\b|\bform-11\b/i.test(parts) && /accident\s+book/i.test(parts)) return true;
+  if (/\bform[\s._-]*11(?:[\s._-]|$)/i.test(parts) && headersIndicateForm11AccidentBook(tableHeaders)) return true;
+  if (/tamil\s*nadu/.test(parts) && /\bform[\s._-]*11\b|\bform_11\b/i.test(parts)) return true;
+  if (
+    headersIndicateForm11AccidentBook(tableHeaders) &&
+    /esic|employees.? state insurance|regulation\s*66|accident\s+book/i.test(parts)
+  ) {
+    return true;
+  }
+  return false;
 };
 
 /** Tamil Nadu Form 26 — Register of Accidents. */
@@ -3217,6 +4650,202 @@ const isForm26SkipAutofillHeader = (h) => {
   if (/remarks/.test(bare) && (/initials/.test(bare) || /manager/.test(bare) || /manage/.test(bare))) return true;
   if (/\(14\)|^14\)/.test(s) && /remarks/.test(bare)) return true;
   return false;
+};
+
+const resolveForm26MonthYear = (selectedMonthStr, item, fallbackLine = '') =>
+  resolveForm25PeriodMonthYear(selectedMonthStr, item, fallbackLine);
+
+/** Form 26 nil row: "Nil for the month of Jun 2026" */
+const buildForm26NilMonthLine = (monthName, year) => {
+  const idx = MONTH_NAMES.findIndex((m) => m.toLowerCase() === String(monthName || '').toLowerCase().trim());
+  const abbr = idx >= 0 ? MONTH_ABBR[idx] : String(monthName || '').trim().slice(0, 3);
+  const y = Number(year);
+  if (!abbr || !Number.isFinite(y) || y < 1900) return '';
+  return `Nil for the month of ${abbr} ${y}`;
+};
+
+const isForm26AccidentDataHeader = (h) => {
+  const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const bare = s.replace(/^\(?\d+\)?\s*/, '').trim();
+  if (/\(2\)|^2\)/.test(s) && /accident/.test(bare)) return true;
+  if (/\(3\)|^3\)/.test(s) && /injured|designation|person/.test(bare)) return true;
+  if (/\(4\)|^4\)/.test(s) && /place/.test(bare) && /accident|factory|branch|dept|machine/.test(bare)) return true;
+  if (/\(5\)|^5\)/.test(s) && /description/.test(bare)) return true;
+  if (/\(6\)|^6\)/.test(s) && /injury|nature|extent|location/.test(bare)) return true;
+  if (/date.*hour.*accident/.test(bare)) return true;
+  if (/name.*designation.*injured/.test(bare)) return true;
+  if (/exact\s+place.*accident/.test(bare)) return true;
+  if (/full\s+description.*accident/.test(bare)) return true;
+  if (/nature.*extent.*injury|nature.*location.*injury/.test(bare)) return true;
+  return false;
+};
+
+const findForm26NilPrimaryHeader = (headers) => {
+  for (const h of headers || []) {
+    const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const bare = s.replace(/^\(?\d+\)?\s*/, '').trim();
+    if (/\(7\)|^7\)/.test(s)) return h;
+    if (/date\s+of\s+despatch|date\s+of\s+dispatch/.test(bare) && /form\s*18/.test(bare)) return h;
+  }
+  return null;
+};
+
+const form26RowHasAccidentEntry = (row, headers) => {
+  if (!row || typeof row !== 'object') return false;
+  return (headers || []).some((h) => {
+    if (!isForm26AccidentDataHeader(h)) return false;
+    const v = String(row[h] ?? '').trim();
+    return v && !/^nil\s+for\s+the\s+month/i.test(v);
+  });
+};
+
+const buildForm26NilTableRows = (headers, nilLine) => {
+  const nilPrimary = findForm26NilPrimaryHeader(headers);
+  const row = {};
+  (headers || []).forEach((h) => {
+    row[h] = '';
+  });
+  if (nilPrimary && nilLine) row[nilPrimary] = nilLine;
+  return [row];
+};
+
+const applyForm26NilTableRows = (headers, existingRows, selectedMonthStr, item) => {
+  const { fullMonth, year } = resolveForm26MonthYear(selectedMonthStr, item);
+  const nilLine = buildForm26NilMonthLine(fullMonth, year);
+  const rows = Array.isArray(existingRows) ? existingRows : [];
+  if (rows.some((r) => form26RowHasAccidentEntry(r, headers))) return rows;
+  return buildForm26NilTableRows(headers, nilLine);
+};
+
+const applyForm26HeaderMonthFields = (formHeader, selectedMonthStr, item) => {
+  if (!formHeader || typeof formHeader !== 'object') return formHeader;
+  const { year } = resolveForm26MonthYear(selectedMonthStr, item);
+  if (!year) return formHeader;
+  const fields = Array.isArray(formHeader.fields) ? [...formHeader.fields] : [];
+  const calendarKey = 'form26_header_calendar_year';
+  const calendarValue = String(year);
+  const idx = fields.findIndex(
+    (f) => f.key === calendarKey || /calendar\s+year/i.test(String(f.label || '').trim())
+  );
+  if (idx === -1) {
+    fields.push({ label: 'Calendar Year:', value: calendarValue, key: calendarKey });
+  } else if (!String(fields[idx].value || '').trim()) {
+    fields[idx] = { ...fields[idx], value: calendarValue };
+  }
+  return { ...formHeader, fields };
+};
+
+const resolveForm11MonthYear = (selectedMonthStr, item, fallbackLine = '') =>
+  resolveForm25PeriodMonthYear(selectedMonthStr, item, fallbackLine);
+
+const FORM11_NIL_OF_MONTH_TEXT = 'Nill of the month';
+
+const isForm11NilMonthInsuranceValue = (v) =>
+  /^nill\s+of\s+the\s+month/i.test(String(v ?? '').trim());
+
+const buildForm11NilMonthYearLabel = (monthName, year) => {
+  const idx = MONTH_NAMES.findIndex((m) => m.toLowerCase() === String(monthName || '').toLowerCase().trim());
+  const abbr = idx >= 0 ? MONTH_ABBR[idx] : String(monthName || '').trim().slice(0, 3);
+  const y = Number(year);
+  if (!abbr || !Number.isFinite(y) || y < 1900) return '';
+  return `${abbr} ${y}`;
+};
+
+const findForm11NilInsuranceHeader = (headers) => {
+  for (const h of headers || []) {
+    const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const bare = s.replace(/^\(?\d+\)?\s*/, '').trim();
+    if (/\(7\)|^7\)/.test(s)) return h;
+    if (/insurance\s+no/.test(bare)) return h;
+  }
+  return null;
+};
+
+const findForm11NilShiftDeptHeader = (headers) => {
+  for (const h of headers || []) {
+    const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const bare = s.replace(/^\(?\d+\)?\s*/, '').trim();
+    if (/\(8\)|^8\)/.test(s)) return h;
+    if (/shift/.test(bare) && /department/.test(bare) && /occupation/.test(bare)) return h;
+  }
+  return null;
+};
+
+const isForm11AccidentDataHeader = (h) => {
+  const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const bare = s.replace(/^\(?\d+\)?\s*/, '').trim();
+  if (/^(s\.?\s*no\.?|sl\.?\s*no\.?|serial(\s+number)?)$/.test(bare)) return false;
+  if (/insurance\s+no/.test(bare) || /\(7\)|^7\)/.test(s)) return false;
+  if (/shift/.test(bare) && (/department/.test(bare) || /occupation/.test(bare))) return false;
+  if (/date\s+of\s+notice/.test(bare) || /time\s+of\s+notice/.test(bare)) return true;
+  if (/date\s+of\s+injury/.test(bare) || /time\s+of\s+injury/.test(bare)) return true;
+  if (/cause\s+of\s+injury/.test(bare) || /nature\s+of\s+injury/.test(bare)) return true;
+  if (/place\s+of\s+injury/.test(bare)) return true;
+  if (/injured/.test(bare) && /name/.test(bare)) return true;
+  if (/what\s+exactly/.test(bare) && /injured/.test(bare)) return true;
+  if (isForm11NameSubColumnHeader(h) || isForm11AddressSubColumnHeader(h)) return true;
+  if (isForm11InjuredPersonNameAddressHeader(h) || isForm11NoticePersonHeader(h) || isForm11WitnessesHeader(h)) {
+    return true;
+  }
+  if (/\(5\)|^5\)/.test(s) && /^sex$/.test(bare)) return true;
+  if (/\(6\)|^6\)/.test(s) && /^age$/.test(bare)) return true;
+  if (/^sex$/.test(bare) || /^age$/.test(bare)) return true;
+  return false;
+};
+
+const form11RowIsNilMonthEntry = (row, headers) => {
+  const insHdr = findForm11NilInsuranceHeader(headers);
+  if (!insHdr) return false;
+  return isForm11NilMonthInsuranceValue(row?.[insHdr]);
+};
+
+const form11RowHasAccidentEntry = (row, headers) => {
+  if (!row || typeof row !== 'object') return false;
+  if (form11RowIsNilMonthEntry(row, headers)) return false;
+  return (headers || []).some((h) => {
+    const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const bare = s.replace(/^\(?\d+\)?\s*/, '').trim();
+    const isManualCol =
+      (/date\s+of\s+notice|time\s+of\s+notice|time\s+of\s+injury/.test(bare) &&
+        !/insurance\s+no/.test(bare)) ||
+      /cause\s+of\s+injury|nature\s+of\s+injury|date\s+of\s+injury|place\s+of\s+injury/.test(bare) ||
+      (/what\s+exactly/.test(bare) && /injured/.test(bare));
+    if (!isManualCol) return false;
+    const v = String(row[h] ?? '').trim();
+    return Boolean(v);
+  });
+};
+
+const buildForm11NilTableRows = (headers, nilInsuranceText, monthYearLabel) => {
+  const insHdr = findForm11NilInsuranceHeader(headers);
+  const shiftHdr = findForm11NilShiftDeptHeader(headers);
+  const row = {};
+  (headers || []).forEach((h) => {
+    row[h] = '';
+  });
+  if (insHdr && nilInsuranceText) row[insHdr] = nilInsuranceText;
+  if (shiftHdr && monthYearLabel) row[shiftHdr] = monthYearLabel;
+  return [row];
+};
+
+const applyForm11NilTableRows = (headers, existingRows, selectedMonthStr, item) => {
+  const { fullMonth, year } = resolveForm11MonthYear(selectedMonthStr, item);
+  const nilInsuranceText = FORM11_NIL_OF_MONTH_TEXT;
+  const monthYearLabel = buildForm11NilMonthYearLabel(fullMonth, year);
+  const rows = Array.isArray(existingRows) ? existingRows : [];
+  if (rows.some((r) => form11RowHasAccidentEntry(r, headers))) return rows;
+  if (rows.some((r) => form11RowIsNilMonthEntry(r, headers))) {
+    const insHdr = findForm11NilInsuranceHeader(headers);
+    const shiftHdr = findForm11NilShiftDeptHeader(headers);
+    return rows.map((r) => {
+      if (!form11RowIsNilMonthEntry(r, headers)) return r;
+      const updated = { ...r };
+      if (insHdr) updated[insHdr] = nilInsuranceText;
+      if (shiftHdr && monthYearLabel) updated[shiftHdr] = monthYearLabel;
+      return updated;
+    });
+  }
+  return buildForm11NilTableRows(headers, nilInsuranceText, monthYearLabel);
 };
 
 /** Form 11 (ESIC Accident Book): manual accident/notice columns — do not autofill from Zoho People. */
@@ -3366,7 +4995,11 @@ const buildForm11NameAndAddressValue = (emp, row) => {
 };
 
 const formatForm11NameAddressCellForExport = (value, header, row) => {
-  if (isForm11SkipAutofillHeader(header)) return '';
+  if (isForm11SkipAutofillHeader(header)) {
+    const text = String(value ?? '').trim();
+    if (isForm11NilMonthInsuranceValue(text)) return text;
+    return '';
+  }
   const sanitized = String(value ?? '').trim();
   if (isForm11NameSubColumnHeader(header)) {
     return pickFirstNonEmptyString(row?.__employeeLookupName, row?.__employeelookupname, sanitized);
@@ -3493,6 +5126,280 @@ const isFormXVIContext = (formHeader, rowItem, fileName) => {
   return /\bform\s*xvi\b|\bform_xvi\b|\bform-xvi\b/i.test(parts);
 };
 
+/** Tamil Nadu Form XV — Service Certificate (See rule 77); not XVI/XVII/XVIII. */
+const isFormXVContext = (formHeader, rowItem, fileName) => {
+  const parts = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference
+  ]
+    .join(' ')
+    .toLowerCase();
+  if (/form[\s._-]*xviii(?![a-z])/i.test(parts)) return false;
+  if (/form[\s._-]*xvii(?![a-z])/i.test(parts)) return false;
+  if (/form[\s._-]*xvi(?![a-z])/i.test(parts)) return false;
+  if (/form[\s._-]*xxvii(?![a-z])/i.test(parts)) return false;
+  if (/form[\s._-]*xxvi(?![a-z])/i.test(parts)) return false;
+  return (
+    /form[\s._-]*xv(?![a-z])/i.test(parts) ||
+    (/service\s+certificate/i.test(parts) && /\b(?:rule\s*77|see\s+rule\s*77)\b/i.test(parts))
+  );
+};
+
+/** Tamil Nadu Form XXVI — register with daily hours 1–31 under column (10). */
+const isFormXXVIContext = (formHeader, rowItem, fileName) => {
+  const parts = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference
+  ]
+    .join(' ')
+    .toLowerCase();
+  if (/\bform[\s._-]*xxvii\b|\bform[\s._-]*27\b/.test(parts)) return false;
+  return /\bform[\s._-]*xxvi\b/i.test(parts);
+};
+
+const rowCellsLookLikeDayNumberGrid = (cells) => {
+  let hits = 0;
+  let total = 0;
+  (cells || []).forEach((cell) => {
+    const t = String(cell || '').trim();
+    if (!t) return;
+    total += 1;
+    const n = parseInt(t, 10);
+    if (/^\d{1,2}$/.test(t) && n >= 1 && n <= 31) hits += 1;
+  });
+  return total >= 8 && hits >= 8 && hits >= Math.max(5, Math.floor(total * 0.25));
+};
+
+const findFormXXVIDailyHoursParentLabel = (getMergedAwareCellText, anchorRow, colStart, colEnd) => {
+  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  for (let r = Math.max(0, anchorRow - 4); r <= anchorRow; r += 1) {
+    for (let c = colStart; c <= colEnd; c += 1) {
+      const t = norm(getMergedAwareCellText(r, c));
+      if (t.includes('daily') && (t.includes('hour') || t.includes('work'))) {
+        return String(getMergedAwareCellText(r, c) || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+    }
+  }
+  return 'Daily hours of work';
+};
+
+/**
+ * Form XXVI Excel uses three header tiers: descriptive row, column numbers (10), then days 1–31.
+ * Generic parsing often treats column number "10" as the sub-header for every day column.
+ */
+const rebuildFormXXVIDailyHoursHeaders = ({
+  jsonData,
+  effectiveSheetCols,
+  getMergedAwareCellText,
+  headers,
+  expandedHeaders,
+  subColumnsData,
+  headerRowIndex,
+  startIndex,
+  tableData,
+  firstSheetName,
+  formHeaderInfo
+}) => {
+  if (!isFormXXVIContext(formHeaderInfo, null, firstSheetName)) return null;
+
+  const hdrList = expandedHeaders?.length ? expandedHeaders : headers || [];
+  const bareTenCols = hdrList.filter((h) => String(h || '').trim() === '10').length;
+  const tenDayCols = hdrList.filter((h) => /^10_(\d{1,2})$/.test(String(h || '').trim())).length;
+  const repeatedTenSubCols = hdrList.filter((h) => /^Daily hours of work_10$/i.test(String(h || '').trim())).length;
+  const needsRebuild =
+    bareTenCols >= 5 || tenDayCols >= 5 || repeatedTenSubCols >= 5 || rowCellsLookLikeDayNumberGrid(
+      headerRowIndex >= 0 && headerRowIndex + 2 < jsonData.length
+        ? (jsonData[headerRowIndex + 2] || []).map((cell, idx) =>
+            String(getMergedAwareCellText(headerRowIndex + 2, idx) || cell || '').trim()
+          )
+        : []
+    );
+  const daySuffixColCount = hdrList.filter((h) => {
+    const t = String(h || '').trim();
+    const m = t.match(/(?:^|_)(\d{1,2})$/);
+    return m && Number(m[1]) >= 1 && Number(m[1]) <= 31;
+  }).length;
+  if (!needsRebuild && daySuffixColCount < 5) return null;
+
+  const norm = (s) =>
+    String(s || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+  let tableHeaderRow = headerRowIndex;
+  if (tableHeaderRow < 0) {
+    for (let r = 0; r < Math.min(35, jsonData.length); r += 1) {
+      const parts = [];
+      for (let c = 0; c < Math.max(effectiveSheetCols, 20); c += 1) {
+        const t = norm(getMergedAwareCellText(r, c));
+        if (t) parts.push(t);
+      }
+      const joined = parts.join(' ');
+      if ((/s\.?\s*no|sr\.?\s*no|serial/.test(joined)) && (/name|employee|worker/.test(joined))) {
+        tableHeaderRow = r;
+        break;
+      }
+    }
+  }
+  if (tableHeaderRow < 0) return null;
+
+  let dayRow = -1;
+  let dayColByNum = new Map();
+  let bestHits = 0;
+  for (let r = tableHeaderRow; r <= Math.min(tableHeaderRow + 5, jsonData.length - 1); r += 1) {
+    const cols = new Map();
+    for (let c = 0; c < Math.max(effectiveSheetCols, 45); c += 1) {
+      const raw = String(getMergedAwareCellText(r, c) || '').trim();
+      if (!/^\d{1,2}$/.test(raw)) continue;
+      const num = parseInt(raw, 10);
+      if (num >= 1 && num <= 31) cols.set(num, c);
+    }
+    if (cols.size > bestHits) {
+      bestHits = cols.size;
+      dayRow = r;
+      dayColByNum = cols;
+    }
+  }
+  if (dayRow < 0 || bestHits < 5) return null;
+
+  const dayColsSorted = [...dayColByNum.entries()].sort((a, b) => a[1] - b[1]);
+  const bandStartCol = dayColsSorted[0][1];
+  const bandEndCol = dayColsSorted[dayColsSorted.length - 1][1];
+  const columnNumberRow = dayRow - 1;
+  let columnBandParent = '10';
+  if (columnNumberRow >= 0) {
+    const bandLabel = String(getMergedAwareCellText(columnNumberRow, bandStartCol) || '').trim();
+    if (/^\d{1,2}$/.test(bandLabel)) columnBandParent = bandLabel;
+  }
+  const parentLabel = findFormXXVIDailyHoursParentLabel(
+    getMergedAwareCellText,
+    columnNumberRow >= 0 ? columnNumberRow : dayRow,
+    bandStartCol,
+    bandEndCol
+  );
+
+  const pickColumnLabel = (c, stopBeforeDaily) => {
+    for (let r = Math.max(0, tableHeaderRow - 2); r <= Math.max(tableHeaderRow, columnNumberRow); r += 1) {
+      const t = String(getMergedAwareCellText(r, c) || '').trim();
+      if (!t || /^\d{1,2}$/.test(t)) continue;
+      const n = norm(t);
+      if (stopBeforeDaily && n.includes('daily') && (n.includes('hour') || n.includes('work'))) continue;
+      return t.replace(/\s+/g, ' ').trim();
+    }
+    return '';
+  };
+
+  const leftHeaders = [];
+  for (let c = 0; c < bandStartCol; c += 1) {
+    const label = pickColumnLabel(c, true);
+    if (label) leftHeaders.push(label);
+  }
+
+  const daySubs = dayColsSorted.map(([num]) => String(num));
+  const dailyExpanded = daySubs.map((d) => `${columnBandParent}_${d}`);
+
+  const rightHeaders = [];
+  for (let c = bandEndCol + 1; c < Math.max(effectiveSheetCols, bandEndCol + 8); c += 1) {
+    const label = pickColumnLabel(c, false);
+    if (label) rightHeaders.push(label);
+  }
+
+  const newExpanded = [...leftHeaders, ...dailyExpanded, ...rightHeaders];
+  if (newExpanded.length < 4 || dailyExpanded.length < 5) return null;
+
+  const newSubColumns = { [columnBandParent]: daySubs };
+  const columnGroupLabels = new Array(newExpanded.length).fill('');
+  let labelIdx = 0;
+  leftHeaders.forEach((h) => {
+    columnGroupLabels[labelIdx] = h;
+    labelIdx += 1;
+  });
+  for (let i = 0; i < dailyExpanded.length; i += 1) {
+    columnGroupLabels[labelIdx + i] = parentLabel;
+  }
+  labelIdx += dailyExpanded.length;
+  rightHeaders.forEach((h, ri) => {
+    columnGroupLabels[labelIdx + ri] = h;
+  });
+
+  const newHeaderRowIndex = columnNumberRow >= 0 ? columnNumberRow : tableHeaderRow;
+  const newStartIndex = dayRow + 1;
+  const mainHeaders = [];
+  let curMain = null;
+  for (let c = 0; c < bandStartCol; c += 1) {
+    const h = pickColumnLabel(c, true);
+    if (h) {
+      curMain = h;
+      mainHeaders.push(h);
+    }
+  }
+  mainHeaders.push(columnBandParent);
+  rightHeaders.forEach((h) => mainHeaders.push(h));
+
+  const priorHeaders = hdrList;
+  const priorRows = Array.isArray(tableData) ? tableData.map((row) => ({ ...row })) : [];
+  let newTableData = [];
+  for (let i = newStartIndex; i < jsonData.length; i += 1) {
+    const rowData = {};
+    let leftIdx = 0;
+    for (let c = 0; c < bandStartCol && leftIdx < leftHeaders.length; c += 1) {
+      const label = pickColumnLabel(c, true);
+      if (!label) continue;
+      rowData[label] = String(getMergedAwareCellText(i, c) || '').trim();
+      leftIdx += 1;
+    }
+    daySubs.forEach((d) => {
+      const key = `${columnBandParent}_${d}`;
+      const dayCol = dayColByNum.get(parseInt(d, 10));
+      rowData[key] =
+        dayCol != null ? String(getMergedAwareCellText(i, dayCol) || '').trim() : '';
+    });
+    rightHeaders.forEach((h, ri) => {
+      const c = bandEndCol + 1 + ri;
+      rowData[h] = String(getMergedAwareCellText(i, c) || '').trim();
+    });
+    if (Object.values(rowData).some((val) => String(val ?? '').trim() !== '')) {
+      newTableData.push(rowData);
+    }
+  }
+  if (
+    priorRows.length > 0 &&
+    (!newTableData.length ||
+      newTableData.every((row) => !Object.values(row).some((val) => String(val ?? '').trim() !== '')))
+  ) {
+    newTableData = priorRows.map((row) => {
+      const out = {};
+      newExpanded.forEach((h, idx) => {
+        const oldH = priorHeaders[idx];
+        out[h] = row[h] ?? (oldH != null ? row[oldH] : '') ?? '';
+      });
+      return out;
+    });
+  }
+
+  return {
+    headers: mainHeaders,
+    expandedHeaders: newExpanded,
+    subColumnsData: newSubColumns,
+    headerRowIndex: newHeaderRowIndex,
+    startIndex: newStartIndex,
+    tableData: newTableData.length ? newTableData : priorRows,
+    columnGroupLabels
+  };
+};
+
 const isFormXXVIIContext = (formHeader, rowItem, fileName) => {
   const parts = [
     rowItem?.formName,
@@ -3526,6 +5433,9 @@ const looksLikeWageRegisterTableHeaders = (tableHeaders) => {
   const hdrBlob = (Array.isArray(tableHeaders) ? tableHeaders : [])
     .map((h) => String(h || '').toLowerCase())
     .join(' | ');
+  if (/row\s+labels|count\s+of\s+(male|female)|sum\s+of\s+(gross|basic)\s+wage/.test(hdrBlob)) {
+    return false;
+  }
   const hasWageCore =
     hdrBlob.includes('gross wage') ||
     hdrBlob.includes('basic wage') ||
@@ -3855,10 +5765,145 @@ const STATUTORY_CONTRACTOR_HEADER_KEYS = [
   'form12_header_contractor',
   'form10_header_contractor',
   'form25_contractor',
+  'form_xv_contractor',
   'form_xvi_contractor',
   'form_xvii_contractor',
   'form_xviii_contractor'
 ];
+
+const STATUTORY_FACTORY_HEADER_KEYS = ['form12_header_factory', 'form10_header_factory'];
+
+/** Excel labels like "Name and Address of the Factory:" */
+const isFactoryHeaderLabel = (label) => {
+  const compact = normalizeHeaderLabelForMatch(label);
+  if (!compact) return false;
+  return /name\s+and\s+address\s+of\s+the\s+factory/.test(compact);
+};
+
+const FORM_XV_HEADER_LABEL_SPECS = [
+  {
+    match: /name\s+and\s+address\s+of\s+contractor/i,
+    label: 'Name and address of contractor',
+    key: 'form_xv_contractor'
+  },
+  {
+    match: /nature\s+and\s+location\s+of\s+work/i,
+    label: 'Nature and location of work',
+    key: 'form_xv_nature_location_work'
+  },
+  {
+    match: /name\s+and\s+address\s+of\s+establishment[\s\S]*contract\s+is\s+carried\s+on/i,
+    label: 'Name and address of establishment in/under which contract is carried on',
+    key: 'form_xv_establishment_contract_carried'
+  },
+  {
+    match: /name\s+and\s+address\s+of\s+principal\s+employer/i,
+    label: 'Name and address of principal employer',
+    key: 'form_xv_principal_employer'
+  },
+  {
+    match: /name\s+and\s+address\s+of\s+the\s+workman/i,
+    label: 'Name and address of the workman',
+    key: 'form_xv_workman'
+  },
+  {
+    match: /age\s+or\s+date\s+of\s+birth/i,
+    label: 'Age or date of birth',
+    key: 'form_xv_age_or_dob'
+  },
+  {
+    match: /identification\s+marks/i,
+    label: 'Identification marks',
+    key: 'form_xv_identification_marks'
+  },
+  {
+    match: /father'?s\s*\/\s*husband'?s\s+name/i,
+    label: "Father's/Husband's name",
+    key: 'form_xv_father_or_husband_name'
+  }
+];
+
+const FORM_XV_TABLE_HEADERS = [
+  'Sr.No.',
+  'Total period for which employed_From',
+  'Total period for which employed_To',
+  'Nature of work done',
+  'Rate of wage (with particulars of work)',
+  'Remarks'
+];
+
+const normalizeFormXVTableHeader = (h) =>
+  String(h || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const isFormXVPeriodFromHeader = (h) => {
+  const n = normalizeFormXVTableHeader(h);
+  return n.includes('from') && (n.includes('period') || n.includes('employed'));
+};
+
+const isFormXVPeriodToHeader = (h) => {
+  const n = normalizeFormXVTableHeader(h);
+  return n.includes('to') && !n.includes('from') && (n.includes('period') || n.includes('employed'));
+};
+
+const isFormXVNatureOfWorkHeader = (h) => {
+  const n = normalizeFormXVTableHeader(h);
+  return n.includes('nature') && n.includes('work');
+};
+
+const isFormXVRateOfWageHeader = (h) => {
+  const n = normalizeFormXVTableHeader(h);
+  return n.includes('rate') && n.includes('wage');
+};
+
+const isFormXVRemarksHeader = (h) => normalizeFormXVTableHeader(h).includes('remarks');
+
+const isFormXVSkipAutofillHeader = (h) =>
+  isFormXVPeriodFromHeader(h) || isFormXVPeriodToHeader(h) || isFormXVRemarksHeader(h);
+
+const coerceFormXVCellExportValue = (value, headerName) => {
+  const s = value == null ? '' : String(value).trim();
+  if (!s) return '';
+  const h = normalizeFormXVTableHeader(headerName);
+  const looksLikeLongNumeric = /^\d{8,}$/.test(s.replace(/[\s-]/g, ''));
+  if (looksLikeLongNumeric || h.includes('nature') || h.includes('remarks') || h.includes('from') || h.includes('to')) {
+    return s;
+  }
+  if (/^-?\d+(\.\d+)?$/.test(s) && (h.includes('sr') || h.includes('serial') || h.includes('rate'))) {
+    return Number(s);
+  }
+  return s;
+};
+
+const autofitExcelJSColumns = (worksheet, colFrom, colTo, rowFrom, rowTo) => {
+  if (!worksheet) return;
+  const start = Math.max(1, colFrom);
+  const end = Math.max(start, colTo);
+  const r0 = Math.max(1, rowFrom);
+  const r1 = Math.max(r0, rowTo);
+  for (let c = start; c <= end; c += 1) {
+    let maxLen = 10;
+    for (let r = r0; r <= r1; r += 1) {
+      const cell = worksheet.getCell(r, c);
+      const raw = cell?.value;
+      let text = '';
+      if (raw == null) text = '';
+      else if (typeof raw === 'object' && raw.richText) {
+        text = raw.richText.map((part) => part?.text || '').join('');
+      } else if (typeof raw === 'object' && raw.text != null) {
+        text = String(raw.text);
+      } else {
+        text = String(raw);
+      }
+      maxLen = Math.max(maxLen, text.length + 2);
+    }
+    const col = worksheet.getColumn(c);
+    col.width = Math.min(Math.max(maxLen, 12), 72);
+  }
+};
 
 const STATUTORY_MANAGER_INCHARGE_HEADER_KEYS = ['form_header_manager_incharge'];
 
@@ -3913,14 +5958,18 @@ const findSiteDetailByName = (siteDetailsList, siteName) => {
     .map((t) => t.trim().toLowerCase())
     .filter(Boolean);
   if (tokens.length === 0) return null;
+  const siteNameNorm = (s) =>
+    String(s?.siteName ?? s?.SiteName ?? s?.name ?? s?.Name ?? '')
+      .trim()
+      .toLowerCase();
   for (const token of tokens) {
-    const match = siteDetailsList.find((s) => {
-      const sn = String(s?.siteName ?? s?.SiteName ?? '')
-        .trim()
-        .toLowerCase();
-      return sn === token;
+    const exact = siteDetailsList.find((s) => siteNameNorm(s) === token);
+    if (exact) return exact;
+    const fuzzy = siteDetailsList.find((s) => {
+      const sn = siteNameNorm(s);
+      return sn && (sn === token || sn.includes(token) || token.includes(sn));
     });
-    if (match) return match;
+    if (fuzzy) return fuzzy;
   }
   return null;
 };
@@ -4005,6 +6054,189 @@ const filterEmployeesBySiteLocation = (employees, siteName, siteDetailsList) => 
 const buildSiteInchargeName = (site) =>
   String(site?.inchargeName ?? site?.InchargeName ?? '').trim();
 
+const buildSiteEstablishmentNameAndAddress = (site) => {
+  if (!site || typeof site !== 'object') return '';
+  const name = String(site.siteName ?? site.SiteName ?? '').trim();
+  const addr = String(site.siteAddress ?? site.SiteAddress ?? '').trim();
+  const city = String(site.siteCity ?? site.SiteCity ?? '').trim();
+  const state = String(site.siteState ?? site.SiteState ?? '').trim();
+  const parts = [];
+  if (name) parts.push(name);
+  const addrLine = [addr, city, state].filter(Boolean).join(', ');
+  if (addrLine) parts.push(addrLine);
+  return parts.join(', ').trim();
+};
+
+const buildSiteNatureAndLocation = (site) => {
+  if (!site || typeof site !== 'object') return '';
+  const industry = String(site.industry ?? site.Industry ?? '').trim();
+  const loc = siteLocationFromRecord(site);
+  return [industry, loc].filter(Boolean).join(' - ').trim();
+};
+
+const parseFlexibleEmployeeDate = (raw) => {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const parseFlexibleStatutoryDate = (raw) => {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}/.test(value)) {
+    const d = new Date(`${value.substring(0, 10)}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+
+  const direct = new Date(value);
+  if (!Number.isNaN(direct.getTime())) return direct;
+
+  let m = value.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/);
+  if (m) {
+    const dd = Number(m[1]);
+    const mm = Number(m[2]) - 1;
+    const yyyy = Number(m[3].length === 2 ? `20${m[3]}` : m[3]);
+    const d = new Date(yyyy, mm, dd);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+
+  m = value.match(/^(\d{1,2})[-/\s]([A-Za-z]{3,})[-/\s](\d{2,4})$/);
+  if (m) {
+    const dd = Number(m[1]);
+    const mon = String(m[2]).slice(0, 3).toLowerCase();
+    const yyyy = Number(m[3].length === 2 ? `20${m[3]}` : m[3]);
+    const months = {
+      jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+      jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+    };
+    if (Object.prototype.hasOwnProperty.call(months, mon)) {
+      const d = new Date(yyyy, months[mon], dd);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+  }
+  return null;
+};
+
+const getEmployeeDateofjoiningRaw = (emp) =>
+  emp.Dateofjoining ||
+  emp['Dateofjoining'] ||
+  emp.DateofJoining ||
+  emp['Date of Joining'] ||
+  emp['DateofJoining'] ||
+  emp.dateOfJoining ||
+  emp['Date of joining'] ||
+  emp.Date_of_Joining ||
+  emp['Date_of_Joining'] ||
+  '';
+
+const addDaysToEmployeeJoiningDate = (emp, daysToAdd) => {
+  const base = parseFlexibleStatutoryDate(getEmployeeDateofjoiningRaw(emp));
+  if (!base) return '';
+  const result = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+  result.setDate(result.getDate() + daysToAdd);
+  const iso = `${result.getFullYear()}-${String(result.getMonth() + 1).padStart(2, '0')}-${String(result.getDate()).padStart(2, '0')}`;
+  return formatStatutoryDateDisplay(iso);
+};
+
+const buildEmployeeWorkmanNameAndAddress = (empItem) => {
+  const emp = unwrapZohoEmployeeRecord(empItem);
+  if (!emp || typeof emp !== 'object') return '';
+  const employeeName =
+    emp.Name ||
+    emp['Name'] ||
+    emp.Name1 ||
+    emp['Name1'] ||
+    emp.EmployeeName ||
+    emp['Employee Name'] ||
+    `${emp.FirstName || emp['FirstName'] || ''} ${emp.LastName || emp['LastName'] || ''}`.trim() ||
+    '';
+  const addressLine1 = emp.Address_Line_1 || emp['Address_Line_1'] || emp.AddressLine1 || '';
+  const addressLine2 = emp.Address_Line_2 || emp['Address_Line_2'] || emp.AddressLine2 || '';
+  const city = emp.City || emp['City'] || emp.City1 || emp['City1'] || '';
+  const country = emp.Country || emp['Country'] || emp.Country1 || emp['Country1'] || '';
+  const addressParts = [addressLine1, addressLine2, city, country]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  return [String(employeeName || '').trim(), addressParts.join(', ')].filter(Boolean).join(', ');
+};
+
+const buildEmployeeAgeOrDobForFormXV = (empItem) => {
+  const emp = unwrapZohoEmployeeRecord(empItem);
+  if (!emp || typeof emp !== 'object') return '';
+  const dobRaw =
+    emp.Date_of_birth ||
+    emp['Date_of_birth'] ||
+    emp.DateofBirth ||
+    emp['Date of Birth'] ||
+    emp['DateofBirth'] ||
+    '';
+  if (String(dobRaw || '').trim()) return String(dobRaw).trim();
+  const dob = parseFlexibleEmployeeDate(dobRaw);
+  if (dob) {
+    const today = new Date();
+    let age = today.getFullYear() - dob.getFullYear();
+    const md = today.getMonth() - dob.getMonth();
+    if (md < 0 || (md === 0 && today.getDate() < dob.getDate())) age -= 1;
+    if (age >= 0 && age < 120) return String(age);
+  }
+  const direct = emp.Age || emp['Age'] || emp.age || emp['Employee Age'] || '';
+  return direct != null && String(direct).trim() !== '' ? String(direct).trim() : '';
+};
+
+const buildEmployeeIdentificationMarks = (empItem) => {
+  const emp = unwrapZohoEmployeeRecord(empItem);
+  if (!emp || typeof emp !== 'object') return '';
+  return String(
+    emp.Identification_Marks ||
+      emp['Identification Marks'] ||
+      emp.IdentificationMarks ||
+      emp.identification_marks ||
+      emp['Identification_marks'] ||
+      ''
+  ).trim();
+};
+
+const buildEmployeeFatherOrHusbandName = (empItem) => {
+  const emp = unwrapZohoEmployeeRecord(empItem);
+  if (!emp || typeof emp !== 'object') return '';
+  const fatherName =
+    emp.Father_s_Name ||
+    emp['Father_s_Name'] ||
+    emp.Father_Name ||
+    emp['Father_Name'] ||
+    emp.FathersName ||
+    emp['Father/Spouse Name'] ||
+    emp['Father Name'] ||
+    '';
+  if (String(fatherName || '').trim()) return String(fatherName).trim();
+  const spouseName =
+    emp.Spouse_Name || emp['Spouse_Name'] || emp.spouseName || emp['Spouse Name'] || '';
+  return String(spouseName || '').trim();
+};
+
+const applyFormXVHeaderAutofillFromEmployee = (headerData, empItem) => {
+  if (!headerData || typeof headerData !== 'object' || !empItem) return headerData;
+  const out = { ...headerData };
+  let changed = false;
+  const fill = (key, value) => {
+    if (!key || !Object.prototype.hasOwnProperty.call(out, key)) return;
+    const text = String(value || '').trim();
+    if (!text) return;
+    const cur = String(out[key] ?? '').trim();
+    if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+      out[key] = text;
+      changed = true;
+    }
+  };
+  fill('form_xv_workman', buildEmployeeWorkmanNameAndAddress(empItem));
+  fill('form_xv_age_or_dob', buildEmployeeAgeOrDobForFormXV(empItem));
+  fill('form_xv_identification_marks', buildEmployeeIdentificationMarks(empItem));
+  fill('form_xv_father_or_husband_name', buildEmployeeFatherOrHusbandName(empItem));
+  return changed ? out : headerData;
+};
+
 /** Fill contractor + manager/incharge headers from Site Management when empty or placeholder. */
 const applySiteManagementToHeaderFormData = (
   headerData,
@@ -4030,6 +6262,68 @@ const applySiteManagementToHeaderFormData = (
       }
     }
   }
+
+  const factoryText = buildSiteEstablishmentNameAndAddress(site);
+  if (factoryText) {
+    for (const key of STATUTORY_FACTORY_HEADER_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(out, key)) continue;
+      const cur = String(out[key] ?? '').trim();
+      if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+        out[key] = factoryText;
+        changed = true;
+      }
+    }
+    const fields = Array.isArray(formHeaderFields) ? formHeaderFields : [];
+    for (const field of fields) {
+      if (!isFactoryHeaderLabel(field?.label)) continue;
+      const key = field?.key;
+      if (!key) continue;
+      const cur = String(out[key] ?? '').trim();
+      if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+        out[key] = factoryText;
+        changed = true;
+      }
+    }
+  }
+
+  const establishmentText = buildSiteEstablishmentNameAndAddress(site);
+  const establishmentName = buildFormAEstablishmentNameFromSite(site);
+  const establishmentAddress = buildFormAEstablishmentAddressFromSite(site);
+  if (establishmentName) {
+    const fillEstablishmentKey = (key) => {
+      const cur = String(out[key] ?? '').trim();
+      if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+        out[key] = establishmentName;
+        changed = true;
+      }
+    };
+    fillEstablishmentKey('form_a_establishment_name');
+  }
+  if (establishmentAddress) {
+    const fillAddressKey = (key) => {
+      const cur = String(out[key] ?? '').trim();
+      if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+        out[key] = establishmentAddress;
+        changed = true;
+      }
+    };
+    fillAddressKey('form_a_establishment_address');
+  }
+  const natureLocationText = buildSiteNatureAndLocation(site);
+  const principalEmployerText = String(site?.siteName ?? site?.SiteName ?? '').trim() || establishmentText;
+  const formXVSiteHeaderFillers = [
+    ['form_xv_nature_location_work', natureLocationText],
+    ['form_xv_establishment_contract_carried', establishmentText],
+    ['form_xv_principal_employer', principalEmployerText]
+  ];
+  formXVSiteHeaderFillers.forEach(([key, value]) => {
+    if (!value || !Object.prototype.hasOwnProperty.call(out, key)) return;
+    const cur = String(out[key] ?? '').trim();
+    if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+      out[key] = value;
+      changed = true;
+    }
+  });
 
   const inchargeName = buildSiteInchargeName(site);
   if (inchargeName) {
@@ -4057,6 +6351,52 @@ const applySiteManagementToHeaderFormData = (
 /** @deprecated Use applySiteManagementToHeaderFormData */
 const applySiteContractorToHeaderFormData = (headerData, siteName, siteDetailsList, formHeaderFields) =>
   applySiteManagementToHeaderFormData(headerData, siteName, siteDetailsList, formHeaderFields);
+
+/** Ensure parsed form header field keys exist before site autofill (download without opening modal). */
+const seedHeaderFormDataFromParsedFields = (headerData, formHeaderFields) => {
+  const fields = Array.isArray(formHeaderFields) ? formHeaderFields : [];
+  if (fields.length === 0) return headerData;
+  const out = headerData && typeof headerData === 'object' ? { ...headerData } : {};
+  let changed = !headerData || typeof headerData !== 'object';
+  for (const field of fields) {
+    if (!field?.key) continue;
+    if (!Object.prototype.hasOwnProperty.call(out, field.key)) {
+      out[field.key] = field.value || '';
+      changed = true;
+    }
+  }
+  return changed ? out : headerData;
+};
+
+/** Write Form 10 / Form 12 merged factory+contractor header block into ExcelJS worksheet (0-based r,c from parser). */
+const writeForm10Form12HeaderFieldsToExcelJsWorksheet = (worksheet, headerFormData, parsedFormHeader) => {
+  if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
+  const effectiveFormHeader = parsedFormHeader || {};
+  const toCell = (r, c) => worksheet.getCell(Number(r) + 1, Number(c) + 1);
+
+  if (effectiveFormHeader.form12MergedHeaderCell) {
+    const { r, c } = effectiveFormHeader.form12MergedHeaderCell;
+    const vF = String(headerFormData.form12_header_factory ?? '').trim();
+    const vC = String(headerFormData.form12_header_contractor ?? '').trim();
+    const vR = String(headerFormData.form12_header_registration ?? '').trim();
+    const combined = `Name and Address of the Factory: ${vF}\nName and Address of the Contractor: ${vC}\nRegistration No: ${vR}`;
+    toCell(r, c).value = combined;
+  }
+  if (effectiveFormHeader.form10MergedHeaderCell) {
+    const { r, c } = effectiveFormHeader.form10MergedHeaderCell;
+    const vF = String(headerFormData.form10_header_factory ?? '').trim();
+    const vC = String(headerFormData.form10_header_contractor ?? '').trim();
+    const combined = `Name and Address of the Factory: ${vF}\nName and Address of the Contractor: ${vC}`;
+    toCell(r, c).value = combined;
+  }
+  if (effectiveFormHeader.form10MonthEndingCell) {
+    const me = effectiveFormHeader.form10MonthEndingCell;
+    const vM = String(headerFormData.form10_header_month_ending ?? '').trim();
+    const cell = toCell(me.r, me.c);
+    cell.value =
+      me.writeMode === 'full' ? (vM ? `Month ending: ${vM}` : 'Month ending: ') : vM;
+  }
+};
 
 /** Site name for Site Management header autofill — explicit row site / URL param first. */
 const resolveStatutorySiteNameForContractorAutofill = (item, ctx = {}) => {
@@ -4093,7 +6433,7 @@ const friendlyZohoPeopleAutofillError = (rawMessage, httpStatus) => {
   return msg || 'Failed to fetch employee data from Zoho People';
 };
 
-/** Form I: merged heading block should render as separate lines (Form - I / REGISTER OF WORKMEN / legal lines). */
+/** Form I: merged heading block — Form I / REGISTER OF FINES or REGISTER OF WORKMEN / legal lines. */
 const splitFormIHeaderBlock = (text) => {
   const t = String(text || '')
     .replace(/\r\n/g, '\n')
@@ -4102,7 +6442,9 @@ const splitFormIHeaderBlock = (text) => {
     .trim();
   if (!t) return null;
   if (!/\bform\s*[-–]?\s*i\b/i.test(t)) return null;
-  if (!/register\s+of\s+workmen/i.test(t)) return null;
+  const hasWorkmen = /register\s+of\s+workmen/i.test(t);
+  const hasFines = /register\s+of\s+fines/i.test(t);
+  if (!hasWorkmen && !hasFines) return null;
 
   const lines = t
     .split('\n')
@@ -4110,10 +6452,16 @@ const splitFormIHeaderBlock = (text) => {
     .filter(Boolean);
   if (lines.length === 0) return null;
 
-  const titleLine = lines.find((l) => /\bform\s*[-–]?\s*i\b/i.test(l)) || 'Form - I';
-  const subtitleLine = lines.find((l) => /register\s+of\s+workmen/i.test(l)) || 'REGISTER OF WORKMEN';
-  const bracketRule = lines.find((l) => /^\[.*\]$/.test(l) || /see\s+sub-?rule/i.test(l)) || '';
-  const actLine = lines.find((l) => /tamil\s+nadu\s+industrial\s+establishments/i.test(l)) || '';
+  const titleLine = lines.find((l) => /\bform\s*[-–]?\s*i\b/i.test(l)) || 'FORM I';
+  const subtitleLine =
+    lines.find((l) => /register\s+of\s+fines/i.test(l)) ||
+    lines.find((l) => /register\s+of\s+workmen/i.test(l)) ||
+    (hasFines ? 'REGISTER OF FINES' : 'REGISTER OF WORKMEN');
+  const bracketRule = lines.find((l) => /^\[.*\]$/.test(l) || /see\s+sub-?rule|see\s+rule/i.test(l)) || '';
+  const actLine =
+    lines.find((l) => /tamil\s+nadu\s+industrial\s+establishments/i.test(l)) ||
+    lines.find((l) => /minimum\s+wages\s+act/i.test(l)) ||
+    '';
   const reference = [bracketRule, actLine].filter(Boolean).join('\n').trim();
 
   return {
@@ -4243,6 +6591,104 @@ const dedupeConsecutiveFixedAggregateBodyRows = (rows) => {
   return out;
 };
 
+const normalizeAggregateRowText = (txt) =>
+  String(txt || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+const cellValueIsSignatureFooterText = (value) => {
+  const norm = normalizeAggregateRowText(value);
+  if (!norm) return false;
+  if (/\b(authorised|authorized)\s+signator(y|ies)\b/i.test(norm)) return true;
+  if (norm.includes('authorised signatory') || norm.includes('authorized signatory')) return true;
+  if (/signature\s+of\s+employer/i.test(norm)) return true;
+  if (/^for\s*\(/.test(norm)) return true;
+  if (/manager\s*\/\s*authorised\s+person/i.test(norm)) return true;
+  return false;
+};
+
+const collectFixedAggregateRowValues = (row, headers) => {
+  if (Array.isArray(row)) {
+    return row.map((v) => String(v ?? '').trim()).filter(Boolean);
+  }
+  if (!row || typeof row !== 'object') return [];
+  const hdrs = Array.isArray(headers) && headers.length > 0 ? headers : Object.keys(row);
+  return hdrs.map((h) => String(row[h] ?? '').trim()).filter(Boolean);
+};
+
+const isFixedAggregateCategoryLabelRow = (row, headers) => {
+  const labelHeader = (headers || []).find((h) =>
+    /details\s+of\s+fines|unpaid\s+accumulations/i.test(String(h || ''))
+  );
+  if (!labelHeader) return false;
+  const labelVal = String(row?.[labelHeader] ?? '').trim();
+  if (!labelVal || /^enter\s+/i.test(labelVal)) return false;
+  return true;
+};
+
+/** Signature / employer footer rows must not appear as editable Form C (LWF) grid rows. */
+const isFixedAggregateComplianceFooterRow = (row, headers) => {
+  if (isFixedAggregateCategoryLabelRow(row, headers)) return false;
+  const values = collectFixedAggregateRowValues(row, headers);
+  if (values.length === 0) return false;
+  if (values.some((v) => cellValueIsSignatureFooterText(v))) return true;
+
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const labelHeader = hdrs.find((h) => /details\s+of\s+fines|unpaid\s+accumulations/i.test(String(h || '')));
+  const labelVal = labelHeader ? String(row?.[labelHeader] ?? '').trim() : '';
+  const labelIsEmptyOrPlaceholder = !labelVal || /^enter\s+/i.test(labelVal);
+  const quarterHeaders = hdrs.filter((h) => /quarter\s+ending/i.test(String(h || '')));
+  const quarterVals = quarterHeaders.map((h) => String(row?.[h] ?? '').trim()).filter(Boolean);
+  if (labelIsEmptyOrPlaceholder && quarterVals.length > 0) {
+    const allFooterish = quarterVals.every((v) => {
+      if (cellValueIsSignatureFooterText(v)) return true;
+      if (/^\d{1,3}$/.test(normalizeAggregateRowText(v))) return true;
+      return false;
+    });
+    if (allFooterish) return true;
+  }
+  return false;
+};
+
+const stripFixedAggregateComplianceFooterRows = (rows, headers) => {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  return rows.filter((row) => !isFixedAggregateComplianceFooterRow(row, headers));
+};
+
+/** Remove signature/footer bleed from quarter columns while keeping category + fines entry rows. */
+const sanitizeFixedAggregateComplianceRows = (rows, headers) => {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const quarterHeaders = hdrs.filter((h) => /quarter\s+ending/i.test(String(h || '')));
+  const labelHeader = hdrs.find((h) => /details\s+of\s+fines|unpaid\s+accumulations/i.test(String(h || '')));
+
+  return stripFixedAggregateComplianceFooterRows(rows, hdrs).map((row) => {
+    if (!row || typeof row !== 'object' || quarterHeaders.length === 0) return row;
+    if (isFixedAggregateCategoryLabelRow(row, hdrs)) return row;
+    const next = { ...row };
+    const labelVal = labelHeader ? String(next[labelHeader] ?? '').trim() : '';
+    const isFinesEntryRow = !labelVal || /^enter\s+/i.test(labelVal);
+    let changed = false;
+    quarterHeaders.forEach((h) => {
+      const v = String(next[h] ?? '').trim();
+      if (!v) return;
+      if (cellValueIsSignatureFooterText(v)) {
+        next[h] = '';
+        changed = true;
+        return;
+      }
+      if (isFinesEntryRow && /^\d{1,3}$/.test(normalizeAggregateRowText(v))) {
+        next[h] = '';
+        changed = true;
+      }
+    });
+    return changed ? next : row;
+  });
+};
+
 /** LWF Form-C: “[See rule … Labour Welfare …]” is rendered on its own line under the title (not the generic reference block). */
 const shouldAppendReferenceToFormCTitle = (formHeader) => {
   const title = String(formHeader?.title || '').trim();
@@ -4284,10 +6730,600 @@ const isFormAMusterRollContext = (formHeader) => {
   );
 };
 
+const isFormAMusterRollRowContext = (formHeader, item, fileName = '', sheetText = '') => {
+  if (isFormAMusterRollContext(formHeader)) return true;
+  const blob = [
+    item?.formName,
+    item?.FormName,
+    item?.act,
+    item?.Act,
+    item?.description,
+    item?.Description,
+    fileName,
+    sheetText
+  ]
+    .join(' ')
+    .toLowerCase();
+  const formAName = /\bform[\s_\-]*a\b/.test(blob);
+  if (
+    formAName &&
+    /maternity\s+benefit|register\s+of\s+muster\s+roll|muster\s+roll|tamil\s*nadu|tamilnadu/.test(blob)
+  ) {
+    return true;
+  }
+  const fn = String(fileName || '').toLowerCase();
+  if (/\bform[\s_\-]*a\b/.test(fn) && /tamil|maternity|muster/.test(fn)) return true;
+  if (/form[\s_\-]*a[\s_\-]+tamil/i.test(fn.replace(/\.xlsx?$/i, ''))) return true;
+  return false;
+};
+
+const headersIndicateFormAMusterRoll = (tableHeaders) => {
+  if (!Array.isArray(tableHeaders) || tableHeaders.length === 0) return false;
+  const joined = tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+  if (/name\s+of\s+the\s+woman/.test(joined)) return true;
+  if (/woman/.test(joined) && /\bage\b/.test(joined)) return true;
+  if (/husband\s+or\s+father/.test(joined) && /nature\s+of\s+work/.test(joined)) return true;
+  if (/no\.?\s*of\s+days?\s+employed/.test(joined) && /laid\s+off/.test(joined)) return true;
+  if (/no\.?\s*of\s+days?\s+not\s+employed/.test(joined)) return true;
+  if (/date\s+on\s+which\s+employed/.test(joined) && /month/.test(joined)) return true;
+  return false;
+};
+
+const headersLookLikePivotOrWrongFormATable = (tableHeaders) => {
+  if (!Array.isArray(tableHeaders) || tableHeaders.length === 0) return false;
+  const joined = tableHeaders.map((h) => String(h || '').toLowerCase()).join(' | ');
+  if (/row\s+labels/.test(joined)) return true;
+  if (/count\s+of\s+(male|female)/.test(joined)) return true;
+  if (/sum\s+of\s+(gross|basic)\s+wage/.test(joined) && !/woman|workman|maternity/.test(joined)) return true;
+  return false;
+};
+
+const isFormAMusterTableHeaderRowText = (rowTextLower) => {
+  if (!rowTextLower || headersLookLikePivotOrWrongFormATable([rowTextLower])) return false;
+  if (!rowHasTableSerialHeader(rowTextLower) && !/\bserial\b/.test(rowTextLower)) return false;
+  return /woman|workman|husband|nature\s+of\s+work|days\s+employed|laid\s+off|not\s+employed|maternity/.test(
+    rowTextLower
+  );
+};
+
+const findFormAMusterTableAnchor = (getMergedAwareCellText, maxRows = 80, maxCols = 140) => {
+  for (let r = 0; r < maxRows; r += 1) {
+    const cells = [];
+    for (let c = 0; c < maxCols; c += 1) {
+      cells.push(String(getMergedAwareCellText(r, c) || '').trim());
+    }
+    const rowTextLower = cells.filter(Boolean).join(' ').toLowerCase();
+    if (!isFormAMusterTableHeaderRowText(rowTextLower)) continue;
+    let snoCol = 0;
+    for (let c = 0; c < maxCols; c += 1) {
+      const t = normalizeExcelHeaderCell(getMergedAwareCellText(r, c));
+      if (
+        t &&
+        (t === 's.no' ||
+          t === 's no' ||
+          t === 'sl.no' ||
+          t === 'sl no' ||
+          t.includes('s.no') ||
+          t.includes('serial'))
+      ) {
+        snoCol = c;
+        break;
+      }
+    }
+    return { r, c: snoCol };
+  }
+  return null;
+};
+
+const collectFormATableHeaderCells = (getMergedAwareCellText, headerRowIndex, startCol, maxCols) => {
+  const normalizeHeaderText = (txt) =>
+    String(txt || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const rebuilt = [];
+  let emptyStreak = 0;
+  for (let colIdx = startCol; colIdx < maxCols; colIdx += 1) {
+    let h = normalizeHeaderText(getMergedAwareCellText(headerRowIndex, colIdx));
+    if (!h) {
+      for (let lookFwd = 1; lookFwd <= 2; lookFwd += 1) {
+        const cand = normalizeHeaderText(getMergedAwareCellText(headerRowIndex + lookFwd, colIdx));
+        if (!cand || /^\d+$/.test(cand) || cand.length < 2) continue;
+        h = cand;
+        break;
+      }
+    }
+    if (!h) {
+      if (rebuilt.length === 0) continue;
+      emptyStreak += 1;
+      if (emptyStreak >= 6) break;
+      continue;
+    }
+    emptyStreak = 0;
+    rebuilt.push(h);
+  }
+  while (rebuilt.length > 0 && !rebuilt[rebuilt.length - 1]) rebuilt.pop();
+  return rebuilt;
+};
+
+const computeFormADataStartIndex = (getMergedAwareCellText, headerRowIndex, startCol, headers, jsonDataLength) => {
+  let dataStartIndex = headerRowIndex + 1;
+  if (headerRowIndex + 1 < jsonDataLength) {
+    let seqHits = 0;
+    for (let i = 0; i < headers.length; i += 1) {
+      const t = String(getMergedAwareCellText(headerRowIndex + 1, startCol + i) || '')
+        .replace(/\s+/g, '')
+        .trim();
+      if (t === String(i + 1)) seqHits += 1;
+    }
+    if (seqHits >= Math.max(3, Math.floor(headers.length * 0.4))) {
+      dataStartIndex = headerRowIndex + 2;
+    }
+  }
+  return dataStartIndex;
+};
+
+const findFormAMusterTableAnchorRelaxed = (getMergedAwareCellText, maxRows = 120, maxCols = 140, sheetText = '') => {
+  let searchFrom = 0;
+  for (let r = 0; r < maxRows; r += 1) {
+    const rowText = [];
+    for (let c = 0; c < maxCols; c += 1) {
+      rowText.push(String(getMergedAwareCellText(r, c) || '').trim());
+    }
+    const joined = rowText.filter(Boolean).join(' ').toLowerCase();
+    if (/register\s+of\s+muster\s+roll|maternity\s+benefit/.test(joined)) searchFrom = r;
+  }
+  for (let r = searchFrom; r < maxRows; r += 1) {
+    const cells = [];
+    for (let c = 0; c < maxCols; c += 1) {
+      cells.push(String(getMergedAwareCellText(r, c) || '').trim());
+    }
+    const nonEmpty = cells.filter(Boolean);
+    if (nonEmpty.length < 3 || headersLookLikePivotOrWrongFormATable(nonEmpty)) continue;
+    const rowTextLower = nonEmpty.join(' ').toLowerCase();
+    if (/^1[\s.)-]*name\s+of\s+the\s+establishment/.test(rowTextLower.replace(/^\s+/, ''))) continue;
+    if (!rowHasTableSerialHeader(rowTextLower) && !/\bserial\b/.test(rowTextLower)) continue;
+    let snoCol = 0;
+    for (let c = 0; c < maxCols; c += 1) {
+      const t = normalizeExcelHeaderCell(getMergedAwareCellText(r, c));
+      if (
+        t &&
+        (t === 's.no' ||
+          t === 's no' ||
+          t === 'sl.no' ||
+          t === 'sl no' ||
+          t.includes('s.no') ||
+          t.includes('serial'))
+      ) {
+        snoCol = c;
+        return { r, c: snoCol };
+      }
+    }
+  }
+  return null;
+};
+
+const rebuildFormATableHeadersFromSheetRelaxed = ({
+  jsonData,
+  effectiveSheetCols,
+  getMergedAwareCellText,
+  sheetText = ''
+}) => {
+  const maxRows = Math.min(120, (jsonData?.length || 0) + 5);
+  const maxCols = Math.max(effectiveSheetCols || 0, 50);
+  const anchor = findFormAMusterTableAnchorRelaxed(getMergedAwareCellText, maxRows, maxCols, sheetText);
+  if (!anchor) return null;
+  const rebuilt = collectFormATableHeaderCells(getMergedAwareCellText, anchor.r, anchor.c, maxCols);
+  if (rebuilt.length < 3 || headersLookLikePivotOrWrongFormATable(rebuilt)) return null;
+  return {
+    headers: rebuilt,
+    headerRowIndex: anchor.r,
+    dataStartIndex: computeFormADataStartIndex(
+      getMergedAwareCellText,
+      anchor.r,
+      anchor.c,
+      rebuilt,
+      jsonData?.length || 0
+    ),
+    startCol: anchor.c
+  };
+};
+
+const buildWorksheetParseHelpers = (worksheet, jsonData) => {
+  const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1:A1');
+  const maxSheetCols = range.e && typeof range.e.c === 'number' ? range.e.c + 1 : 0;
+  const merges = worksheet['!merges'] || [];
+  let mergeMaxCol = 0;
+  for (let mi = 0; mi < merges.length; mi += 1) {
+    const m = merges[mi];
+    if (m && m.e && typeof m.e.c === 'number') mergeMaxCol = Math.max(mergeMaxCol, m.e.c + 1);
+  }
+  const effectiveSheetCols = Math.max(maxSheetCols, mergeMaxCol);
+  const getRawCellText = (r, c) => {
+    if (r < 0 || c < 0) return '';
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const cell = worksheet[ref];
+    if (!cell || cell.v == null) return '';
+    return String(cell.v).trim();
+  };
+  const getMergedAwareCellText = (r, c) => {
+    const direct = getRawCellText(r, c);
+    if (direct) return direct;
+    for (let i = 0; i < merges.length; i += 1) {
+      const m = merges[i];
+      if (!m || !m.s || !m.e) continue;
+      if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) {
+        const topLeft = getRawCellText(m.s.r, m.s.c);
+        if (topLeft) return topLeft;
+      }
+    }
+    return '';
+  };
+  return { effectiveSheetCols, getMergedAwareCellText, jsonData: jsonData || XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }) };
+};
+
+const extractFormATableDataFromSheet = (jsonData, layout, getMergedAwareCellText) => {
+  if (!layout?.headers?.length) return [];
+  const rows = [];
+  const startIndex = layout.dataStartIndex ?? layout.headerRowIndex + 1;
+  const startCol = layout.startCol ?? 0;
+  for (let i = startIndex; i < (jsonData?.length || 0); i += 1) {
+    const rowData = {};
+    for (let j = 0; j < layout.headers.length; j += 1) {
+      rowData[layout.headers[j]] = String(getMergedAwareCellText(i, startCol + j) || '').trim();
+    }
+    if (Object.values(rowData).some((val) => val)) rows.push(rowData);
+  }
+  return rows;
+};
+
+const resolveFormATableHeadersFromWorkbook = (workbook, hints = {}) => {
+  const sheetName = workbook?.SheetNames?.[0];
+  if (!sheetName) return null;
+  const worksheet = workbook.Sheets[sheetName];
+  if (!worksheet) return null;
+  const { effectiveSheetCols, getMergedAwareCellText, jsonData } = buildWorksheetParseHelpers(worksheet);
+  const sheetText = jsonData
+    .slice(0, 45)
+    .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+    .join(' ');
+  const formHeader = hints.formHeader || null;
+  const item = hints.item || null;
+  const fileName = hints.fileName || hints.formFileName || sheetName || '';
+  if (
+    !isFormAMusterRollContext(formHeader) &&
+    !isFormAMusterRollRowContext(formHeader, item, fileName, hints.sheetText || sheetText)
+  ) {
+    return null;
+  }
+  let rebuild = rebuildFormATableHeadersFromSheet({ jsonData, effectiveSheetCols, getMergedAwareCellText });
+  if (!rebuild?.headers?.length) {
+    rebuild = rebuildFormATableHeadersFromSheetRelaxed({
+      jsonData,
+      effectiveSheetCols,
+      getMergedAwareCellText,
+      sheetText: hints.sheetText || sheetText
+    });
+  }
+  if (!rebuild?.headers?.length) return null;
+  return {
+    ...rebuild,
+    tableData: extractFormATableDataFromSheet(jsonData, rebuild, getMergedAwareCellText)
+  };
+};
+
+const applyFormAWorkbookLayoutToParsed = (parsed, workbook, hints = {}) => {
+  if (!parsed || !workbook) return parsed;
+  const currentHeaders = Array.isArray(parsed.headers) ? parsed.headers : [];
+  if (
+    headersIndicateFormAMusterRoll(currentHeaders) &&
+    !headersLookLikePivotOrWrongFormATable(currentHeaders)
+  ) {
+    return parsed;
+  }
+  const layout = resolveFormATableHeadersFromWorkbook(workbook, {
+    ...hints,
+    formHeader: hints.formHeader || parsed.formHeader
+  });
+  if (layout?.headers?.length) {
+    return {
+      ...parsed,
+      headers: layout.headers,
+      tableData: layout.tableData?.length ? layout.tableData : parsed.tableData,
+      headerRowIndex: layout.headerRowIndex,
+      dataStartIndex: layout.dataStartIndex,
+      tableStartCol: layout.startCol
+    };
+  }
+  return applyFormAHeaderFieldLayoutToParsed(parsed, workbook, hints);
+};
+
+const rebuildFormATableHeadersFromSheet = ({
+  jsonData,
+  effectiveSheetCols,
+  getMergedAwareCellText
+}) => {
+  const maxRows = Math.min(80, (jsonData?.length || 0) + 5);
+  const maxCols = Math.max(effectiveSheetCols || 0, 40);
+  const anchor = findFormAMusterTableAnchor(getMergedAwareCellText, maxRows, maxCols);
+  if (!anchor) return null;
+  const rebuilt = collectFormATableHeaderCells(getMergedAwareCellText, anchor.r, anchor.c, maxCols);
+  if (rebuilt.length < 3 || headersLookLikePivotOrWrongFormATable(rebuilt)) return null;
+  return {
+    headers: rebuilt,
+    headerRowIndex: anchor.r,
+    dataStartIndex: computeFormADataStartIndex(
+      getMergedAwareCellText,
+      anchor.r,
+      anchor.c,
+      rebuilt,
+      jsonData?.length || 0
+    ),
+    startCol: anchor.c
+  };
+};
+
+const FORM_A_NUMBERED_HEADER_SPECS = [
+  {
+    match: /^1\.?\s*name\s+of\s+the\s+establishment/i,
+    label: 'Name of the Establishment:',
+    key: 'form_a_establishment_name'
+  },
+  {
+    match: /address\s+of\s+the\s+establishment/i,
+    label: 'Address of the Establishment:',
+    key: 'form_a_establishment_address'
+  },
+  {
+    match: /^2\.?\s*name\s+of\s+the\s+woman/i,
+    label: 'Name of the woman and age:',
+    key: 'form_a_woman_name_age'
+  },
+  {
+    match: /^3\.?\s*name\s+of\s+husband/i,
+    label: 'Name of husband or father:',
+    key: 'form_a_husband_father'
+  },
+  {
+    match: /^4\.?\s*nature\s+of\s+work/i,
+    label: 'Nature of Work:',
+    key: 'form_a_nature_of_work'
+  },
+  {
+    match: /^5\.?\s*date\s+on\s+which\s+employed/i,
+    label: 'Date on which employed:',
+    key: 'form_a_date_employed'
+  },
+  {
+    match: /^6\.?\s*dates\s+with\s+month/i,
+    label: 'Dates with month and year in which employed:',
+    key: 'form_a_dates_employed'
+  },
+  {
+    match: /^7\.?\s*date\s+of\s+giving\s+notice.*preg/i,
+    label: 'Date of giving notice of Pregnancy:',
+    key: 'form_a_notice_pregnancy'
+  },
+  {
+    match: /^8\.?\s*date\s+of\s+giving\s+notice.*deliv/i,
+    label: 'Date of giving notice of Delivery:',
+    key: 'form_a_notice_delivery'
+  },
+  {
+    match: /^9\.?\s*date\s+of\s+production\s+of\s+proof.*birth/i,
+    label: 'Date of Production of Proof of Birth:',
+    key: 'form_a_proof_birth'
+  },
+  {
+    match: /^10\.?\s*date\s+of\s+production\s+of\s+proof.*death/i,
+    label: 'Date of production of proof of death if any:',
+    key: 'form_a_proof_death'
+  },
+  {
+    match: /^11\.?\s*date\s+on\s+which\s+payment\s+was\s+made/i,
+    label: 'Date on which payment was made:',
+    key: 'form_a_payment_date'
+  },
+  {
+    match: /^12\.?\s*details\s+of\s+payment/i,
+    label: 'Details of Payment:',
+    key: 'form_a_payment_details'
+  },
+  {
+    match: /^\s*a\)?\s*maternity\s+benefit/i,
+    label: 'a) Maternity Benefit:',
+    key: 'form_a_maternity_benefit'
+  },
+  {
+    match: /^\s*b\)?\s*subsequent\s+paym/i,
+    label: 'b) Subsequent Payment:',
+    key: 'form_a_subsequent_payment'
+  },
+  {
+    match: /^\s*c\)?\s*bonus/i,
+    label: 'c) Bonus:',
+    key: 'form_a_bonus'
+  }
+];
+
+const enrichFormAHeaderFieldsFromSheet = (headerRowIndex, effectiveSheetCols, getMergedAwareCellText, existingFields = []) => {
+  const normLabel = (v) =>
+    String(v || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const hasLabel = (label) => (existingFields || []).some((f) => normLabel(f.label) === normLabel(label));
+  const fields = Array.isArray(existingFields) ? [...existingFields] : [];
+  const addField = (label, key, value = '') => {
+    if (hasLabel(label)) return;
+    fields.push({ label, value, key });
+  };
+  const scanTo = Math.max(headerRowIndex >= 0 ? headerRowIndex + 1 : 0, 100);
+  for (let r = 0; r < scanTo; r += 1) {
+    for (let c = 0; c < Math.max(80, effectiveSheetCols || 0); c += 1) {
+      const raw = String(getMergedAwareCellText(r, c) || '').trim();
+      if (!raw) continue;
+      FORM_A_NUMBERED_HEADER_SPECS.forEach((spec) => {
+        if (!spec.match.test(raw) || hasLabel(spec.label)) return;
+        let value = '';
+        for (let nc = c + 1; nc < Math.min(c + 10, Math.max(80, effectiveSheetCols || 0)); nc += 1) {
+          const v = String(getMergedAwareCellText(r, nc) || '').trim();
+          if (v && v !== ':' && !spec.match.test(v)) {
+            value = v;
+            break;
+          }
+        }
+        addField(spec.label, spec.key, value);
+      });
+    }
+  }
+  return fields;
+};
+
+const remapFormARowsByColumnIndex = (rows, priorHeaders, canonicalHeaders) => {
+  const list = Array.isArray(rows) ? rows : [];
+  const canon = Array.isArray(canonicalHeaders) ? canonicalHeaders : [];
+  const prior = Array.isArray(priorHeaders) ? priorHeaders : [];
+  return list.map((row, rowIndex) => {
+    const out = {};
+    canon.forEach((header, colIndex) => {
+      let value = '';
+      if (row && typeof row === 'object') {
+        if (Object.prototype.hasOwnProperty.call(row, header)) value = row[header];
+        else {
+          const priorKey = prior[colIndex];
+          if (priorKey && Object.prototype.hasOwnProperty.call(row, priorKey)) value = row[priorKey];
+          else {
+            const vals = Object.values(row);
+            value = vals[colIndex] != null ? vals[colIndex] : '';
+          }
+        }
+      }
+      if ((value == null || String(value).trim() === '') && /s\.?\s*no|serial|sl\.?\s*no/i.test(String(header || ''))) {
+        value = rowIndex + 1;
+      }
+      out[header] = value != null ? value : '';
+    });
+    return out;
+  });
+};
+
 const shouldHideFormAHeaderField = (formHeader, field) => {
+  if (isFormAHeaderFieldLayoutFormHeader(formHeader)) return false;
   if (!isFormAMusterRollContext(formHeader)) return false;
   const label = String(field?.label || '').replace(/\s+/g, ' ').trim().toLowerCase();
   return /^\(?10\)?\s*date\s+on\s+which\s+payment\s+was\s+made\s*:?$/.test(label);
+};
+
+const buildFormAEstablishmentNameFromSite = (site) =>
+  String(site?.siteName ?? site?.SiteName ?? '').trim();
+
+const buildFormAEstablishmentAddressFromSite = (site) => {
+  if (!site || typeof site !== 'object') return '';
+  const addr = String(site.siteAddress ?? site.SiteAddress ?? '').trim();
+  const city = String(site.siteCity ?? site.SiteCity ?? '').trim();
+  const state = String(site.siteState ?? site.SiteState ?? '').trim();
+  return [addr, city, state].filter(Boolean).join(', ').trim();
+};
+
+const applyFormAEstablishmentFromSite = (headerData, siteName, siteDetailsList) => {
+  if (!headerData || typeof headerData !== 'object') return headerData;
+  const site = findSiteDetailByName(siteDetailsList, siteName);
+  if (!site) return headerData;
+  const out = { ...headerData };
+  let changed = false;
+  const fill = (key, value) => {
+    if (!value) return;
+    const cur = String(out[key] ?? '').trim();
+    if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+      out[key] = value;
+      changed = true;
+    }
+  };
+  fill('form_a_establishment_name', buildFormAEstablishmentNameFromSite(site));
+  fill('form_a_establishment_address', buildFormAEstablishmentAddressFromSite(site));
+  return changed ? out : headerData;
+};
+
+const pickFormAEmployeeTextField = (emp, patterns) => {
+  if (!emp || typeof emp !== 'object') return '';
+  const keys = Object.keys(emp);
+  for (let i = 0; i < patterns.length; i += 1) {
+    const re = patterns[i];
+    const hit = keys.find((k) => re.test(String(k || '').replace(/[^a-z0-9]/gi, ' ')));
+    if (hit && emp[hit] != null && String(emp[hit]).trim() !== '') return String(emp[hit]).trim();
+  }
+  return '';
+};
+
+const pickEmployeeJoiningDateRaw = (emp) =>
+  pickFormAEmployeeTextField(emp, [
+    /dateofjoining/i,
+    /dateofjoiningdisplayvalue/i,
+    /date_of_joining/i,
+    /joiningdate/i,
+    /doj/i
+  ]) ||
+  String(
+    emp.Dateofjoining ||
+      emp['Dateofjoining'] ||
+      emp.DateofJoining ||
+      emp['Date of Joining'] ||
+      emp['DateofJoining'] ||
+      emp.dateOfJoining ||
+      emp['dateOfJoining'] ||
+      emp['Date of joining'] ||
+      emp.Date_of_Joining ||
+      emp['Date_of_Joining'] ||
+      ''
+  ).trim();
+
+const formatFormADisplayDate = (raw) => {
+  const value = String(raw || '').trim();
+  if (!value) return '';
+  const d = parseFlexibleStatutoryDate(value) || parseFlexibleEmployeeDate(value);
+  if (!d || Number.isNaN(d.getTime())) return value;
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  return `${dd}-${mm}-${d.getFullYear()}`;
+};
+
+const buildFormAMonthEmploymentSummary = (selectedMonth, year, daysEmployed, daysLaidOff) => {
+  const fullMonth = resolveToFullMonthName(selectedMonth) || String(selectedMonth || '').trim();
+  const y = year || new Date().getFullYear();
+  const parts = [];
+  if (daysEmployed != null && String(daysEmployed).trim() !== '') {
+    parts.push(`Employed ${daysEmployed} day(s)`);
+  }
+  if (daysLaidOff != null && String(daysLaidOff).trim() !== '') {
+    parts.push(`Laid off / not employed ${daysLaidOff} day(s)`);
+  }
+  if (!fullMonth) return parts.join('; ');
+  return parts.length ? `${fullMonth} ${y}: ${parts.join('; ')}` : `${fullMonth} ${y}`;
+};
+
+const pickForm25RecordValue = (record, keys) => {
+  if (!record || typeof record !== 'object' || !Array.isArray(keys)) return '';
+  const normKey = (s) =>
+    String(s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+  for (let i = 0; i < keys.length; i += 1) {
+    const key = keys[i];
+    const direct = record[key];
+    if (direct != null && String(direct).trim() !== '') return String(direct).trim();
+    const targetNorm = normKey(key);
+    if (!targetNorm) continue;
+    const hit = Object.keys(record).find((k) => {
+      const kn = normKey(k);
+      return kn === targetNorm || kn.includes(targetNorm) || targetNorm.includes(kn);
+    });
+    if (hit && record[hit] != null && String(record[hit]).trim() !== '') {
+      return String(record[hit]).trim();
+    }
+  }
+  return '';
 };
 
 const FORM_A_MARKING_LEGEND = [
@@ -4296,6 +7332,195 @@ const FORM_A_MARKING_LEGEND = [
   'W/H for work with substituted holiday',
   'N/E if not eligible for the wages'
 ];
+
+const isFormAHeaderFieldLayoutFormHeader = (formHeader) => !!formHeader?.formAHeaderFieldLayout;
+
+const formAHeaderFieldsHaveData = (headerData) => {
+  if (!headerData || typeof headerData !== 'object') return false;
+  return Object.values(headerData).some((v) => {
+    const s = String(v ?? '').trim();
+    return s && !/^enter\b/i.test(s) && !/^select\b/i.test(s);
+  });
+};
+
+const isFormAHeaderOnlyModalContext = (
+  formHeader,
+  item,
+  fileName,
+  sheetText,
+  tableHeaders = [],
+  headerFields = null
+) => {
+  if (isFormAHeaderFieldLayoutFormHeader(formHeader)) return true;
+  const fn = String(fileName || '');
+  const formACtx =
+    isFormAMusterRollContext(formHeader) ||
+    isFormAMusterRollRowContext(formHeader, item, fn, sheetText) ||
+    /\bform[\s._-]*a[\s._-]*[-_.]?tamil/i.test(fn);
+  if (!formACtx) return false;
+  const fields = headerFields || formHeader?.fields;
+  if (Array.isArray(fields) && fields.some((f) => String(f?.key || '').startsWith('form_a_'))) return true;
+  if (!tableHeaders?.length || headersLookLikePivotOrWrongFormATable(tableHeaders)) return true;
+  return false;
+};
+
+const sheetTextIndicatesFormAHeaderFields = (sheetText) => {
+  const t = String(sheetText || '').toLowerCase();
+  return (
+    /register\s+of\s+muster\s+roll/.test(t) &&
+    (/name\s+of\s+the\s+woman\s+and\s+age/.test(t) ||
+      /name\s+of\s+husband\s+or\s+father/.test(t) ||
+      /nature\s+of\s+work/.test(t))
+  );
+};
+
+const workbookHasFormAMusterEmployeeTable = (workbook, hints = {}) => {
+  if (!workbook) return false;
+  const layout = resolveFormATableHeadersFromWorkbook(workbook, hints);
+  return !!(
+    layout?.headers?.length >= 3 && !headersLookLikePivotOrWrongFormATable(layout.headers)
+  );
+};
+
+const buildFormAHeaderFieldSpecs = (existingFields = []) => {
+  const fields = Array.isArray(existingFields) ? [...existingFields] : [];
+  const hasKey = (key) => fields.some((f) => f.key === key);
+  FORM_A_NUMBERED_HEADER_SPECS.forEach((spec) => {
+    if (!hasKey(spec.key)) {
+      fields.push({ label: spec.label, value: '', key: spec.key });
+    }
+  });
+  return fields;
+};
+
+const resolveFormAHeaderFieldLayout = (parsed, workbook, hints = {}) => {
+  const formHeader = hints.formHeader || parsed?.formHeader || null;
+  const item = hints.item || null;
+  const fileName = hints.fileName || hints.formFileName || '';
+  const sheetText = hints.sheetText || '';
+  const formACtx =
+    isFormAMusterRollContext(formHeader) ||
+    isFormAMusterRollRowContext(formHeader, item, fileName, sheetText);
+  if (!formACtx) return null;
+  if (workbook && workbookHasFormAMusterEmployeeTable(workbook, { ...hints, formHeader, item, fileName, sheetText })) {
+    return null;
+  }
+  if (
+    !sheetTextIndicatesFormAHeaderFields(sheetText) &&
+    !isFormAMusterRollContext(formHeader) &&
+    !isFormAMusterRollRowContext(formHeader, item, fileName, sheetText)
+  ) {
+    return null;
+  }
+  let fields = buildFormAHeaderFieldSpecs(formHeader?.fields || []);
+  if (workbook?.SheetNames?.[0]) {
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+    if (worksheet) {
+      const { effectiveSheetCols, getMergedAwareCellText, jsonData } = buildWorksheetParseHelpers(worksheet);
+      const scanTo = Math.max(parsed?.headerRowIndex >= 0 ? parsed.headerRowIndex + 1 : 0, 100);
+      fields = enrichFormAHeaderFieldsFromSheet(scanTo, effectiveSheetCols, getMergedAwareCellText, fields);
+    }
+  }
+  return {
+    formHeader: {
+      ...(formHeader || {}),
+      formAHeaderFieldLayout: true,
+      fields
+    },
+    headers: [],
+    tableData: [],
+    headerRowIndex: -1,
+    dataStartIndex: 0,
+    tableStartCol: 0
+  };
+};
+
+const applyFormAHeaderFieldLayoutToParsed = (parsed, workbook, hints = {}) => {
+  if (!parsed) return parsed;
+  if (isFormAHeaderFieldLayoutFormHeader(parsed.formHeader)) return parsed;
+  const layout = resolveFormAHeaderFieldLayout(parsed, workbook, {
+    ...hints,
+    formHeader: hints.formHeader || parsed.formHeader
+  });
+  if (!layout) return parsed;
+  return {
+    ...parsed,
+    formHeader: layout.formHeader,
+    headers: layout.headers,
+    tableData: layout.tableData,
+    headerRowIndex: layout.headerRowIndex,
+    dataStartIndex: layout.dataStartIndex,
+    tableStartCol: layout.tableStartCol
+  };
+};
+
+const writeFormAHeaderFieldsToExcelWorksheet = (worksheet, headerFormData, parsedFormHeader, helpers = {}) => {
+  if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
+  const normalize = (txt) =>
+    String(txt || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  const excelCellValueToString =
+    helpers.excelCellValueToString ||
+    ((val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    });
+  const maxScanRows = Math.max(120, worksheet.rowCount + 10);
+  const maxScanCols = 80;
+  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : FORM_A_NUMBERED_HEADER_SPECS.map((spec) => ({
+    key: spec.key,
+    label: spec.label
+  }));
+  const writeValueBesideLabel = (row, startCol, value) => {
+    const text = String(value ?? '').trim();
+    if (!text) return;
+    for (let nc = startCol + 1; nc <= Math.min(startCol + 10, maxScanCols); nc += 1) {
+      const cell = worksheet.getCell(row, nc);
+      const nt = normalize(excelCellValueToString(cell?.value));
+      if (nt === ':' || !nt) {
+        const target = worksheet.getCell(row, nc === startCol + 1 && nt === ':' ? nc + 1 : nc);
+        const existing = normalize(excelCellValueToString(target?.value));
+        if (!existing || /^enter\b/i.test(existing)) {
+          target.value = text;
+          return;
+        }
+      }
+    }
+    worksheet.getCell(row, Math.min(startCol + 3, maxScanCols)).value = text;
+  };
+  for (let r = 1; r <= maxScanRows; r += 1) {
+    for (let c = 1; c <= maxScanCols; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
+      if (!raw) continue;
+      FORM_A_NUMBERED_HEADER_SPECS.forEach((spec) => {
+        if (!spec.match.test(raw)) return;
+        const val = headerFormData[spec.key];
+        if (val == null || String(val).trim() === '') return;
+        writeValueBesideLabel(r, c, val);
+      });
+      fields.forEach((field) => {
+        const label = String(field?.label || '').trim();
+        if (!label) return;
+        const labelNorm = normalize(label.replace(/:+$/, ''));
+        const rawNorm = normalize(raw.replace(/:+$/, ''));
+        if (!rawNorm || (!rawNorm.includes(labelNorm) && !labelNorm.includes(rawNorm))) return;
+        const val = headerFormData[field.key];
+        if (val == null || String(val).trim() === '') return;
+        writeValueBesideLabel(r, c, val);
+      });
+    }
+  }
+};
 
 const isFormVIFestivalContext = (formHeader, rowItem, fileName, tableHeaders) => {
   const parts = [
@@ -4323,6 +7548,195 @@ const isFormVILegendLine = (text) => {
   if (/^to\s+be\s+marked\s+as\s+follows\s*:?\s*$/.test(t)) return true;
   if (/^(h|w\/d|w\/h|n\/e)\s*["']?\s*for\b/.test(t)) return true;
   return false;
+};
+
+const FORM_VI_CANONICAL_HOLIDAY_HEADERS = [
+  '14-01-2022 ( PONGAL)',
+  '26/01/2022 (REPUBLIC DAY)',
+  '14/04/2022 (TAMIL NEW YEAR)',
+  '15/04/2022 (GOOD FRIDAY)',
+  '01/05/2022 (MAY DAY)',
+  '03/05/2022 (RAMZAN)',
+  '15/08/2022 (INDEPENDENCE DAY)',
+  '19/08/2022 (KRISHNA JAYANTHI)',
+  '31/08/2022 (VINAYAKAR CHATHURTHI)',
+  '04/10/2022 (AYUDHA POOJA)',
+  '05/10/2022 (VIJAYA DASHAMI)',
+  '24/10/2022 (DIWALI)',
+  '25/12/2022 (CHRISTMAS)'
+];
+
+const FORM_VI_FESTIVAL_BAND_TITLE =
+  'Days, dates and months of the year on which National and Festival Holidays are allowed under the section 3 of the Tamil Nadu Industrial Establishments (National and Festival Holidays) Act, 1958 (Tamil Nadu Act XXXIII of 1958)';
+
+const normalizeFormVIHolidayCellText = (txt) =>
+  String(txt || '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+
+const isFormVIFestivalBandHeader = (header) => {
+  const s = String(header || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!s) return false;
+  if (s.includes('enter days date')) return true;
+  if (s.includes('enter days dates')) return true;
+  if (s.includes('days dates') && s.includes('months')) return true;
+  if (s.includes('national') && s.includes('festival') && s.includes('holiday')) return true;
+  return /festival\s+holidays?/.test(s);
+};
+
+const looksLikeFormVIHolidayLabel = (txt) => {
+  const s = normalizeFormVIHolidayCellText(txt).toLowerCase();
+  if (!s || isFormVIFestivalBandHeader(s)) return false;
+  if (/\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}/.test(s)) return true;
+  return /pongal|republic\s+day|tamil\s+new\s+year|good\s+friday|may\s+day|ramzan|independence\s+day|krishna|vinayakar|ayudha|vijaya\s+dashami|diwali|christmas/.test(
+    s
+  );
+};
+
+const isFormVIHolidayColumnHeader = (header) => {
+  const s = String(header || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!s || s === 'remark' || s === 'remarks') return false;
+  if (isFormVIFestivalBandHeader(s)) return false;
+  if (looksLikeFormVIHolidayLabel(s)) return true;
+  return false;
+};
+
+const isFormVIDojHeader = (header) => {
+  const s = String(header || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return s === 'doj' || s === 'd.o.j' || s === 'd.o.j.' || (s.includes('date') && s.includes('join'));
+};
+
+const getFormVIEmployeeDojDisplay = (emp) => formatStatutoryDateDisplay(getEmployeeDateofjoiningRaw(emp));
+
+const remapFormVIRowsByColumnIndex = (rows, oldHeaders, newHeaders) => {
+  if (!Array.isArray(rows)) return [];
+  if (!Array.isArray(oldHeaders) || !Array.isArray(newHeaders)) return rows;
+  return rows.map((row) => {
+    const out = {};
+    newHeaders.forEach((nh, idx) => {
+      const oh = oldHeaders[idx];
+      if (oh && row && Object.prototype.hasOwnProperty.call(row, oh)) out[nh] = row[oh];
+      else if (row && Object.prototype.hasOwnProperty.call(row, nh)) out[nh] = row[nh];
+      else out[nh] = '';
+    });
+    return out;
+  });
+};
+
+const formVIExcelCellValueToString = (val) => {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'object') {
+    if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+    if (val.text != null) return String(val.text);
+    if (val.result != null) return String(val.result);
+  }
+  return '';
+};
+
+const formVIExcelNormalize = (txt) =>
+  String(txt || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+const formVIHolidayMatchToken = (txt) => {
+  const s = formVIExcelNormalize(txt);
+  const tokens = [
+    'pongal',
+    'republic day',
+    'tamil new year',
+    'good friday',
+    'may day',
+    'ramzan',
+    'independence day',
+    'krishna jayanthi',
+    'vinayakar chathurthi',
+    'ayudha pooja',
+    'vijaya dashami',
+    'diwali',
+    'christmas'
+  ];
+  const hit = tokens.find((t) => s.includes(t));
+  if (hit) return hit;
+  const date = s.match(/\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}/);
+  return date ? date[0].replace(/\//g, '-') : s;
+};
+
+const formVIHolidayLabelsMatch = (appHeader, excelLabel) => {
+  const a = formVIHolidayMatchToken(appHeader);
+  const e = formVIHolidayMatchToken(excelLabel);
+  if (!a || !e) return false;
+  if (a === e) return true;
+  return a.includes(e) || e.includes(a);
+};
+
+const ensureFormVIDownloadRowsHaveDefaults = (rows, headers) => {
+  if (!Array.isArray(rows) || !Array.isArray(headers)) return rows;
+  return rows.map((row) => {
+    const next = { ...(row || {}) };
+    headers.forEach((h) => {
+      if (isFormVIHolidayColumnHeader(h) && !String(next[h] ?? '').trim()) next[h] = 'H';
+    });
+    return next;
+  });
+};
+
+const rebuildFormVIFestivalTableHeadersFromSheet = ({
+  jsonData,
+  getMergedAwareCellText,
+  headerRowIndex,
+  headers,
+  firstSheetName,
+  formHeaderInfo
+}) => {
+  if (!isFormVIFestivalContext(formHeaderInfo, null, firstSheetName, headers)) return null;
+  if (headerRowIndex < 0 || !Array.isArray(headers) || headers.length < 6) return null;
+
+  const normHdr = (h) => String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  let festStart = -1;
+  let festEnd = -1;
+  headers.forEach((h, i) => {
+    if (isFormVIHolidayColumnHeader(h)) {
+      if (festStart < 0) festStart = i;
+      festEnd = i + 1;
+    }
+  });
+  if (festStart < 0) {
+    for (let i = 0; i < headers.length; i += 1) {
+      if (!isFormVIFestivalBandHeader(headers[i])) continue;
+      festStart = i;
+      festEnd = headers.length;
+      for (let j = i + 1; j < headers.length; j += 1) {
+        const n = normHdr(headers[j]);
+        if (n === 'remarks' || n === 'remark') {
+          festEnd = j;
+          break;
+        }
+      }
+      break;
+    }
+  }
+  if (festStart < 0 || festEnd <= festStart) return null;
+
+  const holidayLabels = [];
+  for (let col = festStart; col < festEnd; col += 1) {
+    let label = '';
+    for (let rowOff = -3; rowOff <= 2; rowOff += 1) {
+      const r = headerRowIndex + rowOff;
+      if (r < 0 || !Array.isArray(jsonData) || r >= jsonData.length) continue;
+      const cell = normalizeFormVIHolidayCellText(getMergedAwareCellText(r, col));
+      if (looksLikeFormVIHolidayLabel(cell)) {
+        label = cell;
+        break;
+      }
+    }
+    if (!label) label = FORM_VI_CANONICAL_HOLIDAY_HEADERS[col - festStart] || '';
+    holidayLabels.push(label || `Holiday ${col - festStart + 1}`);
+  }
+
+  const rebuilt = [...headers.slice(0, festStart), ...holidayLabels, ...headers.slice(festEnd)];
+  return { headers: rebuilt, holidayLabels };
 };
 
 const isFormBLabourWelfareContext = (formHeader, rowItem, fileName, tableHeaders) => {
@@ -5160,6 +8574,7 @@ const Statutory = ({ userEmail, userRole }) => {
   const [autofillTotalEmployees, setAutofillTotalEmployees] = useState(0);
   const autofillEmployeesRef = useRef([]);
   const autofillPayrollLookupRef = useRef(null);
+  const autofillAttendanceCacheRef = useRef(null);
   const [tableHeaders, setTableHeaders] = useState([]);
   const [subColumns, setSubColumns] = useState(null);
   const [formFields, setFormFields] = useState([]);
@@ -6963,6 +10378,72 @@ const Statutory = ({ userEmail, userRole }) => {
     return bestCandidate ? String(bestCandidate.id) : null;
   };
 
+  const resolveStatutorySampleDataFetchId = (item, options = {}) =>
+    resolveNumericStatutoryIdForProofRow(item, options) ||
+    resolveStatutorySampleDataSaveId(item) ||
+    '';
+
+  const buildStatutorySampleDataFetchContext = (primaryItem, resolvedItem) => {
+    const item = primaryItem || resolvedItem || {};
+    const formNameValue =
+      item?.formName ||
+      item?.FormName ||
+      resolvedItem?.formName ||
+      resolvedItem?.FormName ||
+      '';
+    const monthFilterValue = resolveMonthFilterForSave(
+      item?.dueDate,
+      selectedMonth,
+      item?.monthFilter ?? item?.MonthFilter ?? item?.monthfilter
+    );
+    return {
+      formName: formNameValue,
+      monthFilter: monthFilterValue,
+      MonthFilter: monthFilterValue,
+      monthfilter: monthFilterValue
+    };
+  };
+
+  const buildStatutorySampleDataFetchIds = (primaryItem, resolvedItem, options = {}) => {
+    const draftIdOpts =
+      options.draftIdOpts ||
+      (showApprovalColumn ? { preferSiteSubmittedDraft: true } : {});
+    const formNorm = baseFormNameKey(
+      primaryItem?.formName ||
+        primaryItem?.FormName ||
+        resolvedItem?.formName ||
+        resolvedItem?.FormName ||
+        ''
+    );
+    const uiMonthNorm = statutoryDedupeMonthNorm(primaryItem || resolvedItem, selectedMonth);
+    const matchingStatutoryRowIds = (statutoryData || [])
+      .filter((row) => {
+        if (!/^\d+$/.test(String(row?.id ?? ''))) return false;
+        if (formNorm && baseFormNameKey(row?.formName || row?.FormName) !== formNorm) return false;
+        if (
+          uiMonthNorm !== 'nomonth' &&
+          !statutoryMonthMatchesUiFilter(row, uiMonthNorm, selectedMonth)
+        ) {
+          return false;
+        }
+        return statutoryLineMetadataMatches(primaryItem || resolvedItem, row);
+      })
+      .map((row) => String(row.id));
+    return uniqueNumericStatutoryIds(
+      options.sampleStatutoryId,
+      options.draftApiRowId,
+      primaryItem?.draftStatutoryRowIdForFile,
+      resolvedItem?.draftStatutoryRowIdForFile,
+      resolveStatutorySampleDataSaveId(primaryItem),
+      resolveStatutorySampleDataSaveId(resolvedItem),
+      resolveStatutorySampleDataFetchId(primaryItem, draftIdOpts),
+      resolveStatutorySampleDataFetchId(resolvedItem, draftIdOpts),
+      ...matchingStatutoryRowIds,
+      primaryItem?.id,
+      resolvedItem?.id
+    );
+  };
+
   /** Approval / status / draft for the UI month only — never reuse another month's statutory row. */
   const resolveStatutoryRowMetaForSelectedMonth = (item) => {
     const emptyMeta = {
@@ -7516,18 +10997,25 @@ const Statutory = ({ userEmail, userRole }) => {
     }
   };
   const handleAutofill = async (item, options = {}) => {
+    const enrichedItem = enrichStatutoryItemWithFormMasterMeta(
+      item,
+      formmasterTemplates,
+      formmasterFormFileByMatchKey
+    );
+    prefetchStatutoryAutofillData();
+    fetchPeopleDataForAutofillDisplay().catch(() => null);
     setIsAutofillMode(true);
-    setAutofillItem(item);
+    setAutofillItem(enrichedItem);
     setFormFileLoading(true);
     setError('');
     setIsFormFileModalOpen(true);
     setFormFileModalData({
-      fileName: buildStatutoryFormFileLabel(item) || 'Form',
+      fileName: buildStatutoryFormFileLabel(enrichedItem) || 'Form',
       fileType: 'excel-form',
       loading: true,
-      item
+      item: enrichedItem
     });
-    await handleViewFormFile(item, true, options);
+    await handleViewFormFile(enrichedItem, true, options);
   };
 
   // Build draft workbook from formmaster template + table data (used by Save and by View Draft File generate-and-download)
@@ -7909,12 +11397,12 @@ const Statutory = ({ userEmail, userRole }) => {
     templateHeaders,
     templateHeaderRowIndex,
     templateDataStartIndex,
+    tableStartCol = 0,
     hasSubColumns
   }) => {
     if (!draftWorkbook || !Array.isArray(templateHeaders) || templateHeaders.length === 0) return [];
     const parsedDraft = parseExcelForm(draftWorkbook);
-    const draftHeaders = Array.isArray(parsedDraft.headers) ? parsedDraft.headers : [];
-    if (!draftHeaders.length) return [];
+    const draftHeaders = Array.isArray(parsedDraft.headers) ? parsedDraft.headers : templateHeaders;
     const draftSheetName = draftWorkbook.SheetNames[0];
     const draftWs = draftWorkbook.Sheets[draftSheetName];
     if (!draftWs) return [];
@@ -7926,24 +11414,41 @@ const Statutory = ({ userEmail, userRole }) => {
       ? templateDataStartIndex
       : (templateHeaderRowIndex >= 0 ? templateHeaderRowIndex + (hasSubColumns ? 2 : 1) : 0);
     const startIndex = Math.max(0, Math.min(draftDataStart, fallbackTargetStart));
+    const startCol =
+      parsedDraft.tableStartCol != null && parsedDraft.tableStartCol >= 0
+        ? parsedDraft.tableStartCol
+        : tableStartCol;
     const draftDataRows = draftRowsRaw.slice(startIndex).filter((row) =>
-      Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== '')
+      Array.isArray(row) &&
+      row.slice(startCol, startCol + templateHeaders.length).some((cell) => String(cell ?? '').trim() !== '')
     );
     if (!draftDataRows.length) return [];
-    const rows = draftDataRows.map((rowArr) => {
+    return draftDataRows.map((rowArr, rowIdx) => {
       const rowObj = {};
-      for (let i = 0; i < draftHeaders.length; i++) {
-        rowObj[draftHeaders[i]] = rowArr[i] != null ? rowArr[i] : '';
+      for (let i = 0; i < templateHeaders.length; i++) {
+        const header = templateHeaders[i];
+        let value = rowArr[startCol + i];
+        if ((value == null || String(value).trim() === '') && draftHeaders[i] && draftHeaders[i] !== header) {
+          value = rowArr[i];
+        }
+        rowObj[header] = value != null ? value : '';
+      }
+      if (
+        templateHeaders[0] &&
+        (rowObj[templateHeaders[0]] == null || String(rowObj[templateHeaders[0]]).trim() === '') &&
+        /s\.?\s*no|serial|sl\.?\s*no/i.test(String(templateHeaders[0] || ''))
+      ) {
+        rowObj[templateHeaders[0]] = rowIdx + 1;
       }
       return rowObj;
     });
-    return rows;
   };
 
   const extractRowMatrixFromSavedDraft = ({
     draftWorkbook,
     templateHeaderRowIndex,
     templateDataStartIndex,
+    tableStartCol = 0,
     hasSubColumns
   }) => {
     if (!draftWorkbook) return [];
@@ -7959,8 +11464,94 @@ const Statutory = ({ userEmail, userRole }) => {
       ? templateDataStartIndex
       : (templateHeaderRowIndex >= 0 ? templateHeaderRowIndex + (hasSubColumns ? 2 : 1) : 0);
     const startIndex = Math.max(0, Math.min(draftDataStart, fallbackTargetStart));
+    const startCol =
+      parsedDraft.tableStartCol != null && parsedDraft.tableStartCol >= 0
+        ? parsedDraft.tableStartCol
+        : tableStartCol;
     return draftRowsRaw.slice(startIndex).filter((row) =>
-      Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== '')
+      Array.isArray(row) &&
+      row.slice(startCol).some((cell) => String(cell ?? '').trim() !== '')
+    );
+  };
+
+  const resolveSavedDraftRowsForModal = ({
+    workbook,
+    parsed,
+    tableHeaders,
+    tableStartCol = 0
+  }) => {
+    if (!workbook || !Array.isArray(tableHeaders) || tableHeaders.length === 0) return [];
+    const hasSubColumns = parsed?.subColumns && Object.keys(parsed.subColumns || {}).length > 0;
+    const rawHeaders = Array.isArray(parsed?.headers) ? parsed.headers : tableHeaders;
+    const applyFormIRemap = (rows) => {
+      if (
+        !isFormIRegisterOfWorkmenContext(
+          null,
+          parsed?.formHeader?.title || '',
+          parsed?.formHeader,
+          tableHeaders,
+          ''
+        )
+      ) {
+        return rows;
+      }
+      return padFormIWorkmenRowsForHeaders(
+        remapFormARowsByColumnIndex(rows, rawHeaders, tableHeaders),
+        tableHeaders
+      );
+    };
+    if (Array.isArray(parsed?.tableData) && parsed.tableData.length > 0) {
+      const remapped = applyFormIRemap(
+        remapFormARowsByColumnIndex(parsed.tableData, rawHeaders, tableHeaders)
+      );
+      const filtered = filterStatutoryDraftTableRows(remapped, tableHeaders);
+      if (filtered.length > 0) return filtered;
+    }
+    let rows = extractMappedRowsFromSavedDraft({
+      draftWorkbook: workbook,
+      templateHeaders: tableHeaders,
+      templateHeaderRowIndex: parsed?.headerRowIndex,
+      templateDataStartIndex: parsed?.dataStartIndex,
+      tableStartCol: parsed?.tableStartCol ?? tableStartCol,
+      hasSubColumns
+    });
+    rows = applyFormIRemap(rows);
+    rows = filterStatutoryDraftTableRows(rows, tableHeaders);
+    if (rows.length > 0) return rows;
+    const matrixRows = extractRowMatrixFromSavedDraft({
+      draftWorkbook: workbook,
+      templateHeaderRowIndex: parsed?.headerRowIndex,
+      templateDataStartIndex: parsed?.dataStartIndex,
+      tableStartCol: parsed?.tableStartCol ?? tableStartCol,
+      hasSubColumns
+    });
+    if (!matrixRows.length) return [];
+    const startCol = parsed?.tableStartCol ?? tableStartCol ?? 0;
+    const matrixAsObjects = matrixRows.map((rowArr, rowIdx) => {
+      const obj = {};
+      tableHeaders.forEach((h, colIdx) => {
+        obj[h] = rowArr[startCol + colIdx] != null ? rowArr[startCol + colIdx] : '';
+      });
+      if (
+        tableHeaders[0] &&
+        (obj[tableHeaders[0]] == null || String(obj[tableHeaders[0]]).trim() === '') &&
+        /s\.?\s*no|serial|sl\.?\s*no/i.test(String(tableHeaders[0] || ''))
+      ) {
+        obj[tableHeaders[0]] = rowIdx + 1;
+      }
+      return obj;
+    });
+    return filterStatutoryDraftTableRows(applyFormIRemap(matrixAsObjects), tableHeaders);
+  };
+
+  const applySavedDraftRowsToModalTable = (rows, tableHeadersForModal, form26Open, form11Open, item) => {
+    if (!Array.isArray(rows) || rows.length === 0) return;
+    setFormTableData(
+      form26Open
+        ? applyForm26NilTableRows(tableHeadersForModal, rows, selectedMonth, item)
+        : form11Open
+          ? applyForm11NilTableRows(tableHeadersForModal, rows, selectedMonth, item)
+          : rows
     );
   };
 
@@ -7971,7 +11562,8 @@ const Statutory = ({ userEmail, userRole }) => {
     mappedRowMatrix,
     templateFileId,
     parsedFormHeader,
-    formFileName
+    formFileName,
+    headerFormData
   }) => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(templateArrayBuffer);
@@ -8017,11 +11609,20 @@ const Statutory = ({ userEmail, userRole }) => {
     const maxScanRows = Math.max(60, worksheet.rowCount + 5);
     const maxScanCols = 140;
     for (let r = 1; r <= maxScanRows; r++) {
+      const rowCells = [];
       for (let c = 1; c <= maxScanCols; c++) {
-        const cell = worksheet.getCell(r, c);
-        const raw = excelCellValueToString(cell?.value);
+        rowCells.push(excelCellValueToString(worksheet.getCell(r, c)?.value));
+      }
+      const rowTextLower = rowCells
+        .map((v) => String(v || '').trim())
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (!isFormAMusterTableHeaderRowText(rowTextLower)) continue;
+      for (let c = 1; c <= maxScanCols; c++) {
+        const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
         const t = normalize(raw);
-        if (t && (t === 's.no' || t === 's no' || t.includes('s.no') || t.includes('serial'))) {
+        if (t && (t === 's.no' || t === 's no' || t.includes('s.no') || t.includes('serial') || t === 'sl.no' || t === 'sl no')) {
           snoAnchor = { r, c };
           break;
         }
@@ -8029,13 +11630,53 @@ const Statutory = ({ userEmail, userRole }) => {
       if (snoAnchor) break;
     }
     if (!snoAnchor) {
+      for (let r = 1; r <= maxScanRows; r++) {
+        for (let c = 1; c <= maxScanCols; c++) {
+          const cell = worksheet.getCell(r, c);
+          const raw = excelCellValueToString(cell?.value);
+          const t = normalize(raw);
+          if (t && (t === 's.no' || t === 's no' || t === 'sl.no' || t === 'sl no' || t === 'sr.no' || t === 'sr no')) {
+            snoAnchor = { r, c };
+            break;
+          }
+        }
+        if (snoAnchor) break;
+      }
+    }
+
+    const isHeaderFieldLayout = isFormAHeaderFieldLayoutFormHeader(parsedFormHeader);
+    const headerValues =
+      headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+    const hasHeaderFieldValues = Object.values(headerValues).some((v) => String(v ?? '').trim() !== '');
+
+    if ((isHeaderFieldLayout || !snoAnchor) && hasHeaderFieldValues) {
+      writeFormAHeaderFieldsToExcelWorksheet(worksheet, headerValues, parsedFormHeader, {
+        excelCellValueToString
+      });
+      const out = await workbook.xlsx.writeBuffer();
+      const fileName = formFileName ||
+        parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+        `Form_${Date.now()}.xlsx`;
+      const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      return { blob, fileName };
+    }
+
+    if (!snoAnchor) {
       throw new Error('Could not locate Form A table anchor (S.No) in original template.');
     }
 
-    // Apply strict safeguards for all Form A templates (template ID can change after re-upload).
-    const isStrictFormATemplate = true;
-    const startRow = isStrictFormATemplate ? (snoAnchor.r + 3) : (snoAnchor.r + 1);
+    let dataStartRow = snoAnchor.r + 1;
+    let seqHits = 0;
+    for (let j = 0; j < (headersToUse?.length || 0); j += 1) {
+      const t = normalize(excelCellValueToString(worksheet.getCell(snoAnchor.r + 1, snoAnchor.c + j)?.value));
+      if (t === String(j + 1)) seqHits += 1;
+    }
+    if (seqHits >= Math.max(3, Math.floor((headersToUse?.length || 0) * 0.4))) {
+      dataStartRow = snoAnchor.r + 2;
+    }
+    const startRow = dataStartRow;
     const startCol = snoAnchor.c;
+    const isStrictFormATemplate = true;
     const useMatrix = Array.isArray(mappedRowMatrix) && mappedRowMatrix.length > 0;
     const cleanedMatrixRows = useMatrix
       ? mappedRowMatrix.filter((row) => {
@@ -8430,7 +12071,8 @@ const Statutory = ({ userEmail, userRole }) => {
     mappedRowMatrix,
     headersToUse,
     parsedFormHeader,
-    formFileName
+    formFileName,
+    headerFormData
   }) => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(templateArrayBuffer);
@@ -8481,6 +12123,7 @@ const Statutory = ({ userEmail, userRole }) => {
     const orderedHeaders = Array.isArray(headersToUse) && headersToUse.length > 0
       ? headersToUse
       : FORM_12_ALIGNMENT_HEADERS;
+    const sourceHeaders = [...orderedHeaders];
     const templateHeaderCols = [];
     let blankRun = 0;
     for (let c = startCol; c <= 260; c++) {
@@ -8493,30 +12136,81 @@ const Statutory = ({ userEmail, userRole }) => {
         if (blankRun >= 8) break;
       }
     }
-    const effectiveHeaders =
-      templateHeaderCols.length > 0
-        ? orderedHeaders.slice(0, templateHeaderCols.length)
-        : orderedHeaders;
-    const fieldCols = effectiveHeaders.map((_, idx) => templateHeaderCols[idx] ?? (startCol + idx));
+    const templateHeaderLabels = templateHeaderCols.map((c) =>
+      excelCellValueToString(worksheet.getCell(headerRow, c)?.value).trim()
+    );
+    const resolveTemplateHeaderLabel = (idx) => {
+      let label = templateHeaderLabels[idx] || '';
+      const normLabel = normalize(label);
+      if (!label || /^\d+$/.test(normLabel)) {
+        if (sourceHeaders[idx]) label = sourceHeaders[idx];
+      }
+      if (!label || /^\d+$/.test(normalize(label))) {
+        const above = excelCellValueToString(worksheet.getCell(headerRow - 1, templateHeaderCols[idx])?.value).trim();
+        if (above && !/^\d+$/.test(normalize(above))) label = above;
+      }
+      return label;
+    };
+    const fieldCols = templateHeaderCols.length > 0
+      ? [...templateHeaderCols]
+      : sourceHeaders.map((_, idx) => startCol + idx);
+    const headerNormKey = (h) => normalize(String(h || '').replace(/[^a-z0-9]/gi, ' '));
+    const form12HeaderAliasBucket = (norm) => {
+      if (!norm) return '';
+      if (/^s\.?\s*no|serial\s*number|sl\.?\s*no/.test(norm)) return 'sno';
+      if (/bank/.test(norm) && (/account|ifsc|branch|financial|a c|ac no/.test(norm))) return 'bank';
+      if (/^photo/.test(norm)) return 'photo';
+      if (/mobile/.test(norm)) return 'mobile';
+      if (/e\s*mail|email/.test(norm)) return 'email';
+      if (/specimen|signature|thumb/.test(norm)) return 'signature';
+      if (/date.*exit/.test(norm)) return 'dateexit';
+      if (/reason.*exit/.test(norm)) return 'reasonexit';
+      if (/remark/.test(norm)) return 'remarks';
+      if (/480.*day|completion.*480/.test(norm)) return '480days';
+      if (/made permanent|permanent/.test(norm)) return 'permanent';
+      if (/period.*suspension|suspension/.test(norm)) return 'suspension';
+      if (/esic|esi/.test(norm)) return 'esic';
+      return norm;
+    };
     const getRowValueForHeader = (row, header, headerIndex) => {
       if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
-      if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
-      const target = normalize(String(header || '').replace(/[^a-z0-9]/gi, ' '));
+      if (header && Object.prototype.hasOwnProperty.call(row, header)) {
+        const direct = row[header];
+        if (direct != null && String(direct).trim() !== '') return direct;
+      }
+      if (headerIndex != null && headerIndex >= 0 && sourceHeaders[headerIndex]) {
+        const sourceKey = sourceHeaders[headerIndex];
+        if (Object.prototype.hasOwnProperty.call(row, sourceKey)) {
+          const sourceVal = row[sourceKey];
+          if (sourceVal != null && String(sourceVal).trim() !== '') return sourceVal;
+        }
+      }
+      const target = headerNormKey(header);
       if (!target) return '';
+      const targetAlias = form12HeaderAliasBucket(target);
       const rowKeys = Object.keys(row);
-      const exact = rowKeys.find((k) => normalize(String(k || '').replace(/[^a-z0-9]/gi, ' ')) === target);
-      if (exact) return row[exact];
+      const exact = rowKeys.find((k) => headerNormKey(k) === target);
+      if (exact && row[exact] != null && String(row[exact]).trim() !== '') return row[exact];
+      if (targetAlias) {
+        const aliasMatch = rowKeys.find((k) => form12HeaderAliasBucket(headerNormKey(k)) === targetAlias);
+        if (aliasMatch && row[aliasMatch] != null && String(row[aliasMatch]).trim() !== '') return row[aliasMatch];
+      }
       const fuzzy = rowKeys.find((k) => {
-        const nk = normalize(String(k || '').replace(/[^a-z0-9]/gi, ' '));
+        const nk = headerNormKey(k);
         return nk && (nk.includes(target) || target.includes(nk));
       });
-      if (fuzzy) return row[fuzzy];
+      if (fuzzy && row[fuzzy] != null && String(row[fuzzy]).trim() !== '') return row[fuzzy];
+      if (headerIndex != null && headerIndex >= 0) {
+        const vals = Object.values(row);
+        if (vals[headerIndex] != null && String(vals[headerIndex]).trim() !== '') {
+          return vals[headerIndex];
+        }
+      }
       return '';
     };
     const toForm12OrderedValues = (row, rowIndex) => {
       if (Array.isArray(row)) {
         const out = [...row];
-        // Common bad parse: "2 rathnakumar" in first cell; split into serial + name.
         if (out[0] != null) {
           const s0 = String(out[0]).trim();
           const m = s0.match(/^(\d+)\s+(.+)$/);
@@ -8526,9 +12220,19 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
         if (out[0] == null || String(out[0]).trim() === '') out[0] = rowIndex + 1;
-        return effectiveHeaders.map((_, idx) => out[idx] ?? '');
+        const colCount = Math.max(fieldCols.length, sourceHeaders.length, out.length);
+        return Array.from({ length: colCount }, (_, idx) => out[idx] ?? '');
       }
-      const out = effectiveHeaders.map((header, idx) => getRowValueForHeader(row, header, idx));
+      const colCount = Math.max(fieldCols.length, sourceHeaders.length, templateHeaderLabels.length);
+      const out = Array.from({ length: colCount }, (_, idx) => {
+        const templateLabel = resolveTemplateHeaderLabel(idx);
+        const sourceLabel = sourceHeaders[idx] || '';
+        let val = templateLabel ? getRowValueForHeader(row, templateLabel, idx) : '';
+        if (val === '' && sourceLabel && sourceLabel !== templateLabel) {
+          val = getRowValueForHeader(row, sourceLabel, idx);
+        }
+        return val != null ? val : '';
+      });
       if (out[0] == null || String(out[0]).trim() === '') out[0] = rowIndex + 1;
       return out;
     };
@@ -8555,7 +12259,7 @@ const Statutory = ({ userEmail, userRole }) => {
         return out;
       });
 
-    const writableCols = fieldCols.slice(0, effectiveHeaders.length);
+    const writableCols = fieldCols;
     for (let i = 0; i < sourceRows.length; i++) {
       const row = sourceRows[i];
       // Clear existing template sample row values so every employee row follows the same model alignment.
@@ -8563,7 +12267,7 @@ const Statutory = ({ userEmail, userRole }) => {
         const clearCell = worksheet.getCell(startRow + i, writableCols[wc]);
         clearCell.value = '';
       }
-      for (let j = 0; j < row.length; j++) {
+      for (let j = 0; j < row.length && j < writableCols.length; j++) {
         const value = row[j];
         if (value == null || value === '') continue;
         const targetCol = j < fieldCols.length ? fieldCols[j] : (startCol + j);
@@ -8578,6 +12282,8 @@ const Statutory = ({ userEmail, userRole }) => {
         cell.alignment = { ...(cell.alignment || {}), horizontal: 'left' };
       }
     }
+
+    writeForm10Form12HeaderFieldsToExcelJsWorksheet(worksheet, headerFormData, parsedFormHeader);
 
     const out = await workbook.xlsx.writeBuffer();
     const fileName = formFileName ||
@@ -9364,7 +13070,8 @@ const Statutory = ({ userEmail, userRole }) => {
     parsedHeaderRowIndex,
     parsedDataStartIndex,
     parsedFormHeader,
-    formFileName
+    formFileName,
+    headerFormData
   }) => {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(templateArrayBuffer);
@@ -9424,6 +13131,117 @@ const Statutory = ({ userEmail, userRole }) => {
       ? markerCols
       : Array.from({ length: Math.max(12, Array.isArray(headersToUse) ? headersToUse.length : 12) }, (_, i) => startCol + i);
 
+    const sourceHeaders = Array.isArray(headersToUse) && headersToUse.length > 0 ? [...headersToUse] : [];
+    const templateHeaderLabels = orderedCols.map((col) =>
+      String(excelCellValueToString(worksheet.getCell(headerRow, col)?.value) || '').trim()
+    );
+    const resolveTemplateHeaderLabel = (idx) => {
+      let label = templateHeaderLabels[idx] || '';
+      const normLabel = normalize(label);
+      if (!label || /^\d+$/.test(normLabel)) {
+        if (sourceHeaders[idx]) label = sourceHeaders[idx];
+      }
+      if (!label || /^\d+$/.test(normalize(label))) {
+        const above = excelCellValueToString(worksheet.getCell(headerRow - 1, orderedCols[idx])?.value).trim();
+        if (above && !/^\d+$/.test(normalize(above))) label = above;
+      }
+      return label;
+    };
+    const headerNormKey = (h) => normalize(String(h || '').replace(/[^a-z0-9]/gi, ' '));
+    const form10HeaderAliasBucket = (norm) => {
+      if (!norm) return '';
+      if (/number\s+in\s+register|register\s+number/.test(norm)) return 'register';
+      if (/employee\s+name|^name$/.test(norm)) return 'name';
+      if (/department/.test(norm)) return 'department';
+      if (/date.*overtime|overtime.*date|date\s+on\s+which/.test(norm)) return 'otdate';
+      if (/extent.*overtime|overtime.*occasion/.test(norm)) return 'otextent';
+      if (/total\s+overtime|overtime\s+worked.*production/.test(norm)) return 'ottotal';
+      if (/normal\s+hours/.test(norm)) return 'normalhours';
+      if (/normal\s+rate/.test(norm)) return 'normalrate';
+      if (/overtime\s+rate/.test(norm)) return 'otrate';
+      if (/normal\s+earnings/.test(norm)) return 'normalearnings';
+      if (/overtime\s+earnings/.test(norm)) return 'otearnings';
+      if (/cash\s+equivalent|advantage.*concession/.test(norm)) return 'cashequiv';
+      if (/total\s+earnings/.test(norm)) return 'totalearnings';
+      if (/dates.*overtime.*payment|overtime.*payment.*made/.test(norm)) return 'otpaydate';
+      return norm;
+    };
+    const getRowValueForHeader = (rowObj, header, headerIndex) => {
+      if (!rowObj || typeof rowObj !== 'object' || Array.isArray(rowObj)) return '';
+      const isPlaceholder = (v) => /^enter\s+/i.test(String(v ?? '').trim());
+      const pickVal = (v) => {
+        if (v == null || String(v).trim() === '' || isPlaceholder(v)) return '';
+        return v;
+      };
+      if (header && Object.prototype.hasOwnProperty.call(rowObj, header)) {
+        const direct = pickVal(rowObj[header]);
+        if (direct !== '') return direct;
+      }
+      if (headerIndex != null && headerIndex >= 0 && sourceHeaders[headerIndex]) {
+        const sourceKey = sourceHeaders[headerIndex];
+        if (Object.prototype.hasOwnProperty.call(rowObj, sourceKey)) {
+          const sourceVal = pickVal(rowObj[sourceKey]);
+          if (sourceVal !== '') return sourceVal;
+        }
+      }
+      const target = headerNormKey(header);
+      if (!target) return '';
+      const targetAlias = form10HeaderAliasBucket(target);
+      const rowKeys = Object.keys(rowObj);
+      const exact = rowKeys.find((k) => headerNormKey(k) === target);
+      if (exact) {
+        const v = pickVal(rowObj[exact]);
+        if (v !== '') return v;
+      }
+      if (targetAlias) {
+        const aliasMatch = rowKeys.find((k) => form10HeaderAliasBucket(headerNormKey(k)) === targetAlias);
+        if (aliasMatch) {
+          const v = pickVal(rowObj[aliasMatch]);
+          if (v !== '') return v;
+        }
+      }
+      const fuzzy = rowKeys.find((k) => {
+        const nk = headerNormKey(k);
+        return nk && (nk.includes(target) || target.includes(nk));
+      });
+      if (fuzzy) {
+        const v = pickVal(rowObj[fuzzy]);
+        if (v !== '') return v;
+      }
+      if (headerIndex != null && headerIndex >= 0) {
+        const vals = Object.values(rowObj);
+        const v = pickVal(vals[headerIndex]);
+        if (v !== '') return v;
+      }
+      return '';
+    };
+    const toForm10OrderedValues = (row, rowIndex) => {
+      if (Array.isArray(row)) {
+        const out = [...row];
+        const first = String(out[0] ?? '').trim();
+        const m = first.match(/^(\d+)\s+(.+)$/);
+        if (m && (!out[1] || String(out[1]).trim() === '')) {
+          out[0] = m[1];
+          out[1] = m[2];
+        }
+        if (out[0] == null || String(out[0]).trim() === '') out[0] = rowIndex + 1;
+        const colCount = Math.max(orderedCols.length, sourceHeaders.length, out.length);
+        return Array.from({ length: colCount }, (_, idx) => out[idx] ?? '');
+      }
+      const colCount = Math.max(orderedCols.length, sourceHeaders.length, templateHeaderLabels.length);
+      const out = Array.from({ length: colCount }, (_, idx) => {
+        const templateLabel = resolveTemplateHeaderLabel(idx);
+        const sourceLabel = sourceHeaders[idx] || '';
+        let val = templateLabel ? getRowValueForHeader(row, templateLabel, idx) : '';
+        if (val === '' && sourceLabel && sourceLabel !== templateLabel) {
+          val = getRowValueForHeader(row, sourceLabel, idx);
+        }
+        return val != null ? val : '';
+      });
+      if (out[0] == null || String(out[0]).trim() === '') out[0] = rowIndex + 1;
+      return out;
+    };
+
     const rowLooksMeaningful = (row) => {
       if (Array.isArray(row)) {
         const vals = row.map((v) => String(v ?? '').trim()).filter(Boolean);
@@ -9443,23 +13261,7 @@ const Statutory = ({ userEmail, userRole }) => {
       : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
     const sourceRows = sourcePrimary
       .filter((row) => rowLooksMeaningful(row))
-      .map((row, idx) => {
-        if (Array.isArray(row)) {
-          const out = [...row];
-          const first = String(out[0] ?? '').trim();
-          const m = first.match(/^(\d+)\s+(.+)$/);
-          if (m && (!out[1] || String(out[1]).trim() === '')) {
-            out[0] = m[1];
-            out[1] = m[2];
-          }
-          if (out[0] == null || String(out[0]).trim() === '') out[0] = idx + 1;
-          return out;
-        }
-        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
-        const arr = hdrs.map((h) => row?.[h] ?? '');
-        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
-        return arr;
-      });
+      .map((row, idx) => toForm10OrderedValues(row, idx));
 
     // Remove stale sample data above/below model row while keeping header and numeric marker row intact.
     const isNumericMarkerTemplateRow = (r) => {
@@ -9508,6 +13310,8 @@ const Statutory = ({ userEmail, userRole }) => {
       targetRow.height = Math.max(baseHeight, Math.min(120, baseHeight * maxVisualLines));
     }
 
+    writeForm10Form12HeaderFieldsToExcelJsWorksheet(worksheet, headerFormData, parsedFormHeader);
+
     const out = await workbook.xlsx.writeBuffer();
     const fileName = formFileName ||
       parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
@@ -9550,7 +13354,11 @@ const Statutory = ({ userEmail, userRole }) => {
       return '';
     };
     const sanitizeForm11ExportCell = (value, header) => {
-      if (isForm11SkipAutofillHeader(header)) return '';
+      if (isForm11SkipAutofillHeader(header)) {
+        const text = String(value ?? '').trim();
+        if (isForm11NilMonthInsuranceValue(text)) return text;
+        return '';
+      }
       if (value == null || value === '') return '';
       const text = String(value).trim();
       if (!text) return '';
@@ -9879,6 +13687,149 @@ const Statutory = ({ userEmail, userRole }) => {
       formFileName ||
       parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
       `Form_25_${Date.now()}.xlsx`;
+    const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    return { blob, fileName };
+  };
+
+  const buildFormXVWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    formFileName,
+    headerFormData
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const normalize = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    const maxScanRows = Math.max(80, worksheet.rowCount + 10);
+    const maxScanCols = 20;
+    let headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? parsedHeaderRowIndex + 1 : -1;
+    if (headerRow < 1) {
+      for (let r = 1; r <= maxScanRows; r += 1) {
+        const rowBits = [];
+        for (let c = 1; c <= maxScanCols; c += 1) {
+          const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
+          if (t) rowBits.push(t);
+        }
+        const joined = rowBits.join(' ');
+        if (
+          (/\bsr\.?\s*no\b/.test(joined) || /\bserial\b/.test(joined)) &&
+          joined.includes('nature') &&
+          joined.includes('wage')
+        ) {
+          headerRow = r;
+          break;
+        }
+      }
+    }
+    if (headerRow < 1) throw new Error('Could not locate Form XV table header row.');
+
+    let dataStartRow =
+      parsedDataStartIndex != null && parsedDataStartIndex >= 0
+        ? parsedDataStartIndex + 1
+        : headerRow + 2;
+    for (let r = headerRow + 1; r <= Math.min(headerRow + 3, maxScanRows); r += 1) {
+      const b = normalize(excelCellValueToString(worksheet.getCell(r, 2)?.value));
+      const c = normalize(excelCellValueToString(worksheet.getCell(r, 3)?.value));
+      if (b === 'from' && c === 'to') {
+        dataStartRow = r + 1;
+        break;
+      }
+    }
+
+    const hdrs =
+      Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [...FORM_XV_TABLE_HEADERS];
+    const orderedCols = Array.from({ length: hdrs.length }, (_, i) => i + 1);
+    const getRowValueForHeader = (row, header, headerIndex) => {
+      if (!row || typeof row !== 'object') return '';
+      if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
+      const target = normalizeFormXVTableHeader(header);
+      const keys = Object.keys(row);
+      const exact = keys.filter((k) => normalizeFormXVTableHeader(k) === target);
+      if (exact.length === 1) return row[exact[0]];
+      const fuzzy = keys.find((k) => {
+        const n = normalizeFormXVTableHeader(k);
+        return n && (n.includes(target) || target.includes(n));
+      });
+      return fuzzy ? row[fuzzy] : '';
+    };
+
+    const headerFields = parsedFormHeader?.fields;
+    const headerValues = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+    if (Array.isArray(headerFields) && headerFields.length > 0) {
+      for (let r = 1; r < headerRow; r += 1) {
+        for (let c = 1; c <= 6; c += 1) {
+          const cellStr = String(excelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
+          if (!cellStr) continue;
+          for (const field of headerFields) {
+            const label = String(field?.label || '').trim();
+            if (!label) continue;
+            if (cellStr === label || cellStr.startsWith(label) || label.startsWith(cellStr)) {
+              const value = headerValues[field.key] ?? field.value ?? '';
+              if (value != null && String(value).trim() !== '') {
+                worksheet.getCell(r, 2).value = String(value);
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    const sourceRows = (Array.isArray(mappedData) ? mappedData : []).filter(
+      (row) => row && typeof row === 'object' && Object.values(row).some((v) => String(v ?? '').trim() !== '')
+    );
+
+    const clearToRow = Math.max(dataStartRow + sourceRows.length + 20, dataStartRow + 20);
+    for (let r = dataStartRow; r <= clearToRow; r += 1) {
+      for (let j = 0; j < orderedCols.length; j += 1) {
+        worksheet.getCell(r, orderedCols[j]).value = '';
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i += 1) {
+      const row = sourceRows[i];
+      for (let j = 0; j < hdrs.length; j += 1) {
+        const header = hdrs[j];
+        let value = getRowValueForHeader(row, header, j);
+        if ((value == null || String(value).trim() === '') && j === 0) {
+          value = i + 1;
+        }
+        if (value == null || value === '') continue;
+        worksheet.getCell(dataStartRow + i, orderedCols[j]).value = coerceFormXVCellExportValue(value, header);
+      }
+    }
+
+    autofitExcelJSColumns(worksheet, 1, Math.max(6, hdrs.length), 1, dataStartRow + sourceRows.length + 2);
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName =
+      formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_XV_${Date.now()}.xlsx`;
     const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     return { blob, fileName };
   };
@@ -10280,8 +14231,11 @@ const Statutory = ({ userEmail, userRole }) => {
     const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
       ? mappedData
       : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
-    const sourceRows = sourcePrimary
-      .filter((row) => rowLooksMeaningful(row))
+    const hdrsForExport = Array.isArray(headersToUse) ? headersToUse : [];
+    const sourceRows = sanitizeFixedAggregateComplianceRows(
+      sourcePrimary.filter((row) => rowLooksMeaningful(row)),
+      hdrsForExport
+    )
       .map((row, idx) => {
         if (Array.isArray(row)) return row;
         const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
@@ -10712,60 +14666,141 @@ const Statutory = ({ userEmail, userRole }) => {
     const worksheet = workbook.worksheets[0];
     if (!worksheet) throw new Error('Template worksheet not found.');
 
-    const headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? (parsedHeaderRowIndex + 1) : -1;
-    const dataStartRow = parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? (parsedDataStartIndex + 1) : -1;
-    if (headerRow < 1 || dataStartRow < 1) {
+    const maxScanCols = 360;
+    const maxScanRows = Math.max(80, worksheet.rowCount + 5);
+    let headerRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? parsedHeaderRowIndex + 1 : -1;
+    let startCol = 1;
+
+    for (let r = 1; r <= maxScanRows; r += 1) {
+      for (let c = 1; c <= 60; c += 1) {
+        const raw = formVIExcelCellValueToString(worksheet.getCell(r, c)?.value);
+        if (excelCellLooksLikeSerialHeader(raw)) {
+          headerRow = r;
+          startCol = c;
+          break;
+        }
+      }
+      if (headerRow > 0) break;
+    }
+    if (headerRow < 1) {
       throw new Error('Could not locate Form VI table region from template parser.');
     }
 
-    let startCol = 1;
-    const maxScanCols = 360;
-    for (let c = 1; c <= maxScanCols; c++) {
-      const v = worksheet.getCell(headerRow, c)?.value;
-      if (v != null && String(v).trim() !== '') {
-        startCol = c;
-        break;
+    const getColLabel = (col) => {
+      const parts = [];
+      for (let r = Math.max(1, headerRow - 2); r <= headerRow + 2; r += 1) {
+        const v = formVIExcelNormalize(formVIExcelCellValueToString(worksheet.getCell(r, col)?.value));
+        if (v) parts.push(v);
+      }
+      return parts.join(' ');
+    };
+
+    let dataStartRow =
+      parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? parsedDataStartIndex + 1 : headerRow + 1;
+    let seqMarkers = 0;
+    for (let c = startCol; c <= startCol + 30; c += 1) {
+      const v = formVIExcelNormalize(formVIExcelCellValueToString(worksheet.getCell(headerRow + 1, c)?.value));
+      if (/^\d{1,2}$/.test(v)) seqMarkers += 1;
+    }
+    if (seqMarkers >= 4) dataStartRow = Math.max(dataStartRow, headerRow + 2);
+
+    const hdrs = Array.isArray(headersToUse) ? headersToUse : [];
+    const colByHeader = new Map();
+
+    hdrs.forEach((header) => {
+      const hNorm = formVIExcelNormalize(header);
+      for (let c = startCol; c <= maxScanCols; c += 1) {
+        const label = getColLabel(c);
+        if (!label) continue;
+        let matched = false;
+        if ((/\bs\.?\s*no\b|serial/.test(hNorm)) && (/\bs\.?\s*no\b|serial/.test(label))) matched = true;
+        else if (/employee\s+code/.test(hNorm) && /employee\s+code/.test(label)) matched = true;
+        else if (/name\s+of\s+the\s+employee/.test(hNorm) && /name\s+of\s+the\s+employee/.test(label)) matched = true;
+        else if ((/father|husband/.test(hNorm)) && (/father|husband/.test(label))) matched = true;
+        else if (isFormVIDojHeader(header) && (/\bdoj\b/.test(label) || /date\s+of\s+joining/.test(label))) matched = true;
+        else if (/^remarks?$/.test(hNorm) && /^remarks?$/.test(label)) matched = true;
+        else if (isFormVIHolidayColumnHeader(header) && formVIHolidayLabelsMatch(header, label)) matched = true;
+        if (matched && !colByHeader.has(header)) colByHeader.set(header, c);
+      }
+    });
+
+    let dojCol = null;
+    hdrs.forEach((h) => {
+      if (isFormVIDojHeader(h) && colByHeader.has(h)) dojCol = colByHeader.get(h);
+    });
+    if (!dojCol) {
+      for (let c = startCol; c <= maxScanCols; c += 1) {
+        const label = getColLabel(c);
+        if (/\bdoj\b/.test(label) || /date\s+of\s+joining/.test(label)) {
+          dojCol = c;
+          break;
+        }
       }
     }
+
+    const holidayHeaders = hdrs.filter((h) => isFormVIHolidayColumnHeader(h));
+    if (dojCol && holidayHeaders.some((h) => !colByHeader.has(h))) {
+      let col = dojCol + 1;
+      holidayHeaders.forEach((h) => {
+        if (colByHeader.has(h)) return;
+        while (col <= maxScanCols && /^remarks?$/.test(getColLabel(col))) col += 1;
+        colByHeader.set(h, col);
+        col += 1;
+      });
+    }
+
+    hdrs.forEach((h, idx) => {
+      if (!colByHeader.has(h)) colByHeader.set(h, startCol + idx);
+    });
 
     const rowLooksMeaningful = (row) => {
       if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
       if (row && typeof row === 'object') return Object.values(row).some((v) => String(v ?? '').trim() !== '');
       return false;
     };
-    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
-      ? mappedData
-      : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []);
+    const sourcePrimary = ensureFormVIDownloadRowsHaveDefaults(
+      Array.isArray(mappedData) && mappedData.length > 0
+        ? mappedData
+        : (Array.isArray(mappedRowMatrix) ? mappedRowMatrix : []),
+      hdrs
+    );
     const sourceRows = sourcePrimary
       .filter((row) => rowLooksMeaningful(row))
       .map((row, idx) => {
         if (Array.isArray(row)) return row;
-        const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
-        const arr = hdrs.map((h) => row?.[h] ?? '');
-        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
-        return arr;
+        const obj = {};
+        hdrs.forEach((h) => {
+          obj[h] = row?.[h] ?? '';
+        });
+        const snoHeader = hdrs.find((h) => /\bs\.?\s*no\b|serial/i.test(String(h || '')));
+        if (snoHeader && !String(obj[snoHeader] ?? '').trim()) obj[snoHeader] = idx + 1;
+        return obj;
       });
 
-    const maxColsToWrite = Math.max(12, Array.isArray(headersToUse) ? headersToUse.length : 12);
+    const usedCols = [...new Set([...colByHeader.values()])].sort((a, b) => a - b);
     const clearToRow = Math.min(Math.max(200, worksheet.rowCount + 20), dataStartRow + sourceRows.length + 40);
-    for (let r = dataStartRow; r <= clearToRow; r++) {
-      for (let j = 0; j < maxColsToWrite; j++) {
-        worksheet.getCell(r, startCol + j).value = '';
-      }
+    for (let r = dataStartRow; r <= clearToRow; r += 1) {
+      usedCols.forEach((c) => {
+        worksheet.getCell(r, c).value = '';
+      });
     }
 
-    for (let i = 0; i < sourceRows.length; i++) {
-      const row = sourceRows[i] || [];
-      for (let j = 0; j < maxColsToWrite; j++) {
-        const value = row[j];
-        if (value == null || value === '') continue;
-        const cell = worksheet.getCell(dataStartRow + i, startCol + j);
-        if (j === 0 && (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))) {
+    for (let i = 0; i < sourceRows.length; i += 1) {
+      const row = sourceRows[i] || {};
+      hdrs.forEach((header) => {
+        const col = colByHeader.get(header);
+        const value = row[header];
+        if (!col || value == null || String(value).trim() === '') return;
+        const cell = worksheet.getCell(dataStartRow + i, col);
+        if (
+          /\bs\.?\s*no\b|serial/i.test(String(header || '')) &&
+          (typeof value === 'number' || (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))
+        ) {
           cell.value = Number(value);
         } else {
           cell.value = String(value);
         }
-      }
+      });
     }
 
     const out = await workbook.xlsx.writeBuffer();
@@ -10777,37 +14812,52 @@ const Statutory = ({ userEmail, userRole }) => {
   };
 
   // View Draft File: generate formmaster template + autofill (Zoho People) data and download (no modal, no save)
-  const handleViewDraftFileGenerate = async (item, resolvedFormFileItem) => {
+  const handleViewDraftFileGenerate = async (item, resolvedFormFileItem, generateOptions = {}) => {
     const lineItem = item || resolvedFormFileItem || {};
     const isFormUItem = isFormUAutofillContext({
       formName: lineItem?.formName || lineItem?.FormName,
       item: lineItem
     });
+    const isFormIItem =
+      isFormIRegisterOfFinesContext(
+        lineItem,
+        lineItem?.formFileName || lineItem?.FormFileName || '',
+        null,
+        null,
+        ''
+      ) ||
+      isFormIRegisterOfWorkmenContext(
+        lineItem,
+        lineItem?.formFileName || lineItem?.FormFileName || '',
+        null,
+        null,
+        ''
+      ) ||
+      /\bform\s*[-"']?\s*i\b/i.test(String(lineItem?.formName || lineItem?.FormName || '')) ||
+      (/\bform[\s._-]*1(?:[\s._-]|$)/i.test(String(lineItem?.formName || lineItem?.FormName || '')) &&
+        !/\bform[\s._-]*1[0-9]/i.test(String(lineItem?.formName || lineItem?.FormName || '')));
     const draftIdOptsEarly = showApprovalColumn ? { preferSiteSubmittedDraft: true } : {};
+    const sampleFetchContextEarly = buildStatutorySampleDataFetchContext(item, resolvedFormFileItem);
+    const sampleFetchIdsEarly = buildStatutorySampleDataFetchIds(item, resolvedFormFileItem, {
+      draftIdOpts: draftIdOptsEarly,
+      sampleStatutoryId: generateOptions?.sampleStatutoryId,
+      draftApiRowId: generateOptions?.draftApiRowId
+    });
+    const preloadedSampleEarly = generateOptions?.preloadedSampleBlock
+      ? normalizeSampleDataSnapshotBlock(generateOptions.preloadedSampleBlock)
+      : null;
+    const parallelSamplePromise = preloadedSampleEarly
+      ? Promise.resolve(preloadedSampleEarly)
+      : resolveStatutorySampleDataBlockForDownload(sampleFetchIdsEarly, sampleFetchContextEarly).catch(
+          () => null
+        );
     let sampleHeadersForTemplate = null;
-    if (isFormUItem) {
-      const sampleStatutoryIdEarly =
-        resolveNumericStatutoryIdForProofRow(item, draftIdOptsEarly) ||
-        resolveNumericStatutoryIdForProofRow(resolvedFormFileItem, draftIdOptsEarly);
-      if (sampleStatutoryIdEarly && isNumericStatutoryBackendId(sampleStatutoryIdEarly)) {
-        try {
-          const sampleRespEarly = await fetch(
-            `/server/statutoryreg_function/statutory/${sampleStatutoryIdEarly}/sampledata?_ts=${Date.now()}`
-          );
-          if (sampleRespEarly.ok) {
-            const sampleJsonEarly = await sampleRespEarly.json().catch(() => null);
-            const sh = sampleJsonEarly?.data?.sampleData?.headers;
-            if (Array.isArray(sh) && sh.length > 0) sampleHeadersForTemplate = sh;
-          }
-        } catch (sampleEarlyErr) {
-          console.warn('Could not prefetch SampleData headers for Form U draft download:', sampleEarlyErr);
-        }
-      }
+    if (preloadedSampleEarly?.headers?.length) {
+      sampleHeadersForTemplate = preloadedSampleEarly.headers;
     }
-    const templateMeta = resolveDraftDownloadTemplateMeta(
+    const templateMeta = resolveStatutoryFormTemplateForRow(
       lineItem,
-      resolvedFormFileItem,
-      { formmasterFormFileByMatchKey, formmasterTemplates },
+      { formmasterFormFileByMatchKey, formFileByFormKey, formmasterTemplates },
       { sampleHeaders: sampleHeadersForTemplate }
     );
     const hasFormFile = templateMeta?.formFile && templateMeta.formFile !== 'null' && String(templateMeta.formFile).trim() !== '';
@@ -10821,12 +14871,18 @@ const Statutory = ({ userEmail, userRole }) => {
       setSuccess('Generating draft...');
       const fn = (templateMeta.formFileName || resolvedFormFileItem.formFileName || 'template.xlsx').replace(/[^a-zA-Z0-9._-]/g, '_');
       const fileUrl = `/server/formmaster_function/templates/download/${templateMeta.formFile}?fileName=${encodeURIComponent(fn)}`;
-      const res = await fetch(fileUrl);
-      if (!res.ok) {
-        setError('Could not load formmaster template.');
-        return;
+      const templateCacheKey = `formmaster|${templateMeta.formFile}|${fn}`;
+      const [{ arrayBuffer }, sampleBlockParallel] = await Promise.all([
+        fetchFormTemplateArrayBuffer([fileUrl], templateCacheKey),
+        parallelSamplePromise
+      ]);
+      if (
+        !sampleHeadersForTemplate &&
+        Array.isArray(sampleBlockParallel?.headers) &&
+        sampleBlockParallel.headers.length > 0
+      ) {
+        sampleHeadersForTemplate = sampleBlockParallel.headers;
       }
-      const arrayBuffer = await res.arrayBuffer();
       let templateWb = XLSX.read(arrayBuffer, { type: 'array' });
       let parsed = parseExcelForm(templateWb);
       const sheetTextForDownload = templateWb.SheetNames?.[0]
@@ -10916,6 +14972,88 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
       }
+      downloadHeaderHints.tableHeaders = headersToUse;
+      const expectedFormIVariant =
+        inferFormIVariantFromRow(lineItem, {
+          ...downloadHeaderHints,
+          sampleHeaders: sampleHeadersForTemplate
+        }) ||
+        inferFormIVariantFromSavedHeaders(sampleHeadersForTemplate) ||
+        inferFormIVariantFromSavedHeaders(headersToUse) ||
+        null;
+      const fetchedFormIVariant = inferFormIVariantFromSheetHints({
+        ...downloadHeaderHints,
+        item: lineItem,
+        tableHeaders: headersToUse
+      });
+      const formITemplateMismatch =
+        isFormIItem &&
+        fetchedFormIVariant &&
+        (expectedFormIVariant
+          ? fetchedFormIVariant !== expectedFormIVariant
+          : fetchedFormIVariant === 'register_of_workmen' &&
+            isFormIRegisterOfFinesContext(
+              lineItem,
+              fn,
+              parsed?.formHeader,
+              headersToUse,
+              downloadHeaderHints.sheetText
+            ));
+      if (formITemplateMismatch) {
+        const repickVariant =
+          expectedFormIVariant ||
+          (fetchedFormIVariant === 'register_of_workmen' ? 'register_of_fines' : null);
+        const repickMeta =
+          (repickVariant
+            ? pickFormMasterTemplateByFormIVariant(
+                lineItem,
+                formmasterTemplates,
+                repickVariant
+              )
+            : null) ||
+          resolveDraftDownloadTemplateMeta(
+            lineItem,
+            resolvedFormFileItem,
+            { formmasterFormFileByMatchKey, formmasterTemplates },
+            {
+              expectedVariant: repickVariant,
+              sampleHeaders: sampleHeadersForTemplate || headersToUse,
+              formHeaderTitle: parsed.formHeader?.title,
+              formHeaderSubtitle: parsed.formHeader?.subtitle,
+              sheetText: downloadHeaderHints.sheetText
+            }
+          );
+        if (repickMeta?.formFile && String(repickMeta.formFile) !== String(templateMeta.formFile)) {
+          const repickFn = String(
+            repickMeta.formFileName || templateMeta.formFileName || 'template.xlsx'
+          ).replace(/[^a-zA-Z0-9._-]/g, '_');
+          const repickUrl = `/server/formmaster_function/templates/download/${repickMeta.formFile}?fileName=${encodeURIComponent(repickFn)}`;
+          const repickRes = await fetch(repickUrl);
+          if (repickRes.ok) {
+            const repickBuf = await repickRes.arrayBuffer();
+            templateWb = XLSX.read(repickBuf, { type: 'array' });
+            parsed = parseExcelForm(templateWb);
+            downloadHeaderHints.fileName = repickFn;
+            downloadHeaderHints.formFileName = repickMeta.formFileName;
+            downloadHeaderHints.sheetText = templateWb.SheetNames?.[0]
+              ? (() => {
+                  const ws0 = templateWb.Sheets[templateWb.SheetNames[0]];
+                  const rows = XLSX.utils.sheet_to_json(ws0, { header: 1, defval: '' });
+                  return rows
+                    .slice(0, 35)
+                    .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+                    .join(' ');
+                })()
+              : '';
+            headersToUse = resolveAutofillTableHeaders(
+              (parsed.headers || []).filter((h) => String(h || '').trim()),
+              downloadHeaderHints
+            );
+            downloadHeaderHints.tableHeaders = headersToUse;
+            Object.assign(templateMeta, repickMeta);
+          }
+        }
+      }
       if (!headersToUse.length) {
         setError('Could not read template headers.');
         return;
@@ -10941,6 +15079,12 @@ const Statutory = ({ userEmail, userRole }) => {
       let usedSnapshot = false;
       let usedSavedDraftFile = false;
       let savedDraftRowMatrix = null;
+      let cachedSampleBlockForDownload =
+        preloadedSampleEarly ||
+        (sampleBlockParallel ? normalizeSampleDataSnapshotBlock(sampleBlockParallel) : null) ||
+        (generateOptions?.preloadedSampleBlock
+          ? normalizeSampleDataSnapshotBlock(generateOptions.preloadedSampleBlock)
+          : null);
       const downloadReqTs = Date.now();
       const isFormADownload = isFormAMusterRollContext(parsed.formHeader) ||
         /\bform\s*[-"']?\s*a\b/i.test(String(item?.formName || item?.FormName || ''));
@@ -10985,7 +15129,21 @@ const Statutory = ({ userEmail, userRole }) => {
       );
       const isFormIDownload =
         !isFormIIDownload &&
-        (/\bform\s*[-"']?\s*i\b/i.test(String(item?.formName || item?.FormName || '')) ||
+        (isFormIRegisterOfFinesContext(
+          item,
+          templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
+          parsed?.formHeader,
+          headersToUse,
+          parsed?.sheetText
+        ) ||
+          isFormIRegisterOfWorkmenContext(
+            item,
+            templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
+            parsed?.formHeader,
+            headersToUse,
+            parsed?.sheetText
+          ) ||
+          /\bform\s*[-"']?\s*i\b/i.test(String(item?.formName || item?.FormName || '')) ||
           /\bform\s*[-"']?\s*i\b/i.test(String(parsed?.formHeader?.title || '')));
       const isFormKDownload = isFormKRegisterOfEmploymentContext(
         parsed?.formHeader,
@@ -11008,9 +15166,11 @@ const Statutory = ({ userEmail, userRole }) => {
         /\bform\s*[-"']?\s*6\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform\s*[-"']?\s*vi\b/i.test(String(parsed?.formHeader?.title || '')) ||
         /\bform\s*[-"']?\s*6\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormXVDownload = isFormXVContext(parsed?.formHeader, item, fn);
       const isFormXVIDownload =
         /\bform[\s._-]*xvi\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform[\s._-]*xvi\b/i.test(String(parsed?.formHeader?.title || ''));
+      const isFormXXVIDownload = isFormXXVIContext(parsed?.formHeader, item, fn);
       const isFormXVIIIDownload =
         /\bform[\s._-]*xviii\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform[\s._-]*xviii\b/i.test(String(parsed?.formHeader?.title || '')) ||
@@ -11041,9 +15201,9 @@ const Statutory = ({ userEmail, userRole }) => {
       const modalRow = formFileModalData?.item || autofillItem;
       const draftIdOpts = showApprovalColumn ? { preferSiteSubmittedDraft: true } : {};
       const nidDownload =
-        resolveNumericStatutoryIdForProofRow(item, draftIdOpts) ||
-        resolveNumericStatutoryIdForProofRow(resolvedFormFileItem, draftIdOpts);
-      const nidModal = modalRow ? resolveNumericStatutoryIdForProofRow(modalRow, draftIdOpts) : null;
+        resolveStatutorySampleDataFetchId(item, draftIdOpts) ||
+        resolveStatutorySampleDataFetchId(resolvedFormFileItem, draftIdOpts);
+      const nidModal = modalRow ? resolveStatutorySampleDataFetchId(modalRow, draftIdOpts) : null;
       const dedupD = proofRowDedupKey(item);
       const dedupM = modalRow ? proofRowDedupKey(modalRow) : '';
       const sameStatutoryLineAsModal =
@@ -11052,7 +15212,19 @@ const Statutory = ({ userEmail, userRole }) => {
         ((nidDownload && nidModal && String(nidDownload) === String(nidModal)) ||
           !!(dedupD && dedupM && dedupD === dedupM));
 
+      // Export exactly what the user sees in the open modal (including imported / manual edits).
       if (
+        sameStatutoryLineAsModal &&
+        !formFileLoading &&
+        liveModalGridLoadedRowCount > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = copyLiveModalGridRowsForDownload();
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        }
+      } else if (
         sameStatutoryLineAsModal &&
         canUseLiveModalGridForDownload
       ) {
@@ -11107,9 +15279,22 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
 
-      // Form 12 hard preference: use live Autofill grid rows directly when available
-      // so alignment matches the modal (avoid stale/shifted draft matrix rows).
+      // Form 12: always export the live Autofill modal grid when open (must match on-screen data including bank details).
       if (
+        isForm12Download &&
+        isFormFileModalOpen &&
+        liveModalGridLoadedRowCount > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = copyLiveModalGridRowsForDownload();
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      } else if (
         isForm12Download &&
         canUseLiveModalGridForDownload
       ) {
@@ -11123,8 +15308,22 @@ const Statutory = ({ userEmail, userRole }) => {
         }
         savedDraftRowMatrix = null;
       }
-      // Form 10 hard preference: use live Autofill grid rows directly when available.
+      // Form 10: always export the live Autofill modal grid when open (must match on-screen imported/overtime data).
       if (
+        isForm10Download &&
+        isFormFileModalOpen &&
+        liveModalGridLoadedRowCount > 0
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = copyLiveModalGridRowsForDownload();
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          headersToUse = [...modalHdrs];
+        } else if (mappedData[0] && typeof mappedData[0] === 'object') {
+          headersToUse = Object.keys(mappedData[0]);
+        }
+        savedDraftRowMatrix = null;
+      } else if (
         isForm10Download &&
         canUseLiveModalGridForDownload
       ) {
@@ -11305,10 +15504,16 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isFormVIDownload &&
-        canUseLiveModalGridForDownload
+        (canUseLiveModalGridForDownload ||
+          (isFormFileModalOpen && liveModalGridLoadedRowCount > 0))
       ) {
         usedLiveModalGrid = true;
-        mappedData = copyLiveModalGridRowsForDownload();
+        mappedData = ensureFormVIDownloadRowsHaveDefaults(
+          copyLiveModalGridRowsForDownload(),
+          formFileModalData?.parsedTableHeaders?.length
+            ? formFileModalData.parsedTableHeaders
+            : headersToUse
+        );
         const modalHdrs = formFileModalData?.parsedTableHeaders;
         if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
@@ -11317,34 +15522,65 @@ const Statutory = ({ userEmail, userRole }) => {
         }
         savedDraftRowMatrix = null;
       }
+      if (
+        isFormXVDownload &&
+        canUseLiveModalGridForDownload
+      ) {
+        usedLiveModalGrid = true;
+        mappedData = copyLiveModalGridRowsForDownload();
+        const modalHdrs = formFileModalData?.parsedTableHeaders;
+        const priorHdrs = Array.isArray(modalHdrs) && modalHdrs.length > 0 ? modalHdrs : headersToUse;
+        headersToUse = [...FORM_XV_TABLE_HEADERS];
+        mappedData = mapFormXVRowsToCanonicalHeaders(mappedData, priorHdrs, headersToUse);
+        savedDraftRowMatrix = null;
+      }
+
+      let downloadHeaderFormData =
+        headerFormData && typeof headerFormData === 'object' && Object.keys(headerFormData).length > 0
+          ? { ...headerFormData }
+          : formFileModalData?.parsedHeaderFormData && typeof formFileModalData.parsedHeaderFormData === 'object'
+            ? { ...formFileModalData.parsedHeaderFormData }
+            : {};
 
       // Prefer latest saved snapshot from SampleData for this statutory record (includes imported data).
       // Must resolve real Catalyst ROWID: merged ChecklistBulk rows keep bulk_* id while draft lives on draftStatutoryRowIdForFile.
-      if (!usedLiveModalGrid) {
-        const sampleStatutoryId =
-          resolveNumericStatutoryIdForProofRow(item, draftIdOpts) ||
-          resolveNumericStatutoryIdForProofRow(resolvedFormFileItem, draftIdOpts);
-        if (sampleStatutoryId && isNumericStatutoryBackendId(sampleStatutoryId)) {
-          try {
-            const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleStatutoryId}/sampledata?_ts=${downloadReqTs}`);
-            if (sampleResp.ok) {
-              const sampleJson = await sampleResp.json().catch(() => null);
-              const sampleBlock = sampleJson?.data?.sampleData;
-              const sampleRows = sampleBlock?.rows;
-              const snapshotHeaders = Array.isArray(sampleBlock?.headers) ? sampleBlock.headers : null;
-              if (Array.isArray(sampleRows) && sampleRows.length > 0) {
-                usedSnapshot = true;
-                mappedData = sampleRows;
-                // Rows were persisted under these headers; prefer them so keys align with the modal / Autofill save.
-                if (snapshotHeaders && snapshotHeaders.length > 0) {
-                  headersToUse = [...snapshotHeaders];
-                }
-              }
-            }
-          } catch (sampleErr) {
-            console.warn('Could not fetch SampleData snapshot for draft generation:', sampleErr);
-          }
+      try {
+        if (!cachedSampleBlockForDownload) {
+          cachedSampleBlockForDownload = await resolveStatutorySampleDataBlockForDownload(
+            buildStatutorySampleDataFetchIds(item, resolvedFormFileItem, {
+              draftIdOpts,
+              sampleStatutoryId: generateOptions?.sampleStatutoryId,
+              draftApiRowId: generateOptions?.draftApiRowId
+            }),
+            buildStatutorySampleDataFetchContext(item, resolvedFormFileItem)
+          );
         }
+        if (cachedSampleBlockForDownload?.rows?.length) {
+          const appliedSample = applyStatutorySampleDataBlockToDownload(
+            mappedData,
+            headersToUse,
+            cachedSampleBlockForDownload,
+            buildSampleDataDownloadApplyOptions({
+              isForm10Download,
+              isForm12Download,
+              usedLiveModalGrid
+            })
+          );
+          mappedData = appliedSample.mappedData;
+          headersToUse = appliedSample.headersToUse;
+          if (appliedSample.usedSnapshot) usedSnapshot = true;
+          if (appliedSample.headerFormData && Object.keys(appliedSample.headerFormData).length > 0) {
+            downloadHeaderFormData = { ...downloadHeaderFormData, ...appliedSample.headerFormData };
+          }
+          if (isFormXVDownload && Array.isArray(cachedSampleBlockForDownload.headers) && cachedSampleBlockForDownload.headers.length > 0) {
+            const priorHdrs = cachedSampleBlockForDownload.headers;
+            headersToUse = [...FORM_XV_TABLE_HEADERS];
+            mappedData = mapFormXVRowsToCanonicalHeaders(mappedData, priorHdrs, headersToUse);
+          }
+          savedDraftRowMatrix = null;
+        }
+      } catch (sampleErr) {
+        console.warn('Could not fetch SampleData snapshot for draft generation:', sampleErr);
       }
 
       // Prefer saved Draft file rows only when no exact SampleData snapshot exists.
@@ -11448,14 +15684,39 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       // Fallback to Zoho data if snapshot is not available (skip employee expansion for LWF Form C–style fixed grids).
-      if (!Array.isArray(mappedData) || mappedData.length === 0) {
+      const downloadHasMeaningfulRows =
+        Array.isArray(mappedData) &&
+        mappedData.some((row) => formTableRowHasMeaningfulData(row));
+
+      if (!usedSnapshot && (!Array.isArray(mappedData) || mappedData.length === 0)) {
         if (isFixedRowAggregateComplianceTable(headersToUse)) {
           mappedData = parsed.tableData || [];
         } else {
-          mappedData = await fetchAndPopulateEmployeeData(headersToUse, {
-            returnMappedData: true,
-            ...(isFormADownload ? { formAPeopleSkipManualColumns: true } : {})
-          });
+          const modalHdrsForFetch =
+            isForm12Download &&
+            isFormFileModalOpen &&
+            Array.isArray(formFileModalData?.parsedTableHeaders) &&
+            formFileModalData.parsedTableHeaders.length > 0
+              ? formFileModalData.parsedTableHeaders
+              : headersToUse;
+          mappedData = await fetchAndPopulateEmployeeData(
+            isForm12Download ? modalHdrsForFetch : headersToUse,
+            {
+              returnMappedData: true,
+              ...(isFormADownload ? { formAPeopleSkipManualColumns: true } : {}),
+              ...(isForm12Download && formFileModalData
+                ? {
+                    formFileModalData: {
+                      ...formFileModalData,
+                      parsedTableHeaders: modalHdrsForFetch
+                    }
+                  }
+                : {})
+            }
+          );
+          if (isForm12Download && Array.isArray(modalHdrsForFetch) && modalHdrsForFetch.length > 0) {
+            headersToUse = [...modalHdrsForFetch];
+          }
         }
       }
 
@@ -11549,12 +15810,60 @@ const Statutory = ({ userEmail, userRole }) => {
 
       // Form 12 strict alignment rule:
       // Rebuild from fresh autofill mapping only when we do not already have an exact saved snapshot/draft.
-      if (isForm12Download && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !showApprovalColumn) {
+      if (isForm12Download && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !showApprovalColumn && !downloadHasMeaningfulRows) {
         try {
-          const canonicalForm12Headers = [...FORM_12_ALIGNMENT_HEADERS];
-          const refreshedForm12Rows = await fetchAndPopulateEmployeeData(canonicalForm12Headers, { returnMappedData: true });
+          const sampleBlockLate = await fetchFirstAvailableStatutorySampleDataSnapshot(
+            ...buildStatutorySampleDataFetchIds(item, resolvedFormFileItem, {
+              draftIdOpts,
+              sampleStatutoryId: generateOptions?.sampleStatutoryId,
+              draftApiRowId: generateOptions?.draftApiRowId
+            }),
+            buildStatutorySampleDataFetchContext(item, resolvedFormFileItem)
+          );
+          if (sampleBlockLate?.rows?.length) {
+            if (Array.isArray(mappedData) && mappedData.length > 0) {
+              mappedData = overlayForm12SampleRowsOntoBase(
+                mappedData,
+                sampleBlockLate.rows,
+                sampleBlockLate.headers,
+                headersToUse
+              );
+            } else {
+              mappedData = sampleBlockLate.rows;
+              if (Array.isArray(sampleBlockLate.headers) && sampleBlockLate.headers.length > 0) {
+                headersToUse = [...sampleBlockLate.headers];
+              }
+            }
+            usedSnapshot = true;
+            savedDraftRowMatrix = null;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          /* keep existing mappedData */
+        }
+      }
+      if (isForm12Download && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !showApprovalColumn && !downloadHasMeaningfulRows) {
+        try {
+          const form12HeadersForRefresh =
+            isFormFileModalOpen &&
+            Array.isArray(formFileModalData?.parsedTableHeaders) &&
+            formFileModalData.parsedTableHeaders.length > 0
+              ? [...formFileModalData.parsedTableHeaders]
+              : headersToUse?.length
+                ? [...headersToUse]
+                : [...FORM_12_ALIGNMENT_HEADERS];
+          const refreshedForm12Rows = await fetchAndPopulateEmployeeData(form12HeadersForRefresh, {
+            returnMappedData: true,
+            formFileModalData: formFileModalData || {
+              item,
+              parsedTableHeaders: form12HeadersForRefresh,
+              parsedFormHeader: parsed.formHeader,
+              fileName: fn,
+              formFileName: templateMeta.formFileName
+            }
+          });
           if (Array.isArray(refreshedForm12Rows) && refreshedForm12Rows.length > 0) {
-            headersToUse = canonicalForm12Headers;
+            headersToUse = form12HeadersForRefresh;
             mappedData = refreshedForm12Rows;
             savedDraftRowMatrix = null;
             usedSnapshot = false;
@@ -11564,19 +15873,17 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      // Form 11: refresh People autofill on download so Name + Address columns include employee name.
+      // Form 11: ensure nil-of-the-month row when no accident entries exist.
       if (isForm11Download && !usedLiveModalGrid) {
-        try {
-          const refreshedForm11Rows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
-          if (Array.isArray(refreshedForm11Rows) && refreshedForm11Rows.length > 0) {
-            mappedData = refreshedForm11Rows;
-            savedDraftRowMatrix = null;
-          }
-        } catch (_) {
-          // keep existing mappedData if refresh fails
-        }
+        mappedData = applyForm11NilTableRows(
+          headersToUse,
+          Array.isArray(mappedData) ? mappedData : [],
+          selectedMonth,
+          item
+        );
+        savedDraftRowMatrix = null;
       }
-      if (isForm10Download) {
+      if (isForm10Download && !usedSnapshot && !usedSavedDraftFile && !usedLiveModalGrid && !cachedSampleBlockForDownload?.rows?.length) {
         const form10CurrentRowCount = countMeaningfulFormTableRows(
           Array.isArray(mappedData) ? mappedData : []
         );
@@ -11588,7 +15895,6 @@ const Statutory = ({ userEmail, userRole }) => {
           try {
             const refreshedForm10Rows = await fetchAndPopulateEmployeeData(headersToUse, {
               returnMappedData: true,
-              forcePeopleRefresh: true,
               formFileModalData: formFileModalData || {
                 item,
                 parsedTableHeaders: headersToUse,
@@ -11609,7 +15915,7 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
       }
-      if (isForm25Download && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isForm25Download && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedForm25Rows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -11625,7 +15931,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormBDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormBDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedFormBRows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -11641,7 +15947,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormWDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormWDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedFormWRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormWRows) && refreshedFormWRows.length > 0) {
@@ -11654,7 +15960,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormXDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormXDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedFormXRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormXRows) && refreshedFormXRows.length > 0) {
@@ -11667,7 +15973,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormCDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormCDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedFormCRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormCRows) && refreshedFormCRows.length > 0) {
@@ -11680,7 +15986,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormDDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormDDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedFormDRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormDRows) && refreshedFormDRows.length > 0) {
@@ -11693,7 +15999,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedFormIRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormIRows) && refreshedFormIRows.length > 0) {
@@ -11706,7 +16012,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormJDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormJDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedFormJRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormJRows) && refreshedFormJRows.length > 0) {
@@ -11719,7 +16025,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormKDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormKDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedFormKRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormKRows) && refreshedFormKRows.length > 0) {
@@ -11732,7 +16038,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormVDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormVDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedFormVRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
           if (Array.isArray(refreshedFormVRows) && refreshedFormVRows.length > 0) {
@@ -11745,11 +16051,26 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormVIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormVIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
-          const refreshedFormVIRows = await fetchAndPopulateEmployeeData(headersToUse, { returnMappedData: true });
+          const formVIFileName = String(
+            item?.formName || item?.FormName || parsed?.formHeader?.title || fn || templateMeta.formFileName || ''
+          );
+          const refreshedFormVIRows = await fetchAndPopulateEmployeeData(headersToUse, {
+            returnMappedData: true,
+            fileName: formVIFileName,
+            parsedFormHeader: parsed.formHeader,
+            item,
+            formFileModalData: {
+              parsedFormHeader: parsed.formHeader,
+              parsedTableHeaders: headersToUse,
+              item,
+              fileName: formVIFileName,
+              formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || ''
+            }
+          });
           if (Array.isArray(refreshedFormVIRows) && refreshedFormVIRows.length > 0) {
-            mappedData = refreshedFormVIRows;
+            mappedData = ensureFormVIDownloadRowsHaveDefaults(refreshedFormVIRows, headersToUse);
             savedDraftRowMatrix = null;
             usedSnapshot = false;
             usedSavedDraftFile = false;
@@ -11758,7 +16079,25 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
-      if (isFormXVIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormXVDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
+        try {
+          const refreshedRows = await fetchAndPopulateEmployeeData(headersToUse, {
+            returnMappedData: true,
+            fileName: String(item?.formName || item?.FormName || parsed?.formHeader?.title || fn || ''),
+            parsedFormHeader: parsed.formHeader,
+            item
+          });
+          if (Array.isArray(refreshedRows) && refreshedRows.length > 0) {
+            mappedData = refreshedRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          /* keep existing mappedData */
+        }
+      }
+      if (isFormXVIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedRows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -11776,7 +16115,25 @@ const Statutory = ({ userEmail, userRole }) => {
           /* keep existing mappedData */
         }
       }
-      if (isFormXVIIIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormXXVIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
+        try {
+          const refreshedRows = await fetchAndPopulateEmployeeData(headersToUse, {
+            returnMappedData: true,
+            fileName: String(item?.formName || item?.FormName || parsed?.formHeader?.title || fn || ''),
+            parsedFormHeader: parsed.formHeader,
+            item
+          });
+          if (Array.isArray(refreshedRows) && refreshedRows.length > 0) {
+            mappedData = refreshedRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          /* keep existing mappedData */
+        }
+      }
+      if (isFormXVIIIDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedRows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -11794,7 +16151,7 @@ const Statutory = ({ userEmail, userRole }) => {
           /* keep existing mappedData */
         }
       }
-      if (isFormTSEDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile) {
+      if (isFormTSEDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const refreshedRows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -11858,15 +16215,155 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
       if (isFormVIDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        mappedData = ensureFormVIDownloadRowsHaveDefaults(mappedData, headersToUse);
         savedDraftRowMatrix = null;
       }
       if (isForm11Download && Array.isArray(mappedData) && mappedData.length > 0) {
         savedDraftRowMatrix = null;
       }
 
+      // FINAL: SampleData table always wins for Excel download when it has saved/imported rows.
+      try {
+        if (!cachedSampleBlockForDownload) {
+          cachedSampleBlockForDownload = await resolveStatutorySampleDataBlockForDownload(
+            buildStatutorySampleDataFetchIds(item, resolvedFormFileItem, {
+              draftIdOpts,
+              sampleStatutoryId: generateOptions?.sampleStatutoryId,
+              draftApiRowId: generateOptions?.draftApiRowId
+            }),
+            buildStatutorySampleDataFetchContext(item, resolvedFormFileItem)
+          );
+        }
+        if (cachedSampleBlockForDownload?.rows?.length) {
+          const finalSampleApply = applyStatutorySampleDataBlockToDownload(
+            mappedData,
+            headersToUse,
+            cachedSampleBlockForDownload,
+            buildSampleDataDownloadApplyOptions({
+              isForm10Download,
+              isForm12Download,
+              usedLiveModalGrid
+            })
+          );
+          mappedData = finalSampleApply.mappedData;
+          headersToUse = finalSampleApply.headersToUse;
+          if (finalSampleApply.usedSnapshot) {
+            usedSnapshot = true;
+            usedSavedDraftFile = false;
+            savedDraftRowMatrix = null;
+          }
+          if (finalSampleApply.headerFormData && Object.keys(finalSampleApply.headerFormData).length > 0) {
+            downloadHeaderFormData = {
+              ...downloadHeaderFormData,
+              ...finalSampleApply.headerFormData
+            };
+          }
+          if (isFormXVDownload && Array.isArray(cachedSampleBlockForDownload.headers) && cachedSampleBlockForDownload.headers.length > 0) {
+            const priorHdrs = cachedSampleBlockForDownload.headers;
+            headersToUse = [...FORM_XV_TABLE_HEADERS];
+            mappedData = mapFormXVRowsToCanonicalHeaders(mappedData, priorHdrs, headersToUse);
+          }
+        }
+      } catch (finalSampleErr) {
+        console.warn('Final SampleData apply before Excel build failed:', finalSampleErr);
+      }
+
+      // Form 10/12: live modal grid always wins (typed VE1044 date etc.) even when download starts from main table.
+      if (
+        (isForm10Download || isForm12Download) &&
+        isFormFileModalOpen &&
+        countMeaningfulFormTableRows(formTableDataRef.current) > 0
+      ) {
+        const modalHdrs =
+          (Array.isArray(formFileModalData?.parsedTableHeaders) && formFileModalData.parsedTableHeaders.length > 0
+            ? formFileModalData.parsedTableHeaders
+            : headersToUse) || [];
+        const liveRows = formTableDataRef.current
+          .filter((row) => formTableRowHasMeaningfulData(row))
+          .map((row) => ({ ...row }));
+        if (liveRows.length > 0) {
+          try {
+            const persistIds = buildStatutorySampleDataFetchIds(item, resolvedFormFileItem, {
+              draftIdOpts,
+              sampleStatutoryId: generateOptions?.sampleStatutoryId,
+              draftApiRowId: generateOptions?.draftApiRowId
+            });
+            const persistCtx = buildStatutorySampleDataFetchContext(item, resolvedFormFileItem);
+            const monthVal =
+              persistCtx.monthFilter || selectedMonth || MONTH_NAMES[new Date().getMonth()];
+            const persistPayload = {
+              sampleDataHeader: prepareSampleDataHeadersForSave(modalHdrs),
+              sampleHeaderFormData:
+                downloadHeaderFormData && typeof downloadHeaderFormData === 'object'
+                  ? downloadHeaderFormData
+                  : formFileModalData?.parsedHeaderFormData || {},
+              sampleData: prepareSampleDataRowsForSave(liveRows),
+              formName: persistCtx.formName || item?.formName || item?.FormName || '',
+              monthFilter: monthVal,
+              MonthFilter: monthVal,
+              monthfilter: monthVal
+            };
+            for (const pid of persistIds) {
+              const pr = await postStatutorySampleDataSnapshot(pid, persistPayload);
+              if (pr.ok && pr.data?.status === 'success') break;
+            }
+          } catch (persistLiveErr) {
+            console.warn('Live modal SampleData persist before download skipped:', persistLiveErr);
+          }
+          if (Array.isArray(mappedData) && mappedData.length > 0) {
+            mappedData = overlayLiveModalRowsOntoDownload(mappedData, liveRows, modalHdrs, headersToUse);
+          } else {
+            mappedData = liveRows;
+          }
+          if (modalHdrs.length > 0) headersToUse = [...modalHdrs];
+          usedLiveModalGrid = true;
+          savedDraftRowMatrix = null;
+        }
+      }
+
+      const formHeaderFieldsForDownload = parsed?.formHeader?.fields || [];
+      downloadHeaderFormData = seedHeaderFormDataFromParsedFields(
+        downloadHeaderFormData,
+        formHeaderFieldsForDownload
+      );
+      try {
+        const resolvedSiteForFactoryHeaders = resolveStatutorySiteNameForContractorAutofill(item, {
+          siteFromUrl,
+          allowedSiteNameList,
+          allRows: statutoryData,
+          resolveSiteFn: typeof resolveSiteDisplayName === 'function' ? resolveSiteDisplayName : null
+        });
+        if (resolvedSiteForFactoryHeaders) {
+          const sitesForFactoryHeaders =
+            Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+              ? siteDetailsList
+              : readSiteDetailsCache() || [];
+          downloadHeaderFormData = applySiteManagementToHeaderFormData(
+            downloadHeaderFormData,
+            resolvedSiteForFactoryHeaders,
+            sitesForFactoryHeaders,
+            formHeaderFieldsForDownload
+          );
+        }
+      } catch (siteFactoryHeaderErr) {
+        console.warn('Site factory header autofill for download skipped:', siteFactoryHeaderErr);
+      }
+
       if (!mappedData || mappedData.length === 0) {
-        setError('No data available to fill in the draft.');
-        return;
+        const formAHeaderOnlyDownload =
+          isFormADownload &&
+          isFormAHeaderFieldLayoutFormHeader(parsed?.formHeader) &&
+          Object.values(downloadHeaderFormData || {}).some((v) => String(v ?? '').trim() !== '');
+        if (!formAHeaderOnlyDownload) {
+          setError('No data available to fill in the draft.');
+          return;
+        }
+        mappedData = [];
+      }
+      if (isFormXVDownload) {
+        const priorHdrs = headersToUse;
+        headersToUse = [...FORM_XV_TABLE_HEADERS];
+        mappedData = mapFormXVRowsToCanonicalHeaders(mappedData, priorHdrs, headersToUse);
       }
       let { blob, fileName } = isFormADownload
         ? await buildFormAWorkbookWithTemplateStyles({
@@ -11876,7 +16373,8 @@ const Statutory = ({ userEmail, userRole }) => {
             mappedRowMatrix: savedDraftRowMatrix,
             templateFileId: templateMeta.formFile,
             parsedFormHeader: parsed.formHeader,
-            formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+            formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx',
+            headerFormData: downloadHeaderFormData
           })
         : isFormUDownload
           ? await buildFormUWorkbookWithTemplateStyles({
@@ -11894,7 +16392,8 @@ const Statutory = ({ userEmail, userRole }) => {
                 mappedRowMatrix: savedDraftRowMatrix,
                 headersToUse,
                 parsedFormHeader: parsed.formHeader,
-                formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx',
+                headerFormData: downloadHeaderFormData
               })
             : isForm10Download
               ? await buildForm10WorkbookWithTemplateStyles({
@@ -11905,7 +16404,8 @@ const Statutory = ({ userEmail, userRole }) => {
                   parsedHeaderRowIndex: parsed.headerRowIndex,
                   parsedDataStartIndex: parsed.dataStartIndex,
                   parsedFormHeader: parsed.formHeader,
-                  formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                  formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx',
+                  headerFormData: downloadHeaderFormData
                 })
               : isForm11Download
                 ? await buildForm11WorkbookWithTemplateStyles({
@@ -11928,6 +16428,17 @@ const Statutory = ({ userEmail, userRole }) => {
                     parsedDataStartIndex: parsed.dataStartIndex,
                     parsedFormHeader: parsed.formHeader,
                     formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                  })
+              : isFormXVDownload
+                ? await buildFormXVWorkbookWithTemplateStyles({
+                    templateArrayBuffer: arrayBuffer,
+                    mappedData,
+                    headersToUse,
+                    parsedHeaderRowIndex: downloadHeaderRowIndex,
+                    parsedDataStartIndex: downloadDataStartIndex,
+                    parsedFormHeader: parsed.formHeader,
+                    formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx',
+                    headerFormData: downloadHeaderFormData
                   })
                 : isFormBDownload
                   ? await buildFormBWorkbookWithTemplateStyles({
@@ -12058,7 +16569,7 @@ const Statutory = ({ userEmail, userRole }) => {
           dataStartIndex: downloadDataStartIndex,
           tableStartCol: downloadTableStartCol,
           parsedFormHeader: parsed.formHeader,
-          headerFormData: {},
+          headerFormData: downloadHeaderFormData,
           formTableData: mappedData,
           hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0,
           formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx',
@@ -12073,6 +16584,7 @@ const Statutory = ({ userEmail, userRole }) => {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
+      setFormFileLoading(false);
       setSuccess(
         usedLiveModalGrid
           ? 'Draft downloaded from current Autofill grid.'
@@ -12111,6 +16623,26 @@ const Statutory = ({ userEmail, userRole }) => {
       await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem);
       return;
     }
+    const isFormIDownloadRow =
+      isFormIRegisterOfFinesContext(
+        sourceItem || resolvedFormFileItem,
+        fileName || resolvedFormFileItem?.formFileName || '',
+        null,
+        null,
+        ''
+      ) ||
+      isFormIRegisterOfWorkmenContext(
+        sourceItem || resolvedFormFileItem,
+        fileName || resolvedFormFileItem?.formFileName || '',
+        null,
+        null,
+        ''
+      ) ||
+      /\bform\s*[-"']?\s*i\b/i.test(String(sourceItem?.formName || sourceItem?.FormName || ''));
+    if (isFormIDownloadRow) {
+      await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem);
+      return;
+    }
     const isForm25DownloadRow =
       /\bform\s*[-"']?\s*25\b/i.test(String(sourceItem?.formName || sourceItem?.FormName || '')) ||
       /\bform\s*[-"']?\s*25\b/i.test(String(resolvedFormFileItem?.formName || resolvedFormFileItem?.FormName || '')) ||
@@ -12123,66 +16655,22 @@ const Statutory = ({ userEmail, userRole }) => {
       setFormFileLoading(true);
       setError('');
 
-      const form12Ctx =
-        isForm12StatutoryContext(sourceItem, fileName, null) ||
-        isForm12StatutoryContext(resolvedFormFileItem, fileName, null);
-      if (showApprovalColumn || form12Ctx) {
-        try {
-          const sampleResp = await fetch(
-            `/server/statutoryreg_function/statutory/${draftApiRowId}/sampledata?_ts=${Date.now()}`
-          );
-          if (sampleResp.ok) {
-            const sampleJson = await sampleResp.json().catch(() => null);
-            const sampleBlock = sampleJson?.data?.sampleData;
-            const sampleRows = sampleBlock?.rows;
-            const sampleHeaders = Array.isArray(sampleBlock?.headers) ? sampleBlock.headers : [];
-            if (Array.isArray(sampleRows) && sampleRows.length > 0) {
-              const templateMeta =
-                resolvedFormFileItem?.formFile && resolvedFormFileItem.formFile !== 'null'
-                  ? resolvedFormFileItem
-                  : sourceItem;
-              const hasTemplate =
-                templateMeta?.formFile && String(templateMeta.formFile).trim() !== '';
-              if (hasTemplate) {
-                const fn = String(
-                  templateMeta.formFileName || fileName || 'form12.xlsx'
-                ).replace(/[^a-zA-Z0-9._-]/g, '_');
-                const tplUrl = `/server/formmaster_function/templates/download/${templateMeta.formFile}?fileName=${encodeURIComponent(fn)}`;
-                const tplResp = await fetch(tplUrl);
-                if (tplResp.ok) {
-                  const tplBuf = await tplResp.arrayBuffer();
-                  const headersForBuild =
-                    sampleHeaders.length > 0 ? sampleHeaders : [...FORM_12_ALIGNMENT_HEADERS];
-                  const { blob: outBlob, fileName: outName } = await buildForm12WorkbookWithTemplateStyles({
-                    templateArrayBuffer: tplBuf,
-                    mappedData: sampleRows,
-                    mappedRowMatrix: null,
-                    headersToUse: headersForBuild,
-                    parsedFormHeader: null,
-                    formFileName: fileName || 'form12-draft.xlsx'
-                  });
-                  const dlBlob = await appendApprovedStatutoryHeadHrSignSealToDownloadBlob(
-                    outBlob,
-                    sourceItem || resolvedFormFileItem
-                  );
-                  const url = URL.createObjectURL(dlBlob);
-                  const link = document.createElement('a');
-                  link.href = url;
-                  link.download = fileName || outName || 'form12-draft.xlsx';
-                  document.body.appendChild(link);
-                  link.click();
-                  document.body.removeChild(link);
-                  URL.revokeObjectURL(url);
-                  setSuccess('Downloaded site-saved draft (including manual edits).');
-                  setTimeout(() => setSuccess(''), 4000);
-                  return;
-                }
-              }
-            }
-          }
-        } catch (sampleExportErr) {
-          console.warn('SampleData-based Form 12 export failed, falling back to stored Draft file:', sampleExportErr);
-        }
+      // Prefer SampleData (imported / manual grid) over the stored Draft file blob.
+      const sampleBlockForDownload = await fetchFirstAvailableStatutorySampleDataSnapshot(
+        ...buildStatutorySampleDataFetchIds(sourceItem, resolvedFormFileItem, {
+          draftApiRowId: draftApiRowId,
+          sampleStatutoryId: draftApiRowId
+        }),
+        buildStatutorySampleDataFetchContext(sourceItem, resolvedFormFileItem)
+      );
+      if (sampleBlockForDownload) {
+        setFormFileLoading(false);
+        await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem, {
+          preloadedSampleBlock: sampleBlockForDownload,
+          sampleStatutoryId: draftApiRowId,
+          draftApiRowId
+        });
+        return;
       }
 
       const resp = await fetch(
@@ -12233,15 +16721,35 @@ const Statutory = ({ userEmail, userRole }) => {
       setError('');
       setSuccess('');
       const tableDataForSave = Array.isArray(formTableDataRef.current) ? formTableDataRef.current : [];
+      const headerDataForSave =
+        headerFormData && typeof headerFormData === 'object' && !Array.isArray(headerFormData)
+          ? headerFormData
+          : formFileModalData?.parsedHeaderFormData || {};
+      const formAHeaderSaveContext = isFormAHeaderOnlyModalContext(
+        formFileModalData?.parsedFormHeader || formHeader,
+        formFileModalData?.item,
+        formFileModalData?.formFileName || formFileModalData?.fileName,
+        formFileModalData?.sheetText || '',
+        formFileModalData?.parsedTableHeaders || tableHeaders,
+        (formFileModalData?.parsedFormHeader || formHeader)?.fields
+      );
+      const formAHasHeaderData = formAHeaderFieldsHaveData(headerDataForSave);
 
-      if (!tableDataForSave || tableDataForSave.length === 0) {
+      if (
+        (!tableDataForSave || tableDataForSave.length === 0) &&
+        !(formAHeaderSaveContext && formAHasHeaderData)
+      ) {
         setError('No data to save');
         setSubmitting(false);
         return;
       }
 
       // Get the current item being viewed (if any)
-      const currentItem = formFileModalData?.item || autofillItem;
+      const currentItem = enrichStatutoryItemWithFormMasterMeta(
+        formFileModalData?.item || autofillItem,
+        formmasterTemplates,
+        formmasterFormFileByMatchKey
+      );
       const isFromChecklist = currentItem?.isFromChecklist || (currentItem?.id && String(currentItem.id).startsWith('checklist_'));
      
       let headersToUse = formFileModalData?.parsedTableHeaders?.length ? formFileModalData.parsedTableHeaders : tableHeaders;
@@ -12261,6 +16769,8 @@ const Statutory = ({ userEmail, userRole }) => {
           formFileModalData?.fileName,
         formFetchRowId: currentItem?.formFetchRowId ?? currentItem?.id
       };
+      const draftFileNameForSaveEarly =
+        formFileModalData?.formFileName || formFileModalData?.fileName || '';
       const hasFormFileId =
         itemForTemplateFetch.formFile &&
         itemForTemplateFetch.formFile !== 'null' &&
@@ -12273,7 +16783,23 @@ const Statutory = ({ userEmail, userRole }) => {
           const cacheKey = getFormTemplateCacheKey(itemForTemplateFetch);
           const { arrayBuffer } = await fetchFormTemplateArrayBuffer(urls, cacheKey);
           templateWb = XLSX.read(arrayBuffer, { type: 'array' });
-          const parsed = parseExcelForm(templateWb);
+          const parsedRaw = parseExcelForm(templateWb);
+          const parsed = applyFormAWorkbookLayoutToParsed(parsedRaw, templateWb, {
+            formHeader: parsedRaw.formHeader,
+            item: currentItem,
+            fileName: draftFileNameForSaveEarly,
+            formFileName: formFileModalData?.formFileName,
+            sheetText: templateWb.SheetNames?.[0]
+              ? (() => {
+                  const ws0 = templateWb.Sheets[templateWb.SheetNames[0]];
+                  const rows = XLSX.utils.sheet_to_json(ws0, { header: 1, defval: '' });
+                  return rows
+                    .slice(0, 35)
+                    .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+                    .join(' ');
+                })()
+              : ''
+          });
           headerRowIndex = parsed.headerRowIndex;
           dataStartIndex = parsed.dataStartIndex;
           parsedFormHeaderForSave = parsed.formHeader || parsedFormHeaderForSave;
@@ -12301,15 +16827,14 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
 
-      const draftFileNameForSaveEarly =
-        formFileModalData?.formFileName || formFileModalData?.fileName || '';
       const layout = resolveDraftTemplateLayout(templateWb, {
         headersToUse,
         headerRowIndex,
         dataStartIndex,
         parsedFormHeader: parsedFormHeaderForSave,
         fileName: draftFileNameForSaveEarly,
-        formName: currentItem?.formName || currentItem?.FormName
+        formName: currentItem?.formName || currentItem?.FormName,
+        item: currentItem
       });
       templateWb = layout.templateWb;
       headersToUse = layout.headersToUse;
@@ -12342,6 +16867,20 @@ const Statutory = ({ userEmail, userRole }) => {
         draftFileNameForSave,
         headersToUse
       );
+      const formISave =
+        !formIISave &&
+        (isFormIRegisterOfFinesContext(
+          currentItem,
+          draftFileNameForSave,
+          parsedFormHeaderForSave || formHeader,
+          headersToUse
+        ) ||
+          isFormIRegisterOfWorkmenContext(
+            currentItem,
+            draftFileNameForSave,
+            parsedFormHeaderForSave || formHeader,
+            headersToUse
+          ));
       const formKSave = isFormKRegisterOfEmploymentContext(
         parsedFormHeaderForSave || formHeader,
         currentItem,
@@ -12356,12 +16895,13 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedFormHeaderForSave || formHeader
         );
       const formUSave =
-        isFormUAutofillContext({
+        !formISave &&
+        (isFormUAutofillContext({
           formName: currentItem?.formName || currentItem?.FormName,
           item: currentItem
         }) ||
-        headersIndicateFormUConfidential(headersToUse) ||
-        headersIndicateFormUEmployeeRegister(headersToUse);
+          headersIndicateFormUConfidential(headersToUse) ||
+          headersIndicateFormUEmployeeRegister(headersToUse));
       const form11Save = isForm11EsicAccidentBookContext(
         parsedFormHeaderForSave || formHeader,
         currentItem,
@@ -12372,6 +16912,25 @@ const Statutory = ({ userEmail, userRole }) => {
         /\bform\s*[-"']?\s*25\b/i.test(String(currentItem?.formName || currentItem?.FormName || '')) ||
         /\bform\s*[-"']?\s*25\b/i.test(String(parsedFormHeaderForSave?.title || '')) ||
         /\bform\s*[-"']?\s*25\b/i.test(String(draftFileNameForSave || ''));
+      const formXVSave = isFormXVContext(
+        parsedFormHeaderForSave || formHeader,
+        currentItem,
+        draftFileNameForSave
+      );
+      const formVISave = isFormVIFestivalContext(
+        parsedFormHeaderForSave || formHeader,
+        currentItem,
+        draftFileNameForSave,
+        headersToUse
+      );
+      const formASave =
+        isFormAMusterRollContext(parsedFormHeaderForSave || formHeader) ||
+        isFormAMusterRollRowContext(
+          parsedFormHeaderForSave || formHeader,
+          currentItem,
+          draftFileNameForSave,
+          formFileModalData?.sheetText || ''
+        );
       let blob;
       let fileName;
       if (form12Save && templateWb) {
@@ -12385,6 +16944,22 @@ const Statutory = ({ userEmail, userRole }) => {
           mappedData: tableDataForSave,
           mappedRowMatrix: null,
           headersToUse: form12Headers,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave,
+          headerFormData:
+            headerFormData && typeof headerFormData === 'object'
+              ? headerFormData
+              : formFileModalData?.parsedHeaderFormData || {}
+        }));
+      } else if (formISave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        ({ blob, fileName } = await buildFormIWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: tableDataForSave,
+          mappedRowMatrix: null,
+          headersToUse: Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [...FORM_I_TABLE_HEADERS],
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           formFileName: draftFileNameForSave
         }));
@@ -12470,6 +17045,50 @@ const Statutory = ({ userEmail, userRole }) => {
           formFileName: draftFileNameForSave,
           headerFormData
         }));
+      } else if (formXVSave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const formXVHeaders = [...FORM_XV_TABLE_HEADERS];
+        const formXVRows = mapFormXVRowsToCanonicalHeaders(
+          tableDataForSave,
+          Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : formXVHeaders,
+          formXVHeaders
+        );
+        ({ blob, fileName } = await buildFormXVWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: formXVRows,
+          headersToUse: formXVHeaders,
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave,
+          headerFormData
+        }));
+      } else if (formVISave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const formVIHeaders = Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [];
+        const formVIRows = ensureFormVIDownloadRowsHaveDefaults(tableDataForSave, formVIHeaders);
+        ({ blob, fileName } = await buildFormVIWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: formVIRows,
+          mappedRowMatrix: null,
+          headersToUse: formVIHeaders,
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave
+        }));
+      } else if (formASave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        ({ blob, fileName } = await buildFormAWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          headersToUse: Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [],
+          mappedData: tableDataForSave,
+          mappedRowMatrix: null,
+          templateFileId: itemForTemplateFetch.formFile,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave,
+          headerFormData: headerDataForSave
+        }));
       } else {
         ({ blob, fileName } = buildDraftWorkbook({
           currentItem,
@@ -12546,48 +17165,77 @@ const Statutory = ({ userEmail, userRole }) => {
         .toLowerCase()
         .replace(/\s+/g, ' ')
         .trim();
-      // Fallback metadata source for site-scope logins:
-      // when Autofill starts from formmaster/checklist placeholder rows, act/sector can be blank.
-      // Then saved draft rows get filtered out in site view. Reuse metadata from any existing row of same form.
-      const metadataSource = Array.isArray(statutoryData)
-        ? (statutoryData.find((r) => {
-            const rForm = String(r?.formName || r?.FormName || '')
-              .toLowerCase()
-              .replace(/\s+/g, ' ')
-              .trim();
-            if (!rForm || rForm !== normalizedCurrentFormName) return false;
-            const hasAct = String(r?.act || r?.Act || '').trim() !== '';
-            const hasSector = String(r?.sector || r?.Sector || '').trim() !== '';
-            return hasAct || hasSector;
-          }) || null)
-        : null;
-      // Only treat as update (PUT) when this id is an actual Statutory table record. statutoryData is merged (API + form master + bulk), so we must detect synthetic ids explicitly — backend only has numeric ROWIDs.
+
       const idStr = currentItem?.id != null ? String(currentItem.id).trim() : '';
       const isSyntheticId = isSyntheticStatutoryRowId(idStr);
       const isUpdate = !!currentItem?.id && !isFromChecklist && !isSyntheticId;
 
       const latestRecord = currentItem?.id && statutoryData?.length ? statutoryData.find(r => String(r.id) === String(currentItem.id)) : null;
-      // Form file from SEMaster must never be touched by draft save: on PUT do not send formFile/formFileName at all
       const preservedFormFile = latestRecord?.formFile ?? latestRecord?.FormFile ?? currentItem?.formFile ?? currentItem?.FormFile ?? null;
       const preservedFormFileName = latestRecord?.formFileName ?? latestRecord?.FormFileName ?? currentItem?.formFileName ?? currentItem?.FormFileName ?? fileName;
       const hasFormFile = preservedFormFile && String(preservedFormFile).trim() !== '' && preservedFormFile !== 'null';
+
+      const resolvedSiteForSave =
+        resolveSiteDisplayName(currentItem || {}, statutoryData) || siteFromUrl || '';
+      const saveMeta = resolveStatutorySectorStateForSave({
+        currentItem,
+        latestRecord,
+        statutoryRows: statutoryData,
+        formmasterTemplates,
+        formmasterFormFileByMatchKey,
+        normalizedFormName: normalizedCurrentFormName,
+        parsedFormHeader: parsedFormHeaderForSave || formHeader,
+        formFileNameHints: [
+          formFileModalData?.formFileName,
+          formFileModalData?.fileName,
+          preservedFormFileName,
+          draftFileNameForSave,
+          draftFileNameForSaveEarly
+        ],
+        siteName: resolvedSiteForSave,
+        siteDetailsList,
+        organizationSitesMeta,
+        inchargeSitesMeta
+      });
+      const metadataSource = saveMeta.metadataDonor;
+      const templateMetaForSave = saveMeta.templateMeta;
+      const sectorForSave = saveMeta.sector;
+      const stateForSave = saveMeta.state;
 
       // On update (PUT): never send formFile/formFileName so backend keeps existing form file. On create (POST): include when we have it.
       // draftOnly: true = Autofill save → only save draft; do not copy draft to proof. Proof is set only when user clicks Edit and saves.
       const payload = {
         ...(!isUpdate && hasFormFile && { formFile: preservedFormFile, formFileName: preservedFormFileName || fileName }),
         formName: currentItem?.formName || formNameValue,
-        act: currentItem?.act || metadataSource?.act || metadataSource?.Act || formHeader?.subtitle || '',
-        description: currentItem?.description || metadataSource?.description || metadataSource?.Description || '',
-        sector: currentItem?.sector || metadataSource?.sector || metadataSource?.Sector || '',
-        state: currentItem?.state || metadataSource?.state || metadataSource?.State || '',
+        act: pickNonEmptyStatutoryMeta(
+          currentItem?.act,
+          currentItem?.Act,
+          latestRecord?.act,
+          latestRecord?.Act,
+          metadataSource?.act,
+          metadataSource?.Act,
+          templateMetaForSave?.act,
+          formHeader?.subtitle
+        ),
+        description: pickNonEmptyStatutoryMeta(
+          currentItem?.description,
+          currentItem?.Description,
+          latestRecord?.description,
+          latestRecord?.Description,
+          metadataSource?.description,
+          metadataSource?.Description,
+          templateMetaForSave?.description
+        ),
+        sector: sectorForSave || null,
+        state: stateForSave || null,
+        ...(sectorForSave ? { Sector: sectorForSave } : {}),
+        ...(stateForSave ? { State: stateForSave } : {}),
         site:
           currentItem?.site ||
           currentItem?.Site ||
           metadataSource?.site ||
           metadataSource?.Site ||
-          resolveSiteDisplayName(currentItem || metadataSource || {}, statutoryData) ||
-          siteFromUrl ||
+          resolvedSiteForSave ||
           '',
         dueDate: currentItem?.dueDate || metadataSource?.dueDate || metadataSource?.DueDate || '',
         monthFilter: monthFilterValue,
@@ -12615,10 +17263,10 @@ const Statutory = ({ userEmail, userRole }) => {
           return r != null && String(r).trim() !== '' ? String(r).trim() : null;
         })(),
         // Persist autofill/imported grid snapshot in SampleData table on backend save.
-        sampleDataHeader: Array.isArray(headersToUse) ? headersToUse : [],
+        sampleDataHeader: prepareSampleDataHeadersForSave(Array.isArray(headersToUse) ? headersToUse : []),
         sampleHeaderFormData:
-          headerFormData && typeof headerFormData === 'object' && !Array.isArray(headerFormData)
-            ? headerFormData
+          headerDataForSave && typeof headerDataForSave === 'object' && !Array.isArray(headerDataForSave)
+            ? headerDataForSave
             : {},
         sampleData: prepareSampleDataRowsForSave(tableDataForSave)
       };
@@ -12628,6 +17276,10 @@ const Statutory = ({ userEmail, userRole }) => {
         if (isUpdate) {
           console.log('Updating existing record with draft file (no new record):', currentItem.id);
           const { formFile: _f, formFileName: _n, ...putPayload } = requestPayload;
+          if (!sectorForSave) delete putPayload.sector;
+          if (!sectorForSave) delete putPayload.Sector;
+          if (!stateForSave) delete putPayload.state;
+          if (!stateForSave) delete putPayload.State;
           return fetch(`/server/statutoryreg_function/statutory/${currentItem.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -12729,14 +17381,23 @@ const Statutory = ({ userEmail, userRole }) => {
         // Enforce month storage explicitly on the saved row so Jan/Feb filtering remains strict.
         if (/^\d+$/.test(keeperStatutoryId)) {
           try {
+            const monthMetaPayload = {
+              monthFilter: monthFilterValue,
+              MonthFilter: monthFilterValue,
+              monthfilter: monthFilterValue
+            };
+            if (sectorForSave) {
+              monthMetaPayload.sector = sectorForSave;
+              monthMetaPayload.Sector = sectorForSave;
+            }
+            if (stateForSave) {
+              monthMetaPayload.state = stateForSave;
+              monthMetaPayload.State = stateForSave;
+            }
             await fetch(`/server/statutoryreg_function/statutory/${keeperStatutoryId}`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                monthFilter: monthFilterValue,
-                MonthFilter: monthFilterValue,
-                monthfilter: monthFilterValue
-              })
+              body: JSON.stringify(monthMetaPayload)
             });
           } catch (monthPersistErr) {
             console.warn('MonthFilter follow-up persist failed (non-blocking):', monthPersistErr);
@@ -12849,6 +17510,8 @@ const Statutory = ({ userEmail, userRole }) => {
   // When options.returnMappedData is true, returns the mapped rows (for use by View Draft File generate-and-download)
   const fetchAndPopulateEmployeeData = async (headersToUse = null, options = {}) => {
     const returnMappedData = options.returnMappedData === true;
+    const downloadFastPath = returnMappedData && options.downloadFullEnrichment !== true;
+    const enrichOnlyPhase = options.enrichOnly === true && !returnMappedData;
     const modalData = options.formFileModalData || formFileModalData;
     const useEmployeePagination = !returnMappedData && options.paginateEmployees !== false;
     const employeePageSize = useEmployeePagination
@@ -12857,13 +17520,18 @@ const Statutory = ({ userEmail, userRole }) => {
     const employeePage = useEmployeePagination ? Math.max(0, parseInt(options.employeePage, 10) || 0) : 0;
     const employeePageOffset = employeePage * employeePageSize;
     const skipPeopleLoad =
-      options.skipPeopleFetch === true &&
-      (Array.isArray(options.employeesOverride) && options.employeesOverride.length > 0
-        ? true
-        : autofillEmployeesRef.current.length > 0);
+      enrichOnlyPhase ||
+      (options.skipPeopleFetch === true &&
+        (Array.isArray(options.employeesOverride) && options.employeesOverride.length > 0
+          ? true
+          : autofillEmployeesRef.current.length > 0));
     const fastModalAutofill =
-      !returnMappedData && useEmployeePagination && employeePage === 0 && !skipPeopleLoad;
-    const fastPaginatedAutofill = !returnMappedData && useEmployeePagination;
+      !returnMappedData &&
+      useEmployeePagination &&
+      employeePage === 0 &&
+      !skipPeopleLoad &&
+      !enrichOnlyPhase;
+    const fastPaginatedAutofill = !returnMappedData && useEmployeePagination && !enrichOnlyPhase;
 
     const mergeMappedIntoFormTable = (rows, urgent = false) => {
       if (returnMappedData || !Array.isArray(rows)) return;
@@ -12928,6 +17596,9 @@ const Statutory = ({ userEmail, userRole }) => {
         formName: modalData?.item?.formName || modalData?.item?.FormName,
         itemFormName: modalData?.item?.formName || modalData?.item?.FormName,
         formHeaderTitle: modalData?.parsedFormHeader?.title,
+        formHeaderSubtitle: modalData?.parsedFormHeader?.subtitle,
+        sheetText: modalData?.sheetText,
+        tableHeaders: currentHeaders,
         item: modalData?.item
       });
       const formIIAutofillHeadersNormalized = isFormIIMaharashtraContext(
@@ -12939,6 +17610,81 @@ const Statutory = ({ userEmail, userRole }) => {
       if (formIIAutofillHeadersNormalized) {
         currentHeaders = normalizeFormIIMaharashtraTableHeaders(currentHeaders);
       }
+      const formALayoutFix =
+        modalData?.rawData &&
+        (headersLookLikePivotOrWrongFormATable(currentHeaders) ||
+          !headersIndicateFormAMusterRoll(currentHeaders))
+          ? resolveFormATableHeadersFromWorkbook(modalData.rawData, {
+              formHeader: modalData?.parsedFormHeader,
+              item: modalData?.item,
+              fileName: modalData?.fileName,
+              formFileName: modalData?.formFileName,
+              sheetText: modalData?.sheetText
+            })
+          : null;
+      if (formALayoutFix?.headers?.length >= 3) {
+        currentHeaders = formALayoutFix.headers;
+        if (!returnMappedData) {
+          setFormFileModalData((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  parsedTableHeaders: formALayoutFix.headers,
+                  headerRowIndex: formALayoutFix.headerRowIndex,
+                  dataStartIndex: formALayoutFix.dataStartIndex,
+                  tableStartCol: formALayoutFix.startCol
+                }
+              : prev
+          );
+        }
+      }
+      const formAHeaderFieldLayoutActive =
+        isFormAHeaderFieldLayoutFormHeader(modalData?.parsedFormHeader || options?.parsedFormHeader) ||
+        (!formALayoutFix?.headers?.length &&
+          (isFormAMusterRollContext(modalData?.parsedFormHeader || options?.parsedFormHeader || {}) ||
+            isFormAMusterRollRowContext(
+              modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+              modalData?.item || options?.item || null,
+              String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+              modalData?.sheetText || ''
+            )) &&
+          sheetTextIndicatesFormAHeaderFields(modalData?.sheetText || ''));
+      if (formAHeaderFieldLayoutActive) {
+        const headerLayout = resolveFormAHeaderFieldLayout(
+          {
+            formHeader: modalData?.parsedFormHeader,
+            headers: currentHeaders,
+            headerRowIndex: modalData?.headerRowIndex
+          },
+          modalData?.rawData,
+          {
+            formHeader: modalData?.parsedFormHeader,
+            item: modalData?.item,
+            fileName: modalData?.fileName || modalData?.formFileName,
+            formFileName: modalData?.formFileName,
+            sheetText: modalData?.sheetText
+          }
+        );
+        if (headerLayout?.formHeader) {
+          currentHeaders = [];
+          if (!returnMappedData) {
+            setFormFileModalData((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    parsedFormHeader: headerLayout.formHeader,
+                    parsedTableHeaders: [],
+                    headerRowIndex: headerLayout.headerRowIndex,
+                    dataStartIndex: headerLayout.dataStartIndex,
+                    tableStartCol: headerLayout.tableStartCol
+                  }
+                : prev
+            );
+            setFormHeader(headerLayout.formHeader);
+            setTableHeaders([]);
+          }
+        }
+      }
       if (currentHeaders.length > 0 && !returnMappedData) {
         setFormFileModalData((prev) =>
           prev ? { ...prev, parsedTableHeaders: currentHeaders } : prev
@@ -12946,12 +17692,33 @@ const Statutory = ({ userEmail, userRole }) => {
         setTableHeaders(currentHeaders);
       }
 
-      if (!currentHeaders || currentHeaders.length === 0) {
+      if ((!currentHeaders || currentHeaders.length === 0) && !formAHeaderFieldLayoutActive) {
         console.error('⚠️ Table headers not available');
         if (!returnMappedData) setError('Table headers not available. Please try again.');
         if (!returnMappedData) {
           setTableAutofillLoading(false);
           setTableAutofillProgress('');
+        }
+        if (returnMappedData) return [];
+        return;
+      }
+
+      const formAAutofillBlockedByPivot =
+        headersLookLikePivotOrWrongFormATable(currentHeaders) &&
+        (isFormAMusterRollContext(modalData?.parsedFormHeader || options?.parsedFormHeader || {}) ||
+          isFormAMusterRollRowContext(
+            modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+            modalData?.item || options?.item || null,
+            String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+            modalData?.sheetText || ''
+          ));
+      if (formAAutofillBlockedByPivot) {
+        if (!returnMappedData) {
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+          setError(
+            'Form A template layout could not be read (summary/pivot columns detected). Re-open the form file or update the Form Master template.'
+          );
         }
         if (returnMappedData) return [];
         return;
@@ -12970,21 +17737,76 @@ const Statutory = ({ userEmail, userRole }) => {
         if (returnMappedData) return [];
         return;
       }
+
+      // Form 26: accident register — show "Nil for the month of …" when no accident rows exist.
+      if (
+        isForm26RegisterOfAccidentsContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          currentHeaders
+        )
+      ) {
+        const { fullMonth, year } = resolveForm26MonthYear(selectedMonth, modalData?.item);
+        const nilLine = buildForm26NilMonthLine(fullMonth, year);
+        const nilRows = buildForm26NilTableRows(currentHeaders, nilLine);
+        if (!returnMappedData) {
+          setFormTableData(nilRows);
+          setHeaderFormData((prev) => ({
+            ...(prev || {}),
+            form26_header_calendar_year: String(year)
+          }));
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+          setSuccess(nilLine ? `Form 26: ${nilLine}` : 'Form 26 loaded.');
+          setTimeout(() => setSuccess(''), 5000);
+        }
+        if (returnMappedData) return nilRows;
+        return;
+      }
+
+      // Form 11: accident book — show "Nill of the month" + month/year when no accident rows exist.
+      if (
+        isForm11EsicAccidentBookContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          currentHeaders,
+          String(modalData?.sheetText || options?.sheetText || '')
+        )
+      ) {
+        const nilRows = applyForm11NilTableRows(currentHeaders, [], selectedMonth, modalData?.item);
+        const { fullMonth, year } = resolveForm11MonthYear(selectedMonth, modalData?.item);
+        const monthYearLabel = buildForm11NilMonthYearLabel(fullMonth, year);
+        if (!returnMappedData) {
+          setFormTableData(nilRows);
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+          setSuccess(
+            monthYearLabel
+              ? `Form 11: ${FORM11_NIL_OF_MONTH_TEXT} — ${monthYearLabel}`
+              : 'Form 11 loaded.'
+          );
+          setTimeout(() => setSuccess(''), 5000);
+        }
+        if (returnMappedData) return nilRows;
+        return;
+      }
      
       console.log('Using table headers:', currentHeaders);
      
       let employees;
-      if (skipPeopleLoad) {
-        employees = Array.isArray(options.employeesOverride) && options.employeesOverride.length > 0
+        if (skipPeopleLoad) {
+          employees = Array.isArray(options.employeesOverride) && options.employeesOverride.length > 0
           ? options.employeesOverride
           : autofillEmployeesRef.current;
-        if (!returnMappedData) {
-          const pageEnd = Math.min(employeePageOffset + employeePageSize, employees.length);
-          setTableAutofillProgress(
-            `Loading employees ${employeePageOffset + 1}–${pageEnd} of ${employees.length}…`
-          );
-        }
-      } else {
+          if (!returnMappedData && !enrichOnlyPhase) {
+            const pageEnd = Math.min(employeePageOffset + employeePageSize, employees.length);
+            setTableAutofillProgress(
+              `Loading employees ${employeePageOffset + 1}–${pageEnd} of ${employees.length}…`
+            );
+          }
+        } else {
         // Prefer in-memory/localStorage cache (from People page) — avoids slow Zoho pagination on every autofill.
         let result;
         try {
@@ -12996,14 +17818,28 @@ const Statutory = ({ userEmail, userRole }) => {
             let loadedCount = flattenZohoPeopleEmployees(result).length;
             if (result?.success && loadedCount > 0) {
               console.log(`Statutory autofill using cached People data (${loadedCount} employees).`);
+            } else if (fastModalAutofill || downloadFastPath) {
+              if (!returnMappedData) setTableAutofillProgress('Loading employees…');
+              result = await fetchPeopleDataForAutofillDisplay();
+              loadedCount = flattenZohoPeopleEmployees(result).length;
             } else if (!result?.success || loadedCount === 0) {
               if (!returnMappedData) setTableAutofillProgress('Fetching employees from Zoho People…');
               result = await fetchPeopleData({ force: false });
               loadedCount = flattenZohoPeopleEmployees(result).length;
             }
-            if ((!result?.success || loadedCount === 0) && !fastModalAutofill) {
+            if ((!result?.success || loadedCount === 0) && !fastModalAutofill && !downloadFastPath) {
               if (!returnMappedData) setTableAutofillProgress('Refreshing employee list from Zoho…');
               result = await fetchPeopleData({ force: true });
+            }
+            if (fastModalAutofill && result?.meta?.mode === 'fast_first_page') {
+              startPeopleDataBackgroundRefresh()
+                .then((fullResult) => {
+                  const fullEmployees = flattenZohoPeopleEmployees(fullResult);
+                  if (!Array.isArray(fullEmployees) || fullEmployees.length <= loadedCount) return;
+                  autofillEmployeesRef.current = fullEmployees;
+                  setAutofillTotalEmployees(fullEmployees.length);
+                })
+                .catch(() => null);
             }
           }
         } catch (peopleErr) {
@@ -13158,7 +17994,7 @@ const Statutory = ({ userEmail, userRole }) => {
         return `${firstName} ${lastName}`.trim();
       };
 
-      if (!fastModalAutofill) try {
+      if (!fastModalAutofill && !enrichOnlyPhase && !downloadFastPath) try {
         const cmsResponse = await fetch('/server/cms_function/employees');
         const cmsJson = await cmsResponse.json().catch(() => null);
         const cmsEmployees = Array.isArray(cmsJson?.data?.employees) ? cmsJson.data.employees : [];
@@ -13305,7 +18141,15 @@ const Statutory = ({ userEmail, userRole }) => {
       if (useEmployeePagination && !skipPeopleLoad) {
         autofillEmployeesRef.current = employees;
         setAutofillTotalEmployees(employees.length);
-        if (employeePage === 0) setFormTablePage(0);
+        if (employeePage === 0) {
+          setFormTablePage(0);
+          setFormTableData((prev) => {
+            if (!Array.isArray(prev) || prev.length >= employees.length) return prev;
+            const next = [...prev];
+            while (next.length < employees.length) next.push({});
+            return next;
+          });
+        }
       }
 
       const employeesForMapping = useEmployeePagination
@@ -13386,21 +18230,23 @@ const Statutory = ({ userEmail, userRole }) => {
         const s = String(header || '').toLowerCase().replace(/\s+/g, ' ').trim();
         if (!s) return false;
         if (s === 'remark' || s === 'remarks') return true;
-        if (s.includes('enter days date')) return true;
-        if (s.includes('enter days dates')) return true;
-        if (s.includes('days dates') && s.includes('months')) return true;
-        if (s.includes('national') && s.includes('festival') && s.includes('holiday')) return true;
-        return /festival\s+holidays?/.test(s);
+        return isFormVIFestivalBandHeader(s);
       };
 
       const formVIFestivalAutofillContext =
-        isFormFileModalOpen &&
         isFormVIFestivalContext(
-          formFileModalData?.parsedFormHeader || {},
-          formFileModalData?.item,
-          String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
           currentHeaders
-        );
+        ) ||
+        (isFormFileModalOpen &&
+          isFormVIFestivalContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            currentHeaders
+          ));
 
       const unwrapEmp = (empItem) => empItem.Employee || empItem.employee || empItem;
 
@@ -13554,6 +18400,7 @@ const Statutory = ({ userEmail, userRole }) => {
         const joined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
         const dayColCount = currentHeaders.filter((h) => isLikelyDayOfMonthColumnHeader(h)).length;
         if (dayColCount >= 10 && /dates|daily\s+hours|hours\s+worked/.test(joined)) return true;
+        if (dayColCount >= 5 && /daily\s+hours|hours\s+of\s+work|^10_\d+/.test(joined)) return true;
         if (dayColCount >= 5 && /register\s+of\s+adult|worker\s+identity|scheme\s+of\s+shifts/.test(joined)) {
           return true;
         }
@@ -13597,12 +18444,38 @@ const Statutory = ({ userEmail, userRole }) => {
             item: formFileModalData?.item,
             fileName: formFileModalData?.fileName || formFileModalData?.formFileName
           }));
+      const formXXVIAutofillContext = isFormXXVIContext(
+        modalData?.parsedFormHeader || options?.parsedFormHeader || formFileModalData?.parsedFormHeader || {},
+        modalData?.item || options?.item || formFileModalData?.item || null,
+        String(
+          modalData?.fileName ||
+            modalData?.formFileName ||
+            formFileModalData?.fileName ||
+            formFileModalData?.formFileName ||
+            options?.fileName ||
+            ''
+        )
+      );
+      const form25HeadersJoined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+      const form25DayColumnCount = currentHeaders.filter((h) => isLikelyDayOfMonthColumnHeader(h)).length;
+      const form25DailyHoursGrid =
+        form25SkipLossPayAndNationalHolidayBenefit &&
+        (/daily\s+hours|hours\s+of\s+work|hours\s+worked|daily\s+hours\s+of\s+work/.test(form25HeadersJoined) ||
+          ((/time\s+at\s+which\s+work\s+commence|scheme\s+of\s+shift/.test(form25HeadersJoined) ||
+            currentHeaders.some(isForm25WorkCommencesHeader) ||
+            currentHeaders.some(isForm25SchemeOfShiftsHeader)) &&
+            form25DayColumnCount >= 5));
       const form25DayStatusGrid =
-        form25SkipLossPayAndNationalHolidayBenefit ||
-        currentHeaders.filter((h) => isLikelyDayOfMonthColumnHeader(h)).length >= 5;
-      if (form25DayStatusGrid) {
-        console.log('Form 25 daily status grid enabled:', {
+        !form25DailyHoursGrid &&
+        (form25SkipLossPayAndNationalHolidayBenefit ||
+          formXXVIAutofillContext ||
+          currentHeaders.filter((h) => isLikelyDayOfMonthColumnHeader(h)).length >= 5);
+      if (form25DayStatusGrid || form25DailyHoursGrid) {
+        console.log('Form 25 daily grid enabled:', {
           fileName: form25ContextHints.fileName,
+          formXXVI: formXXVIAutofillContext,
+          dailyHours: form25DailyHoursGrid,
+          presentAbsent: form25DayStatusGrid,
           dayColumns: currentHeaders.filter((h) => isLikelyDayOfMonthColumnHeader(h)).length
         });
       }
@@ -13628,6 +18501,8 @@ const Statutory = ({ userEmail, userRole }) => {
         looksLikeFormAMusterEmployeeTable() ||
         options.formAPeopleSkipManualColumns === true ||
         (isFormFileModalOpen &&
+          !headersLookLikePivotOrWrongFormATable(currentHeaders) &&
+          headersIndicateFormAMusterRoll(currentHeaders) &&
           (/\bform\s*[-"']?\s*a\b/i.test(String(formFileModalData?.item?.formName || formFileModalData?.item?.FormName || '')) ||
             /maternity\s+benefit/i.test(
               String(
@@ -13690,14 +18565,16 @@ const Statutory = ({ userEmail, userRole }) => {
           modalData?.parsedFormHeader || options?.parsedFormHeader || {},
           modalData?.item || options?.item || null,
           String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
-          currentHeaders
+          currentHeaders,
+          String(modalData?.sheetText || options?.sheetText || '')
         ) ||
         (isFormFileModalOpen &&
           isForm11EsicAccidentBookContext(
             formFileModalData?.parsedFormHeader || {},
             formFileModalData?.item,
             String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
-            currentHeaders
+            currentHeaders,
+            String(formFileModalData?.sheetText || '')
           ));
 
       const form26AutofillContext =
@@ -13713,6 +18590,19 @@ const Statutory = ({ userEmail, userRole }) => {
             formFileModalData?.item,
             String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
             currentHeaders
+          ));
+
+      const formXVAutofillContext =
+        isFormXVContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || '')
+        ) ||
+        (isFormFileModalOpen &&
+          isFormXVContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || '')
           ));
 
       const looksLikeForm12EmployeeTable = () => {
@@ -13735,6 +18625,21 @@ const Statutory = ({ userEmail, userRole }) => {
             formFileModalData?.item,
             String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
             formFileModalData?.parsedFormHeader || {}
+          ));
+
+      const form1AutofillContext =
+        isForm1EmployeeRegisterContext(
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          currentHeaders
+        ) ||
+        (isFormFileModalOpen &&
+          isForm1EmployeeRegisterContext(
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            formFileModalData?.parsedFormHeader || {},
+            currentHeaders
           ));
 
       const looksLikeEmploymentRegisterTable = () => {
@@ -15546,7 +20451,273 @@ const Statutory = ({ userEmail, userRole }) => {
         formWHeadersResolved = resolveFormWTableHeaders(currentHeaders);
       }
 
-      const mappedData = employeesForMapping.map((empItem, index) => {
+      if (formAHeaderFieldLayoutActive) {
+        const pickFemaleEmployee = () => {
+          for (let i = 0; i < employees.length; i += 1) {
+            const em = unwrapEmp(employees[i]);
+            const sex = String(
+              em.Sex || em.Gender || em.gender || em['Sex'] || em['Gender.displayValue'] || ''
+            )
+              .trim()
+              .toLowerCase();
+            if (sex === 'female' || sex === 'f' || sex === 'woman') return em;
+          }
+          return employees.length > 0 ? unwrapEmp(employees[0]) : null;
+        };
+        const emp = pickFemaleEmployee();
+        const existingHeaderData = {
+          ...(modalData?.parsedHeaderFormData || {}),
+          ...(typeof headerFormData === 'object' && headerFormData ? headerFormData : {})
+        };
+        let nextHeaderFormData = { ...existingHeaderData };
+        FORM_A_NUMBERED_HEADER_SPECS.forEach((spec) => {
+          if (nextHeaderFormData[spec.key] == null) nextHeaderFormData[spec.key] = '';
+        });
+
+        const resolvedSiteForFormA = resolveStatutorySiteNameForContractorAutofill(modalData?.item, {
+          siteFromUrl,
+          allowedSiteNameList,
+          resolveSiteFn: resolveSiteDisplayName,
+          allRows: statutoryData
+        });
+        const sitesForFormA =
+          Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+            ? siteDetailsList
+            : readSiteDetailsCache() || [];
+        if (resolvedSiteForFormA) {
+          nextHeaderFormData = applyFormAEstablishmentFromSite(
+            nextHeaderFormData,
+            resolvedSiteForFormA,
+            sitesForFormA
+          );
+          nextHeaderFormData = applySiteManagementToHeaderFormData(
+            nextHeaderFormData,
+            resolvedSiteForFormA,
+            sitesForFormA,
+            modalData?.parsedFormHeader?.fields || []
+          );
+        }
+
+        const fillHeader = (key, value) => {
+          if (value == null || String(value).trim() === '') return;
+          const cur = String(nextHeaderFormData[key] ?? '').trim();
+          if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+            nextHeaderFormData[key] = String(value).trim();
+          }
+        };
+
+        if (emp) {
+          const namePart =
+            [emp.FirstName || emp['FirstName'] || '', emp.LastName || emp['LastName'] || '']
+              .map((v) => String(v || '').trim())
+              .filter(Boolean)
+              .join(' ') ||
+            emp.Name ||
+            emp['Employee Name'] ||
+            '';
+          const agePart = computeAgeFromDobForStatutory(emp);
+          fillHeader(
+            'form_a_woman_name_age',
+            namePart ? (agePart ? `${namePart} (${agePart})` : namePart) : ''
+          );
+          fillHeader(
+            'form_a_husband_father',
+            emp.Father_s_Name ||
+              emp['Father_s_Name'] ||
+              emp.Father_Name ||
+              emp['Father_Name'] ||
+              emp.Spouse_Name ||
+              emp['Spouse_Name'] ||
+              ''
+          );
+          fillHeader(
+            'form_a_nature_of_work',
+            emp.Designation ||
+              emp.designation ||
+              emp['Designation.displayValue'] ||
+              emp['Nature of Work'] ||
+              ''
+          );
+          const dojRaw = pickEmployeeJoiningDateRaw(emp);
+          fillHeader('form_a_date_employed', formatFormADisplayDate(dojRaw));
+
+          fillHeader(
+            'form_a_notice_pregnancy',
+            formatFormADisplayDate(
+              pickFormAEmployeeTextField(emp, [/pregnancy.*notice/, /notice.*pregnancy/, /pregnan.*notice/])
+            )
+          );
+          fillHeader(
+            'form_a_notice_delivery',
+            formatFormADisplayDate(
+              pickFormAEmployeeTextField(emp, [/delivery.*notice/, /notice.*delivery/, /deliver.*notice/])
+            )
+          );
+          fillHeader(
+            'form_a_proof_birth',
+            formatFormADisplayDate(
+              pickFormAEmployeeTextField(emp, [/proof.*birth/, /birth.*proof/, /date.*birth.*proof/])
+            )
+          );
+          fillHeader(
+            'form_a_proof_death',
+            formatFormADisplayDate(
+              pickFormAEmployeeTextField(emp, [/proof.*death/, /death.*proof/])
+            )
+          );
+
+          try {
+            if (!returnMappedData) setTableAutofillProgress('Fetching Form 25 / attendance for Form A…');
+            const form25Res = await fetch('/server/form25_function/form25?perPage=200');
+            const form25Json = await form25Res.json();
+            let form25Records = [];
+            if (
+              form25Res.ok &&
+              (form25Json.success === true || form25Json.status === 'success') &&
+              Array.isArray(form25Json.data?.form25Data)
+            ) {
+              form25Records = form25Json.data.form25Data;
+            }
+            const form25ByName = new Map();
+            const form25ById = new Map();
+            form25Records.forEach((record) => {
+              const name = String(record.nameOfTheWorker || '').trim().toLowerCase();
+              const id = String(record.workerIdentityNumber || '').trim().toLowerCase();
+              if (name) form25ByName.set(name, record);
+              if (id) form25ById.set(id, record);
+            });
+            const empNameCandidates = getEmployeeNameCandidates(emp);
+            const empId = String(
+              emp.EmployeeID ||
+                emp['EmployeeID'] ||
+                emp['Employee ID'] ||
+                emp.Zoho_ID ||
+                emp['Zoho_ID'] ||
+                ''
+            )
+              .trim()
+              .toLowerCase();
+            let matchedForm25 =
+              empNameCandidates.map((c) => form25ByName.get(c)).find(Boolean) ||
+              (empId && form25ById.get(empId)) ||
+              null;
+
+            const monthIdx = MONTH_NAMES.findIndex((m) =>
+              m.toLowerCase().startsWith(String(selectedMonth || '').toLowerCase().trim())
+            );
+            const yearForFormA =
+              extractYearFromDueDate(modalData?.item?.dueDate || '') || new Date().getFullYear();
+            let daysEmployed = '';
+            let daysLaidOff = '';
+            if (matchedForm25) {
+              daysEmployed = pickForm25RecordValue(matchedForm25, [
+                'totalDaysWorked',
+                'Total Worked Days',
+                'total_worked_days',
+                'daysWorked'
+              ]);
+              daysLaidOff = pickForm25RecordValue(matchedForm25, [
+                'numberOfDaysOnLossOfPay',
+                'No of days on loss of pay',
+                'loss_of_pay',
+                'lopDays'
+              ]);
+              if (!daysEmployed) {
+                daysEmployed = pickForm25RecordValue(matchedForm25, [
+                  'noOfDaysEmployed',
+                  'numberOfDaysEmployed'
+                ]);
+              }
+            }
+            fillHeader(
+              'form_a_dates_employed',
+              buildFormAMonthEmploymentSummary(selectedMonth, yearForFormA, daysEmployed, daysLaidOff)
+            );
+          } catch (form25HeaderErr) {
+            console.warn('Form 25 fetch for Form A header fields skipped:', form25HeaderErr);
+            fillHeader(
+              'form_a_dates_employed',
+              buildFormAMonthEmploymentSummary(
+                selectedMonth,
+                extractYearFromDueDate(modalData?.item?.dueDate || '') || new Date().getFullYear(),
+                '',
+                ''
+              )
+            );
+          }
+
+          try {
+            const payrollEmpId = String(getPayrollEmployeeId(emp) || '').trim();
+            if (payrollEmpId) {
+              const payrollQs = new URLSearchParams({
+                employee_id: payrollEmpId,
+                organization_id: getPayrollOrganizationId()
+              });
+              const payrollRes = await fetch(`/server/payroll_function?${payrollQs.toString()}`);
+              const payrollJson = await payrollRes.json();
+              if (payrollRes.ok && payrollJson?.success && payrollJson.data) {
+                const earnings = getEarningsArray(getPayrollPayloadObject(payrollJson.data));
+                const maternityAmt = findEarningAmount(earnings, (type, name) =>
+                  /maternity/.test(name) || /maternity/.test(type)
+                );
+                if (maternityAmt !== '' && maternityAmt != null) {
+                  fillHeader('form_a_maternity_benefit', String(maternityAmt));
+                  fillHeader(
+                    'form_a_payment_details',
+                    `Maternity Benefit: Rs. ${maternityAmt}`
+                  );
+                }
+              }
+            }
+          } catch (payrollFormAErr) {
+            console.warn('Payroll fetch for Form A header fields skipped:', payrollFormAErr);
+          }
+        }
+
+        if (!returnMappedData) {
+          setHeaderFormData(nextHeaderFormData);
+          setFormTableData([]);
+          setFormFileModalData((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  parsedHeaderFormData: nextHeaderFormData,
+                  parsedTableHeaders: [],
+                  parsedFormHeader: prev.parsedFormHeader
+                    ? {
+                        ...prev.parsedFormHeader,
+                        fields: buildFormAHeaderFieldSpecs(prev.parsedFormHeader.fields || [])
+                      }
+                    : prev.parsedFormHeader
+                }
+              : prev
+          );
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+          setSuccess('Form A fields populated from site and employee data.');
+          setTimeout(() => setSuccess(''), 3000);
+        }
+        if (returnMappedData) return [];
+        return;
+      }
+
+      let mappedData;
+      if (enrichOnlyPhase) {
+        mappedData = employeesForMapping.map((_, index) => {
+          const globalRowIndex = employeePageOffset + index;
+          const src =
+            formTableDataRef.current[globalRowIndex] &&
+            typeof formTableDataRef.current[globalRowIndex] === 'object'
+              ? formTableDataRef.current[globalRowIndex]
+              : {};
+          const row = { ...src };
+          currentHeaders.forEach((header) => {
+            if (row[header] == null) row[header] = '';
+          });
+          return row;
+        });
+      } else {
+      mappedData = employeesForMapping.map((empItem, index) => {
         const globalRowIndex = employeePageOffset + index;
         // Initialize all headers with empty strings to ensure no undefined/null values
         const row = {};
@@ -15600,6 +20771,10 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           const headerLower = header.toLowerCase().trim();
           const normalizedHeader = headerLower.replace(/[^a-z0-9]/g, '');
+          if (headersLookLikePivotOrWrongFormATable([header])) {
+            row[header] = '';
+            return;
+          }
           if (isLikelyFormW || formXXVIIAutofillContext) {
             if (
               isWageRegisterSerialHeaderCell(header) ||
@@ -15721,9 +20896,21 @@ const Statutory = ({ userEmail, userRole }) => {
 
           if (
             form25SkipLossPayAndNationalHolidayBenefit &&
-            (isForm25LossOfPayDaysHeader(header) || isForm25NationalHolidayBenefitHeader(header))
+            (isForm25LossOfPayDaysHeader(header) ||
+              isForm25NationalHolidayBenefitHeader(header) ||
+              isForm25AttendanceOnlyHeader(header))
           ) {
             row[header] = '';
+            return;
+          }
+
+          if (formVIFestivalAutofillContext && isFormVIDojHeader(header)) {
+            row[header] = sanitizeValue(getFormVIEmployeeDojDisplay(emp));
+            return;
+          }
+
+          if (formVIFestivalAutofillContext && isFormVIHolidayColumnHeader(header)) {
+            row[header] = 'H';
             return;
           }
 
@@ -15803,18 +20990,53 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
-          if (form12AutofillContext && isForm12PresentAddressHeader(header)) {
+          if (
+            (form12AutofillContext || form1AutofillContext) &&
+            isForm12PresentAddressHeader(header)
+          ) {
             row[header] = sanitizeValue(getForm12PresentAddress(emp));
             return;
           }
 
-          if (form12AutofillContext && isForm12PermanentAddressHeader(header)) {
+          if (
+            (form12AutofillContext || form1AutofillContext) &&
+            isForm12PermanentAddressHeader(header)
+          ) {
             row[header] = sanitizeValue(getForm12PermanentAddress(emp));
             return;
           }
 
           if (formXXIIIAutofillContext && isFormXXIIIWorkmenNameHeader(header)) {
             row[header] = sanitizeValue(getFormXXIIIEmployeeFullName(emp));
+            return;
+          }
+
+          if (formXVAutofillContext && isFormXVSkipAutofillHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (formXVAutofillContext && isFormXVNatureOfWorkHeader(header)) {
+            row[header] = sanitizeValue(
+              emp.Designation ||
+                emp.designation ||
+                emp['Designation.displayValue'] ||
+                findValueByNormalizedKey(emp, 'designation') ||
+                ''
+            );
+            return;
+          }
+
+          if (formXVAutofillContext && isFormXVRateOfWageHeader(header)) {
+            row[header] = sanitizeValue(
+              emp.monthly_salary ||
+                emp['monthly_salary'] ||
+                emp.MonthlySalary ||
+                emp['MonthlySalary'] ||
+                emp.Basic ||
+                emp['Basic'] ||
+                ''
+            );
             return;
           }
 
@@ -16100,8 +21322,9 @@ const Statutory = ({ userEmail, userRole }) => {
               console.log(`✓ Mapped Employee Identification No. for employee ${index + 1}: ${idValue}`);
             }
           }
-          // Worker Identity No. - fetch from EmployeeID
-          else if ((headerLower.includes('worker') && headerLower.includes('identity')) ||
+          // Worker Identity / Identify No. - fetch from EmployeeID (Form 12, Form 25)
+          else if ((headerLower.includes('worker') &&
+                    (headerLower.includes('identity') || headerLower.includes('identify'))) ||
                    headerLower === 'worker identity no.' ||
                    headerLower === 'worker identity no') {
             // Form 12 rule: Worker Identity No <- EmployeeID
@@ -16268,26 +21491,23 @@ const Statutory = ({ userEmail, userRole }) => {
               console.log(`✓ Mapped Date of Joining for employee ${index + 1}: ${joiningDate}`);
             }
           }
-          // Date on which made permanent - fetch from DateofConfirmation
+          // Date on which made permanent (Form 12) -> Dateofjoining + 180 days
           else if (headerLower.includes('date') && headerLower.includes('permanent') && headerLower.includes('made')) {
-            // Form 12 rule: Date on which made Permanent <- DateofConfirmation
-            const permanentDate = emp.DateofConfirmation ||
-                         emp['DateofConfirmation'] ||
-                         emp['Date of Confirmation'] ||
-                         emp.dateOfConfirmation ||
-                         '';
-           
+            const permanentDate = addDaysToEmployeeJoiningDate(emp, 180);
             row[header] = permanentDate;
             if (permanentDate) {
-              console.log(`✓ Mapped Date on which made permanent for employee ${index + 1}: ${permanentDate} (from DateofConfirmation)`);
+              console.log(`✓ Mapped Date on which made permanent for employee ${index + 1}: ${permanentDate} (Dateofjoining + 180 days)`);
             } else {
-              console.warn(`✗ Could not find DateofConfirmation field for employee ${index + 1} to populate "Date on which made permanent"`);
+              console.warn(`✗ Could not compute Date on which made permanent for employee ${index + 1} (missing or invalid Dateofjoining)`);
             }
           }
-          // Form 12: Date on which completion of 480 days of Service
+          // Form 12: Date on which completion of 480 days of Service -> Dateofjoining + 480 days
           else if (headerLower.includes('480') && headerLower.includes('service')) {
-            // Keep blank as requested.
-            row[header] = '';
+            const completionDate = addDaysToEmployeeJoiningDate(emp, 480);
+            row[header] = completionDate;
+            if (completionDate) {
+              console.log(`✓ Mapped 480 days completion date for employee ${index + 1}: ${completionDate} (Dateofjoining + 480 days)`);
+            }
           }
           // Date of Exit - fetch from Dateofexit
           else if (headerLower.includes('date') && headerLower.includes('exit')) {
@@ -16381,8 +21601,13 @@ const Statutory = ({ userEmail, userRole }) => {
             const combinedAddress = addressParts.join(', ');
             row[header] = [String(employeeName || '').trim(), combinedAddress].filter(Boolean).join(', ');
           }
-          // Present Address - combine Address_Line_1, Country, City1, and City
+          // Present Address — prefer Present_Address from People API
           else if (headerLower.includes('present') && headerLower.includes('address')) {
+            const directPresent = getForm12PresentAddress(emp);
+            if (directPresent) {
+              row[header] = directPresent;
+              return;
+            }
             // Get individual address components
             const addressLine1 = emp.Address_Line_1 || emp['Address_Line_1'] || emp.AddressLine1 || emp['Address Line 1'] || '';
             const country = emp.Country || emp['Country'] || '';
@@ -16424,8 +21649,13 @@ const Statutory = ({ userEmail, userRole }) => {
               console.log(`✓ Mapped Present Address for employee ${index + 1}: ${combinedAddress}`);
             }
           }
-          // Permanent address - combine Address_Line_1, Address_Line_2, Country1, City, and City2
+          // Permanent address — prefer Permanent_Address from People API
           else if (headerLower.includes('permanent') && headerLower.includes('address')) {
+            const directPermanent = getForm12PermanentAddress(emp);
+            if (directPermanent) {
+              row[header] = directPermanent;
+              return;
+            }
             // Get individual address components - check all variations
             const addressLine1 = emp.Address_Line_1 ||
                                emp['Address_Line_1'] ||
@@ -16574,8 +21804,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // Combined Bank Header: "Bank A/c Number, Name of Bank, Branch (Indian Financial System Code) (IFSC Code)"
           else if ((headerLower.includes('bank') &&
                    (headerLower.includes('account') || headerLower.includes('ac')) &&
-                   headerLower.includes('name') &&
-                   headerLower.includes('branch')) ||
+                   (headerLower.includes('name') || headerLower.includes('branch') || headerLower.includes('ifsc'))) ||
                    (headerLower.includes('bank') && headerLower.includes('ifsc')) ||
                    (headerLower.includes('indian financial system code') && headerLower.includes('ifsc'))) {
             // Fetch from People: Bank_Name, Account_Number, IFSC_Code, Branch_Name
@@ -16803,6 +22032,11 @@ const Statutory = ({ userEmail, userRole }) => {
           // Default: try to find matching field by checking all emp properties
           else {
             if (formXVIIIAutofillContext && isFormXVIIIGenericPeopleSkipHeader(header)) {
+              row[header] = '';
+              return;
+            }
+
+            if (formXVAutofillContext) {
               row[header] = '';
               return;
             }
@@ -17062,15 +22296,58 @@ const Statutory = ({ userEmail, userRole }) => {
 
         return row;
       });
+      }
+
+      if (downloadFastPath) {
+        return mappedData;
+      }
 
       if (!returnMappedData) {
-        if (fastPaginatedAutofill) {
+        if (enrichOnlyPhase) {
+          /* rows already visible — enrichment-only pass */
+        } else if (fastPaginatedAutofill) {
           mergeMappedIntoFormTable(mappedData, true);
           await yieldToMain();
+          setTableAutofillLoading(false);
+          if (Array.isArray(employees) && employees.length > 0) {
+            setHeaderFormData((prev) => {
+              const out = { ...(prev || {}) };
+              const fields = modalData?.parsedFormHeader?.fields || [];
+              fields.forEach((field) => {
+                const compact = String(field?.label || '')
+                  .toLowerCase()
+                  .replace(/\s+/g, ' ')
+                  .trim();
+                if (/total\s*number\s*of\s*persons?\s*employed/.test(compact)) {
+                  const cur = String(out[field.key] ?? '').trim();
+                  if (!cur || isStatutoryHeaderPlaceholderValue(cur)) {
+                    out[field.key] = String(employees.length);
+                  }
+                }
+              });
+              return out;
+            });
+          }
+          setTableAutofillProgress('Updating payroll, attendance & leave…');
+          void fetchAndPopulateEmployeeData(headersToUse || currentHeaders, {
+            ...options,
+            enrichOnly: true,
+            skipPeopleFetch: true,
+            paginateEmployees: options.paginateEmployees,
+            employeePage,
+            employeePageSize,
+            formFileModalData: modalData,
+            columnGroupLabels: options.columnGroupLabels
+          }).finally(() => {
+            setTableAutofillProgress('');
+          });
+          return;
         } else {
           mergeMappedIntoFormTable(mappedData);
         }
-        setTableAutofillProgress('Loading attendance data…');
+        if (!fastPaginatedAutofill && !enrichOnlyPhase) {
+          setTableAutofillProgress('Loading attendance data…');
+        }
 
         if (skipPeopleLoad) {
           const cachedLookup = autofillPayrollLookupRef.current;
@@ -17155,8 +22432,7 @@ const Statutory = ({ userEmail, userRole }) => {
             });
             mergeMappedIntoFormTable(mappedData, true);
           }
-          setTableAutofillProgress('');
-          return;
+          // Paginated pages still need attendance / leave enrichment (Form 25 shift + daily hours, etc.).
         }
       }
 
@@ -17198,12 +22474,18 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       };
 
-      if (!returnMappedData) {
+      if (!returnMappedData && !fastModalAutofill) {
         setTableAutofillProgress('Enriching payroll & attendance…');
       }
-      await runPayrollPreload();
+      const payrollPreloadPromise = runPayrollPreload();
+      if (!fastModalAutofill) {
+        await payrollPreloadPromise;
+      }
 
       // Form B: Zoho Payroll `employee_id` often differs from People `EmployeeID` — merge earnings from all_salaries by mail/name.
+      if (fastModalAutofill && needsPayrollBulkPreload) {
+        await payrollPreloadPromise.catch(() => null);
+      }
       if (formBAutofillContext) {
         try {
           const payrollRows =
@@ -17468,13 +22750,40 @@ const Statutory = ({ userEmail, userRole }) => {
           );
         }
 
-        const attendanceJson = attendanceMonthNotYetStarted
-          ? {}
-          : await fetchAttendanceData({
+        const cachedAttendance =
+          autofillAttendanceCacheRef.current &&
+          autofillAttendanceCacheRef.current.sdate === sdate &&
+          autofillAttendanceCacheRef.current.edate === edate
+            ? autofillAttendanceCacheRef.current
+            : null;
+        const prefetchedAttendance = getCachedAttendanceData(sdate, edate);
+
+        const attendanceJson =
+          attendanceMonthNotYetStarted
+            ? {}
+            : cachedAttendance?.records?.length
+              ? { success: true, data: cachedAttendance.records, cached: true }
+              : prefetchedAttendance?.success
+                ? prefetchedAttendance
+                : fastModalAutofill
+                  ? await fetchAttendanceData({
+                      sdate,
+                      edate,
+                      force: form25DayStatusGrid || form25DailyHoursGrid || form25SkipLossPayAndNationalHolidayBenefit,
+                      timeoutMs: form25DayStatusGrid || form25DailyHoursGrid
+                        ? 8000
+                        : form25SkipLossPayAndNationalHolidayBenefit
+                          ? 3000
+                          : 2500,
+                    }).catch((err) => {
+                      console.warn('Attendance autofill fetch failed:', err?.message || err);
+                      return {};
+                    })
+                  : await fetchAttendanceData({
               sdate,
               edate,
-              force: form25DayStatusGrid || !fastModalAutofill || form25SkipLossPayAndNationalHolidayBenefit,
-              timeoutMs: form25DayStatusGrid
+              force: form25DayStatusGrid || form25DailyHoursGrid || !fastModalAutofill || form25SkipLossPayAndNationalHolidayBenefit,
+              timeoutMs: form25DayStatusGrid || form25DailyHoursGrid
                 ? 60000
                 : fastModalAutofill
                   ? form25SkipLossPayAndNationalHolidayBenefit
@@ -17611,10 +22920,24 @@ const Statutory = ({ userEmail, userRole }) => {
             return '';
           };
 
-          let attendanceRecords = normalizeAttendance(attendanceJson.data).filter((rec) => {
-            const k = recordDateKeyStable(rec);
-            return Boolean(k && k >= sdate && k <= edate);
-          });
+          let attendanceRecords = cachedAttendance?.records?.length
+            ? cachedAttendance.records.filter((rec) => {
+                const k = recordDateKeyStable(rec);
+                return Boolean(k && k >= sdate && k <= edate);
+              })
+            : normalizeAttendance(attendanceJson.data).filter((rec) => {
+                const k = recordDateKeyStable(rec);
+                return Boolean(k && k >= sdate && k <= edate);
+              });
+          if (!cachedAttendance && attendanceRecords.length > 0) {
+            autofillAttendanceCacheRef.current = {
+              sdate,
+              edate,
+              records: attendanceRecords,
+              targetMonthIndex,
+              targetYear
+            };
+          }
           console.log(
             `Statutory attendance normalize: ${attendanceRecords.length} day rows for ${sdate}..${edate}`
           );
@@ -17646,6 +22969,9 @@ const Statutory = ({ userEmail, userRole }) => {
             });
 
             const form25LossOfPayHeader = currentHeaders.find((header) => isForm25LossOfPayDaysHeader(header));
+            const form25WorkCommencesHeader = currentHeaders.find((header) => isForm25WorkCommencesHeader(header));
+            const form25WorkEndsHeader = currentHeaders.find((header) => isForm25WorkEndsHeader(header));
+            const form25SchemeOfShiftsHeader = currentHeaders.find((header) => isForm25SchemeOfShiftsHeader(header));
 
             const totalHoursHeader = currentHeaders.find((header) => {
               const h = String(header || '').toLowerCase().trim();
@@ -17691,17 +23017,20 @@ const Statutory = ({ userEmail, userRole }) => {
             if (dailyWorkedHoursHeader) {
               hasDailyHoursColumn = true;
             }
-            if (dateDayHeaders.length > 0 && form25DayStatusGrid) {
+            if (dateDayHeaders.length > 0 && (form25DayStatusGrid || form25DailyHoursGrid)) {
               hasDailyHoursColumn = true;
             }
 
+            const needsForm25ShiftMerge =
+              form25WorkCommencesHeader || form25WorkEndsHeader || form25SchemeOfShiftsHeader;
             const needsAttendanceHoursMerge =
               totalHoursHeader ||
               totalHoursWorkedAggHeader ||
               totalWorkedDaysHeader ||
               dailyWorkedHoursHeader ||
               normalHoursHeader ||
-              dateDayHeaders.length > 0;
+              dateDayHeaders.length > 0 ||
+              needsForm25ShiftMerge;
             const needsForm10OvertimeMerge = isLikelyForm10;
 
             if (needsAttendanceHoursMerge || needsForm10OvertimeMerge) {
@@ -17790,10 +23119,53 @@ const Statutory = ({ userEmail, userRole }) => {
 
               const shouldIndexAttendanceForDayLookup = (rec) => {
                 if (!rec || typeof rec !== 'object') return false;
-                if (form25DayStatusGrid) {
+                if (
+                  form25SkipLossPayAndNationalHolidayBenefit ||
+                  form25DayStatusGrid ||
+                  form25DailyHoursGrid
+                ) {
                   return Boolean(recordDateKeyStable(rec));
                 }
                 return hasValidAttendanceTime(rec);
+              };
+
+              const collectEmployeeAttendanceRecs = (idCands, nameCands, firstCand, emailCand) => {
+                const candidateRecs = new Set();
+                idCands.forEach((id) => {
+                  (recordsByEmployeeId.get(id) || []).forEach((rec) => candidateRecs.add(rec));
+                });
+                (Array.isArray(nameCands) ? nameCands : [nameCands])
+                  .filter(Boolean)
+                  .forEach((nameCand) => {
+                    (recordsByEmployeeName.get(nameCand) || []).forEach((rec) => candidateRecs.add(rec));
+                  });
+                if (recordsByEmployeeName.size > 0) {
+                  const probes = (Array.isArray(nameCands) ? nameCands : [nameCands]).filter(Boolean);
+                  for (const [key, recs] of recordsByEmployeeName.entries()) {
+                    if (probes.some((probe) => namesLooselyMatchAttendance(key, probe))) {
+                      recs.forEach((rec) => candidateRecs.add(rec));
+                    }
+                  }
+                }
+                if (firstCand) {
+                  (recordsByFirstName.get(firstCand) || []).forEach((rec) => candidateRecs.add(rec));
+                }
+                if (emailCand) {
+                  (recordsByEmployeeEmail.get(emailCand) || []).forEach((rec) => candidateRecs.add(rec));
+                }
+                return [...candidateRecs];
+              };
+
+              const pickForm25ShiftTemplateRec = (recs) => {
+                if (!Array.isArray(recs) || recs.length === 0) return null;
+                const withShiftName = recs.find((r) => getAttendanceShiftNameRaw(r));
+                if (withShiftName) return withShiftName;
+                const withTimes = recs.find((r) => {
+                  const st = getAttendanceShiftStartRaw(r);
+                  const et = getAttendanceShiftEndRaw(r);
+                  return st && et && st !== '-' && et !== '-';
+                });
+                return withTimes || recs[0];
               };
 
               const formatHoursForDayCell = (rec) => {
@@ -17824,11 +23196,6 @@ const Statutory = ({ userEmail, userRole }) => {
               const attendanceNameKeysByDate = new Map();
               const workedMinutesFromAttendanceRecord = (rec) => minutesFromExplicitDailyOrShift(rec);
 
-              const isCountableWorkedDay = (rec) =>
-                form25DayStatusGrid
-                  ? formatForm25DayAttendanceStatus(rec) === 'Present'
-                  : hasValidAttendanceTime(rec);
-
               const formatCumulativeHoursMM = (totalMins) => {
                 if (!Number.isFinite(totalMins) || totalMins <= 0) return '';
                 const h = Math.floor(totalMins / 60);
@@ -17855,6 +23222,17 @@ const Statutory = ({ userEmail, userRole }) => {
                 const emailIdx = getAttendanceEmployeeEmail(rec);
                 if (emailIdx) pushIndexedRecord(recordsByEmployeeEmail, emailIdx, rec);
               });
+
+              const isCountableWorkedDay = (rec) => {
+                if (form25SkipLossPayAndNationalHolidayBenefit) {
+                  const status = getForm25DayCellDisplay(rec);
+                  return status ? form25DayCountFromStatus(status) > 0 : false;
+                }
+                if (form25DayStatusGrid || form25DailyHoursGrid) {
+                  return formatForm25DayAttendanceStatus(rec) === 'Present';
+                }
+                return hasValidAttendanceTime(rec);
+              };
 
               const aggregateWorkedDaysAndMinutesForEmployee = (idCands, nameCands, firstCand, emailCand) => {
                 const candidateRecs = new Set();
@@ -17887,6 +23265,29 @@ const Statutory = ({ userEmail, userRole }) => {
                   const prev = byDate.get(dk);
                   if (!prev || (hasValidAttendanceTime(rec) && !hasValidAttendanceTime(prev))) byDate.set(dk, rec);
                 });
+                if (form25SkipLossPayAndNationalHolidayBenefit) {
+                  const today = new Date();
+                  const isCurrentSelectedMonth =
+                    targetYear === today.getFullYear() && targetMonthIndex === today.getMonth();
+                  const form25CountEndIso = isCurrentSelectedMonth
+                    ? formatLocalDateYYYYMMDD(today)
+                    : edate;
+                  const form25Records = [...byDate.values()].filter((rec) => {
+                    const dk = recordDateKeyStable(rec);
+                    return dk && dk >= sdate && dk <= form25CountEndIso;
+                  });
+                  const form25Totals = aggregateForm25WorkedTotalsFromRecords(form25Records);
+                  return {
+                    days: form25Totals.days,
+                    totalMins: form25Totals.totalHours * 60,
+                    totalHoursRounded: form25Totals.totalHours,
+                    lopDays: computeForm25LossOfPayDays(
+                      form25Totals.days,
+                      targetYear,
+                      targetMonthIndex
+                    )
+                  };
+                }
                 let days = 0;
                 let totalMins = 0;
                 byDate.forEach((rec) => {
@@ -17895,7 +23296,7 @@ const Statutory = ({ userEmail, userRole }) => {
                   const m = workedMinutesFromAttendanceRecord(rec);
                   if (m != null) totalMins += m;
                 });
-                return { days, totalMins };
+                return { days, totalMins, totalHoursRounded: null, lopDays: null };
               };
 
               sortedRecords.forEach((rec) => {
@@ -18078,11 +23479,44 @@ const Statutory = ({ userEmail, userRole }) => {
                     row[totalWorkedDaysHeader] = String(agg.days);
                   }
                   if (form25LossOfPayHeader) {
-                    const daysInMonth = new Date(targetYear, targetMonthIndex + 1, 0).getDate();
-                    row[form25LossOfPayHeader] = String(Math.max(0, daysInMonth - agg.days));
+                    row[form25LossOfPayHeader] =
+                      agg.lopDays != null
+                        ? String(agg.lopDays)
+                        : String(
+                            Math.max(
+                              0,
+                              new Date(targetYear, targetMonthIndex + 1, 0).getDate() - agg.days
+                            )
+                          );
                   }
                   if (totalHoursWorkedAggHeader) {
-                    row[totalHoursWorkedAggHeader] = formatCumulativeHoursMM(agg.totalMins);
+                    row[totalHoursWorkedAggHeader] =
+                      agg.totalHoursRounded != null && agg.totalHoursRounded > 0
+                        ? String(agg.totalHoursRounded)
+                        : formatCumulativeHoursMM(agg.totalMins);
+                  }
+
+                  const employeeAttendanceRecs = collectEmployeeAttendanceRecs(
+                    idCandidates,
+                    nameCandidates,
+                    firstNameCandidate,
+                    emailCandidate
+                  );
+                  const shiftTemplateRec =
+                    pickForm25ShiftTemplateRec(employeeAttendanceRecs) || matchedAttendance;
+
+                  if (form25WorkCommencesHeader) {
+                    row[form25WorkCommencesHeader] = formatAttendanceShiftTimeDisplay(
+                      getAttendanceShiftStartRaw(shiftTemplateRec)
+                    );
+                  }
+                  if (form25WorkEndsHeader) {
+                    row[form25WorkEndsHeader] = formatAttendanceShiftTimeDisplay(
+                      getAttendanceShiftEndRaw(shiftTemplateRec)
+                    );
+                  }
+                  if (form25SchemeOfShiftsHeader) {
+                    row[form25SchemeOfShiftsHeader] = getAttendanceShiftNameRaw(shiftTemplateRec);
                   }
 
                   const totalHoursValue = matchedAttendance
@@ -18150,14 +23584,8 @@ const Statutory = ({ userEmail, userRole }) => {
                           ? attendanceByEmailDate.get(`${emailCandidate}::${iso}`)
                           : null;
                       const rec = byId || byName || byFirstName || byEmail;
-                      if (form25DayStatusGrid) {
-                        if (rec) {
-                          row[header] = formatForm25DayAttendanceStatus(rec);
-                        } else if (isWeekendCalendarDay(dayDate)) {
-                          row[header] = '';
-                        } else {
-                          row[header] = 'Absent';
-                        }
+                      if (form25DailyHoursGrid || form25DayStatusGrid) {
+                        row[header] = rec ? getForm25DayCellDisplay(rec) : '';
                         return;
                       }
                       if (rec && hasValidAttendanceTime(rec)) {
@@ -18898,16 +24326,19 @@ const Statutory = ({ userEmail, userRole }) => {
         console.log('Fetching leave data...');
         const { fromDate, toDate } = zohoBookedBalanceRangeForUiMonth(selectedMonth);
         const unit = 'Day';
-        const leaveResult = await fetchLeaveData({
-          fromDate,
-          toDate,
-          unit,
-          force: !fastModalAutofill,
-          timeoutMs: fastModalAutofill ? 4000 : 300000,
-        }).catch((err) => {
-          console.warn('Leave autofill fetch failed:', err?.message || err);
-          return null;
-        });
+        let leaveResult = getCachedLeaveData(fromDate, toDate, unit);
+        if (!leaveResult) {
+          leaveResult = await fetchLeaveData({
+            fromDate,
+            toDate,
+            unit,
+            force: enrichOnlyPhase ? false : !fastModalAutofill,
+            timeoutMs: enrichOnlyPhase ? 8000 : fastModalAutofill ? 2000 : 300000,
+          }).catch((err) => {
+            console.warn('Leave autofill fetch failed:', err?.message || err);
+            return null;
+          });
+        }
         const leaveTypeLabels = (leaveResult && leaveResult.leaveTypeLabels) || {};
 
         if (leaveResult && typeof leaveResult === 'object') {
@@ -19540,6 +24971,42 @@ const Statutory = ({ userEmail, userRole }) => {
           console.log(`Cleared Form H column: "${formHLeavePaidHeader}"`);
         }
       }
+
+      if (
+        !returnMappedData &&
+        isFormXVContext(
+          parsedFormHeaderForAutofill,
+          modalData?.item || formFileModalData?.item,
+          currentFormFileName || `${currentFormTitle} ${currentFormSubtitle}`
+        ) &&
+        Array.isArray(employees) &&
+        employees.length > 0
+      ) {
+        const headerEmp = employees[employeePageOffset] || employees[0];
+        setHeaderFormData((prev) => {
+          let next = { ...(prev || {}) };
+          const resolvedSite = resolveStatutorySiteNameForContractorAutofill(modalData?.item || formFileModalData?.item, {
+            siteFromUrl,
+            allowedSiteNameList,
+            allRows: statutoryData,
+            resolveSiteFn: typeof resolveSiteDisplayName === 'function' ? resolveSiteDisplayName : null
+          });
+          let sitesForContractor = siteDetailsList;
+          if (!Array.isArray(sitesForContractor) || sitesForContractor.length === 0) {
+            sitesForContractor = readSiteDetailsCache() || [];
+          }
+          if (resolvedSite) {
+            next = applySiteManagementToHeaderFormData(
+              next,
+              resolvedSite,
+              sitesForContractor,
+              parsedFormHeaderForAutofill?.fields || []
+            );
+          }
+          next = applyFormXVHeaderAutofillFromEmployee(next, headerEmp);
+          return next;
+        });
+      }
      
       // Update form table data with employee data (including leave balance and leave earned)
       let tableDataToSet = mappedData;
@@ -19661,6 +25128,7 @@ const Statutory = ({ userEmail, userRole }) => {
       'number of days', 'days worked', 'provident fund', 'signature', 'remarks',
       'number in register', 'muster', 'exempted', 'extent of overtime', 'normal hours',
       'normal rate of pay', 'overtime rate', 'department', 'date of which overtime',
+      'employee code', 'doj', 'father', 'husband',
       // LWF Form C and similar (merged quarterly columns)
       'quarter', 'fines', 'unpaid', 'accumulations',
       // Form Q (attendance / hours register)
@@ -19680,6 +25148,7 @@ const Statutory = ({ userEmail, userRole }) => {
       const nonEmpty = mergedRow.filter(Boolean);
       if (nonEmpty.length === 0) continue;
       const rowTextLower = nonEmpty.join(' ').toLowerCase();
+      if (headersLookLikePivotOrWrongFormATable(nonEmpty)) continue;
       const hasSNo =
         rowHasTableSerialHeader(rowTextLower) ||
         /number\s+in\s+register|register\s+number/i.test(rowTextLower);
@@ -19757,6 +25226,13 @@ const Statutory = ({ userEmail, userRole }) => {
     for (let rowIdx = 0; rowIdx < Math.min(25, jsonData.length) && headerRowIndex === -1; rowIdx++) {
       const row = jsonData[rowIdx] || [];
       if (row.length === 0) continue;
+
+      const mergedHeaderCells = [];
+      for (let colIdx = 0; colIdx < Math.max(row.length, effectiveSheetCols, 20); colIdx += 1) {
+        mergedHeaderCells.push(String(getMergedAwareCellText(rowIdx, colIdx) || row[colIdx] || '').trim());
+      }
+      const nonEmptyMergedHeaderCells = mergedHeaderCells.filter(Boolean);
+      if (headersLookLikePivotOrWrongFormATable(nonEmptyMergedHeaderCells)) continue;
      
       const rowText = row.map(cell => String(cell || '').toLowerCase().trim()).join(' ');
       let matchingHeaderCells = 0;
@@ -19836,6 +25312,7 @@ const Statutory = ({ userEmail, userRole }) => {
       for (let rowIdx = 0; rowIdx < Math.min(25, jsonData.length); rowIdx++) {
         const row = jsonData[rowIdx] || [];
         const cells = row.map(cell => String(cell || '').trim()).filter(Boolean);
+        if (headersLookLikePivotOrWrongFormATable(cells)) continue;
         const allShort = cells.length >= 3 && cells.every(c => c.length < 50);
         const notAllLabels = !cells.every(c => c.endsWith(':'));
         if (cells.length >= 3 && allShort && notAllLabels) {
@@ -20192,9 +25669,22 @@ const Statutory = ({ userEmail, userRole }) => {
                   const n = txt.match(/\bform\s+\d+\b/i);
                   if (n) formTitle = n[0].replace(/\s+/g, ' ').trim();
                 }
+                if (!formTitle && /\bform[\s._-]*xv(?!i)\b/i.test(txt)) {
+                  const roman = txt.match(/\bform[\s._-]*xv\b/i);
+                  if (roman) formTitle = roman[0].replace(/[._-]/g, ' ').replace(/\s+/g, ' ').trim();
+                }
                 if (!formTitle && /\bform\s*["']?\s*[a-z]\s*["']?\s*(?:\([^)]*\))?/i.test(txt)) {
                   formTitle = txt.replace(/\s+/g, ' ').trim();
                 }
+              }
+              if (!formSubtitle && /register\s+of\s+fines/i.test(txt) && !txt.includes(':')) {
+                formSubtitle = txt.replace(/\s+/g, ' ').trim();
+              }
+              if (!formSubtitle && /register\s+of\s+workmen/i.test(txt) && !txt.includes(':')) {
+                formSubtitle = txt.replace(/\s+/g, ' ').trim();
+              }
+              if (!formSubtitle && /service\s+certificate/i.test(txt) && !txt.includes(':')) {
+                formSubtitle = txt.replace(/\s+/g, ' ').trim();
               }
               if (!formSubtitle && /(accident\s+book|leave\s+book)/i.test(txt) && !txt.includes(':')) {
                 formSubtitle = txt.replace(/\s+/g, ' ').trim();
@@ -20225,7 +25715,7 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
 
-        // Form I: split merged heading block so title/subtitle render like Excel (line 1: Form - I, line 2: REGISTER OF WORKMEN).
+        // Form I: split merged heading block so title/subtitle render like Excel.
         const formIParsed = splitFormIHeaderBlock([formTitle, formSubtitle, formReference].filter(Boolean).join('\n'));
         if (formIParsed) {
           if (formIParsed.title) formTitle = formIParsed.title;
@@ -20729,6 +26219,107 @@ const Statutory = ({ userEmail, userRole }) => {
           addHeaderFieldIfMissing('Month/Year', 'form_xviii_month_year', '');
         }
 
+        const formXVHeaderProbe = { title: formTitle, subtitle: formSubtitle, reference: formReference };
+        if (isFormXVContext(formXVHeaderProbe, null, '')) {
+          const normalizeHeaderFieldLabel = (value) =>
+            String(value || '')
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+          const hasHeaderFieldLabel = (label) => {
+            const wanted = normalizeHeaderFieldLabel(label);
+            return headerFields.some((field) => normalizeHeaderFieldLabel(field.label) === wanted);
+          };
+          const addHeaderFieldIfMissing = (label, key, value = '') => {
+            if (hasHeaderFieldLabel(label)) return;
+            headerFields.push({ label, value, key });
+          };
+          const findFieldValueToRight = (rowIndex, colIndex) => {
+            const maxC = Math.max(40, effectiveSheetCols);
+            for (let nc = colIndex + 1; nc < Math.min(colIndex + 12, maxC); nc++) {
+              const raw = String(getMergedAwareCellText(rowIndex, nc) || '').trim();
+              if (!raw) continue;
+              return raw;
+            }
+            return '';
+          };
+          const enrichedContractHeaders = enrichForm25AddressHeadersFromSheet(
+            headerRowIndex,
+            effectiveSheetCols,
+            getMergedAwareCellText
+          );
+          const contractorField = enrichedContractHeaders.find((h) => h.key === 'form25_contractor');
+          const establishmentField = enrichedContractHeaders.find((h) => h.key === 'form25_establishment');
+          const principalEmployerField = enrichedContractHeaders.find((h) => h.key === 'form25_principal_employer');
+          for (let r = 0; r < headerRowIndex; r += 1) {
+            for (let c = 0; c < Math.max(80, effectiveSheetCols); c += 1) {
+              const cellText = String(getMergedAwareCellText(r, c) || '').trim();
+              if (!cellText) continue;
+              FORM_XV_HEADER_LABEL_SPECS.forEach((fieldDef) => {
+                if (!fieldDef.match.test(cellText) || hasHeaderFieldLabel(fieldDef.label)) return;
+                addHeaderFieldIfMissing(fieldDef.label, fieldDef.key, findFieldValueToRight(r, c));
+              });
+            }
+          }
+          addHeaderFieldIfMissing(
+            'Name and address of contractor',
+            'form_xv_contractor',
+            contractorField?.value || ''
+          );
+          addHeaderFieldIfMissing(
+            'Nature and location of work',
+            'form_xv_nature_location_work',
+            ''
+          );
+          addHeaderFieldIfMissing(
+            'Name and address of establishment in/under which contract is carried on',
+            'form_xv_establishment_contract_carried',
+            establishmentField?.value || ''
+          );
+          addHeaderFieldIfMissing(
+            'Name and address of principal employer',
+            'form_xv_principal_employer',
+            principalEmployerField?.value || ''
+          );
+          FORM_XV_HEADER_LABEL_SPECS.forEach((fieldDef) => {
+            addHeaderFieldIfMissing(fieldDef.label, fieldDef.key, '');
+          });
+          const isMeaningfulHeaderValue = (value, label) => {
+            const raw = String(value || '').trim();
+            if (!raw) return false;
+            const normalizedRaw = normalizeHeaderFieldLabel(raw);
+            const normalizedLabel = normalizeHeaderFieldLabel(label);
+            if (!normalizedRaw) return false;
+            if (normalizedRaw === normalizedLabel) return false;
+            if (normalizedRaw === normalizeHeaderFieldLabel(`Enter ${String(label || '').replace(/:+$/, '').trim()}`)) {
+              return false;
+            }
+            return true;
+          };
+          const desiredFormXVOrder = FORM_XV_HEADER_LABEL_SPECS.map((spec) => spec.label);
+          const desiredFormXVKeys = new Set(FORM_XV_HEADER_LABEL_SPECS.map((spec) => spec.key));
+          const existingFormXVFields = headerFields.filter((field) => desiredFormXVKeys.has(String(field?.key || '')));
+          const otherHeaderFields = headerFields.filter((field) => !desiredFormXVKeys.has(String(field?.key || '')));
+          const formXVFieldMap = new Map();
+          existingFormXVFields.forEach((field) => {
+            formXVFieldMap.set(normalizeHeaderFieldLabel(field.label), field);
+          });
+          const orderedFormXVFields = desiredFormXVOrder.map((label) => {
+            const field = formXVFieldMap.get(normalizeHeaderFieldLabel(label));
+            const spec = FORM_XV_HEADER_LABEL_SPECS.find(
+              (entry) => normalizeHeaderFieldLabel(entry.label) === normalizeHeaderFieldLabel(label)
+            );
+            const value = field?.value;
+            return {
+              label,
+              key: spec?.key || field?.key,
+              value: isMeaningfulHeaderValue(value, label) ? String(value).trim() : ''
+            };
+          });
+          headerFields = [...orderedFormXVFields, ...otherHeaderFields];
+        }
+
         const formXVIHeaderProbe = { title: formTitle, subtitle: formSubtitle, reference: formReference };
         if (isFormXVIContext(formXVIHeaderProbe, null, '')) {
           const normalizeHeaderFieldLabel = (value) =>
@@ -21051,6 +26642,25 @@ const Statutory = ({ userEmail, userRole }) => {
         }
 
         if (formTitle || formSubtitle || formReference || headerFields.length > 0 || wagePeriodText || festivalGrid) {
+          const formAHeaderProbe = {
+            title: formTitle,
+            subtitle: formSubtitle,
+            reference: formReference
+          };
+          if (
+            isFormAMusterRollContext(formAHeaderProbe) ||
+            (/\bform\s*[-"']?\s*a\b/i.test(formTitle || '') &&
+              /maternity\s+benefit|muster\s+roll/i.test(
+                [formSubtitle, formReference].join(' ')
+              ))
+          ) {
+            headerFields = enrichFormAHeaderFieldsFromSheet(
+              headerRowIndex,
+              effectiveSheetCols,
+              getMergedAwareCellText,
+              headerFields
+            );
+          }
           formHeaderInfo = {
             title: formTitle,
             subtitle: formSubtitle,
@@ -21082,10 +26692,20 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     let tableStartCol = 0;
+    const sheetTextBlobEarly = jsonData
+      .slice(0, Math.min(40, jsonData.length))
+      .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+      .join(' ');
+    const formAMusterProbeEarly =
+      isFormAMusterRollContext(formHeaderInfo) ||
+      isFormAMusterRollRowContext(formHeaderInfo, null, firstSheetName, sheetTextBlobEarly);
     const wageRegisterSheet =
-      isFormXXVIIContext(formHeaderInfo, null, firstSheetName) ||
-      looksLikeWageRegisterTableHeaders(headersToUse) ||
-      looksLikeWageRegisterTableHeaders(headers);
+      !formAMusterProbeEarly &&
+      !headersIndicateFormAMusterRoll(headersToUse) &&
+      !headersLookLikePivotOrWrongFormATable(headersToUse) &&
+      (isFormXXVIIContext(formHeaderInfo, null, firstSheetName) ||
+        looksLikeWageRegisterTableHeaders(headersToUse) ||
+        looksLikeWageRegisterTableHeaders(headers));
     if (wageRegisterSheet && headerRowIndex >= 0) {
       const anchor = findWageRegisterTableAnchor(
         getMergedAwareCellText,
@@ -21204,7 +26824,12 @@ const Statutory = ({ userEmail, userRole }) => {
             excelColIdx++;
           }
         });
-        if (Object.values(rowData).some((val) => val)) tableData.push(rowData);
+        if (Object.values(rowData).some((val) => val)) {
+          if (isFixedRowAggregateComplianceTable(headersToUse) && isFixedAggregateComplianceFooterRow(rowData, headersToUse)) {
+            break;
+          }
+          tableData.push(rowData);
+        }
       }
     } else {
       for (let i = startIndex; i < jsonData.length; i++) {
@@ -21214,8 +26839,19 @@ const Statutory = ({ userEmail, userRole }) => {
           const excelCol = tableStartCol + j;
           rowData[header] = String(getMergedAwareCellText(i, excelCol) || '').trim();
         }
-        if (Object.values(rowData).some((val) => val)) tableData.push(rowData);
+        if (Object.values(rowData).some((val) => val)) {
+          if (isFixedRowAggregateComplianceTable(headersToUse) && isFixedAggregateComplianceFooterRow(rowData, headersToUse)) {
+            break;
+          }
+          tableData.push(rowData);
+        }
       }
+    }
+
+    if (isFixedRowAggregateComplianceTable(headersToUse) && tableData.length > 0) {
+      const sanitized = sanitizeFixedAggregateComplianceRows(tableData, headersToUse);
+      tableData.length = 0;
+      sanitized.forEach((r) => tableData.push(r));
     }
 
     if (isFixedRowAggregateComplianceTable(headersToUse) && tableData.length > 1) {
@@ -21486,6 +27122,35 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     } else if (
       usableHeaderCount === 0 &&
+      isFormIRegisterOfWorkmenContext(
+        null,
+        firstSheetName,
+        formHeaderInfo,
+        headersToUse,
+        sheetTextBlob
+      )
+    ) {
+      headersToUse = [...FORM_I_TABLE_HEADERS];
+      if (headerRowIndex < 0) {
+        for (let r = 0; r < Math.min(45, jsonData.length); r += 1) {
+          const rowText = (jsonData[r] || [])
+            .map((c) => String(c || '').toLowerCase())
+            .join(' ');
+          if (
+            rowHasTableSerialHeader(rowText) ||
+            rowText.includes('name and address of the workman') ||
+            rowText.includes('emp id')
+          ) {
+            headerRowIndex = r;
+            break;
+          }
+        }
+      }
+      if (startIndex < 0) {
+        startIndex = headerRowIndex >= 0 ? headerRowIndex + 2 : Math.min(12, jsonData.length);
+      }
+    } else if (
+      usableHeaderCount === 0 &&
       isFormUEmployeeRegisterContext(formUHints)
     ) {
       headersToUse = [...FORM_U_FORMAT2_HEADERS];
@@ -21672,6 +27337,30 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
 
+    const formXXVIRebuild = rebuildFormXXVIDailyHoursHeaders({
+      jsonData,
+      effectiveSheetCols,
+      getMergedAwareCellText,
+      headers,
+      expandedHeaders: headersToUse,
+      subColumnsData,
+      headerRowIndex,
+      startIndex,
+      tableData,
+      firstSheetName,
+      formHeaderInfo
+    });
+    if (formXXVIRebuild) {
+      headers = formXXVIRebuild.headers;
+      headersToUse = formXXVIRebuild.expandedHeaders;
+      subColumnsData = formXXVIRebuild.subColumnsData;
+      headerRowIndex = formXXVIRebuild.headerRowIndex;
+      startIndex = formXXVIRebuild.startIndex;
+      tableData.length = 0;
+      (formXXVIRebuild.tableData || []).forEach((r) => tableData.push(r));
+      columnGroupLabels = formXXVIRebuild.columnGroupLabels;
+    }
+
     const formIIProbe = isFormIIMaharashtraContext(
       formHeaderInfo,
       null,
@@ -21699,6 +27388,127 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
 
+    let formVIFestivalHolidayLabels = null;
+    const formVIRebuild = rebuildFormVIFestivalTableHeadersFromSheet({
+      jsonData,
+      getMergedAwareCellText,
+      headerRowIndex,
+      headers: headersToUse,
+      firstSheetName,
+      formHeaderInfo
+    });
+    if (formVIRebuild?.headers?.length) {
+      const priorHeaders = [...headersToUse];
+      const priorRows = tableData.map((row) => ({ ...row }));
+      headersToUse = formVIRebuild.headers;
+      headers = formVIRebuild.headers;
+      expandedHeaders = [...formVIRebuild.headers];
+      formVIFestivalHolidayLabels = formVIRebuild.holidayLabels || null;
+      if (priorRows.length > 0) {
+        tableData.length = 0;
+        remapFormVIRowsByColumnIndex(priorRows, priorHeaders, headersToUse).forEach((r) => tableData.push(r));
+      }
+    }
+
+    const sheetTextBlobFinal = jsonData
+      .slice(0, Math.min(40, jsonData.length))
+      .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+      .join(' ');
+    const formAProbeFinal =
+      isFormAMusterRollContext(formHeaderInfo) ||
+      isFormAMusterRollRowContext(formHeaderInfo, null, firstSheetName, sheetTextBlobFinal);
+    if (
+      formAProbeFinal &&
+      (!headersIndicateFormAMusterRoll(headersToUse) || headersLookLikePivotOrWrongFormATable(headersToUse))
+    ) {
+      let formARebuild = rebuildFormATableHeadersFromSheet({
+        jsonData,
+        effectiveSheetCols,
+        getMergedAwareCellText
+      });
+      if (!formARebuild?.headers?.length) {
+        formARebuild = rebuildFormATableHeadersFromSheetRelaxed({
+          jsonData,
+          effectiveSheetCols,
+          getMergedAwareCellText,
+          sheetText: sheetTextBlobFinal
+        });
+      }
+      if (formARebuild?.headers?.length >= 3) {
+        const priorHeaders = [...headersToUse];
+        const priorRows = tableData.map((row) => ({ ...row }));
+        headersToUse = formARebuild.headers;
+        headers = formARebuild.headers;
+        expandedHeaders = [...formARebuild.headers];
+        headerRowIndex = formARebuild.headerRowIndex;
+        tableStartCol = formARebuild.startCol;
+        startIndex = formARebuild.dataStartIndex;
+        tableData.length = 0;
+        for (let i = startIndex; i < jsonData.length; i += 1) {
+          const rowData = {};
+          for (let j = 0; j < headersToUse.length; j += 1) {
+            rowData[headersToUse[j]] = String(
+              getMergedAwareCellText(i, tableStartCol + j) || ''
+            ).trim();
+          }
+          if (Object.values(rowData).some((val) => val)) tableData.push(rowData);
+        }
+        if (
+          priorRows.length > 0 &&
+          (tableData.length === 0 ||
+            tableData.every(
+              (row) => !row || !Object.values(row).some((val) => String(val ?? '').trim() !== '')
+            ))
+        ) {
+          tableData.length = 0;
+          remapFormARowsByColumnIndex(priorRows, priorHeaders, headersToUse).forEach((r) => tableData.push(r));
+        }
+      } else if (sheetTextIndicatesFormAHeaderFields(sheetTextBlobFinal)) {
+        headersToUse = [];
+        headers = [];
+        expandedHeaders = [];
+        tableData.length = 0;
+        headerRowIndex = -1;
+        startIndex = 0;
+        tableStartCol = 0;
+        formHeaderInfo = {
+          ...(formHeaderInfo || {}),
+          formAHeaderFieldLayout: true,
+          fields: buildFormAHeaderFieldSpecs(formHeaderInfo?.fields || [])
+        };
+      }
+    }
+    if (formAProbeFinal && formHeaderInfo) {
+      formHeaderInfo = {
+        ...formHeaderInfo,
+        fields: enrichFormAHeaderFieldsFromSheet(
+          headerRowIndex,
+          effectiveSheetCols,
+          getMergedAwareCellText,
+          formHeaderInfo.fields || []
+        )
+      };
+    }
+
+    const formIWorkmenProbe = isFormIRegisterOfWorkmenContext(
+      null,
+      firstSheetName,
+      formHeaderInfo,
+      headersToUse,
+      sheetTextBlobFinal
+    );
+    if (formIWorkmenProbe && Array.isArray(headersToUse) && headersToUse.length > 0) {
+      const normalizedFormIHeaders = normalizeFormIWorkmenTableHeaders(headersToUse);
+      if (normalizedFormIHeaders.length !== headersToUse.length) {
+        const priorRows = tableData.map((row) => ({ ...row }));
+        headersToUse = normalizedFormIHeaders;
+        headers = normalizedFormIHeaders;
+        expandedHeaders = [...normalizedFormIHeaders];
+        tableData.length = 0;
+        padFormIWorkmenRowsForHeaders(priorRows, headersToUse).forEach((r) => tableData.push(r));
+      }
+    }
+
     return {
       formHeader: formHeaderInfo,
       tableData: tableData,
@@ -21708,6 +27518,7 @@ const Statutory = ({ userEmail, userRole }) => {
       dataStartIndex: startIndex,
       tableStartCol,
       columnGroupLabels,
+      formVIFestivalHolidayLabels,
       originalHeaderRowIndex: headerRowIndex
     };
   };
@@ -21819,6 +27630,10 @@ const Statutory = ({ userEmail, userRole }) => {
         return obj;
       });
 
+      if (isFixedRowAggregateComplianceTable(normalizedHeaders) && importedRows.length > 0) {
+        importedRows = sanitizeFixedAggregateComplianceRows(importedRows, normalizedHeaders);
+      }
+
       if (isFixedRowAggregateComplianceTable(normalizedHeaders) && importedRows.length > 1) {
         importedRows = dedupeConsecutiveFixedAggregateBodyRows(importedRows);
       }
@@ -21839,8 +27654,81 @@ const Statutory = ({ userEmail, userRole }) => {
       });
 
       setFormTableData(mergedRows);
-      setSuccess(`Imported ${importedRows.length} rows and merged with existing data.`);
-      setError('');
+
+      const currentItem = enrichStatutoryItemWithFormMasterMeta(
+        formFileModalData?.item || autofillItem,
+        formmasterTemplates,
+        formmasterFormFileByMatchKey
+      );
+      const candidateStatutoryIds = buildStatutorySampleDataFetchIds(currentItem, currentItem, {});
+      let sampleDataSaved = false;
+      let sampleDataSaveError = '';
+      if (candidateStatutoryIds.length > 0) {
+        const headerDataForSampleSave =
+          headerFormData && typeof headerFormData === 'object' && !Array.isArray(headerFormData)
+            ? headerFormData
+            : formFileModalData?.parsedHeaderFormData || {};
+        const monthFilterValue =
+          resolveMonthFilterForSave(
+            currentItem?.dueDate,
+            selectedMonth,
+            currentItem?.monthFilter ??
+              currentItem?.MonthFilter ??
+              currentItem?.monthfilter ??
+              selectedMonth
+          ) ||
+          selectedMonth ||
+          MONTH_NAMES[new Date().getMonth()];
+        const formNameValue =
+          currentItem?.formName ||
+          formHeader?.title?.split('\n')[0]?.trim() ||
+          formFileModalData?.formFileName ||
+          formFileModalData?.fileName ||
+          '';
+        const samplePayload = {
+          sampleDataHeader: prepareSampleDataHeadersForSave(normalizedHeaders),
+          sampleHeaderFormData: headerDataForSampleSave,
+          sampleData: prepareSampleDataRowsForSave(mergedRows),
+          formName: formNameValue,
+          monthFilter: monthFilterValue,
+          MonthFilter: monthFilterValue,
+          monthfilter: monthFilterValue
+        };
+        for (const tryStatutoryId of candidateStatutoryIds) {
+          try {
+            const sampleResp = await postStatutorySampleDataSnapshot(tryStatutoryId, samplePayload);
+            if (sampleResp.ok && sampleResp.data?.status === 'success') {
+              sampleDataSaved = true;
+              sampleDataSaveError = '';
+              break;
+            }
+            sampleDataSaveError =
+              sampleResp.data?.message ||
+              sampleResp.rawText ||
+              `SampleData save failed for statutory id ${tryStatutoryId}.`;
+            console.warn('SampleData persist after import failed:', sampleDataSaveError);
+          } catch (samplePersistErr) {
+            sampleDataSaveError =
+              samplePersistErr?.message || `SampleData save failed for statutory id ${tryStatutoryId}.`;
+            console.warn('SampleData persist after import failed:', samplePersistErr);
+          }
+        }
+      }
+
+      if (sampleDataSaved) {
+        setSuccess(`Imported ${importedRows.length} rows and saved to SampleData.`);
+        setError('');
+      } else if (candidateStatutoryIds.length > 0) {
+        setSuccess(`Imported ${importedRows.length} rows into the form.`);
+        setError(
+          sampleDataSaveError
+            ? `SampleData was not saved: ${sampleDataSaveError}`
+            : 'SampleData was not saved. Click Save to retry, or redeploy statutoryreg_function.'
+        );
+      } else {
+        setSuccess(`Imported ${importedRows.length} rows into the form.`);
+        setError('SampleData was not saved because this row has no statutory record id yet. Click Save first.');
+      }
     } catch (err) {
       console.error('Import rows error:', err);
       setError(err?.message || 'Failed to import Excel rows.');
@@ -21942,14 +27830,26 @@ const Statutory = ({ userEmail, userRole }) => {
     }
     if (!item?.formFile || item.formFile === 'null' || String(item.formFile).trim() === '') return;
 
-    const baseName = getFormFileDownloadFileName(item);
+    const templateMeta = resolveStatutoryFormTemplateForRow(item, {
+      formmasterFormFileByMatchKey,
+      formFileByFormKey,
+      formmasterTemplates
+    });
+    const downloadItem = {
+      ...item,
+      ...templateMeta,
+      formFile: templateMeta?.formFile || item.formFile,
+      formFileName: templateMeta?.formFileName || item.formFileName,
+      isFromFormmaster: true
+    };
+    const baseName = getFormFileDownloadFileName(downloadItem);
     const downloadName = /\.(xlsx|xls)$/i.test(baseName) ? baseName : `${baseName}.xlsx`;
 
     try {
       setFormFileLoading(true);
       setError('');
-      const urls = getFormFileFetchUrlCandidates(item);
-      const cacheKey = getFormTemplateCacheKey(item);
+      const urls = getFormFileFetchUrlCandidates(downloadItem);
+      const cacheKey = getFormTemplateCacheKey(downloadItem);
       const { arrayBuffer, contentType } = await fetchFormTemplateArrayBuffer(urls, cacheKey);
       const blob = new Blob([arrayBuffer], {
         type: contentType || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -22031,9 +27931,15 @@ const Statutory = ({ userEmail, userRole }) => {
       setError('');
       setFormHeader(null);
       setHeaderFormData({});
-      setFormTableData([]);
+      if (!forceAutofill) {
+        setFormTableData([]);
+      }
       setTableHeaders([]);
       setSubColumns(null);
+
+      if (forceAutofill) {
+        fetchPeopleDataForAutofillDisplay().catch(() => null);
+      }
 
       const savedDraftSourceItem = options?.savedDraftSourceItem || item;
       const preferDirectDraftFile = !!options?.preferDirectDraftFile;
@@ -22059,22 +27965,47 @@ const Statutory = ({ userEmail, userRole }) => {
       const directDraftUrl = directDraftRowId
         ? `/server/statutoryreg_function/statutory/${directDraftRowId}/file/Draft`
         : null;
-      // Site grid edits live in SampleData; opening stored Draft first shows stale Zoho autofill (e.g. missing Gender on Form 12).
+      const templateMetaForView = resolveStatutoryFormTemplateForRow(item, {
+        formmasterFormFileByMatchKey,
+        formFileByFormKey,
+        formmasterTemplates
+      });
+      const itemForTemplateFetch = {
+        ...item,
+        ...templateMetaForView,
+        formFile: templateMetaForView?.formFile || item.formFile,
+        formFileName: templateMetaForView?.formFileName || item.formFileName,
+        isFromFormmaster: true
+      };
+      // SampleData holds the exact saved grid; prefer it over a cached empty form template when viewing draft.
       const fileUrls =
         preferDirectDraftFile && directDraftUrl
-          ? [directDraftUrl, ...getFormFileFetchUrlCandidates(item)]
-          : getFormFileFetchUrlCandidates(item);
-      if (!fileUrls.length) {
+          ? [directDraftUrl, ...getFormFileFetchUrlCandidates(itemForTemplateFetch)]
+          : getFormFileFetchUrlCandidates(itemForTemplateFetch);
+      if (!fileUrls.length && !directDraftUrl) {
         throw new Error('No form file linked for this row');
       }
       const siteDetailsPromise =
         Array.isArray(siteDetailsList) && siteDetailsList.length > 0
           ? Promise.resolve(siteDetailsList)
           : fetchSiteDetails();
-      const templateCacheKey = getFormTemplateCacheKey(item);
+      const templateCacheKey = getFormTemplateCacheKey(itemForTemplateFetch);
+      const excelFetchPromise =
+        preferDirectDraftFile && directDraftUrl
+          ? fetchFormTemplateArrayBuffer(
+              [directDraftUrl],
+              `draft-file|${directDraftRowId}`,
+              { force: true }
+            ).catch(() =>
+              fetchFormTemplateArrayBuffer(
+                fileUrls.length ? fileUrls : getFormFileFetchUrlCandidates(itemForTemplateFetch),
+                templateCacheKey
+              )
+            )
+          : fetchFormTemplateArrayBuffer(fileUrls, templateCacheKey);
       const [{ arrayBuffer, contentType: cachedContentType, contentDisposition: cachedCd, url: selectedFileUrl }, sitesForContractorPrefetch] =
         await Promise.all([
-          fetchFormTemplateArrayBuffer(fileUrls, templateCacheKey),
+          excelFetchPromise,
           siteDetailsPromise
         ]);
 
@@ -22102,11 +28033,13 @@ const Statutory = ({ userEmail, userRole }) => {
         const workbook = XLSX.read(arrayBuffer, { type: 'array' });
         const firstSheetName = workbook.SheetNames?.[0];
         const firstSheet = firstSheetName ? workbook.Sheets[firstSheetName] : null;
-        const excelSheetHtml = firstSheet
-          ? XLSX.utils.sheet_to_html(firstSheet, { editable: true })
-          : '';
+        const excelSheetHtml = forceAutofill
+          ? ''
+          : firstSheet
+            ? XLSX.utils.sheet_to_html(firstSheet, { editable: true })
+            : '';
 
-        const parsed = parseExcelForm(workbook);
+        const parsedRaw = parseExcelForm(workbook);
         const sheetTextForVariant = workbook.SheetNames?.[0]
           ? (() => {
               const ws0 = workbook.Sheets[workbook.SheetNames[0]];
@@ -22117,6 +28050,54 @@ const Statutory = ({ userEmail, userRole }) => {
                 .join(' ');
             })()
           : '';
+        const parsed = applyFormAWorkbookLayoutToParsed(parsedRaw, workbook, {
+          formHeader: parsedRaw.formHeader,
+          item,
+          fileName: displayFileName,
+          formFileName: item?.formFileName,
+          sheetText: sheetTextForVariant
+        });
+        const formAFileOpen =
+          isFormAMusterRollContext(parsed.formHeader) ||
+          isFormAMusterRollRowContext(parsed.formHeader, item, displayFileName, sheetTextForVariant);
+        let formAWorkbookHeaders = null;
+        if (
+          formAFileOpen &&
+          (headersLookLikePivotOrWrongFormATable(parsed.headers || []) ||
+            !headersIndicateFormAMusterRoll(parsed.headers || []))
+        ) {
+          const formALayout = resolveFormATableHeadersFromWorkbook(workbook, {
+            formHeader: parsed.formHeader,
+            item,
+            fileName: displayFileName,
+            formFileName: item?.formFileName,
+            sheetText: sheetTextForVariant
+          });
+          if (formALayout?.headers?.length >= 3) {
+            formAWorkbookHeaders = formALayout.headers;
+            parsed.headers = formALayout.headers;
+            parsed.headerRowIndex = formALayout.headerRowIndex;
+            parsed.dataStartIndex = formALayout.dataStartIndex;
+            parsed.tableStartCol = formALayout.startCol;
+            if (formALayout.tableData?.length) parsed.tableData = formALayout.tableData;
+          } else {
+            const headerFieldLayout = resolveFormAHeaderFieldLayout(parsed, workbook, {
+              formHeader: parsed.formHeader,
+              item,
+              fileName: displayFileName,
+              formFileName: item?.formFileName,
+              sheetText: sheetTextForVariant
+            });
+            if (headerFieldLayout) {
+              parsed.formHeader = headerFieldLayout.formHeader;
+              parsed.headers = headerFieldLayout.headers;
+              parsed.tableData = headerFieldLayout.tableData;
+              parsed.headerRowIndex = headerFieldLayout.headerRowIndex;
+              parsed.dataStartIndex = headerFieldLayout.dataStartIndex;
+              parsed.tableStartCol = headerFieldLayout.tableStartCol;
+            }
+          }
+        }
         const variantHints = {
           fileName: displayFileName,
           formFileName: item?.formFileName,
@@ -22208,6 +28189,34 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
 
+        if (
+          formHeaderForModal &&
+          isForm25StatutoryContext({
+            fileName: displayFileName,
+            formFileName: resolvedFormFileName,
+            item,
+            formHeaderTitle: formHeaderForModal?.title,
+            formHeaderSubtitle: formHeaderForModal?.subtitle,
+            tableHeaders: parsed.headers
+          })
+        ) {
+          const periodLine = fullMonthForPeriod
+            ? buildForm25PeriodLine(fullMonthForPeriod, yearForPeriod)
+            : '';
+          if (periodLine) {
+            formHeaderForModal = {
+              ...(formHeaderForModal || {
+                title: '',
+                subtitle: '',
+                reference: '',
+                fields: [],
+                textRows: []
+              }),
+              wagePeriodText: periodLine
+            };
+          }
+        }
+
         // Form B: show "For the Month of" — template may omit it or have #REF!; default from Month filter / due date.
         if (formHeaderForModal && isFormBLabourWelfareContext(formHeaderForModal, item, displayFileName, parsed.headers)) {
           const monthKey = 'form_b_header_for_the_month_of';
@@ -22235,6 +28244,13 @@ const Statutory = ({ userEmail, userRole }) => {
           formHeaderForModal = { ...formHeaderForModal, fields };
         }
 
+        if (
+          formHeaderForModal &&
+          isForm26RegisterOfAccidentsContext(formHeaderForModal, item, displayFileName, parsed.headers)
+        ) {
+          formHeaderForModal = applyForm26HeaderMonthFields(formHeaderForModal, selectedMonth, item);
+        }
+
         formHeaderForModal = normalizeFormJHeaderForDisplay(
           formHeaderForModal,
           item,
@@ -22248,7 +28264,8 @@ const Statutory = ({ userEmail, userRole }) => {
               formName: item?.formName || item?.FormName,
               formHeaderTitle: formHeaderForModal?.title || parsed.formHeader?.title,
               sheetText: sheetTextForVariant,
-              item
+              item,
+              formAWorkbookHeaders: formAWorkbookHeaders || undefined
             });
         const formIIModalOpen = isFormIIMaharashtraContext(
           formHeaderForModal,
@@ -22258,6 +28275,62 @@ const Statutory = ({ userEmail, userRole }) => {
         );
         if (formIIModalOpen) {
           tableHeadersForModal = normalizeFormIIMaharashtraTableHeaders(tableHeadersForModal);
+        }
+        if (isFormAHeaderFieldLayoutFormHeader(formHeaderForModal)) {
+          tableHeadersForModal = [];
+          parsed.headers = [];
+          parsed.tableData = [];
+          formHeaderForModal = {
+            ...formHeaderForModal,
+            fields: buildFormAHeaderFieldSpecs(formHeaderForModal?.fields || [])
+          };
+        }
+        const formIFinesModalOpen = isFormIRegisterOfFinesContext(
+          item,
+          displayFileName,
+          formHeaderForModal,
+          tableHeadersForModal,
+          sheetTextForVariant
+        );
+        const formIWorkmenModalOpen = isFormIRegisterOfWorkmenContext(
+          item,
+          displayFileName,
+          formHeaderForModal,
+          tableHeadersForModal,
+          sheetTextForVariant
+        );
+        if ((formIFinesModalOpen || formIWorkmenModalOpen) && formHeaderForModal) {
+          const titleText = String(formHeaderForModal.title || '');
+          const subtitleText = String(formHeaderForModal.subtitle || '');
+          const titleOk = /\bform\s*[-–]?\s*i\b/i.test(titleText);
+          const defaultSubtitle = formIFinesModalOpen ? 'REGISTER OF FINES' : 'REGISTER OF WORKMEN';
+          const subtitleOk = formIFinesModalOpen
+            ? /register\s+of\s+fines/i.test(subtitleText)
+            : /register\s+of\s+workmen/i.test(subtitleText);
+          const nextHeader = {
+            ...formHeaderForModal,
+            title: titleOk ? formHeaderForModal.title : 'FORM I',
+            subtitle:
+              subtitleOk && !/employee\s+register/i.test(subtitleText)
+                ? formHeaderForModal.subtitle
+                : defaultSubtitle
+          };
+          if (Array.isArray(formHeaderForModal.fields)) {
+            nextHeader.fields = formHeaderForModal.fields.filter((f) => {
+              const label = String(f.label || '').toLowerCase();
+              if (/name\s+and\s+address\s+of\s+the\s+establishment/.test(label)) return true;
+              if (/employer|registration\s*certificate|manager|incharge/.test(label)) return false;
+              if (/\bmonth\b/.test(label) || /\byear\b/.test(label)) return false;
+              return true;
+            });
+          }
+          formHeaderForModal = nextHeader;
+        }
+        if (formIWorkmenModalOpen) {
+          tableHeadersForModal = normalizeFormIWorkmenTableHeaders(tableHeadersForModal);
+          if (Array.isArray(parsed.tableData) && parsed.tableData.length > 0) {
+            parsed.tableData = padFormIWorkmenRowsForHeaders(parsed.tableData, tableHeadersForModal);
+          }
         }
         parsed.headers = tableHeadersForModal;
         setFormHeader(formHeaderForModal);
@@ -22325,7 +28398,11 @@ const Statutory = ({ userEmail, userRole }) => {
         }
 
         const modalSourceItem = {
-          ...item,
+          ...enrichStatutoryItemWithFormMasterMeta(
+            item,
+            formmasterTemplates,
+            formmasterFormFileByMatchKey
+          ),
           ...(savedDraftSourceItem || {})
         };
         if (item?.formFile != null) modalSourceItem.formFile = item.formFile;
@@ -22337,6 +28414,7 @@ const Statutory = ({ userEmail, userRole }) => {
           fileType: 'excel-form',
           readOnly: !!options?.readOnly,
           sheetHtml: excelSheetHtml,
+          sheetText: sheetTextForVariant,
           rawData: workbook,
           item: modalSourceItem,
           parsedFormHeader: formHeaderForModal,
@@ -22355,43 +28433,112 @@ const Statutory = ({ userEmail, userRole }) => {
 
         const shouldAutofill = forceAutofill || isAutofillMode;
 
+        const form26ModalOpen = isForm26RegisterOfAccidentsContext(
+          formHeaderForModal,
+          item,
+          displayFileName,
+          tableHeadersForModal
+        );
+        const form11ModalOpen = isForm11EsicAccidentBookContext(
+          formHeaderForModal,
+          item,
+          displayFileName,
+          tableHeadersForModal,
+          sheetTextForVariant
+        );
+
         if (shouldAutofill) {
           console.log('🔄 Autofill: template from Form File – headers:', tableHeadersForModal.length);
-          // Show the selected form file immediately on first click, then replace rows with Autofill data.
-          setFormTableData(
-            formIIModalOpen
-              ? remapFormIIRowsToHeaders(parsed.tableData || [], parsed.headers || [], tableHeadersForModal)
-              : (parsed.tableData || [])
-          );
+          const formAHeaderOnlyModal = isFormAHeaderFieldLayoutFormHeader(formHeaderForModal);
           const shouldPreferSavedDraftData = !!options?.preferSavedDraftData;
+          const parsedForDraftResolve = {
+            ...parsed,
+            formHeader: formHeaderForModal,
+            headers: tableHeadersForModal
+          };
+          const draftRowsFromOpenWorkbook = shouldPreferSavedDraftData
+            ? resolveSavedDraftRowsForModal({
+                workbook,
+                parsed: parsedForDraftResolve,
+                tableHeaders: tableHeadersForModal,
+                tableStartCol: parsed.tableStartCol ?? 0
+              })
+            : [];
+          // Show the selected form file immediately on first click, then replace rows with saved draft / autofill data.
+          const initialModalRows = formAHeaderOnlyModal
+            ? []
+            : formIIModalOpen
+            ? remapFormIIRowsToHeaders(parsed.tableData || [], parsed.headers || [], tableHeadersForModal)
+            : shouldPreferSavedDraftData && draftRowsFromOpenWorkbook.length > 0
+              ? draftRowsFromOpenWorkbook
+              : shouldPreferSavedDraftData
+                ? []
+                : formIWorkmenModalOpen
+                  ? padFormIWorkmenRowsForHeaders(
+                      filterStatutoryDraftTableRows(
+                        remapFormARowsByColumnIndex(parsed.tableData || [], parsed.headers || [], tableHeadersForModal),
+                        tableHeadersForModal
+                      ),
+                      tableHeadersForModal
+                    )
+                  : filterStatutoryDraftTableRows(
+                      remapFormARowsByColumnIndex(parsed.tableData || [], parsed.headers || [], tableHeadersForModal),
+                      tableHeadersForModal
+                    );
+          setFormTableData(
+            formAHeaderOnlyModal
+              ? []
+              : form26ModalOpen
+              ? applyForm26NilTableRows(tableHeadersForModal, initialModalRows, selectedMonth, item)
+              : form11ModalOpen
+                ? applyForm11NilTableRows(tableHeadersForModal, initialModalRows, selectedMonth, item)
+                : initialModalRows
+          );
           if (shouldPreferSavedDraftData) {
-            let loadedSavedData = false;
+            let loadedSavedData =
+              draftRowsFromOpenWorkbook.length > 0 &&
+              draftRowsFromOpenWorkbook.some((row) => draftTableRowHasSubstantiveData(row, tableHeadersForModal));
             const modalReqTs = Date.now();
             try {
               const sampleRowId =
-                (item?.draftStatutoryRowIdForFile && isNumericStatutoryBackendId(item.draftStatutoryRowIdForFile)
-                  ? String(item.draftStatutoryRowIdForFile).trim()
+                (modalDraftSourceItem?.draftStatutoryRowIdForFile &&
+                isNumericStatutoryBackendId(modalDraftSourceItem.draftStatutoryRowIdForFile)
+                  ? String(modalDraftSourceItem.draftStatutoryRowIdForFile).trim()
+                  : null) ||
+                (savedDraftSourceItem?.draftStatutoryRowIdForFile &&
+                isNumericStatutoryBackendId(savedDraftSourceItem.draftStatutoryRowIdForFile)
+                  ? String(savedDraftSourceItem.draftStatutoryRowIdForFile).trim()
                   : null) ||
                 (sentDraftDonorForModal?.id != null ? String(sentDraftDonorForModal.id).trim() : null) ||
-                resolveNumericStatutoryIdForProofRow(modalDraftSourceItem, { preferSiteSubmittedDraft: true }) ||
-                resolveNumericStatutoryIdForProofRow(item, { preferSiteSubmittedDraft: true }) ||
+                resolveStatutorySampleDataFetchId(modalDraftSourceItem, { preferSiteSubmittedDraft: true }) ||
+                resolveStatutorySampleDataFetchId(savedDraftSourceItem, { preferSiteSubmittedDraft: true }) ||
+                resolveStatutorySampleDataFetchId(item, { preferSiteSubmittedDraft: true }) ||
                 (isNumericStatutoryBackendId(modalDraftSourceItem?.id) ? String(modalDraftSourceItem.id).trim() : null) ||
+                (isNumericStatutoryBackendId(savedDraftSourceItem?.id) ? String(savedDraftSourceItem.id).trim() : null) ||
                 (isNumericStatutoryBackendId(item?.id) ? String(item.id).trim() : null);
               if (sampleRowId) {
                 // SampleData is the exact grid the site user saved, including manual add/delete/edit cells.
-                const sampleResp = await fetch(`/server/statutoryreg_function/statutory/${sampleRowId}/sampledata?_ts=${modalReqTs}`);
-                if (sampleResp.ok) {
-                  const sampleJson = await sampleResp.json().catch(() => null);
-                  const sampleBlock = sampleJson?.data?.sampleData;
-                  const sampleRows = sampleBlock?.rows;
-                  const sampleHeaders = Array.isArray(sampleBlock?.headers) ? sampleBlock.headers : [];
+                const sampleBlock = await fetchFirstAvailableStatutorySampleDataSnapshot(sampleRowId);
+                if (sampleBlock) {
+                  const sampleRows = sampleBlock.rows;
+                  const sampleHeaders = Array.isArray(sampleBlock.headers) ? sampleBlock.headers : [];
                   const sampleHeaderFormData =
-                    sampleBlock?.headerFormData &&
+                    sampleBlock.headerFormData &&
                     typeof sampleBlock.headerFormData === 'object' &&
                     !Array.isArray(sampleBlock.headerFormData)
                       ? sampleBlock.headerFormData
                       : {};
                   const hasSavedHeaderFormData = Object.keys(sampleHeaderFormData).length > 0;
+                  const formASavedRows =
+                    isFormAMusterRollContext(formFileModalData?.parsedFormHeader) ||
+                    isFormAMusterRollRowContext(
+                      formFileModalData?.parsedFormHeader,
+                      item,
+                      displayFileName,
+                      sheetTextForVariant
+                    );
+                  const skipPivotFormASampleRows =
+                    formASavedRows && headersLookLikePivotOrWrongFormATable(sampleHeaders);
                   if (sampleHeaders.length > 0 || hasSavedHeaderFormData) {
                     setFormFileModalData((prev) => {
                       if (!prev) return prev;
@@ -22408,11 +28555,32 @@ const Statutory = ({ userEmail, userRole }) => {
                         prev.fileName || '',
                         sampleHeaders
                       );
+                      const formIWorkmenSaved = isFormIRegisterOfWorkmenContext(
+                        prev.item,
+                        prev.fileName || '',
+                        prev.parsedFormHeader,
+                        sampleHeaders,
+                        prev.sheetText || ''
+                      );
+                      const formASaved =
+                        isFormAMusterRollContext(prev.parsedFormHeader) ||
+                        isFormAMusterRollRowContext(
+                          prev.parsedFormHeader,
+                          prev.item,
+                          prev.fileName || '',
+                          prev.sheetText || ''
+                        );
+                      let headersForSaved = sampleHeaders;
+                      if (formASaved && headersLookLikePivotOrWrongFormATable(sampleHeaders)) {
+                        headersForSaved = Array.isArray(prev.parsedTableHeaders) ? prev.parsedTableHeaders : [];
+                      }
                       const normalizedSampleHeaders = formQSaved
                         ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
                         : formIISaved
-                          ? normalizeFormIIMaharashtraTableHeaders(sampleHeaders)
-                          : sampleHeaders;
+                          ? normalizeFormIIMaharashtraTableHeaders(headersForSaved)
+                          : formIWorkmenSaved
+                            ? normalizeFormIWorkmenTableHeaders(headersForSaved)
+                            : headersForSaved;
                       if (normalizedSampleHeaders.length > 0) {
                         next.parsedTableHeaders = normalizedSampleHeaders;
                       }
@@ -22444,23 +28612,61 @@ const Statutory = ({ userEmail, userRole }) => {
                       displayFileName,
                       sampleHeaders
                     );
-                    const hdrsForRows = formQSaved
+                    const formIWorkmenSaved = isFormIRegisterOfWorkmenContext(
+                      item,
+                      displayFileName,
+                      formFileModalData?.parsedFormHeader,
+                      sampleHeaders,
+                      sheetTextForVariant
+                    );
+                    if (!skipPivotFormASampleRows) {
+                    let hdrsForRows = formQSaved
                       ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
                       : formIISaved
                         ? normalizeFormIIMaharashtraTableHeaders(sampleHeaders)
-                        : sampleHeaders;
+                        : formIWorkmenSaved
+                          ? normalizeFormIWorkmenTableHeaders(sampleHeaders)
+                          : formASavedRows && headersLookLikePivotOrWrongFormATable(sampleHeaders)
+                            ? tableHeadersForModal
+                            : sampleHeaders;
+                    const remappedSampleRows = formQSaved
+                      ? remapFormQRowsToHeaders(sampleRows, sampleHeaders, hdrsForRows)
+                      : formIISaved
+                        ? remapFormIIRowsToHeaders(sampleRows, sampleHeaders, hdrsForRows)
+                        : formIWorkmenSaved
+                          ? padFormIWorkmenRowsForHeaders(
+                              remapFormARowsByColumnIndex(sampleRows, sampleHeaders, hdrsForRows),
+                              hdrsForRows
+                            )
+                          : formASavedRows
+                            ? remapFormARowsByColumnIndex(sampleRows, sampleHeaders, hdrsForRows)
+                            : remapFormARowsByColumnIndex(sampleRows, sampleHeaders, hdrsForRows);
+                    if (
+                      !skipPivotFormASampleRows &&
+                      remappedSampleRows.some((row) => formTableRowHasMeaningfulData(row))
+                    ) {
                     setFormTableData(
-                      formQSaved
-                        ? remapFormQRowsToHeaders(sampleRows, sampleHeaders, hdrsForRows)
-                        : formIISaved
-                          ? remapFormIIRowsToHeaders(sampleRows, sampleHeaders, hdrsForRows)
-                          : sampleRows
+                      form26ModalOpen
+                        ? applyForm26NilTableRows(hdrsForRows, remappedSampleRows, selectedMonth, item)
+                        : form11ModalOpen
+                          ? applyForm11NilTableRows(hdrsForRows, remappedSampleRows, selectedMonth, item)
+                          : filterStatutoryDraftTableRows(remappedSampleRows, hdrsForRows, { trustSavedSnapshot: true })
                     );
-                  }
-                  if ((Array.isArray(sampleRows) && sampleRows.length > 0) || hasSavedHeaderFormData) {
                     loadedSavedData = true;
+                    }
+                    }
+                  }
+                  if (
+                    loadedSavedData ||
+                    ((Array.isArray(sampleRows) && sampleRows.length > 0 && !skipPivotFormASampleRows &&
+                      sampleRows.some((row) => formTableRowHasMeaningfulData(row))) ||
+                      hasSavedHeaderFormData)
+                  ) {
+                    if (!loadedSavedData && hasSavedHeaderFormData) loadedSavedData = true;
+                    if (loadedSavedData) {
                     setSuccess('Loaded saved draft/imported data.');
                     setTimeout(() => setSuccess(''), 2500);
+                    }
                   }
                 }
                 if (!loadedSavedData) {
@@ -22468,49 +28674,23 @@ const Statutory = ({ userEmail, userRole }) => {
                   if (draftResp.ok) {
                     const draftArrayBuffer = await draftResp.arrayBuffer();
                     const draftWb = XLSX.read(draftArrayBuffer, { type: 'array' });
-                    const draftRows = extractMappedRowsFromSavedDraft({
-                      draftWorkbook: draftWb,
-                      templateHeaders: parsed.headers || [],
-                      templateHeaderRowIndex: parsed.headerRowIndex,
-                      templateDataStartIndex: parsed.dataStartIndex,
-                      hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0
+                    const draftRows = resolveSavedDraftRowsForModal({
+                      workbook: draftWb,
+                      parsed: parsedForDraftResolve,
+                      tableHeaders: tableHeadersForModal,
+                      tableStartCol: parsed.tableStartCol ?? 0
                     });
                     if (Array.isArray(draftRows) && draftRows.length > 0) {
-                      setFormTableData(draftRows);
+                      applySavedDraftRowsToModalTable(
+                        draftRows,
+                        tableHeadersForModal,
+                        form26ModalOpen,
+                        form11ModalOpen,
+                        item
+                      );
                       loadedSavedData = true;
                       setSuccess('Loaded saved draft data.');
                       setTimeout(() => setSuccess(''), 2500);
-                    }
-                    // Some forms (like Form 25) are easier to recover via matrix rows.
-                    // If header-based extraction is empty, map matrix rows to current template headers.
-                    if (!loadedSavedData) {
-                      const matrixRows = extractRowMatrixFromSavedDraft({
-                        draftWorkbook: draftWb,
-                        templateHeaderRowIndex: parsed.headerRowIndex,
-                        templateDataStartIndex: parsed.dataStartIndex,
-                        hasSubColumns: parsed.subColumns && Object.keys(parsed.subColumns || {}).length > 0
-                      });
-                      if (Array.isArray(matrixRows) && matrixRows.length > 0) {
-                        const headersForMatrix =
-                          Array.isArray(parsed.headers) && parsed.headers.length > 0
-                            ? parsed.headers
-                            : Array.from({ length: matrixRows[0]?.length || 0 }, (_, idx) => `Column ${idx + 1}`);
-                        const matrixAsObjects = matrixRows.map((rowArr, rowIdx) => {
-                          const obj = {};
-                          headersForMatrix.forEach((h, colIdx) => {
-                            const v = Array.isArray(rowArr) ? rowArr[colIdx] : '';
-                            obj[h] = v != null ? v : '';
-                          });
-                          if ((obj[headersForMatrix[0]] == null || String(obj[headersForMatrix[0]]).trim() === '') && headersForMatrix.length > 0) {
-                            obj[headersForMatrix[0]] = rowIdx + 1;
-                          }
-                          return obj;
-                        });
-                        setFormTableData(matrixAsObjects);
-                        loadedSavedData = true;
-                        setSuccess('Loaded saved draft data.');
-                        setTimeout(() => setSuccess(''), 2500);
-                      }
                     }
                   }
                 }
@@ -22519,15 +28699,39 @@ const Statutory = ({ userEmail, userRole }) => {
               console.warn('Could not load saved sample data for View Draft modal:', sampleErr);
             }
             if (!loadedSavedData) {
-              if (openedDirectDraftFile) {
-                setSuccess('Loaded saved draft file.');
+              const fallbackDraftRows = resolveSavedDraftRowsForModal({
+                workbook,
+                parsed: parsedForDraftResolve,
+                tableHeaders: tableHeadersForModal,
+                tableStartCol: parsed.tableStartCol ?? 0
+              });
+              if (fallbackDraftRows.length > 0) {
+                applySavedDraftRowsToModalTable(
+                  fallbackDraftRows,
+                  tableHeadersForModal,
+                  form26ModalOpen,
+                  form11ModalOpen,
+                  item
+                );
+                loadedSavedData = true;
+                setSuccess('Loaded saved draft data.');
                 setTimeout(() => setSuccess(''), 2500);
+              }
+            }
+            if (!loadedSavedData) {
+              if (openedDirectDraftFile) {
+                setError('Could not read saved data from the draft file. Try Autofill and Save again.');
+                setTimeout(() => setError(''), 5000);
                 return;
               }
               if (shouldPreferSavedDraftData) {
                 setError('Could not load the saved draft. Loading employee data from Zoho People…');
                 setTimeout(() => setError(''), 4000);
               }
+              if (form11ModalOpen) {
+                setTableAutofillLoading(false);
+                setTableAutofillProgress('');
+              } else {
               prefetchPeopleData();
               setTableAutofillLoading(true);
               fetchAndPopulateEmployeeData(tableHeadersForModal, {
@@ -22546,10 +28750,15 @@ const Statutory = ({ userEmail, userRole }) => {
                   headerRowIndex: parsed.headerRowIndex,
                   dataStartIndex: parsed.dataStartIndex,
                   parsedColumnGroupLabels: parsed.columnGroupLabels ?? null,
-                  originalHeaderRowIndex: parsed.originalHeaderRowIndex ?? parsed.headerRowIndex
+                  originalHeaderRowIndex: parsed.originalHeaderRowIndex ?? parsed.headerRowIndex,
+                  sheetText: sheetTextForVariant
                 }
               });
+              }
             }
+          } else if (form11ModalOpen) {
+            setTableAutofillLoading(false);
+            setTableAutofillProgress('');
           } else {
             prefetchPeopleData();
             setTableAutofillLoading(true);
@@ -22560,7 +28769,13 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         } else {
           console.log('📄 View File mode – using parsed Excel data');
-          setFormTableData(parsed.tableData);
+          setFormTableData(
+            form26ModalOpen
+              ? applyForm26NilTableRows(tableHeadersForModal, parsed.tableData || [], selectedMonth, item)
+              : form11ModalOpen
+                ? applyForm11NilTableRows(tableHeadersForModal, parsed.tableData || [], selectedMonth, item)
+                : parsed.tableData
+          );
         }
       } else if (isPdf) {
         const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
@@ -22603,6 +28818,7 @@ const Statutory = ({ userEmail, userRole }) => {
     setAutofillTotalEmployees(0);
     autofillEmployeesRef.current = [];
     autofillPayrollLookupRef.current = null;
+    autofillAttendanceCacheRef.current = null;
     setError('');
     setSuccess('');
     // Clean up blob URLs if any
@@ -23171,14 +29387,46 @@ const Statutory = ({ userEmail, userRole }) => {
 
   // Autofill/View modal: use format read from the View File (parsed form header + table headers) so each form opens with its own structure
   const displayFormHeader = useMemo(() => {
-    const base =
+    let base =
       formFileModalData?.parsedFormHeader != null ? formFileModalData.parsedFormHeader : formHeader;
-    return normalizeFormJHeaderForDisplay(
+    base = normalizeFormJHeaderForDisplay(
       base,
       formFileModalData?.item,
       formFileModalData?.fileName
     );
-  }, [formFileModalData?.parsedFormHeader, formFileModalData?.item, formFileModalData?.fileName, formHeader]);
+    const fn = formFileModalData?.fileName || '';
+    const item = formFileModalData?.item;
+    if (
+      isForm25StatutoryContext({
+        fileName: fn,
+        formFileName: formFileModalData?.formFileName,
+        item,
+        formHeaderTitle: base?.title,
+        formHeaderSubtitle: base?.subtitle
+      })
+    ) {
+      const { fullMonth, year } = resolveForm25PeriodMonthYear(
+        selectedMonth,
+        item,
+        base?.wagePeriodText || ''
+      );
+      const periodLine = buildForm25PeriodLine(fullMonth, year);
+      if (periodLine) {
+        base = { ...base, wagePeriodText: periodLine };
+      }
+    }
+    if (isForm26RegisterOfAccidentsContext(base, item, fn, formFileModalData?.parsedTableHeaders)) {
+      base = applyForm26HeaderMonthFields(base, selectedMonth, item);
+    }
+    return base;
+  }, [
+    formFileModalData?.parsedFormHeader,
+    formFileModalData?.item,
+    formFileModalData?.fileName,
+    formFileModalData?.formFileName,
+    formHeader,
+    selectedMonth
+  ]);
   const isFormFileReadOnly = !!formFileModalData?.readOnly;
   const displayTableHeaders = useMemo(() => {
     const parsed = formFileModalData?.parsedTableHeaders;
@@ -23191,7 +29439,27 @@ const Statutory = ({ userEmail, userRole }) => {
       formName: item?.formName || item?.FormName,
       itemFormName: item?.FormName,
       formHeaderTitle: formFileModalData?.parsedFormHeader?.title,
-      item
+      formHeaderSubtitle: formFileModalData?.parsedFormHeader?.subtitle,
+      sheetText: formFileModalData?.sheetText,
+      tableHeaders: baseHeaders,
+      item,
+      formAWorkbookHeaders:
+        formFileModalData?.rawData &&
+        (isFormAMusterRollContext(formFileModalData?.parsedFormHeader) ||
+          isFormAMusterRollRowContext(
+            formFileModalData?.parsedFormHeader,
+            item,
+            fn,
+            formFileModalData?.sheetText || ''
+          ))
+          ? resolveFormATableHeadersFromWorkbook(formFileModalData.rawData, {
+              formHeader: formFileModalData?.parsedFormHeader,
+              item,
+              fileName: fn,
+              formFileName: formFileModalData?.formFileName,
+              sheetText: formFileModalData?.sheetText
+            })?.headers
+          : undefined
     });
     if (isFormIIMaharashtraContext(displayFormHeader, item, fn, baseHeaders)) {
       baseHeaders = normalizeFormIIMaharashtraTableHeaders(baseHeaders);
@@ -23259,6 +29527,29 @@ const Statutory = ({ userEmail, userRole }) => {
     if (isFormIIMaharashtraContext(displayFormHeader, item, fn, hdrs)) {
       return remapFormIIRowsToHeaders(rows, rawHeaders, hdrs);
     }
+    if (isFormIRegisterOfWorkmenContext(item, fn, displayFormHeader, hdrs, formFileModalData?.sheetText || '')) {
+      return padFormIWorkmenRowsForHeaders(
+        filterStatutoryDraftTableRows(
+          remapFormARowsByColumnIndex(rows, rawHeaders, hdrs.length > 0 ? hdrs : rawHeaders),
+          hdrs.length > 0 ? hdrs : rawHeaders
+        ),
+        hdrs.length > 0 ? hdrs : rawHeaders
+      );
+    }
+    const filteredRows = filterStatutoryDraftTableRows(rows, hdrs.length > 0 ? hdrs : rawHeaders);
+    if (filteredRows.length !== (rows || []).length && filteredRows.length > 0) return filteredRows;
+    if (
+      isFormAMusterRollContext(displayFormHeader) ||
+      isFormAMusterRollRowContext(displayFormHeader, item, fn, formFileModalData?.sheetText || '')
+    ) {
+      if (headersIndicateFormAMusterRoll(hdrs) || headersIndicateFormAMusterRoll(rawHeaders)) {
+        return remapFormARowsByColumnIndex(rows, rawHeaders, hdrs.length > 0 ? hdrs : rawHeaders);
+      }
+    }
+    if (isFixedRowAggregateComplianceTable(hdrs) || isFixedRowAggregateComplianceTable(rawHeaders)) {
+      const effectiveHdrs = hdrs.length > 0 ? hdrs : rawHeaders;
+      return sanitizeFixedAggregateComplianceRows(rows, effectiveHdrs);
+    }
     if (!isFormQContext(displayFormHeader, item, fn, hdrs)) return rows;
     return remapFormQRowsToHeaders(rows, rawHeaders, hdrs);
   }, [
@@ -23289,20 +29580,17 @@ const Statutory = ({ userEmail, userRole }) => {
       const start = targetPage * FORM_TABLE_PAGE_SIZE;
       if (targetPage < 0 || start >= total) return;
 
+      const headers = formFileModalData?.parsedTableHeaders?.length
+        ? formFileModalData.parsedTableHeaders
+        : tableHeaders;
       const firstRow = formTableData[start];
-      const pageLoaded =
-        firstRow &&
-        typeof firstRow === 'object' &&
-        Object.values(firstRow).some((v) => v != null && String(v).trim() !== '');
+      const pageLoaded = formTablePageHasEmployeeAutofillData(firstRow, headers);
 
       setFormTablePage(targetPage);
 
       if (!pageLoaded && autofillEmployeesRef.current.length > 0) {
         setFormTablePageLoading(true);
         try {
-          const headers = formFileModalData?.parsedTableHeaders?.length
-            ? formFileModalData.parsedTableHeaders
-            : tableHeaders;
           await fetchAndPopulateEmployeeData(headers, {
             formFileModalData: formFileModalData || undefined,
             skipPeopleFetch: true,
@@ -23330,6 +29618,9 @@ const Statutory = ({ userEmail, userRole }) => {
     if (g.length !== displayTableHeaders.length) return null;
     if (!g.some((x) => String(x || '').trim())) return null;
     if (isFormQContext(displayFormHeader, item, fn, displayTableHeaders)) return null;
+    if (isFormXXVIContext(displayFormHeader, item, fn) && getDailyHoursGridGroupInfo(displayTableHeaders)) {
+      return null;
+    }
     if (
       isRegisterOfWagesFormContext(displayFormHeader, item, fn, displayTableHeaders) &&
       formFileModalData?.rawData
@@ -23371,6 +29662,36 @@ const Statutory = ({ userEmail, userRole }) => {
     displayFormHeader,
     selectedMonth
   ]);
+
+  const form26NilSpanInfo = useMemo(() => {
+    const item = formFileModalData?.item;
+    const fn = formFileModalData?.fileName || '';
+    const hdrs = displayTableHeaders;
+    if (!isForm26RegisterOfAccidentsContext(displayFormHeader, item, fn, hdrs)) return null;
+    const primary = findForm26NilPrimaryHeader(hdrs);
+    if (!primary) return null;
+    const startIdx = hdrs.indexOf(primary);
+    if (startIdx < 0) return null;
+    let span = 1;
+    for (let i = startIdx + 1; i < hdrs.length; i++) {
+      const h = hdrs[i];
+      const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const bare = s.replace(/^\(?\d+\)?\s*/, '').trim();
+      if (/\(8\)|^8\)/.test(s) || /return\s+to\s+work/.test(bare)) {
+        span += 1;
+        continue;
+      }
+      if (
+        /\(9\)|^9\)/.test(s) ||
+        (/inspector/.test(bare) && /despatch|dispatch|report/.test(bare))
+      ) {
+        span += 1;
+        continue;
+      }
+      break;
+    }
+    return { startIdx, span, primaryHeader: primary };
+  }, [displayFormHeader, displayTableHeaders, formFileModalData?.item, formFileModalData?.fileName]);
 
   /** Employer / company line for the signature block below the form table (Form I and all excel-form modals). */
   const statutoryModalEmployerName = useMemo(() => {
@@ -23799,9 +30120,31 @@ const Statutory = ({ userEmail, userRole }) => {
     if (isFormQContext(displayFormHeader, item, fn, hdrs)) return null;
     const info = getDailyHoursGridGroupInfo(hdrs);
     if (!info) return null;
-    const { startIndex, parentLabel } = info;
-    const dayCount = hdrs.length - startIndex;
+    let { startIndex, parentLabel } = info;
+    const parentPrefix = String(hdrs[startIndex] || '').match(/^(.+)_(\d{1,2})$/)?.[1];
+    let dayCount = 0;
+    if (parentPrefix) {
+      for (let i = startIndex; i < hdrs.length; i += 1) {
+        const m = String(hdrs[i] || '').match(/^(.+)_(\d{1,2})$/);
+        if (!m || m[1] !== parentPrefix) break;
+        dayCount += 1;
+      }
+    } else {
+      dayCount = hdrs.length - startIndex;
+    }
     if (dayCount < 2) return null;
+    if (info.numericColumnBand && /^\d{1,2}$/.test(String(parentLabel || '').trim())) {
+      const groupLabels = formFileModalData?.parsedColumnGroupLabels;
+      const groupLab =
+        Array.isArray(groupLabels) && groupLabels[startIndex]
+          ? String(groupLabels[startIndex]).trim()
+          : '';
+      if (groupLab && !/^\d{1,2}$/.test(groupLab)) {
+        parentLabel = groupLab;
+      } else if (isFormXXVIContext(displayFormHeader, item, fn)) {
+        parentLabel = 'Daily hours of work';
+      }
+    }
 
     const groupHeaderStyle = {
       backgroundColor: STAT_FORM_FILE_ACCENT_BG,
@@ -23826,13 +30169,17 @@ const Statutory = ({ userEmail, userRole }) => {
     const stickyDetailHeaderStyle = {
       ...identityOrDetailHeaderStyle,
       textAlign: 'center',
-      fontSize: '13px',
-      minWidth: '44px',
+      fontSize: '12px',
+      minWidth: '36px',
+      width: '40px',
+      maxWidth: '48px',
+      padding: '8px 4px',
       position: 'sticky',
       top: 0,
       zIndex: 10
     };
 
+    const rightStandalone = hdrs.slice(startIndex + dayCount);
     return (
       <>
         <tr>
@@ -23844,9 +30191,14 @@ const Statutory = ({ userEmail, userRole }) => {
           <th key="formv-dailyhours" colSpan={dayCount} style={groupHeaderStyle}>
             {parentLabel}
           </th>
+          {rightStandalone.map((h, i) => (
+            <th key={`formv-right-${i}`} rowSpan={2} style={identityOrDetailHeaderStyle} title={h}>
+              {formatStatutoryTableHeaderLabel(h)}
+            </th>
+          ))}
         </tr>
         <tr>
-          {hdrs.slice(startIndex).map((h, i) => (
+          {hdrs.slice(startIndex, startIndex + dayCount).map((h, i) => (
             <th key={`formv-day-${i}`} style={stickyDetailHeaderStyle} title={h}>
               {formatStatutoryTableHeaderLabel(h)}
             </th>
@@ -23854,7 +30206,13 @@ const Statutory = ({ userEmail, userRole }) => {
         </tr>
       </>
     );
-  }, [displayTableHeaders]);
+  }, [
+    displayTableHeaders,
+    displayFormHeader,
+    formFileModalData?.parsedColumnGroupLabels,
+    formFileModalData?.item,
+    formFileModalData?.fileName
+  ]);
 
   /** Form D: two-row header — "Components of Remuneration" over Basic/Dearness/House/Other; left & right cols rowspan 2. */
   const formDRemunerationThead = useMemo(() => {
@@ -24145,7 +30503,7 @@ const Statutory = ({ userEmail, userRole }) => {
     );
   }, [displayTableHeaders, displayFormHeader, formFileModalData?.item, formFileModalData?.fileName]);
 
-  /** Form VI: merged festival-holiday band over multiple date columns; preserve Excel-style grouped header. */
+  /** Form VI: merged festival-holiday band over holiday date columns; vertical sub-headers like Excel. */
   const formVIFestivalThead = useMemo(() => {
     const hdrs = displayTableHeaders;
     const item = formFileModalData?.item;
@@ -24153,24 +30511,18 @@ const Statutory = ({ userEmail, userRole }) => {
     if (!Array.isArray(hdrs) || hdrs.length < 4) return null;
     if (!isFormVIFestivalContext(displayFormHeader, item, fn, hdrs)) return null;
 
-    const norm = (v) => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    const looksFestivalBand = (h) => {
-      const n = norm(h);
-      return n.includes('national') && n.includes('festival') && n.includes('holidays');
-    };
+    let festStart = -1;
+    let festEnd = -1;
+    hdrs.forEach((h, i) => {
+      if (!isFormVIHolidayColumnHeader(h)) return;
+      if (festStart < 0) festStart = i;
+      festEnd = i + 1;
+    });
+    if (festStart < 0 || festEnd <= festStart) return null;
 
-    let start = -1;
-    let end = -1;
-    for (let i = 0; i < hdrs.length; i += 1) {
-      if (!looksFestivalBand(hdrs[i])) continue;
-      if (start < 0) start = i;
-      end = i + 1;
-    }
-    if (start < 0 || end <= start || end - start < 2) return null;
-
-    const left = hdrs.slice(0, start);
-    const groupCols = hdrs.slice(start, end);
-    const right = hdrs.slice(end);
+    const left = hdrs.slice(0, festStart);
+    const groupCols = hdrs.slice(festStart, festEnd);
+    const right = hdrs.slice(festEnd);
 
     const groupHeaderStyle = {
       backgroundColor: STAT_FORM_FILE_ACCENT_BG,
@@ -24178,7 +30530,8 @@ const Statutory = ({ userEmail, userRole }) => {
       padding: '10px 12px',
       textAlign: 'center',
       fontWeight: '700',
-      fontSize: '13px',
+      fontSize: '12px',
+      lineHeight: 1.35,
       border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
       verticalAlign: 'middle'
     };
@@ -24186,47 +30539,55 @@ const Statutory = ({ userEmail, userRole }) => {
       backgroundColor: STAT_FORM_FILE_ACCENT_BG,
       color: 'white',
       padding: '12px',
-      textAlign: 'left',
+      textAlign: 'center',
       fontWeight: '600',
       fontSize: '14px',
       border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
       verticalAlign: 'middle'
     };
-    const stickyDetailHeaderStyle = {
-      ...identityOrDetailHeaderStyle,
+    const stickyHolidayHeaderStyle = {
+      backgroundColor: STAT_FORM_FILE_ACCENT_BG,
+      color: 'white',
+      padding: '8px 4px',
       textAlign: 'center',
-      fontSize: '13px',
-      minWidth: '44px',
+      fontWeight: '600',
+      fontSize: '11px',
+      lineHeight: 1.2,
+      border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
+      verticalAlign: 'bottom',
+      writingMode: 'vertical-rl',
+      textOrientation: 'mixed',
+      transform: 'rotate(180deg)',
+      whiteSpace: 'nowrap',
+      minWidth: '34px',
+      maxWidth: '52px',
+      height: '180px',
       position: 'sticky',
       top: 0,
       zIndex: 10
     };
-
-    const uniqueFestivalHeaders = new Set(groupCols.map((h) => norm(h)).filter(Boolean));
-    const showIndexedSubHeaders = uniqueFestivalHeaders.size <= 1;
-    const parentText = String(groupCols[0] || '').trim();
 
     return (
       <>
         <tr>
           {left.map((h, i) => (
             <th key={`formvi-left-${i}`} rowSpan={2} style={identityOrDetailHeaderStyle} title={h}>
-              {h}
+              {formatStatutoryTableHeaderLabel(h)}
             </th>
           ))}
-          <th key="formvi-group" colSpan={groupCols.length} style={groupHeaderStyle} title={parentText}>
-            {parentText}
+          <th key="formvi-group" colSpan={groupCols.length} style={groupHeaderStyle} title={FORM_VI_FESTIVAL_BAND_TITLE}>
+            {FORM_VI_FESTIVAL_BAND_TITLE}
           </th>
           {right.map((h, i) => (
             <th key={`formvi-right-${i}`} rowSpan={2} style={identityOrDetailHeaderStyle} title={h}>
-              {h}
+              {formatStatutoryTableHeaderLabel(h)}
             </th>
           ))}
         </tr>
         <tr>
           {groupCols.map((h, i) => (
-            <th key={`formvi-sub-${i}`} style={stickyDetailHeaderStyle} title={h}>
-              {showIndexedSubHeaders ? String(i + 1) : formatStatutoryTableHeaderLabel(h)}
+            <th key={`formvi-sub-${i}`} style={stickyHolidayHeaderStyle} title={h}>
+              {formatStatutoryTableHeaderLabel(h)}
             </th>
           ))}
         </tr>
@@ -24592,7 +30953,7 @@ const Statutory = ({ userEmail, userRole }) => {
                           const showDraftForRow =
                             !!draftSourceHasFile && !hideDraftUntilSiteSent && !hideDraftByStoredMonth;
                           // Same row's FormFile for View File + Autofill (checklistbulk / statutory ROWID), not another line's template
-                          let resolvedFormFileItem = resolveFormFileItemForStatutoryRow(item, {
+                          let resolvedFormFileItem = resolveStatutoryFormTemplateForRow(item, {
                             formmasterFormFileByMatchKey,
                             formFileByFormKey,
                             formmasterTemplates
@@ -24711,6 +31072,8 @@ const Statutory = ({ userEmail, userRole }) => {
                                       className="statutory-autofill-btn-ui"
                                       onMouseEnter={() => prefetchAutofillForRow(resolvedFormFileItem)}
                                       onFocus={() => prefetchAutofillForRow(resolvedFormFileItem)}
+                                      onMouseDown={() => prefetchAutofillForRow(resolvedFormFileItem)}
+                                      onTouchStart={() => prefetchAutofillForRow(resolvedFormFileItem)}
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         if (hasFormFileForRow && !rowLocked) {
@@ -24820,6 +31183,8 @@ const Statutory = ({ userEmail, userRole }) => {
                                         download={draftDownloadFileName}
                                         style={{ color: '#059669', textDecoration: 'underline', fontSize: '12px' }}
                                         title={shouldDownloadSavedDraftDirectly ? 'Download saved draft file' : 'Download with same data as View Draft File'}
+                                        onMouseEnter={() => prefetchAutofillForRow(resolvedFormFileItem)}
+                                        onFocus={() => prefetchAutofillForRow(resolvedFormFileItem)}
                                         onClick={(e) => {
                                             e.preventDefault();
                                             e.stopPropagation();
@@ -24831,7 +31196,10 @@ const Statutory = ({ userEmail, userRole }) => {
                                               resolvedFormFileItem
                                             );
                                           } else {
-                                            handleViewDraftFileGenerate(draftSourceItem || item, resolvedFormFileItem);
+                                            handleViewDraftFileGenerate(draftSourceItem || item, resolvedFormFileItem, {
+                                              sampleStatutoryId: draftApiRowId,
+                                              draftApiRowId
+                                            });
                                           }
                                         }}
                                       >
@@ -25867,7 +32235,7 @@ const Statutory = ({ userEmail, userRole }) => {
                       {displayFormHeader.fields && displayFormHeader.fields.length > 0 && (
                         <div style={{
                           display: 'grid',
-                          gridTemplateColumns: (displayFormHeader.form12MergedHeaderCell || displayFormHeader.form10MergedHeaderCell)
+                          gridTemplateColumns: (displayFormHeader.form12MergedHeaderCell || displayFormHeader.form10MergedHeaderCell || isFormAMusterRollContext(displayFormHeader))
                             ? '1fr'
                             : 'repeat(2, 1fr)',
                           gap: '16px',
@@ -26061,7 +32429,9 @@ const Statutory = ({ userEmail, userRole }) => {
                     flexWrap: 'wrap'
                   }}>
                     {/* Autofill button - Hide if draft file exists */}
-                    {!isFormFileReadOnly && displayTableHeaders.length > 0 && !formFileModalData?.item?.draftFile && (
+                    {!isFormFileReadOnly &&
+                      (displayTableHeaders.length > 0 || isFormAHeaderFieldLayoutFormHeader(displayFormHeader)) &&
+                      !formFileModalData?.item?.draftFile && (
                       <button
                         onClick={() => {
                           prefetchPeopleData();
@@ -26077,16 +32447,16 @@ const Statutory = ({ userEmail, userRole }) => {
                             }
                           );
                         }}
-                        disabled={formFileLoading || tableAutofillLoading || Boolean(tableAutofillProgress)}
+                        disabled={formFileLoading || tableAutofillLoading}
                         style={{
                           padding: '10px 20px',
-                          backgroundColor: formFileLoading || tableAutofillLoading || tableAutofillProgress ? '#9ca3af' : STAT_FORM_FILE_ACCENT_BG,
+                          backgroundColor: formFileLoading || tableAutofillLoading ? '#9ca3af' : STAT_FORM_FILE_ACCENT_BG,
                           color: 'white',
                           border: 'none',
                           borderRadius: '6px',
                           fontSize: '14px',
                           fontWeight: '500',
-                          cursor: formFileLoading || tableAutofillLoading || tableAutofillProgress ? 'not-allowed' : 'pointer',
+                          cursor: formFileLoading || tableAutofillLoading ? 'not-allowed' : 'pointer',
                           display: 'flex',
                           alignItems: 'center',
                           gap: '8px',
@@ -26104,7 +32474,7 @@ const Statutory = ({ userEmail, userRole }) => {
                         }}
                         title="Fetch employee data from Zoho People and populate the form"
                       >
-                        {formFileLoading || tableAutofillLoading || tableAutofillProgress ? 'Loading...' : 'Autofill'}
+                        {formFileLoading || tableAutofillLoading ? 'Loading...' : 'Autofill'}
                       </button>
                     )}
                     {/* Import button (after Autofill) */}
@@ -26155,7 +32525,18 @@ const Statutory = ({ userEmail, userRole }) => {
                       </>
                     )}
                     {/* Save Button */}
-                    {!isFormFileReadOnly && formTableData.length > 0 && displayTableHeaders.length > 0 && (
+                    {!isFormFileReadOnly &&
+                      ((formTableData.length > 0 &&
+                        displayTableHeaders.length > 0 &&
+                        !headersLookLikePivotOrWrongFormATable(displayTableHeaders)) ||
+                        isFormAHeaderOnlyModalContext(
+                          displayFormHeader,
+                          formFileModalData?.item,
+                          formFileModalData?.fileName || formFileModalData?.formFileName,
+                          formFileModalData?.sheetText || '',
+                          displayTableHeaders,
+                          displayFormHeader?.fields
+                        )) && (
                       <button
                         onClick={handleSaveFormFile}
                         disabled={submitting}
@@ -26250,7 +32631,7 @@ const Statutory = ({ userEmail, userRole }) => {
                     </div>
                   ) : null}
 
-                  {displayTableHeaders.length > 0 && (
+                  {displayTableHeaders.length > 0 && !isFormAHeaderFieldLayoutFormHeader(displayFormHeader) && (
                     <>
                     <div className="form-file-modal-table-wrap" style={{
                       overflowX: 'auto',
@@ -26441,7 +32822,7 @@ const Statutory = ({ userEmail, userRole }) => {
                           )}
                         </thead>
                         <tbody>
-                          {!tableAutofillLoading && !tableAutofillProgress && formTableData.length === 0 ? (
+                          {!tableAutofillLoading && formTableData.length === 0 ? (
                             <tr>
                               <td
                                 colSpan={displayTableHeaders.length}
@@ -26462,12 +32843,36 @@ const Statutory = ({ userEmail, userRole }) => {
                             <tr key={actualRowIndex} style={{
                               backgroundColor: rowIndex % 2 === 0 ? '#fff' : '#f9fafb'
                             }}>
-                              {displayTableHeaders.map((header, colIndex) => (
-                                <td key={colIndex} style={{
-                                  padding: '10px 12px',
+                              {displayTableHeaders.map((header, colIndex) => {
+                                if (
+                                  form26NilSpanInfo &&
+                                  colIndex > form26NilSpanInfo.startIdx &&
+                                  colIndex < form26NilSpanInfo.startIdx + form26NilSpanInfo.span
+                                ) {
+                                  return null;
+                                }
+                                const isDayCol = isStatutoryDailyHoursDayColumn(header);
+                                const isFormVIHolidayCol =
+                                  formVIFestivalThead != null && isFormVIHolidayColumnHeader(header);
+                                const form26NilColSpan =
+                                  form26NilSpanInfo && colIndex === form26NilSpanInfo.startIdx
+                                    ? form26NilSpanInfo.span
+                                    : undefined;
+                                const form26NilCell =
+                                  form26NilSpanInfo &&
+                                  colIndex === form26NilSpanInfo.startIdx &&
+                                  /^nil\s+for\s+the\s+month/i.test(String(row[header] ?? '').trim());
+                                return (
+                                <td
+                                  key={colIndex}
+                                  colSpan={form26NilColSpan}
+                                  style={{
+                                  padding: isDayCol ? '6px 4px' : '10px 12px',
                                   border: '1px solid #e5e7eb',
                                   fontSize: '14px',
-                                  color: '#374151'
+                                  color: '#374151',
+                                  textAlign: form26NilCell || isFormVIHolidayCol ? 'center' : isDayCol ? 'center' : 'left',
+                                  verticalAlign: 'middle'
                                 }}>
                                   <input
                                     type="text"
@@ -26476,18 +32881,21 @@ const Statutory = ({ userEmail, userRole }) => {
                                       if (isFormFileReadOnly) return;
                                       const newData = [...formTableData];
                                       newData[actualRowIndex] = {
-                                        ...(pagedDisplayFormTableData[rowIndex] || newData[actualRowIndex] || {}),
+                                        ...(newData[actualRowIndex] || {}),
                                         [header]: e.target.value
                                       };
+                                      formTableDataRef.current = newData;
                                       setFormTableData(newData);
                                     }}
                                     readOnly={isFormFileReadOnly}
                                     style={{
                                       width: '100%',
-                                      padding: '6px 8px',
+                                      minWidth: isDayCol ? '32px' : isFormVIHolidayCol ? '28px' : undefined,
+                                      padding: isDayCol ? '4px 2px' : isFormVIHolidayCol ? '4px 2px' : '6px 8px',
                                       border: '1px solid #d1d5db',
                                       borderRadius: '4px',
-                                      fontSize: '14px',
+                                      fontSize: isDayCol ? '12px' : isFormVIHolidayCol ? '13px' : '14px',
+                                      textAlign: form26NilCell || isFormVIHolidayCol ? 'center' : isDayCol ? 'center' : 'left',
                                       backgroundColor: isFormFileReadOnly ? '#f9fafb' : 'white'
                                     }}
                                     placeholder={
@@ -26497,7 +32905,8 @@ const Statutory = ({ userEmail, userRole }) => {
                                     }
                                   />
                                 </td>
-                              ))}
+                                );
+                              })}
                             </tr>
                             );
                           })}
@@ -26509,7 +32918,7 @@ const Statutory = ({ userEmail, userRole }) => {
                         <button
                           type="button"
                           className="form-file-modal-pagination__btn"
-                          disabled={formTablePage === 0 || formTablePageLoading || Boolean(tableAutofillProgress)}
+                          disabled={formTablePage === 0 || formTablePageLoading || tableAutofillLoading}
                           onClick={() => loadFormTablePage(formTablePage - 1)}
                         >
                           Previous
@@ -26525,7 +32934,7 @@ const Statutory = ({ userEmail, userRole }) => {
                           disabled={
                             formTablePage >= formTableTotalPages - 1 ||
                             formTablePageLoading ||
-                            Boolean(tableAutofillProgress)
+                            tableAutofillLoading
                           }
                           onClick={() => loadFormTablePage(formTablePage + 1)}
                         >

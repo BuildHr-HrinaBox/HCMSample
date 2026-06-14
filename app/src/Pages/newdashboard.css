@@ -962,6 +962,42 @@
 }
 
 /* ——— Calendar ——— */
+.nd-card-head--calendar {
+  justify-content: space-between;
+}
+
+.nd-card-title--calendar {
+  flex: 1;
+  text-align: center;
+}
+
+.nd-cal-nav-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--nd-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.nd-cal-nav-btn:hover {
+  background: #f9fafb;
+  border-color: var(--nd-green);
+  color: var(--nd-green);
+}
+
+.nd-cal-nav-btn:focus-visible {
+  outline: 2px solid var(--nd-green);
+  outline-offset: 2px;
+}
+
 .nd-cal-weekdays {
   display: grid;
   grid-template-columns: repeat(7, 1fr);

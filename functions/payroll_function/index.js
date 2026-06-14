@@ -12,6 +12,8 @@ const { IncomingMessage, ServerResponse } = require('http');
  *   - all_salaries=1 (optional) — list employees and attach each employee's salary (for Statutory autofill)
  *   - salary_offset / salary_limit (optional) — process a slice of employees per request (avoids HTTP 408)
  *   - list_employees=1 (optional) — fast employee list without per-employee salary calls
+ *   - payroll_month_data=1 (optional) — pay-run employee summary for payroll_month=YYYY-MM (or year + month)
+ *   - payrun_employee_detail=1 (optional) — earnings/deductions for one employee in a pay run (payroll_run_id + employee_id)
  *
  * OAuth (same pattern as peopledata_function / leavedata_function):
  *   - ZOHO_PAYROLL_ACCESS_TOKEN — optional direct bearer (refreshed hourly in Zoho)
@@ -80,12 +82,80 @@ module.exports = async (req, res) => {
     }
 
     const employeeId = readQueryParam(req, 'employee_id');
+    const payrollRunId = readQueryParam(req, 'payroll_run_id');
     const allSalaries = readQueryParam(req, 'all_salaries') === '1';
     const listEmployees = readQueryParam(req, 'list_employees') === '1';
+    const payrollMonthData = readQueryParam(req, 'payroll_month_data') === '1';
+    const payrunEmployeeDetail = readQueryParam(req, 'payrun_employee_detail') === '1';
 
     const accessToken = await getPayrollAccessToken();
 
-    if (employeeId && !allSalaries) {
+    if (payrunEmployeeDetail) {
+      if (!payrollRunId || !employeeId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            success: false,
+            error: 'payroll_run_id and employee_id are required for payrun_employee_detail',
+          })
+        );
+        return;
+      }
+      const data = await fetchPayrollRunEmployeeDetail({
+        accessToken,
+        organizationId,
+        payrollRunId,
+        employeeId,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, data }));
+      return;
+    }
+
+    if (payrollMonthData) {
+      const monthParts = parsePayrollMonthParam(req);
+      if (!monthParts) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            success: false,
+            error: 'payroll_month=YYYY-MM (or year + month) is required for payroll_month_data',
+          })
+        );
+        return;
+      }
+      const employeeOffset = Math.max(
+        0,
+        parseInt(readQueryParam(req, 'employee_offset') || '0', 10) || 0
+      );
+      const employeeLimitRaw = readQueryParam(req, 'employee_limit');
+      const employeeLimit = employeeLimitRaw
+        ? Math.max(1, Math.min(200, parseInt(employeeLimitRaw, 10) || 1))
+        : 200;
+      const runType = readQueryParam(req, 'payroll_run_type') || 'regular';
+
+      const payload = await fetchPayrollMonthEmployeeBatch({
+        accessToken,
+        organizationId,
+        year: monthParts.year,
+        month: monthParts.month,
+        offset: employeeOffset,
+        limit: employeeLimit,
+        runType,
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          success: true,
+          data: payload.rows,
+          meta: payload.meta,
+        })
+      );
+      return;
+    }
+
+    if (employeeId && !allSalaries && !payrollRunId) {
       const data = await fetchMergedEmployeeSalary({
         accessToken,
         organizationId,
@@ -161,7 +231,8 @@ module.exports = async (req, res) => {
     res.end(
       JSON.stringify({
         success: false,
-        error: 'Specify employee_id, all_salaries=1, or list_employees=1',
+        error:
+          'Specify employee_id, all_salaries=1, list_employees=1, payroll_month_data=1, or payrun_employee_detail=1',
       })
     );
   } catch (error) {
@@ -461,6 +532,244 @@ async function fetchMergedEmployeeSalary({ accessToken, organizationId, employee
     ...baseRow,
     employee_id: getEmployeeRecordId(baseRow) || String(employeeId),
     salary: salaryObj != null ? salaryObj : salaryWrap?.body ?? null,
+  };
+}
+
+const PAYROLL_MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+function parsePayrollMonthParam(req) {
+  const payrollMonth = readQueryParam(req, 'payroll_month');
+  if (/^\d{4}-\d{2}$/.test(payrollMonth)) {
+    const [y, m] = payrollMonth.split('-');
+    const year = parseInt(y, 10);
+    const month = parseInt(m, 10);
+    if (Number.isFinite(year) && month >= 1 && month <= 12) return { year, month };
+  }
+  const year = parseInt(readQueryParam(req, 'year') || '', 10);
+  const month = parseInt(readQueryParam(req, 'month') || '', 10);
+  if (Number.isFinite(year) && Number.isFinite(month) && month >= 1 && month <= 12) {
+    return { year, month };
+  }
+  return null;
+}
+
+function findPayrollRunForMonth(runs, year, month, preferredType = 'regular') {
+  if (!Array.isArray(runs) || runs.length === 0) return null;
+  const monthStr = String(month).padStart(2, '0');
+  const prefix = `${year}-${monthStr}`;
+  const periodLabel = `${PAYROLL_MONTH_NAMES[month - 1]} ${year}`.toLowerCase();
+
+  const matches = runs.filter((run) => {
+    const start = String(run.pay_period_start_date || '');
+    const period = String(run.processing_period || '').toLowerCase().trim();
+    return start.startsWith(prefix) || period === periodLabel;
+  });
+
+  if (matches.length === 0) return null;
+
+  const typeMatch = matches.find((run) => String(run.type || '') === preferredType);
+  if (typeMatch) return typeMatch;
+
+  const statusPriority = ['completed', 'paid', 'approved', 'draft'];
+  const ranked = [...matches].sort((a, b) => {
+    const ai = statusPriority.indexOf(String(a.status || '').toLowerCase());
+    const bi = statusPriority.indexOf(String(b.status || '').toLowerCase());
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+  });
+  return ranked[0];
+}
+
+async function fetchAllPayrollRunPages({ accessToken, organizationId }) {
+  const base = getApiBase();
+  const collected = [];
+  let page = 1;
+  const perPage = Math.min(
+    200,
+    Math.max(1, parseInt(process.env.ZOHO_PAYROLL_PAGE_SIZE || '200', 10) || 200)
+  );
+
+  for (let guard = 0; guard < 100; guard++) {
+    const { data } = await payrollAxiosGet(
+      `${base}/payrollruns`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params: {
+          organization_id: organizationId,
+          page,
+          per_page: perPage,
+        },
+      },
+      'Zoho payroll runs list'
+    );
+
+    const chunk = Array.isArray(data?.payroll_runs) ? data.payroll_runs : [];
+    collected.push(...chunk);
+
+    const ctx = data?.page_context || {};
+    const hasMore = ctx.has_more_page === true || chunk.length >= perPage;
+    if (!hasMore || chunk.length === 0) break;
+    page += 1;
+    await sleep(Math.max(0, parseInt(process.env.ZOHO_PAYROLL_LIST_PAGE_DELAY_MS || '120', 10) || 120));
+  }
+
+  return collected;
+}
+
+async function fetchPayrollRunById({ accessToken, organizationId, payrollRunId }) {
+  const base = getApiBase();
+  const { data } = await payrollAxiosGet(
+    `${base}/payrollruns/${encodeURIComponent(payrollRunId)}`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      params: { organization_id: organizationId },
+    },
+    'Zoho payroll run by id'
+  );
+  return data?.payroll_run || data;
+}
+
+async function fetchPayrollRunEmployeesPage({
+  accessToken,
+  organizationId,
+  payrollRunId,
+  page = 1,
+  perPage = 200,
+}) {
+  const base = getApiBase();
+  const { data } = await payrollAxiosGet(
+    `${base}/payrollruns/${encodeURIComponent(payrollRunId)}/employees`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      params: {
+        organization_id: organizationId,
+        page,
+        per_page: perPage,
+      },
+    },
+    'Zoho payroll run employees'
+  );
+  const employees = Array.isArray(data?.employees) ? data.employees : [];
+  const ctx = data?.page_context || {};
+  return {
+    employees,
+    page: ctx.page || page,
+    perPage: ctx.per_page || perPage,
+    hasMore: ctx.has_more_page === true,
+  };
+}
+
+async function fetchPayrollRunEmployeeDetail({
+  accessToken,
+  organizationId,
+  payrollRunId,
+  employeeId,
+}) {
+  const base = getApiBase();
+  const { data } = await payrollAxiosGet(
+    `${base}/payrollruns/${encodeURIComponent(payrollRunId)}/employees/${encodeURIComponent(employeeId)}`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      params: { organization_id: organizationId },
+    },
+    `Zoho payroll run employee ${employeeId}`
+  );
+  return data?.employee || data;
+}
+
+async function fetchPayrollMonthEmployeeBatch({
+  accessToken,
+  organizationId,
+  year,
+  month,
+  offset = 0,
+  limit = 200,
+  runType = 'regular',
+}) {
+  const runs = await fetchAllPayrollRunPages({ accessToken, organizationId });
+  const run = findPayrollRunForMonth(runs, year, month, runType);
+  if (!run) {
+    throw new Error(
+      `No ${runType} pay run found for ${PAYROLL_MONTH_NAMES[month - 1]} ${year}. Process payroll in Zoho Payroll for that month first.`
+    );
+  }
+
+  const payrollRunId = String(run.payroll_run_id || '').trim();
+  const perPage = Math.min(200, Math.max(1, limit));
+  const page = Math.floor(offset / perPage) + 1;
+  const pageBatch = await fetchPayrollRunEmployeesPage({
+    accessToken,
+    organizationId,
+    payrollRunId,
+    page,
+    perPage,
+  });
+
+  let rows = pageBatch.employees;
+  const sliceStart = offset % perPage;
+  if (sliceStart > 0 || rows.length > limit) {
+    rows = rows.slice(sliceStart, sliceStart + limit);
+  }
+
+  let total = parseInt(run.no_of_employees, 10);
+  if (!Number.isFinite(total) || total <= 0) {
+    try {
+      const runDetail = await fetchPayrollRunById({ accessToken, organizationId, payrollRunId });
+      total = parseInt(runDetail?.no_of_employees, 10);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  if (!Number.isFinite(total) || total <= 0) {
+    total = offset + rows.length + (pageBatch.hasMore ? perPage : 0);
+  }
+
+  const sameMonthRuns = runs.filter((item) => {
+    const monthStr = String(month).padStart(2, '0');
+    const prefix = `${year}-${monthStr}`;
+    const start = String(item.pay_period_start_date || '');
+    const period = String(item.processing_period || '').toLowerCase().trim();
+    return (
+      start.startsWith(prefix) ||
+      period === `${PAYROLL_MONTH_NAMES[month - 1]} ${year}`.toLowerCase()
+    );
+  });
+
+  return {
+    rows,
+    meta: {
+      payroll_run_id: payrollRunId,
+      processing_period: run.processing_period || `${PAYROLL_MONTH_NAMES[month - 1]} ${year}`,
+      pay_period_start_date: run.pay_period_start_date || null,
+      pay_period_end_date: run.pay_period_end_date || null,
+      pay_date: run.pay_date || null,
+      status: run.status || null,
+      type: run.type || runType,
+      year,
+      month,
+      total,
+      offset,
+      limit: rows.length,
+      has_more: offset + rows.length < total,
+      available_runs: sameMonthRuns.map((item) => ({
+        payroll_run_id: item.payroll_run_id,
+        type: item.type,
+        status: item.status,
+        processing_period: item.processing_period,
+      })),
+    },
   };
 }
 

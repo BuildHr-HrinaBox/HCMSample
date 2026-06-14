@@ -428,6 +428,12 @@
   margin-bottom: 4px;
 }
 
+.mr-table-subtitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: #047857;
+}
+
 .mr-table-actions {
   display: flex;
   flex-wrap: nowrap;

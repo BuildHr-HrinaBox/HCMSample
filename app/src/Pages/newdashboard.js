@@ -5,6 +5,8 @@ import {
   AlertTriangle,
   BookMarked,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   MapPin,
   ShieldCheck,
 } from 'lucide-react';
@@ -245,16 +247,32 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
   const [calendarDueDates, setCalendarDueDates] = useState(new Set());
   const [selectedCalendarDay, setSelectedCalendarDay] = useState(null);
   const calendarDayUserPicked = useRef(false);
+  const [calendarView, setCalendarView] = useState(() => {
+    const today = new Date();
+    return { year: today.getFullYear(), month: today.getMonth() };
+  });
 
   const now = new Date();
   const calendarMonth = useMemo(
     () => ({
-      year: now.getFullYear(),
-      month: now.getMonth(),
-      label: now.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }),
+      year: calendarView.year,
+      month: calendarView.month,
+      label: new Date(calendarView.year, calendarView.month, 1).toLocaleDateString('en-IN', {
+        month: 'long',
+        year: 'numeric',
+      }),
     }),
-    [now]
+    [calendarView.year, calendarView.month]
   );
+
+  const navigateCalendarMonth = (delta) => {
+    calendarDayUserPicked.current = false;
+    setSelectedCalendarDay(null);
+    setCalendarView(({ year, month }) => {
+      const next = new Date(year, month + delta, 1);
+      return { year: next.getFullYear(), month: next.getMonth() };
+    });
+  };
   const calendarRows = useMemo(() => buildCalendarGrid(calendarMonth.year, calendarMonth.month), [calendarMonth]);
   const todayDateOnly = useMemo(
     () => new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(),
@@ -611,8 +629,24 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
             </section>
 
             <section className="nd-card nd-card--calendar">
-              <div className="nd-card-head">
-                <h3 className="nd-card-title">{calendarMonth.label}</h3>
+              <div className="nd-card-head nd-card-head--calendar">
+                <button
+                  type="button"
+                  className="nd-cal-nav-btn"
+                  onClick={() => navigateCalendarMonth(-1)}
+                  aria-label="Previous month"
+                >
+                  <ChevronLeft size={18} strokeWidth={2} />
+                </button>
+                <h3 className="nd-card-title nd-card-title--calendar">{calendarMonth.label}</h3>
+                <button
+                  type="button"
+                  className="nd-cal-nav-btn"
+                  onClick={() => navigateCalendarMonth(1)}
+                  aria-label="Next month"
+                >
+                  <ChevronRight size={18} strokeWidth={2} />
+                </button>
               </div>
               <div className="nd-cal">
                 <div className="nd-cal-weekdays">

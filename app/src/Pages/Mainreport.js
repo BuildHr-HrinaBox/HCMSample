@@ -3,6 +3,10 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { jsPDF } from 'jspdf';
 import JSZip from 'jszip';
 import './Mainreport.css';
+import {
+  checklistStateMatchesSiteState,
+  fetchInchargeDisplayScopeFromSites,
+} from '../utils/siteInchargeScope';
 
 const API = '/server/mainreport_function/mainreport';
 
@@ -108,6 +112,29 @@ const getFormNameLabel = (row) => {
 };
 
 const getReportStateLabel = (row) => String(row?.state || row?.zState || '').trim() || '—';
+
+const isPanIndiaStateLabel = (value) => {
+  const blob = String(value || '')
+    .trim()
+    .toLowerCase();
+  return /\b(all india|pan india|pan-india|national|central|all states|all state)\b/.test(blob);
+};
+
+/** Keep only rows belonging to the selected site (name + state). */
+const rowMatchesSiteFilter = (row, siteName, siteState) => {
+  if (!siteName) return true;
+  const rowSite = String(row?.site || '')
+    .trim()
+    .toLowerCase();
+  const wantSite = String(siteName || '')
+    .trim()
+    .toLowerCase();
+  if (rowSite && rowSite !== wantSite) return false;
+  if (!siteState) return true;
+  const rowState = getReportStateLabel(row);
+  if (!rowState || rowState === '—' || isPanIndiaStateLabel(rowState)) return true;
+  return checklistStateMatchesSiteState(rowState, siteState);
+};
 
 const formatReportDateDisplay = (value) => {
   if (value == null || String(value).trim() === '') return '';
@@ -649,6 +676,8 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
   const [years, setYears] = useState([]);
   const [tableRows, setTableRows] = useState([]);
   const [siteNames, setSiteNames] = useState([]);
+  const [reportSiteState, setReportSiteState] = useState('');
+  const [inchargeSiteNames, setInchargeSiteNames] = useState(null);
   const [tableLoading, setTableLoading] = useState(false);
   const [consolidatedZipLoading, setConsolidatedZipLoading] = useState(false);
   const selectedYear = yearFromUrl ? String(yearFromUrl).trim() : '';
@@ -724,6 +753,28 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
     loadSummary();
   }, [loadSummary]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchInchargeDisplayScopeFromSites(effectiveUserEmail).then((scope) => {
+      if (cancelled) return;
+      setInchargeSiteNames(Array.isArray(scope?.siteNames) ? scope.siteNames : []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [effectiveUserEmail]);
+
+  const inchargeScopeReady = inchargeSiteNames !== null;
+  const isSiteInchargeView = inchargeScopeReady && inchargeSiteNames.length > 0;
+  const requireSiteSelection = isSiteInchargeView;
+
+  const siteSelectOptions = useMemo(() => {
+    const fromApi = Array.isArray(siteNames) ? siteNames : [];
+    if (!isSiteInchargeView) return fromApi;
+    const allowed = new Set(inchargeSiteNames.map((s) => String(s).trim().toLowerCase()));
+    return fromApi.filter((s) => allowed.has(String(s).trim().toLowerCase()));
+  }, [siteNames, inchargeSiteNames, isSiteInchargeView]);
+
   const loadEntries = useCallback(async (year, month, siteValue = '') => {
     setTableLoading(true);
     setError('');
@@ -742,10 +793,12 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
       const rawRows = Array.isArray(json.data.rows) ? json.data.rows : [];
       setTableRows(rawRows.map(sanitizeMainReportApiRow));
       setSiteNames(Array.isArray(json.data.siteNames) ? json.data.siteNames : []);
+      setReportSiteState(String(json.data.selectedSiteState || '').trim());
     } catch (e) {
       setError(e.message || 'Failed to load rows');
       setTableRows([]);
       setSiteNames([]);
+      setReportSiteState('');
     } finally {
       setTableLoading(false);
     }
@@ -772,12 +825,26 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
     [effectiveUserEmail]
   );
 
-  const hasAppliedFilters = Boolean(selectedYear && selectedMonth);
+  const hasAppliedFilters = Boolean(
+    selectedYear && selectedMonth && inchargeScopeReady && (!requireSiteSelection || selectedSite)
+  );
 
-  // Load report rows only after Apply Filters (URL has year + month).
+  // Site Incharge with one assigned site: auto-apply site filter when year/month are set.
+  useEffect(() => {
+    if (!inchargeScopeReady || !selectedYear || !selectedMonth || selectedSite) return;
+    if (inchargeSiteNames.length !== 1) return;
+    const q = new URLSearchParams();
+    q.set('year', selectedYear);
+    q.set('month', selectedMonth);
+    q.set('site', inchargeSiteNames[0]);
+    navigate(`/mainreport?${q.toString()}`, { replace: true });
+  }, [inchargeScopeReady, selectedYear, selectedMonth, selectedSite, inchargeSiteNames, navigate]);
+
+  // Load report rows only after Apply Filters (URL has year + month [+ site for incharge]).
   useEffect(() => {
     if (!hasAppliedFilters) {
       setTableRows([]);
+      setReportSiteState('');
       return;
     }
     loadEntries(selectedYear, selectedMonth, String(selectedSite || '').trim());
@@ -812,6 +879,10 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
       setError('Year and month are required.');
       return;
     }
+    if (requireSiteSelection && !s) {
+      setError('Select a site to view the report for that site only.');
+      return;
+    }
     setError('');
 
     const q = new URLSearchParams();
@@ -819,7 +890,7 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
     q.set('month', m);
     if (s) q.set('site', s);
     navigate(`/mainreport?${q.toString()}`);
-  }, [draftYear, draftMonth, draftSite, navigate]);
+  }, [draftYear, draftMonth, draftSite, navigate, requireSiteSelection]);
 
   const resetFilters = useCallback(() => {
     setDraftYear('');
@@ -964,30 +1035,33 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
     URL.revokeObjectURL(url);
   };
 
+  const filteredRows = useMemo(() => {
+    let rows = sortRowsSectorWise(tableRows);
+    if (selectedSite) {
+      rows = rows.filter((row) => rowMatchesSiteFilter(row, selectedSite, reportSiteState));
+    }
+    return rows;
+  }, [tableRows, selectedSite, reportSiteState]);
+
   /**
-   * KPIs match the Forms Summary STATUS column (`getStatusLabel`).
+   * KPIs match the Forms Summary STATUS column (`getStatusLabel`) for visible rows.
    */
   const statusCounts = useMemo(() => {
-    if (!Array.isArray(tableRows) || tableRows.length === 0) {
+    if (!Array.isArray(filteredRows) || filteredRows.length === 0) {
       return { total: 0, approved: 0, pending: 0, yetToComplete: 0 };
     }
     let approved = 0;
     let pending = 0;
     let yetToComplete = 0;
-    for (const row of tableRows) {
+    for (const row of filteredRows) {
       const status = getStatusLabel(row);
       if (isStatutoryTransactionStatusApproved(row) && status === 'Approved') approved += 1;
       else if (status === 'Pending') pending += 1;
       else if (status === 'Yet to Complete') yetToComplete += 1;
     }
-    const total = tableRows.length;
+    const total = filteredRows.length;
     return { total, approved, pending, yetToComplete };
-  }, [tableRows]);
-
-  const filteredRows = useMemo(
-    () => sortRowsSectorWise(tableRows),
-    [tableRows]
-  );
+  }, [filteredRows]);
 
   // Pagination: slice filteredRows for current page
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
@@ -1095,15 +1169,24 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
             </label>
 
             <label className="mr-field">
-              <span className="mr-label">Site</span>
+              <span className="mr-label">
+                Site
+                {requireSiteSelection ? (
+                  <abbr className="mr-required" title="Required">*</abbr>
+                ) : null}
+              </span>
               <select
                 className="mr-select"
                 value={draftSite}
                 onChange={(e) => setDraftSite(e.target.value)}
                 disabled={!draftYear || !draftMonth}
+                required={requireSiteSelection}
+                aria-required={requireSiteSelection ? 'true' : undefined}
               >
-                <option value="">All</option>
-                {(Array.isArray(siteNames) ? siteNames : []).map((s) => (
+                {!requireSiteSelection ? <option value="">All</option> : (
+                  <option value="">Select site</option>
+                )}
+                {siteSelectOptions.map((s) => (
                   <option key={s} value={s}>{s}</option>
                 ))}
               </select>
@@ -1116,8 +1199,14 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
               <button
                 type="submit"
                 className="mr-btn mr-btn-primary"
-                disabled={!draftYear || !draftMonth}
-                title={!draftYear || !draftMonth ? 'Select year and month (required).' : 'Apply filters'}
+                disabled={!draftYear || !draftMonth || (requireSiteSelection && !draftSite)}
+                title={
+                  !draftYear || !draftMonth
+                    ? 'Select year and month (required).'
+                    : requireSiteSelection && !draftSite
+                      ? 'Select a site to view site-specific report.'
+                      : 'Apply filters'
+                }
               >
                 Apply Filters
               </button>
@@ -1156,6 +1245,9 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
               <div className="mr-table-head">
                 <div>
                   <div className="mr-table-title">Forms Summary</div>
+                  {selectedSite ? (
+                    <div className="mr-table-subtitle">Showing forms for site: {selectedSite}</div>
+                  ) : null}
                 </div>
                 <div className="mr-table-actions">
                   <button
@@ -1204,7 +1296,9 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
                     {!hasAppliedFilters ? (
                       <tr>
                         <td colSpan={9} className="mr-empty">
-                          Select year, month, and site, then click Apply Filters to load the report.
+                          {requireSiteSelection
+                            ? 'Select year, month, and your site, then click Apply Filters to load the site report.'
+                            : 'Select year, month, and optionally a site, then click Apply Filters to load the report.'}
                         </td>
                       </tr>
                     ) : tableLoading && filteredRows.length === 0 ? (

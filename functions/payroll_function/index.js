@@ -1,7 +1,16 @@
 'use strict';
 
 const axios = require('axios');
-const { IncomingMessage, ServerResponse } = require('http');
+const express = require('express');
+const catalystSDK = require('zcatalyst-sdk-node');
+const {
+  flattenPayrollEarningColumns,
+  getEarningsArray,
+  mergePayrollRunEmployeePayload,
+  unwrapSalaryEmployeePayload,
+} = require('./payrollEarnings');
+
+const PAYROLL_TABLE = 'Payroll';
 
 /**
  * Zoho Payroll (India DC) proxy — same shape as `peopledata_function` for the app.
@@ -72,7 +81,142 @@ function resolveOrganizationId(req) {
   return fromQuery || DEFAULT_PAYROLL_ORGANIZATION_ID;
 }
 
-module.exports = async (req, res) => {
+function safeJsonParse(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(String(value));
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function pickPayrollDatastoreRow(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return entry.Payroll || entry.payroll || entry;
+}
+
+async function persistPayrollSnapshot(catalyst, payload) {
+  const payrollMonth = String(payload?.payrollMonth || '').trim();
+  const records = Array.isArray(payload?.records) ? payload.records : [];
+  if (!/^\d{4}-\d{2}$/.test(payrollMonth)) {
+    return { saved: false, reason: 'invalid_month' };
+  }
+  if (records.length === 0) {
+    return { saved: false, reason: 'empty_records' };
+  }
+
+  const flattenedRecords = records.map((row) => flattenPayrollEarningColumns(row));
+
+  const totalExpected = Number.isFinite(Number(payload?.totalExpected))
+    ? Number(payload.totalExpected)
+    : records.length;
+
+  const dataPayload = {
+    payrollMonth,
+    organizationId: payload?.organizationId || null,
+    runMeta: payload?.runMeta && typeof payload.runMeta === 'object' ? payload.runMeta : null,
+    records: flattenedRecords,
+    hasBreakdown: payload?.hasBreakdown === true,
+    loadedCount: records.length,
+    totalExpected,
+    breakdownComplete: payload?.breakdownComplete === true,
+    savedAt: new Date().toISOString(),
+  };
+
+  const table = catalyst.datastore().table(PAYROLL_TABLE);
+  const zcql = catalyst.zcql();
+  let existingRowId = null;
+
+  try {
+    const rows = await zcql.executeZCQLQuery(`SELECT ROWID, Data FROM ${PAYROLL_TABLE}`);
+    const list = Array.isArray(rows) ? rows : [];
+    for (const entry of list) {
+      const row = pickPayrollDatastoreRow(entry);
+      if (!row || row.ROWID == null) continue;
+      const parsed = safeJsonParse(row.Data, {});
+      if (parsed && parsed.payrollMonth === payrollMonth) {
+        existingRowId = String(row.ROWID);
+        break;
+      }
+    }
+  } catch (queryErr) {
+    console.warn('Payroll save: month lookup failed, will insert:', queryErr.message);
+  }
+
+  const dataText = JSON.stringify(dataPayload);
+  if (existingRowId) {
+    await table.updateRow({ ROWID: existingRowId, Data: dataText });
+    return {
+      saved: true,
+      rowId: existingRowId,
+      updated: true,
+      recordCount: records.length,
+      totalExpected,
+      payrollMonth,
+    };
+  }
+
+  const insertResp = await table.insertRow({ Data: dataText });
+  return {
+    saved: true,
+    rowId: insertResp?.ROWID || null,
+    updated: false,
+    recordCount: records.length,
+    totalExpected,
+    payrollMonth,
+  };
+}
+
+async function loadPayrollSnapshotFromTable(catalyst, payrollMonth) {
+  const month = String(payrollMonth || '').trim();
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    return { found: false, reason: 'invalid_month' };
+  }
+
+  const zcql = catalyst.zcql();
+  try {
+    const rows = await zcql.executeZCQLQuery(`SELECT ROWID, Data, MODIFIEDTIME FROM ${PAYROLL_TABLE}`);
+    const list = Array.isArray(rows) ? rows : [];
+    let best = null;
+    for (const entry of list) {
+      const row = pickPayrollDatastoreRow(entry);
+      if (!row || row.ROWID == null) continue;
+      const parsed = safeJsonParse(row.Data, {});
+      if (!parsed || parsed.payrollMonth !== month) continue;
+      const modified = String(row.MODIFIEDTIME || row.CREATEDTIME || '');
+      if (!best || modified > String(best.row.MODIFIEDTIME || best.row.CREATEDTIME || '')) {
+        best = { row, parsed };
+      }
+    }
+    if (!best) {
+      return { found: false, reason: 'not_found' };
+    }
+    const records = Array.isArray(best.parsed.records)
+      ? best.parsed.records.map((row) => flattenPayrollEarningColumns(row))
+      : [];
+    return {
+      found: true,
+      rowId: best.row.ROWID,
+      payrollMonth: month,
+      records,
+      meta: {
+        hasBreakdown: best.parsed.hasBreakdown === true,
+        loadedCount: best.parsed.loadedCount,
+        totalExpected: best.parsed.totalExpected,
+        breakdownComplete: best.parsed.breakdownComplete === true,
+        savedAt: best.parsed.savedAt || null,
+        payDate: best.parsed.runMeta?.pay_date || best.parsed.runMeta?.payDate || null,
+        organizationId: best.parsed.organizationId || null,
+      },
+    };
+  } catch (err) {
+    console.error('Payroll load error:', err.message || err);
+    return { found: false, reason: 'query_failed', error: err.message || String(err) };
+  }
+}
+
+async function handlePayrollFetch(req, res) {
   try {
     const organizationId = resolveOrganizationId(req);
     if (!organizationId) {
@@ -101,12 +245,14 @@ module.exports = async (req, res) => {
         );
         return;
       }
-      const data = await fetchPayrollRunEmployeeDetail({
-        accessToken,
-        organizationId,
-        payrollRunId,
-        employeeId,
-      });
+      const data = flattenPayrollEarningColumns(
+        await fetchPayrollRunEmployeeDetail({
+          accessToken,
+          organizationId,
+          payrollRunId,
+          employeeId,
+        })
+      );
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, data }));
       return;
@@ -156,11 +302,13 @@ module.exports = async (req, res) => {
     }
 
     if (employeeId && !allSalaries && !payrollRunId) {
-      const data = await fetchMergedEmployeeSalary({
-        accessToken,
-        organizationId,
-        employeeId,
-      });
+      const data = flattenPayrollEarningColumns(
+        await fetchMergedEmployeeSalary({
+          accessToken,
+          organizationId,
+          employeeId,
+        })
+      );
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, data }));
       return;
@@ -515,13 +663,7 @@ async function fetchMergedEmployeeSalary({ accessToken, organizationId, employee
   }
 
   const salaryWrap = await fetchSalaryPayload({ accessToken, organizationId, employeeId });
-  const salaryObj =
-    salaryWrap &&
-    salaryWrap.body &&
-    typeof salaryWrap.body === 'object' &&
-    salaryWrap.body.salary
-      ? salaryWrap.body.salary
-      : salaryWrap?.body;
+  const salaryEmployee = unwrapSalaryEmployeePayload(salaryWrap?.body);
 
   const baseRow =
     employee && typeof employee === 'object'
@@ -530,8 +672,9 @@ async function fetchMergedEmployeeSalary({ accessToken, organizationId, employee
 
   return {
     ...baseRow,
+    ...salaryEmployee,
     employee_id: getEmployeeRecordId(baseRow) || String(employeeId),
-    salary: salaryObj != null ? salaryObj : salaryWrap?.body ?? null,
+    salary: salaryWrap?.body ?? null,
   };
 }
 
@@ -686,7 +829,26 @@ async function fetchPayrollRunEmployeeDetail({
     },
     `Zoho payroll run employee ${employeeId}`
   );
-  return data?.employee || data;
+  let employee = mergePayrollRunEmployeePayload(data);
+  if (getEarningsArray(employee).length === 0) {
+    try {
+      const salaryWrap = await fetchSalaryPayload({ accessToken, organizationId, employeeId });
+      const salaryEmployee = unwrapSalaryEmployeePayload(salaryWrap?.body);
+      if (getEarningsArray(salaryEmployee).length > 0) {
+        employee = {
+          ...employee,
+          ...salaryEmployee,
+          earnings_source: 'salary_template',
+        };
+      }
+    } catch (salaryErr) {
+      console.warn(
+        `payroll_function: salary template fallback for ${employeeId}:`,
+        salaryErr.message
+      );
+    }
+  }
+  return employee;
 }
 
 async function fetchPayrollMonthEmployeeBatch({
@@ -748,7 +910,7 @@ async function fetchPayrollMonthEmployeeBatch({
   });
 
   return {
-    rows,
+    rows: rows.map((row) => flattenPayrollEarningColumns(row)),
     meta: {
       payroll_run_id: payrollRunId,
       processing_period: run.processing_period || `${PAYROLL_MONTH_NAMES[month - 1]} ${year}`,
@@ -860,3 +1022,122 @@ async function fetchAllEmployeesWithSalary({
     has_more: start + batch.length < total,
   };
 }
+
+const app = express();
+app.use(express.json({ limit: '50mb' }));
+app.use((req, res, next) => {
+  try {
+    res.locals.catalyst = catalystSDK.initialize(req);
+    next();
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Catalyst init failed' });
+  }
+});
+
+function sendPayrollTableJson(res, result) {
+  if (!result.found) {
+    const status =
+      result.reason === 'invalid_month' ? 400 : result.reason === 'not_found' ? 404 : 500;
+    res.status(status).json({
+      success: false,
+      error:
+        result.reason === 'invalid_month'
+          ? 'payroll_month must be YYYY-MM'
+          : result.reason === 'not_found'
+            ? 'No payroll snapshot found for this month'
+            : 'Could not load payroll snapshot',
+      reason: result.reason || 'unknown',
+    });
+    return;
+  }
+  res.status(200).json({
+    success: true,
+    data: {
+      rowId: result.rowId,
+      payrollMonth: result.payrollMonth,
+      records: result.records,
+      meta: result.meta,
+    },
+  });
+}
+
+async function handlePayrollTableGet(req, res) {
+  const payrollMonth = readQueryParam(req, 'payroll_month') || readQueryParam(req, 'payrollMonth');
+  const { catalyst } = res.locals;
+  const result = await loadPayrollSnapshotFromTable(catalyst, payrollMonth);
+  sendPayrollTableJson(res, result);
+}
+
+async function handlePayrollGet(req, res) {
+  const payrollTable = readQueryParam(req, 'payroll_table') === '1';
+  const payrollMonth = readQueryParam(req, 'payroll_month') || readQueryParam(req, 'payrollMonth');
+  if (payrollTable && payrollMonth) {
+    try {
+      await handlePayrollTableGet(req, res);
+    } catch (err) {
+      console.error('payroll_function payroll_table error:', err.message || err);
+      res.status(500).json({
+        success: false,
+        error: err.message || 'Failed to load payroll data',
+      });
+    }
+    return;
+  }
+  return handlePayrollFetch(req, res);
+}
+
+app.get('/', handlePayrollGet);
+
+app.get('/payroll', async (req, res) => {
+  try {
+    await handlePayrollTableGet(req, res);
+  } catch (err) {
+    console.error('payroll_function GET /payroll error:', err.message || err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to load payroll data',
+    });
+  }
+});
+
+app.post('/save', async (req, res) => {
+  try {
+    const { catalyst } = res.locals;
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const result = await persistPayrollSnapshot(catalyst, body);
+    if (!result.saved) {
+      res.status(400).json({
+        success: false,
+        error:
+          result.reason === 'invalid_month'
+            ? 'payrollMonth must be YYYY-MM'
+            : result.reason === 'empty_records'
+              ? 'No payroll records to save'
+              : 'Could not save payroll snapshot',
+        reason: result.reason || 'unknown',
+      });
+      return;
+    }
+    res.status(200).json({
+      success: true,
+      message: result.updated
+        ? 'Payroll data updated in Payroll table.'
+        : 'Payroll data saved to Payroll table.',
+      data: {
+        rowId: result.rowId,
+        payrollMonth: result.payrollMonth,
+        recordCount: result.recordCount,
+        totalExpected: result.totalExpected,
+        updated: result.updated === true,
+      },
+    });
+  } catch (err) {
+    console.error('payroll_function save error:', err.message || err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to save payroll data',
+    });
+  }
+});
+
+module.exports = app;

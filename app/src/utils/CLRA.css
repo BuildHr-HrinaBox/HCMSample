@@ -1,0 +1,148 @@
+/* Embedded in HcmDashboardPageShell — compact height, no full-viewport stretch */
+main.nd-content.nd-content--embedded-page > .clra-page {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.clra-page {
+  box-sizing: border-box;
+  padding: 24px 28px 32px;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  background: #ffffff;
+  min-height: 0;
+}
+
+.clra-header {
+  margin-bottom: 24px;
+}
+
+.clra-title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.clra-subtitle {
+  margin: 4px 0 0;
+  font-size: 0.9rem;
+  color: #6b7280;
+}
+
+.clra-filters {
+  display: none;
+}
+
+.clra-actions {
+  margin-bottom: 24px;
+}
+
+.clra-fetch-btn {
+  padding: 12px 24px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--nd-green, #2ecc71);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+}
+
+.clra-fetch-btn:hover:not(:disabled) {
+  background: #27ae60;
+  transform: translateY(-1px);
+}
+
+.clra-fetch-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.clra-error {
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: #fef2f2;
+  color: #b91c1c;
+  border-radius: 8px;
+  font-size: 0.95rem;
+}
+
+.clra-loading {
+  padding: 24px;
+  text-align: center;
+  color: #6b7280;
+  font-size: 1rem;
+}
+
+.clra-content {
+  width: 100%;
+  max-width: 100%;
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  border: 1px solid #e5e7eb;
+  flex: 0 0 auto;
+}
+
+.clra-empty {
+  margin: 0;
+  color: #6b7280;
+  font-size: 0.95rem;
+}
+
+.clra-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 16px;
+  max-width: 100%;
+}
+
+.clra-data-grid {
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: var(--hcm-data-table-body-font-size);
+}
+
+.clra-data-cell {
+  padding: 10px 12px;
+  text-align: left;
+  color: #4b5563;
+  font-size: var(--hcm-data-table-body-font-size);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.clra-data-cell--header {
+  font-weight: 600;
+  color: #374151;
+  font-size: var(--hcm-data-table-header-font-size);
+  background: #f7f8fa;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.clra-data-cell[data-row]:hover {
+  background: #f9fafb;
+}
+
+.clra-data-cell--sn {
+  text-align: center;
+  width: 56px;
+  min-width: 56px;
+  max-width: 56px;
+}
+
+.clra-meta {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #6b7280;
+}

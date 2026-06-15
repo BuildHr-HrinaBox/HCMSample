@@ -37,6 +37,7 @@ export const HCM_FORM_FETCH_CHILDREN = [
   { label: 'Attendance', to: '/rule-book/attendance' },
   { label: 'Leave', to: '/rule-book/leave' },
   { label: 'Payroll', to: '/rule-book/payroll' },
+  { label: 'CLRA', to: '/rule-book/clra' },
 ];
 
 const NAV = [

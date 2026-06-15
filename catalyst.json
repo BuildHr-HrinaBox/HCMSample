@@ -47,7 +47,9 @@
       "todolist_function",
       "mainreport_function",
       "payroll_function",
-      "settings_function"
+      "settings_function",
+      "importdata_function",
+      "clra_function"
     ],
     "ignore": [],
     "source": "functions"

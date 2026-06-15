@@ -14,6 +14,7 @@ import {
   statesFieldMatchesInchargeSiteStates
 } from '../utils/siteInchargeScope';
 import { resolveLoginEmailString } from '../utils/resolveLoginEmail';
+import { fetchPayrollTableRowsForMonths } from '../utils/payrollTable';
 import {
   fetchAttendanceData,
   fetchFormTemplateArrayBuffer,
@@ -36,11 +37,27 @@ import {
   prefetchFormTemplate,
   prefetchStatutoryAutofillData,
   prefetchPeopleData,
+  prefetchClraData,
+  prefetchLeaveData,
+  prefetchAttendanceData,
   readSiteDetailsCache,
-  writeSiteDetailsCache
+  writeSiteDetailsCache,
+  fetchClraData,
+  flattenClraEmployeesForAutofill,
+  getCachedClraData,
 } from '../utils/statutoryAutofillCache';
 import { getPayrollOrganizationId } from '../utils/payrollOrgId';
 import { expandAttendanceToDailyRows, normalizeAttendanceDateKey } from '../utils/attendanceApi';
+import {
+  buildLeaveRecordLookupMap,
+  collectLeaveRecordIdentityKeys,
+  extractLeaveRecordsFromApiResult,
+  findLeaveRecordForFormRow,
+  getEarnedLeaveMetricsFromRecord,
+  getForm15EarnedLeavePeriodMetrics,
+  isSuspiciousZohoRecordIdValue,
+  sanitizeLeaveMetricDisplayValue,
+} from '../utils/leaveMetrics';
 
 /** @returns {(number | 'ellipsis')[]} */
 function buildPaginationItems(currentPage, totalPages) {
@@ -118,6 +135,16 @@ function prepareSampleDataHeadersForSave(headers) {
   return headers.map((h) => normalizeSampleDataGridKey(h));
 }
 
+function prepareHeaderFieldDefinitionsForSave(fields) {
+  if (!Array.isArray(fields)) return [];
+  return fields
+    .filter((f) => f && f.key != null && String(f.key).trim() !== '')
+    .map((f) => ({
+      key: String(f.key).trim(),
+      label: normalizeSampleDataGridKey(f.label || f.key)
+    }));
+}
+
 function omitStatutorySampleDataSnapshot(payload) {
   if (!payload || typeof payload !== 'object') return payload;
   const {
@@ -139,6 +166,105 @@ function payloadIncludesSampleDataSnapshot(payload) {
     (Array.isArray(headers) && headers.length > 0) ||
     (headerFormData && typeof headerFormData === 'object' && Object.keys(headerFormData).length > 0)
   );
+}
+
+async function postImportDataSnapshot(statutoryId, payload) {
+  const parseResponse = async (resp) => {
+    const rawText = await resp.text();
+    let data = null;
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch (_) {
+      data = null;
+    }
+    return { ok: resp.ok, status: resp.status, data, rawText };
+  };
+
+  const idStr = String(statutoryId || '').trim();
+  if (!/^\d+$/.test(idStr)) {
+    return {
+      ok: false,
+      status: 400,
+      data: { status: 'failure', message: 'Invalid statutory id for ImportData save.' },
+      rawText: ''
+    };
+  }
+
+  const postResp = await fetch(`/server/importdata_function/importdata/${idStr}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  return parseResponse(postResp);
+}
+
+async function postStatutoryDataFields(statutoryId, payload) {
+  const parseResponse = async (resp) => {
+    const rawText = await resp.text();
+    let data = null;
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch (_) {
+      data = null;
+    }
+    return { ok: resp.ok, status: resp.status, data, rawText };
+  };
+
+  const idStr = String(statutoryId || '').trim();
+  if (!/^\d+$/.test(idStr)) {
+    return {
+      ok: false,
+      status: 400,
+      data: { status: 'failure', message: 'Invalid statutory id for StatutoryData save.' },
+      rawText: ''
+    };
+  }
+
+  const postResp = await fetch(`/server/statutoryreg_function/statutory/${idStr}/statutorydata`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  return parseResponse(postResp);
+}
+
+/** Persist grid to SampleData (statutoryreg), ImportData (importdata_function), and StatutoryData fields. */
+async function persistStatutoryGridSnapshots(statutoryId, payload) {
+  const [sampleResult, importResult, statutoryDataResult] = await Promise.all([
+    postStatutorySampleDataSnapshot(statutoryId, payload),
+    postImportDataSnapshot(statutoryId, payload),
+    postStatutoryDataFields(statutoryId, payload)
+  ]);
+
+  const sampleOk = sampleResult.ok && sampleResult.data?.status === 'success';
+  const importOk = importResult.ok && importResult.data?.status === 'success';
+  const statutoryDataOk = statutoryDataResult.ok && statutoryDataResult.data?.status === 'success';
+
+  return {
+    sampleResult,
+    importResult,
+    statutoryDataResult,
+    sampleOk,
+    importOk,
+    statutoryDataOk,
+    ok: sampleOk || importOk || statutoryDataOk,
+    data: {
+      status: importOk || sampleOk || statutoryDataOk ? 'success' : 'failure',
+      sampleDataSaved: sampleOk,
+      importDataSaved: importOk,
+      statutoryDataSaved: statutoryDataOk,
+      message: importOk
+        ? 'ImportData snapshot saved.'
+        : sampleOk
+          ? 'SampleData snapshot saved.'
+          : statutoryDataOk
+            ? 'StatutoryData fields saved.'
+            : importResult.data?.message ||
+              sampleResult.data?.message ||
+              statutoryDataResult.data?.message ||
+              'Grid snapshot save failed.'
+    }
+  };
 }
 
 async function postStatutorySampleDataSnapshot(statutoryId, payload) {
@@ -213,6 +339,42 @@ function resolveStatutorySampleDataSaveId(item) {
   return idStr;
 }
 
+/** Fetch latest ImportData grid snapshot for a statutory ROWID (import/autofill/save). */
+async function fetchStatutoryImportDataSnapshot(statutoryId, context = {}) {
+  const idStr = String(statutoryId || '').trim();
+  const formNameCtx = String(context?.formName || '').trim();
+  const monthCtx = String(
+    context?.monthFilter || context?.MonthFilter || context?.monthfilter || ''
+  ).trim();
+  const formMonthOnlyLookup = formNameCtx && (idStr === '0' || !/^\d+$/.test(idStr));
+  if (!formMonthOnlyLookup && !/^\d+$/.test(idStr)) return null;
+  try {
+    const params = new URLSearchParams({ _ts: String(Date.now()) });
+    if (formNameCtx) params.set('formName', formNameCtx);
+    if (monthCtx) params.set('monthFilter', monthCtx);
+    if (formMonthOnlyLookup) params.set('matchByFormMonth', '1');
+    const lookupId = /^\d+$/.test(idStr) ? idStr : '0';
+    const resp = await fetch(
+      `/server/importdata_function/importdata/${lookupId}?${params.toString()}`
+    );
+    if (!resp.ok) return null;
+    const json = await resp.json().catch(() => null);
+    const block = json?.data?.importData;
+    if (!block) return null;
+    const hasRows = Array.isArray(block.rows) && block.rows.length > 0;
+    const hasHeaders = Array.isArray(block.headers) && block.headers.length > 0;
+    const hasHeaderForm =
+      block.headerFormData &&
+      typeof block.headerFormData === 'object' &&
+      !Array.isArray(block.headerFormData) &&
+      Object.keys(block.headerFormData).length > 0;
+    if (!hasRows && !hasHeaders && !hasHeaderForm) return null;
+    return normalizeSampleDataSnapshotBlock(block);
+  } catch {
+    return null;
+  }
+}
+
 /** Fetch latest SampleData grid snapshot for a statutory ROWID (import/autofill/save). */
 async function fetchStatutorySampleDataSnapshot(statutoryId, context = {}) {
   const idStr = String(statutoryId || '').trim();
@@ -241,7 +403,7 @@ async function fetchStatutorySampleDataSnapshot(statutoryId, context = {}) {
   }
 }
 
-/** Try several statutory ids (bulk row vs linked ROWID) until SampleData is found. */
+/** Try several statutory ids (bulk row vs linked ROWID) until ImportData or SampleData is found. */
 async function fetchFirstAvailableStatutorySampleDataSnapshot(...args) {
   const seen = new Set();
   let context = null;
@@ -255,6 +417,8 @@ async function fetchFirstAvailableStatutorySampleDataSnapshot(...args) {
   }
   // Prefer form + month match (not statutoryId) — user imports are keyed by form/month.
   if (context?.formName) {
+    const byFormMonthImport = await fetchStatutoryImportDataSnapshot('0', context);
+    if (byFormMonthImport) return byFormMonthImport;
     const byFormMonth = await fetchStatutorySampleDataSnapshot('0', context);
     if (byFormMonth) return byFormMonth;
   }
@@ -262,6 +426,8 @@ async function fetchFirstAvailableStatutorySampleDataSnapshot(...args) {
     const idStr = String(raw || '').trim();
     if (!/^\d+$/.test(idStr) || seen.has(idStr)) continue;
     seen.add(idStr);
+    const importBlock = await fetchStatutoryImportDataSnapshot(idStr, context || {});
+    if (importBlock) return importBlock;
     const block = await fetchStatutorySampleDataSnapshot(idStr, context || {});
     if (block) return block;
   }
@@ -1930,8 +2096,8 @@ const formatForm25DayAttendanceStatus = (rec) => {
     ) {
       return 'Absent';
     }
-    if (/weekend|week off|weekoff|^holiday$/.test(statusLower)) {
-      return '';
+    if (/^wo$|weekend|week off|weekoff|^holiday$/.test(statusLower)) {
+      return 'Weekend';
     }
     if (
       /^present$/.test(statusLower) ||
@@ -1986,6 +2152,25 @@ const getAttendanceStatusRaw = (rec) => {
 
 /** Daily grid cell: raw Status from attendance API. */
 const getForm25DayCellDisplay = (rec) => getAttendanceStatusRaw(rec);
+
+const isWeekendCalendarDate = (date) => {
+  if (!date || !(date instanceof Date) || Number.isNaN(date.getTime())) return false;
+  const dow = date.getDay();
+  return dow === 0 || dow === 6;
+};
+
+/** Form 25 day columns: Present → P, Absent → A, Weekend → WO. */
+const formatForm25DayAttendanceCode = (rec, dayDate) => {
+  if (!rec) {
+    return isWeekendCalendarDate(dayDate) ? 'WO' : 'A';
+  }
+  const bucket = formatForm25DayAttendanceStatus(rec);
+  if (bucket === 'Present') return 'P';
+  if (bucket === 'Absent') return 'A';
+  if (bucket === 'Weekend') return 'WO';
+  if (isWeekendCalendarDate(dayDate)) return 'WO';
+  return 'A';
+};
 
 const form25StatusIsHalfDay = (statusRaw) => {
   const s = normalizeForm25StatusToken(statusRaw);
@@ -2295,6 +2480,9 @@ const OTHER_LEAVE_ZOHO_ALIASES = {
 
 const CONTINGENCY_LEAVE_ZOHO_ALIASES = ['contingency leave', 'contingency', 'cl'];
 
+const LEGACY_EARNED_LEAVE_ZOHO_ALIASES = ['legacy earned leave', 'legacy earned'];
+const PATERNITY_LEAVE_ZOHO_ALIASES = ['paternity leave', 'paternity'];
+
 function isForm15Part1AutofillContext(fileName, parsedFormHeader, item) {
   const blob = [
     fileName,
@@ -2310,12 +2498,545 @@ function isForm15Part1AutofillContext(fileName, parsedFormHeader, item) {
   return /form\s*15/.test(blob) && /part\s*1/.test(blob);
 }
 
-function isPrimaryEarnedLeaveZohoLabel(label) {
+/** Leave register detail columns (Earned / Medical / Other) — never Zoho People autofill. */
+function isLeaveRegisterMetricHeader(header) {
+  if (getLeaveColumnMetricType(header)) return true;
+  const s = normalizeLooseHeaderText(header);
+  if (!s.includes('leave')) return false;
+  if (
+    (s.includes('name of the') || s.includes('name of worker')) &&
+    (s.includes('worker') || s.includes('employee'))
+  ) {
+    return false;
+  }
+  if (s.includes('worker identity') || s.includes('employee identification')) return false;
+  return (
+    (s.includes('beginning') && s.includes('month')) ||
+    (s.includes('earned') && (s.includes('period') || s.includes('during'))) ||
+    (s.includes('availed') && s.includes('month')) ||
+    (s.includes('balance') && s.includes('end') && s.includes('month'))
+  );
+}
+
+/** Form 15 Part 1 leave-register sub-columns are filled from Zoho booked/balance leave API, not People. */
+function isForm15Part1LeaveRegisterHeader(header) {
+  return isLeaveRegisterMetricHeader(header);
+}
+
+/** Form 15 / leave register: resolve worker name + identity columns for Zoho matching. */
+function resolveFormEmployeeMatchHeaders(headers) {
+  const list = Array.isArray(headers) ? headers : [];
+  const employeeNameHeader =
+    list.find((header) => {
+      const h = normalizeLooseHeaderText(header);
+      if (!h.includes('name')) return false;
+      return h.includes('worker') || h.includes('employee') || h.includes('workman');
+    }) ||
+    list.find((header) => /^worker$/i.test(String(header || '').trim())) ||
+    null;
+  const employeeIdHeader =
+    list.find((header) => {
+      const h = normalizeLooseHeaderText(header);
+      if (h.includes('zoho')) return false;
+      if (h.includes('identification') || h.includes('identity')) return true;
+      if (h.includes('worker') && h.includes('identity')) return true;
+      if (h.includes('employee') && h.includes('id')) return true;
+      if (h.includes('emp') && h.includes('code')) return true;
+      return false;
+    }) || null;
+  return { employeeNameHeader, employeeIdHeader };
+}
+
+function clearLeaveRegisterCellsOnRow(row, headers) {
+  if (!row || !Array.isArray(headers)) return;
+  headers.forEach((header) => {
+    if (isLeaveRegisterMetricHeader(header)) row[header] = '';
+  });
+}
+
+function isJunkLeaveRegisterCellValue(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return false;
+  if (isSuspiciousZohoRecordIdValue(s)) return true;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
+function getLeaveTypeBalanceMetric(leaveRecord, aliases, leaveTypeLabels = {}) {
+  const raw = getOtherLeaveTypeCell(leaveRecord, aliases, leaveTypeLabels);
+  const metrics = leaveMetricsFromCell(raw);
+  return sanitizeLeaveMetricDisplayValue(metrics.balance);
+}
+
+/** Form 15 Part 1 Other Leave: one Zoho leave type per column (paidBalance). */
+function getForm15Part1OtherLeaveMetrics(leaveRecord, leaveTypeLabels = {}) {
+  const legacy = getLeaveTypeBalanceMetric(
+    leaveRecord,
+    LEGACY_EARNED_LEAVE_ZOHO_ALIASES,
+    leaveTypeLabels
+  );
+  const paternity = getLeaveTypeBalanceMetric(
+    leaveRecord,
+    PATERNITY_LEAVE_ZOHO_ALIASES,
+    leaveTypeLabels
+  );
+  const contingency = getLeaveTypeBalanceMetric(
+    leaveRecord,
+    CONTINGENCY_LEAVE_ZOHO_ALIASES,
+    leaveTypeLabels
+  );
+  return {
+    beginning: legacy,
+    availed: paternity,
+    balance: contingency,
+    hasData: legacy !== '' || paternity !== '' || contingency !== '',
+  };
+}
+
+function applyForm15Part1OtherLeaveToRow(
+  row,
+  leaveRecord,
+  headers,
+  leaveTypeLabels,
+  { overwrite = true } = {}
+) {
+  if (!row || !leaveRecord || !headers) return 0;
+  const metrics = getForm15Part1OtherLeaveMetrics(leaveRecord, leaveTypeLabels);
+  if (!metrics.hasData) return 0;
+  const setCell = (header, value) => {
+    if (!header || value === '') return;
+    const cur = String(row[header] ?? '').trim();
+    if (!overwrite && cur && !isJunkLeaveRegisterCellValue(cur)) return;
+    row[header] = value;
+  };
+  setCell(headers.otherBeginning, metrics.beginning);
+  setCell(headers.otherAvailed, metrics.availed);
+  setCell(headers.otherBalance, metrics.balance);
+  return 1;
+}
+
+function applyForm15Part1LeaveToAllRows(
+  rows,
+  employeesForMapping,
+  currentHeaders,
+  groupLabels,
+  leaveRecords,
+  leaveTypeLabels
+) {
+  if (!Array.isArray(rows) || rows.length === 0) return 0;
+  const form15Headers = resolveForm15Part1LeaveColumnHeaders(currentHeaders, groupLabels);
+  const hasEarnedTargets =
+    form15Headers?.earnedBeginning ||
+    form15Headers?.earnedDuring ||
+    form15Headers?.earnedAvailed ||
+    form15Headers?.earnedBalance;
+  const hasOtherTargets =
+    form15Headers?.otherBeginning ||
+    form15Headers?.otherAvailed ||
+    form15Headers?.otherBalance;
+  if (!hasEarnedTargets && !hasOtherTargets) {
+    return 0;
+  }
+  const lookup = buildLeaveRecordLookupMap(leaveRecords);
+  const { employeeNameHeader, employeeIdHeader } = resolveFormEmployeeMatchHeaders(currentHeaders);
+  let applied = 0;
+  rows.forEach((row, index) => {
+    if (!row || typeof row !== 'object') return;
+    [
+      form15Headers.earnedBeginning,
+      form15Headers.earnedDuring,
+      form15Headers.earnedAvailed,
+      form15Headers.earnedBalance,
+      form15Headers.otherBeginning,
+      form15Headers.otherAvailed,
+      form15Headers.otherBalance,
+    ]
+      .filter(Boolean)
+      .forEach((header) => {
+        if (isJunkLeaveRegisterCellValue(row[header])) row[header] = '';
+      });
+
+    let leaveRecord = findLeaveRecordForFormRow(
+      lookup,
+      row,
+      employeeIdHeader,
+      employeeNameHeader
+    );
+    if (!leaveRecord) {
+      const empItem = employeesForMapping?.[index];
+      const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+      leaveRecord = findLeaveRecordForEmployee(
+        leaveRecords,
+        emp,
+        row,
+        employeeIdHeader,
+        employeeNameHeader
+      );
+    }
+    if (!leaveRecord) return;
+    if (hasEarnedTargets) {
+      applied += applyForm15Part1EarnedLeaveToRow(
+        row,
+        leaveRecord,
+        form15Headers,
+        leaveTypeLabels,
+        { overwrite: true }
+      );
+    }
+    if (hasOtherTargets) {
+      applied += applyForm15Part1OtherLeaveToRow(
+        row,
+        leaveRecord,
+        form15Headers,
+        leaveTypeLabels,
+        { overwrite: true }
+      );
+    }
+  });
+  return applied;
+}
+
+function finalizeForm15Part1LeaveAutofill(
+  mappedData,
+  employeesForMapping,
+  currentHeaders,
+  groupLabels,
+  leaveRecords,
+  leaveTypeLabels
+) {
+  return applyForm15Part1LeaveToAllRows(
+    mappedData,
+    employeesForMapping,
+    currentHeaders,
+    groupLabels,
+    leaveRecords,
+    leaveTypeLabels
+  );
+}
+
+const EARNED_LEAVE_ZOHO_LABEL_ALIASES = [
+  'earned leave',
+  'earned leave test',
+  'earned leave(test)',
+  'earned leave (test)',
+];
+
+function isEarnedLeaveZohoLabel(label) {
   const normalized = normalizeLooseHeaderText(label);
   if (!normalized || normalized.includes('legacy')) return false;
-  if (normalized === 'earned leave' || normalized === 'earned leave test') return true;
-  if (normalized.includes('earned') && normalized.includes('test')) return true;
-  return false;
+  return EARNED_LEAVE_ZOHO_LABEL_ALIASES.some(
+    (alias) => normalized === alias || normalized.includes(alias)
+  );
+}
+
+/** Resolve Form 15 Part 1 / Form X earned-leave leaf columns under merged group headers. */
+function resolveForm15Part1LeaveColumnHeaders(headers, groupLabels) {
+  const headersArr = Array.isArray(headers) ? headers : [];
+  const groups =
+    Array.isArray(groupLabels) && groupLabels.length === headersArr.length ? groupLabels : null;
+  const result = {
+    earnedBeginning: null,
+    earnedDuring: null,
+    earnedAvailed: null,
+    earnedBalance: null,
+    medicalBeginning: null,
+    medicalAvailed: null,
+    medicalBalance: null,
+    otherBeginning: null,
+    otherAvailed: null,
+    otherBalance: null,
+  };
+  const beginnings = [];
+  const availeds = [];
+  const balances = [];
+  const earnedDuringCols = [];
+
+  const isEarnedGroup = (g) => normalizeLooseHeaderText(g).includes('earned leave');
+  const isMedicalGroup = (g) => {
+    const gl = normalizeLooseHeaderText(g);
+    return gl.includes('medical leave') || (gl.includes('medical') && gl.includes('leave'));
+  };
+  const isOtherGroup = (g) => normalizeLooseHeaderText(g).includes('other leave');
+
+  headersArr.forEach((header, index) => {
+    const metric = getLeaveColumnMetricType(header);
+    if (!metric) return;
+    const group = groups ? String(groups[index] || '') : '';
+    const gl = normalizeLooseHeaderText(group);
+
+    if (!groups || isEarnedGroup(group)) {
+      if (metric === 'beginning' && !result.earnedBeginning) result.earnedBeginning = header;
+      if (metric === 'earned' && !result.earnedDuring) result.earnedDuring = header;
+      if (metric === 'availed' && !result.earnedAvailed) result.earnedAvailed = header;
+      if (metric === 'balance' && !result.earnedBalance) result.earnedBalance = header;
+    } else if (isMedicalGroup(group)) {
+      if (metric === 'beginning' && !result.medicalBeginning) result.medicalBeginning = header;
+      if (metric === 'availed' && !result.medicalAvailed) result.medicalAvailed = header;
+      if (metric === 'balance' && !result.medicalBalance) result.medicalBalance = header;
+    } else if (isOtherGroup(group)) {
+      if (metric === 'beginning' && !result.otherBeginning) result.otherBeginning = header;
+      if (metric === 'availed' && !result.otherAvailed) result.otherAvailed = header;
+      if (metric === 'balance' && !result.otherBalance) result.otherBalance = header;
+    }
+
+    if (!groups) {
+      if (metric === 'beginning') beginnings.push(header);
+      if (metric === 'earned') earnedDuringCols.push(header);
+      if (metric === 'availed') availeds.push(header);
+      if (metric === 'balance') balances.push(header);
+    }
+  });
+
+  if (!groups) {
+    if (!result.earnedBeginning && beginnings.length > 0) result.earnedBeginning = beginnings[0];
+    if (!result.earnedDuring && earnedDuringCols.length > 0) result.earnedDuring = earnedDuringCols[0];
+    if (!result.earnedAvailed && availeds.length > 0) result.earnedAvailed = availeds[0];
+    if (!result.earnedBalance && balances.length > 0) result.earnedBalance = balances[0];
+    if (!result.medicalBeginning && beginnings.length > 1) result.medicalBeginning = beginnings[1];
+    if (!result.medicalAvailed && availeds.length > 1) result.medicalAvailed = availeds[1];
+    if (!result.medicalBalance && balances.length > 1) result.medicalBalance = balances[1];
+    if (!result.otherBeginning && beginnings.length > 2) result.otherBeginning = beginnings[2];
+    if (!result.otherAvailed && availeds.length > 2) result.otherAvailed = availeds[2];
+    if (!result.otherBalance && balances.length > 2) result.otherBalance = balances[2];
+  }
+
+  return result;
+}
+
+function isForm15Part2Context(formHeader, rowItem, fileName, tableHeaders) {
+  const blob = [
+    fileName,
+    rowItem?.formName,
+    rowItem?.FormName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.wagePeriodText,
+    Array.isArray(tableHeaders) ? tableHeaders.join(' ') : ''
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ');
+  return (
+    (/form\s*15/.test(blob) && /part\s*2|partii|part_2/.test(blob)) ||
+    (/form\s*15/.test(blob) && blob.includes('part') && blob.includes('2'))
+  );
+}
+
+function looksLikeForm15Part2TableHeaders(tableHeaders) {
+  const hdrBlob = (Array.isArray(tableHeaders) ? tableHeaders : [])
+    .map((h) => String(h || '').toLowerCase())
+    .join(' | ');
+  if (!hdrBlob) return false;
+  const hasAdvanceLeaf =
+    hdrBlob.includes('advance paid') ||
+    hdrBlob.includes('advance recover') ||
+    hdrBlob.includes('pending recovery');
+  const hasDeductionBand =
+    hdrBlob.includes('labour welfare') ||
+    hdrBlob.includes('damage') ||
+    hdrBlob.includes('fine') ||
+    hdrBlob.includes('deduction');
+  return hasAdvanceLeaf && hasDeductionBand;
+}
+
+/** Map Statutory month filter (May, Jun, …) to Zoho Payroll `payroll_month=YYYY-MM`. */
+function resolvePayrollMonthIsoFromStatutoryContext(selectedMonthStr, item, wagePeriodLine = '') {
+  const monthName =
+    resolveToFullMonthName(String(selectedMonthStr || '').trim()) ||
+    resolveToFullMonthName(item?.monthFilter || item?.MonthFilter || item?.monthfilter || '') ||
+    getMonthFromDueDate(item?.dueDate || item?.DueDate || '') ||
+    inferMonthFromWagePeriodLine(wagePeriodLine);
+  if (!monthName) return null;
+  const monthIdx = MONTH_NAMES.findIndex((m) => m.toLowerCase() === String(monthName).toLowerCase());
+  if (monthIdx < 0) return null;
+  const year =
+    extractYearFromDueDate(item?.dueDate || item?.DueDate || '') ||
+    extractYearFromWagePeriodLine(wagePeriodLine) ||
+    new Date().getFullYear();
+  return `${year}-${String(monthIdx + 1).padStart(2, '0')}`;
+}
+
+/** Try primary wage month plus adjacent years (Payroll table / Zoho pay run may differ by one year). */
+function resolvePayrollMonthIsoCandidates(selectedMonthStr, item, wagePeriodLine = '') {
+  const primary = resolvePayrollMonthIsoFromStatutoryContext(selectedMonthStr, item, wagePeriodLine);
+  if (!primary) return [];
+  const candidates = [primary];
+  const year = parseInt(primary.slice(0, 4), 10);
+  const monthPart = primary.slice(5);
+  if (Number.isFinite(year) && /^\d{2}$/.test(monthPart)) {
+    candidates.push(`${year - 1}-${monthPart}`);
+    candidates.push(`${year + 1}-${monthPart}`);
+  }
+  return [...new Set(candidates)];
+}
+
+/** Form 15 Part 2 Date of payment — format Zoho pay_date (YYYY-MM-DD) to DD-MM-YYYY. */
+function formatForm15Part2PayrollPayDate(payDateRaw) {
+  const raw = String(payDateRaw || '').trim();
+  if (!raw) return '';
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[3]}-${iso[2]}-${iso[1]}`;
+  const dmy = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  if (dmy) {
+    const dd = String(dmy[1]).padStart(2, '0');
+    const mm = String(dmy[2]).padStart(2, '0');
+    return `${dd}-${mm}-${dmy[3]}`;
+  }
+  return raw;
+}
+
+/** Fallback when pay_date is unavailable — last calendar day of the wage month (DD-MM-YYYY). */
+function formatForm15Part2MonthEndPaymentDate(payrollMonthIso) {
+  const m = String(payrollMonthIso || '').trim();
+  if (!/^\d{4}-\d{2}$/.test(m)) return '';
+  const year = parseInt(m.slice(0, 4), 10);
+  const month = parseInt(m.slice(5, 7), 10);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return '';
+  const lastDay = new Date(year, month, 0).getDate();
+  const dd = String(lastDay).padStart(2, '0');
+  const mm = String(month).padStart(2, '0');
+  return `${dd}-${mm}-${year}`;
+}
+
+function isForm15Part2BasicWagesHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return (
+    s.includes('basic wage') ||
+    s.includes('basic wag') ||
+    (s.includes('basic') && s.includes('wage') && !s.includes('hra'))
+  );
+}
+
+function isForm15Part2GrossWagesHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return s.includes('gross wage') || s.includes('gross wag') || (s.includes('gross') && s.includes('wage'));
+}
+
+function isForm15Part2OtherAllowancesHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return (
+    s.includes('other allowance') ||
+    (s.includes('other') && s.includes('allowance') && !s.includes('deduction'))
+  );
+}
+
+function isForm15Part2TotalDeductionsHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return s.includes('total') && s.includes('deduction');
+}
+
+function isForm15Part2NetWagesHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return (s.includes('net') && (s.includes('wage') || s.includes('wag'))) || s.includes('net wage');
+}
+
+function isForm15Part2HouseRentAllowanceHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return (
+    s.includes('house rent allowance') ||
+    s.includes('hra') ||
+    (s.includes('house') && s.includes('rent'))
+  );
+}
+
+/** Form 15 Part 2 wage/deduction columns — filled from Zoho Payroll, not People fuzzy match. */
+function isForm15Part2PayrollAutofillHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  if (s.includes('signature') || s.includes('thumb impression')) return false;
+  return (
+    isForm15Part2BasicWagesHeader(h) ||
+    isForm15Part2HouseRentAllowanceHeader(h) ||
+    isForm15Part2GrossWagesHeader(h) ||
+    isForm15Part2OtherAllowancesHeader(h) ||
+    isForm15Part2TotalDeductionsHeader(h) ||
+    isForm15Part2NetWagesHeader(h) ||
+    isForm15Part2DaysWorkedHeader(h) ||
+    isForm15Part2DearnessAllowanceHeader(h) ||
+    isForm15Part2OvertimeWagesHeader(h) ||
+    isForm15Part2AnyOtherDeductionsHeader(h) ||
+    isForm15Part2DateOfPaymentHeader(h) ||
+    (s.includes('dearness') && s.includes('allowance')) ||
+    s.includes('overtime') ||
+    (s.includes('leave') && (s.includes('wage') || s.includes('wag')))
+  );
+}
+
+/** Advances, fines, and other deduction sub-columns — never People fuzzy match (avoids email bleed). */
+function isForm15Part2AnyOtherDeductionsHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  if (!(s.includes('other') && s.includes('deduction'))) return false;
+  return !s.includes('total');
+}
+
+function isForm15Part2DateOfPaymentHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return s.includes('date') && s.includes('payment');
+}
+
+function isForm15Part2DeductionOrAdvanceHeader(h) {
+  if (isForm15Part2AnyOtherDeductionsHeader(h)) return false;
+  const s = normalizeLooseHeaderText(h);
+  return (
+    s.includes('deduction') ||
+    s.includes('advance') ||
+    s.includes('damage') ||
+    s.includes('fine') ||
+    s.includes('recovery')
+  );
+}
+
+function isForm15Part2SkipPeopleAutofillHeader(h) {
+  return isForm15Part2PayrollAutofillHeader(h) || isForm15Part2DeductionOrAdvanceHeader(h);
+}
+
+function isForm15Part2DaysWorkedHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return s.includes('days') && s.includes('work');
+}
+
+function isForm15Part2DearnessAllowanceHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return s.includes('dearness') || /\bda\b/.test(s);
+}
+
+function isForm15Part2OvertimeWagesHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return s.includes('overtime');
+}
+
+/** Form 15 Part 2: bank account for receipt / bank transaction column. */
+function isForm15Part2ReceiptByWorkerHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return (
+    (s.includes('receipt') && (s.includes('worker') || s.includes('employee'))) ||
+    (s.includes('bank') && s.includes('transaction')) ||
+    (s.includes('receipt') && s.includes('bank'))
+  );
+}
+
+function resolveForm15Part2TableHeaders(headers) {
+  return {
+    basicWages: headers.find((h) => isForm15Part2BasicWagesHeader(h)),
+    houseRentAllowance: headers.find((h) => isForm15Part2HouseRentAllowanceHeader(h)),
+    dearnessAllowance: headers.find((h) => isForm15Part2DearnessAllowanceHeader(h)),
+    grossWages: headers.find((h) => isForm15Part2GrossWagesHeader(h)),
+    otherAllowances: headers.find((h) => isForm15Part2OtherAllowancesHeader(h)),
+    overtimeWages: headers.find((h) => isForm15Part2OvertimeWagesHeader(h)),
+    daysWorked: headers.find((h) => isForm15Part2DaysWorkedHeader(h)),
+    totalDeductions: headers.find((h) => isForm15Part2TotalDeductionsHeader(h)),
+    netWages: headers.find((h) => isForm15Part2NetWagesHeader(h)),
+    anyOtherDeductions: headers.find((h) => isForm15Part2AnyOtherDeductionsHeader(h)),
+    dateOfPayment: headers.find((h) => isForm15Part2DateOfPaymentHeader(h)),
+    receiptByWorker: headers.find((h) => isForm15Part2ReceiptByWorkerHeader(h)),
+    employeeName: headers.find((h) => {
+      const t = String(h || '').toLowerCase();
+      return t.includes('name') && (t.includes('employee') || t.includes('worker') || t.includes('emp'));
+    })
+  };
+}
+
+function isPrimaryEarnedLeaveZohoLabel(label) {
+  return isEarnedLeaveZohoLabel(label);
 }
 
 function getEarnedLeaveTypeCell(leaveRecord, leaveTypeLabels = {}) {
@@ -2359,7 +3080,99 @@ function leaveMetricsFromCell(raw) {
 }
 
 function getEarnedLeaveTypeMetrics(leaveRecord, leaveTypeLabels = {}) {
+  const primary = getEarnedLeaveMetricsFromRecord(leaveRecord, leaveTypeLabels);
+  if (primary.balance !== '' || primary.availed !== '') {
+    return {
+      beginning: primary.balance,
+      availed: primary.availed,
+      balance: primary.balance,
+      hasData: true,
+    };
+  }
   return leaveMetricsFromCell(getEarnedLeaveTypeCell(leaveRecord, leaveTypeLabels));
+}
+
+function leaveRecordMatchesEmployee(leaveRecord, emp, row, employeeIdHeader, employeeNameHeader) {
+  const { names: leaveNames, ids: leaveIds } = collectLeaveRecordIdentityKeys(leaveRecord);
+
+  const rowName =
+    employeeNameHeader && row?.[employeeNameHeader]
+      ? String(row[employeeNameHeader]).toLowerCase().trim()
+      : '';
+  const rowNameParen = (() => {
+    const m = rowName.match(/\(([^)]+)\)\s*$/);
+    return m ? m[1].toLowerCase().trim() : '';
+  })();
+  const rowId =
+    employeeIdHeader && row?.[employeeIdHeader]
+      ? String(row[employeeIdHeader]).toLowerCase().trim()
+      : '';
+  const empNames = [
+    rowName,
+    String(row?.__employeeLookupName || '').trim().toLowerCase(),
+    String(emp?.FirstName || emp?.['FirstName'] || '').trim().toLowerCase(),
+    `${String(emp?.FirstName || emp?.['FirstName'] || '').trim()} ${String(emp?.LastName || emp?.['LastName'] || '').trim()}`
+      .trim()
+      .toLowerCase(),
+    String(emp?.Name || emp?.['Name'] || '').trim().toLowerCase(),
+  ].filter(Boolean);
+  const empIds = [
+    rowId,
+    rowNameParen,
+    String(row?.__employeeLookupId || '').toLowerCase().trim(),
+    String(emp?.EmployeeID || emp?.['EmployeeID'] || '').toLowerCase().trim(),
+    String(emp?.Zoho_ID || emp?.['Zoho_ID'] || emp?.ZohoID || emp?.['ZohoID'] || '')
+      .toLowerCase()
+      .trim(),
+  ].filter(Boolean);
+
+  if (empIds.some((id) => leaveIds.includes(id))) return true;
+  if (
+    empIds.some(
+      (id) => id && leaveNames.some((ln) => ln.includes(`(${id})`) || ln.endsWith(` ${id}`))
+    )
+  ) {
+    return true;
+  }
+  return empNames.some((name) =>
+    leaveNames.some((ln) => ln === name || ln.includes(name) || name.includes(ln))
+  );
+}
+
+function findLeaveRecordForEmployee(leaveRecords, emp, row, employeeIdHeader, employeeNameHeader) {
+  if (!Array.isArray(leaveRecords) || leaveRecords.length === 0) return null;
+  return (
+    leaveRecords.find((rec) =>
+      leaveRecordMatchesEmployee(rec, emp, row, employeeIdHeader, employeeNameHeader)
+    ) || null
+  );
+}
+
+function applyForm15Part1EarnedLeaveToRow(
+  row,
+  leaveRecord,
+  headers,
+  leaveTypeLabels,
+  { overwrite = true } = {}
+) {
+  if (!row || !leaveRecord || !headers) return 0;
+  const metrics = getForm15EarnedLeavePeriodMetrics(leaveRecord, leaveTypeLabels);
+  if (!metrics.hasData) return 0;
+  const periodBalance = metrics.periodBalance;
+  const periodBooked = metrics.periodBooked;
+  const setCell = (header, value) => {
+    if (!header || value === '') return;
+    const cur = String(row[header] ?? '').trim();
+    if (!overwrite && cur && !isJunkLeaveRegisterCellValue(cur)) return;
+    row[header] = value;
+  };
+  // Leave at beginning / earned during / balance at end → paidBalance (Leave earned during the Period)
+  setCell(headers.earnedBeginning, periodBalance);
+  setCell(headers.earnedDuring, periodBalance);
+  setCell(headers.earnedBalance, periodBalance);
+  // Leave availed during the Month → paidBooked (booked count)
+  setCell(headers.earnedAvailed, periodBooked);
+  return 1;
 }
 
 function getContingencyLeaveMetrics(leaveRecord, leaveTypeLabels = {}) {
@@ -2498,6 +3311,7 @@ function resolveFormXLeaveSectionHeaders(headers, groupLabels) {
     }
   });
 
+  if (!result.earnedBeginning && lists.beginning.length > 0) result.earnedBeginning = lists.beginning[0];
   if (!result.earnedEarned && lists.earned.length > 0) result.earnedEarned = lists.earned[0];
   if (!result.earnedAvailed && lists.availed.length > 0) result.earnedAvailed = lists.availed[0];
   if (!result.earnedBalance && lists.balance.length > 0) result.earnedBalance = lists.balance[0];
@@ -3970,6 +4784,12 @@ const resolveForm25PeriodMonthYear = (selectedMonthStr, item, fallbackLine = '')
     extractYearFromWagePeriodLine(fallbackLine) ||
     new Date().getFullYear();
   return { fullMonth, year };
+};
+
+/** Form 25 wage-period banner: month from filter; year always current calendar year. */
+const resolveForm25DisplayPeriodMonthYear = (selectedMonthStr, item, fallbackLine = '') => {
+  const { fullMonth } = resolveForm25PeriodMonthYear(selectedMonthStr, item, fallbackLine);
+  return { fullMonth, year: new Date().getFullYear() };
 };
 
 /** Infer calendar month from an existing wage-period sentence in the template (e.g. "…April 202…"). */
@@ -5462,6 +6282,8 @@ const isWageRegisterParentBannerText = (txt) => {
     .toLowerCase();
   if (!t) return false;
   if (t === 'deduction' || t === 'deductions') return true;
+  if (t === 'advances' || t === 'advance') return true;
+  if (/damages\s*\/\s*fine/.test(t) || (t.includes('damages') && t.includes('fine'))) return true;
   if (t.includes('wages earned') || t.includes('wage earned')) return true;
   if (t.includes('other allowances/cash payment')) return true;
   if (t === 'other') return true;
@@ -5524,6 +6346,33 @@ const findWageRegisterTableAnchor = (getMergedAwareCellText, maxRow = 45, maxCol
     if (score > bestScore) {
       bestScore = score;
       best = { r, c: serialCol };
+    }
+  }
+  return best;
+};
+
+/** Form 15 Part 2 (Tamil Nadu): leaf header row with Advance Paid / ESI / Damages columns. */
+const findForm15Part2TableAnchor = (getMergedAwareCellText, maxRow = 45, maxCol = 40) => {
+  let best = null;
+  let bestScore = -1;
+  for (let r = 0; r < maxRow; r += 1) {
+    let score = 0;
+    let firstCol = -1;
+    for (let c = 0; c < maxCol; c += 1) {
+      const t = normalizeWageRegisterHeaderCell(getMergedAwareCellText(r, c));
+      if (!t) continue;
+      if (firstCol < 0) firstCol = c;
+      if (t.includes('advance paid')) score += 40;
+      if (t.includes('advance recover')) score += 15;
+      if (t.includes('pending recovery')) score += 10;
+      if (t.includes('employee') && t.includes('insurance')) score += 25;
+      if (t.includes('labour welfare fund')) score += 15;
+      if (t.includes('damage') || t.includes('fine')) score += 8;
+      if (isWageRegisterSerialHeaderCell(t)) score += 20;
+    }
+    if (score > bestScore && score >= 35) {
+      bestScore = score;
+      best = { r, c: Math.max(0, firstCol) };
     }
   }
   return best;
@@ -6049,6 +6898,40 @@ const filterEmployeesBySiteLocation = (employees, siteName, siteDetailsList) => 
     locations.some((loc) => employeeMatchesSiteLocation(emp, loc))
   );
   return filtered;
+};
+
+/** CLRA industry / act: autofill from Zoho Creator Employee_Master_Report, not Zoho People. */
+const resolveClraCreatorAutofillContext = (item, ctx = {}) => {
+  if (!item || typeof item !== 'object') return false;
+
+  const act = String(item.act ?? item.Act ?? '').trim();
+  const sector = String(item.sector ?? item.Sector ?? '').trim();
+  const formName = String(item.formName ?? item.FormName ?? '').trim();
+  const description = String(item.description ?? item.Description ?? '').trim();
+  const haystack = `${act} ${sector} ${formName} ${description}`.toLowerCase();
+
+  if (getActCategoryFromActSector(act, sector) === 'clra') return true;
+  if (/contract\s*labou?r|\bclra\b|form\s*xviii/i.test(haystack)) return true;
+
+  const allowed = ctx.allowedActCategoryList;
+  if (Array.isArray(allowed) && allowed.length === 1 && allowed[0] === 'clra') return true;
+
+  const sites =
+    Array.isArray(ctx.siteDetailsList) && ctx.siteDetailsList.length > 0
+      ? ctx.siteDetailsList
+      : readSiteDetailsCache() || [];
+  const siteName =
+    ctx.resolveSiteName?.(item) ||
+    String(item.site ?? item.Site ?? item.siteName ?? item.SiteName ?? '').trim();
+  if (!siteName || sites.length === 0) return false;
+
+  for (const token of siteName.split(/\s*,\s*/).map((t) => t.trim()).filter(Boolean)) {
+    const site = findSiteDetailByName(sites, token);
+    const industry = String(site?.industry ?? site?.Industry ?? '').trim();
+    if (industryLabelToActCategory(industry) === 'clra') return true;
+  }
+
+  return false;
 };
 
 const buildSiteInchargeName = (site) =>
@@ -7783,6 +8666,7 @@ const isRegisterOfWagesFormContext = (formHeader, rowItem, fileName, tableHeader
   if (isFormBLabourWelfareContext(formHeader, rowItem, fileName, tableHeaders)) return false;
   // Form X (leave register) must not use Form W wage-register table header logic.
   if (/\bform[_\s-]*x\b|\bform-x\b|form_x/.test(parts)) return false;
+  if (isForm15Part2Context(formHeader, rowItem, fileName, tableHeaders)) return true;
   if (parts.includes('form w') || parts.includes('form-w') || parts.includes('form_w')) return true;
   if (/\bform[\s._-]*27\b|\bform[\s._-]*xxvii\b|\bxxvii\b/.test(parts)) return true;
   if (parts.includes('register') && /\bwages?\b/.test(parts)) return true;
@@ -7853,7 +8737,11 @@ const adjustRegisterOfWagesHeaderBand = (worksheet, dataStartIndex, numCols, ori
     return (
       /wages?\s*earned|deductions?|gross\s*wages?|net\s*wages?|provident|allowance|serial|s\.?\s*no/.test(blob) ||
       blob.includes('other allowances') ||
-      blob.includes('fines')
+      blob.includes('fines') ||
+      blob.includes('advance paid') ||
+      blob.includes('advances') ||
+      blob.includes('labour welfare') ||
+      (blob.includes('damage') && blob.includes('fine'))
     );
   };
   const rowConnectsToHeaderBand = (r, bandBottom) => {
@@ -7869,7 +8757,7 @@ const adjustRegisterOfWagesHeaderBand = (worksheet, dataStartIndex, numCols, ori
       const val = rawCell(m.s.r, m.s.c).toLowerCase();
       if (
         spansBand ||
-        /wages?\s*earned|deductions?|other\s+allowance|gross\s*wages?|net\s*wages?/.test(val)
+        /wages?\s*earned|deductions?|other\s+allowance|gross\s*wages?|net\s*wages?|advances?|damages\s*\/\s*fine|labour\s*welfare/.test(val)
       ) {
         return true;
       }
@@ -11002,8 +11890,23 @@ const Statutory = ({ userEmail, userRole }) => {
       formmasterTemplates,
       formmasterFormFileByMatchKey
     );
-    prefetchStatutoryAutofillData();
-    fetchPeopleDataForAutofillDisplay().catch(() => null);
+    const clraAutofillContext = resolveClraCreatorAutofillContext(enrichedItem, {
+      allowedActCategoryList,
+      siteDetailsList,
+      resolveSiteName: (row) =>
+        resolveStatutorySiteNameForContractorAutofill(row, {
+          siteFromUrl,
+          allowedSiteNameList,
+          resolveSiteFn: resolveSiteDisplayName,
+          allRows: statutoryData,
+        }),
+    });
+    prefetchStatutoryAutofillData({ clraIndustry: clraAutofillContext });
+    if (clraAutofillContext) {
+      prefetchClraData();
+    } else {
+      fetchPeopleDataForAutofillDisplay().catch(() => null);
+    }
     setIsAutofillMode(true);
     setAutofillItem(enrichedItem);
     setFormFileLoading(true);
@@ -13505,6 +14408,7 @@ const Statutory = ({ userEmail, userRole }) => {
     headersToUse,
     parsedHeaderRowIndex,
     parsedDataStartIndex,
+    parsedTableStartCol,
     parsedFormHeader,
     formFileName,
     headerFormData
@@ -13562,28 +14466,109 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
 
-    let markerRow = parsedDataStartIndex != null && parsedDataStartIndex > 0 ? parsedDataStartIndex : -1;
+    if (parsedTableStartCol != null && Number(parsedTableStartCol) >= 0) {
+      startCol = Number(parsedTableStartCol) + 1;
+    }
+
+    let markerRow = -1;
     let markerCols = [];
-    for (let r = Math.max(headerRow, markerRow > 0 ? markerRow - 1 : headerRow); r <= Math.min(headerRow + 6, maxScanRows); r++) {
+    for (let r = headerRow; r <= Math.min(headerRow + 8, maxScanRows); r++) {
       const cols = [];
       for (let c = startCol; c <= maxScanCols; c++) {
         const t = normalize(excelCellValueToString(worksheet.getCell(r, c)?.value));
-        if (/^\d+$/.test(t)) cols.push(c);
+        if (/^\d{1,2}$/.test(t) && Number(t) >= 1 && Number(t) <= 31) cols.push(c);
       }
       if (cols.length > markerCols.length) {
         markerCols = cols;
         markerRow = r;
       }
     }
-    const dataStartRow =
+
+    let dataStartRow =
       parsedDataStartIndex != null && parsedDataStartIndex >= 0
         ? parsedDataStartIndex + 1
         : markerCols.length >= 5 && markerRow > 0
           ? markerRow + 1
           : headerRow + 1;
-    const hdrLen = Array.isArray(headersToUse) ? headersToUse.length : 12;
-    const orderedCols = Array.from({ length: Math.max(12, hdrLen) }, (_, i) => startCol + i);
-    const hdrs = Array.isArray(headersToUse) ? headersToUse : [];
+    if (markerCols.length >= 5 && markerRow > 0) {
+      dataStartRow = Math.max(dataStartRow, markerRow + 1);
+    }
+
+    const sourceHeaders = Array.isArray(headersToUse) ? [...headersToUse] : [];
+    const hdrLen = sourceHeaders.length || 12;
+    const dayStartIdx = sourceHeaders.findIndex((h) => {
+      const t = String(h || '').trim();
+      return /^\d{1,2}$/.test(t) && Number(t) >= 1 && Number(t) <= 31;
+    });
+    const buildForm25OrderedCols = () => {
+      const prefixCount = dayStartIdx >= 0 ? dayStartIdx : hdrLen;
+      if (markerCols.length >= 5 && dayStartIdx >= 0) {
+        const cols = [];
+        for (let j = 0; j < prefixCount; j++) cols.push(startCol + j);
+        const dayCount = Math.max(hdrLen - dayStartIdx, markerCols.length);
+        for (let d = 0; d < dayCount; d += 1) {
+          cols.push(markerCols[d] ?? startCol + prefixCount + d);
+        }
+        return cols;
+      }
+      return Array.from({ length: Math.max(12, hdrLen) }, (_, i) => startCol + i);
+    };
+    const orderedCols = buildForm25OrderedCols();
+    const hdrs = sourceHeaders;
+
+    const isPlaceholderCell = (v) => /^enter\s+/i.test(String(v ?? '').trim());
+    const pickExportCell = (v) => {
+      if (v == null || String(v).trim() === '' || isPlaceholderCell(v)) return '';
+      return v;
+    };
+    const getForm25RowValueForHeader = (rowObj, header, headerIndex) => {
+      if (!rowObj || typeof rowObj !== 'object' || Array.isArray(rowObj)) return '';
+      if (header && Object.prototype.hasOwnProperty.call(rowObj, header)) {
+        const direct = pickExportCell(rowObj[header]);
+        if (direct !== '') return direct;
+      }
+      if (headerIndex != null && sourceHeaders[headerIndex]) {
+        const sourceKey = sourceHeaders[headerIndex];
+        if (Object.prototype.hasOwnProperty.call(rowObj, sourceKey)) {
+          const sourceVal = pickExportCell(rowObj[sourceKey]);
+          if (sourceVal !== '') return sourceVal;
+        }
+      }
+      const baseHeader = String(header || '')
+        .replace(/\s*\(\d+\)\s*$/, '')
+        .trim();
+      if (baseHeader && baseHeader !== header && Object.prototype.hasOwnProperty.call(rowObj, baseHeader)) {
+        const baseVal = pickExportCell(rowObj[baseHeader]);
+        if (baseVal !== '') return baseVal;
+      }
+      if (headerIndex != null && headerIndex >= 0) {
+        const vals = Object.values(rowObj);
+        const indexed = pickExportCell(vals[headerIndex]);
+        if (indexed !== '') return indexed;
+      }
+      return '';
+    };
+    const toForm25OrderedValues = (row, rowIndex) => {
+      if (Array.isArray(row)) {
+        const out = [...row];
+        const first = String(out[0] ?? '').trim();
+        const m = first.match(/^(\d+)\s+(.+)$/);
+        if (m && (!out[1] || String(out[1]).trim() === '')) {
+          out[0] = m[1];
+          out[1] = m[2];
+        }
+        if (out[0] == null || String(out[0]).trim() === '') out[0] = rowIndex + 1;
+        const colCount = Math.max(orderedCols.length, hdrs.length, out.length);
+        return Array.from({ length: colCount }, (_, idx) => out[idx] ?? '');
+      }
+      const colCount = Math.max(orderedCols.length, hdrs.length);
+      const out = Array.from({ length: colCount }, (_, idx) => {
+        const header = hdrs[idx] || '';
+        return header ? getForm25RowValueForHeader(row, header, idx) : '';
+      });
+      if (out[0] == null || String(out[0]).trim() === '') out[0] = rowIndex + 1;
+      return out;
+    };
 
     const headerFields = parsedFormHeader?.fields;
     const headerValues = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
@@ -13608,15 +14593,25 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     const rowLooksMeaningful = (row) => {
+      const hasAttendanceCode = (vals) =>
+        vals.some((v) => /^(P|A|WO|H|L|WOP|OD|SL|CL|EL)$/i.test(String(v).trim()));
       if (Array.isArray(row)) {
         const vals = row.map((v) => String(v ?? '').trim()).filter(Boolean);
         if (vals.length === 0) return false;
-        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+        return (
+          hasAttendanceCode(vals) ||
+          vals.some((v) => /[a-z]/i.test(v)) ||
+          !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v))
+        );
       }
       if (row && typeof row === 'object') {
         const vals = Object.values(row).map((v) => String(v ?? '').trim()).filter(Boolean);
         if (vals.length === 0) return false;
-        return vals.some((v) => /[a-z]/i.test(v)) || !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v));
+        return (
+          hasAttendanceCode(vals) ||
+          vals.some((v) => /[a-z]/i.test(v)) ||
+          !vals.every((v) => /^-?\d+(\.\d+)?$/.test(v))
+        );
       }
       return false;
     };
@@ -13629,22 +14624,7 @@ const Statutory = ({ userEmail, userRole }) => {
           : [];
     const sourceRows = sourcePrimary
       .filter((row) => rowLooksMeaningful(row))
-      .map((row, idx) => {
-        if (Array.isArray(row)) {
-          const out = [...row];
-          const first = String(out[0] ?? '').trim();
-          const m = first.match(/^(\d+)\s+(.+)$/);
-          if (m && (!out[1] || String(out[1]).trim() === '')) {
-            out[0] = m[1];
-            out[1] = m[2];
-          }
-          if (out[0] == null || String(out[0]).trim() === '') out[0] = idx + 1;
-          return out;
-        }
-        const arr = hdrs.map((h) => row?.[h] ?? '');
-        if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
-        return arr;
-      });
+      .map((row, idx) => toForm25OrderedValues(row, idx));
 
     const isNumericMarkerTemplateRow = (r) => {
       if (!markerCols || markerCols.length < 5) return false;
@@ -15350,7 +16330,9 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (
         isForm25Download &&
-        canUseLiveModalGridForDownload
+        (canUseLiveModalGridForDownload ||
+          (isFormFileModalOpen && liveModalGridLoadedRowCount > 0) ||
+          (sameStatutoryLineAsModal && liveModalGridLoadedRowCount > 0))
       ) {
         usedLiveModalGrid = true;
         mappedData = copyLiveModalGridRowsForDownload();
@@ -15654,6 +16636,16 @@ const Statutory = ({ userEmail, userRole }) => {
             const sampleBlocks = await Promise.all(
               candidateIds.map(async (id) => {
                 try {
+                  const importResp = await fetch(
+                    `/server/importdata_function/importdata/${id}?_ts=${Date.now()}`
+                  );
+                  if (importResp.ok) {
+                    const importJson = await importResp.json().catch(() => null);
+                    const importBlock = importJson?.data?.importData;
+                    if (importBlock && Array.isArray(importBlock.rows) && importBlock.rows.length > 0) {
+                      return importBlock;
+                    }
+                  }
                   const r = await fetch(`/server/statutoryreg_function/statutory/${id}/sampledata`);
                   if (!r.ok) return null;
                   const j = await r.json().catch(() => null);
@@ -15919,6 +16911,7 @@ const Statutory = ({ userEmail, userRole }) => {
         try {
           const refreshedForm25Rows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
+            downloadFullEnrichment: true,
             form25PeopleSkipManualColumns: true
           });
           if (Array.isArray(refreshedForm25Rows) && refreshedForm25Rows.length > 0) {
@@ -16268,9 +17261,9 @@ const Statutory = ({ userEmail, userRole }) => {
         console.warn('Final SampleData apply before Excel build failed:', finalSampleErr);
       }
 
-      // Form 10/12: live modal grid always wins (typed VE1044 date etc.) even when download starts from main table.
+      // Form 10/12/25: live modal grid always wins (typed data / attendance codes) even when download starts from main table.
       if (
-        (isForm10Download || isForm12Download) &&
+        (isForm10Download || isForm12Download || isForm25Download) &&
         isFormFileModalOpen &&
         countMeaningfulFormTableRows(formTableDataRef.current) > 0
       ) {
@@ -16298,14 +17291,17 @@ const Statutory = ({ userEmail, userRole }) => {
                   ? downloadHeaderFormData
                   : formFileModalData?.parsedHeaderFormData || {},
               sampleData: prepareSampleDataRowsForSave(liveRows),
+              headerFieldDefinitions: prepareHeaderFieldDefinitionsForSave(
+                formFileModalData?.parsedFormHeader?.fields || []
+              ),
               formName: persistCtx.formName || item?.formName || item?.FormName || '',
               monthFilter: monthVal,
               MonthFilter: monthVal,
               monthfilter: monthVal
             };
             for (const pid of persistIds) {
-              const pr = await postStatutorySampleDataSnapshot(pid, persistPayload);
-              if (pr.ok && pr.data?.status === 'success') break;
+              const pr = await persistStatutoryGridSnapshots(pid, persistPayload);
+              if (pr.ok) break;
             }
           } catch (persistLiveErr) {
             console.warn('Live modal SampleData persist before download skipped:', persistLiveErr);
@@ -16424,10 +17420,12 @@ const Statutory = ({ userEmail, userRole }) => {
                     mappedData,
                     mappedRowMatrix: savedDraftRowMatrix,
                     headersToUse,
-                    parsedHeaderRowIndex: parsed.headerRowIndex,
-                    parsedDataStartIndex: parsed.dataStartIndex,
+                    parsedHeaderRowIndex: downloadHeaderRowIndex,
+                    parsedDataStartIndex: downloadDataStartIndex,
+                    parsedTableStartCol: downloadTableStartCol,
                     parsedFormHeader: parsed.formHeader,
-                    formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
+                    formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx',
+                    headerFormData: downloadHeaderFormData
                   })
               : isFormXVDownload
                 ? await buildFormXVWorkbookWithTemplateStyles({
@@ -17041,6 +18039,7 @@ const Statutory = ({ userEmail, userRole }) => {
           headersToUse: Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [],
           parsedHeaderRowIndex: headerRowIndex,
           parsedDataStartIndex: dataStartIndex,
+          parsedTableStartCol: formFileModalData?.tableStartCol ?? 0,
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           formFileName: draftFileNameForSave,
           headerFormData
@@ -17268,7 +18267,10 @@ const Statutory = ({ userEmail, userRole }) => {
           headerDataForSave && typeof headerDataForSave === 'object' && !Array.isArray(headerDataForSave)
             ? headerDataForSave
             : {},
-        sampleData: prepareSampleDataRowsForSave(tableDataForSave)
+        sampleData: prepareSampleDataRowsForSave(tableDataForSave),
+        headerFieldDefinitions: prepareHeaderFieldDefinitionsForSave(
+          (parsedFormHeaderForSave || formHeader)?.fields || []
+        )
       };
 
       // Autofill → Save: UPDATE if this is an existing Statutory record; otherwise POST to create (e.g. when opened from form master row).
@@ -17403,6 +18405,36 @@ const Statutory = ({ userEmail, userRole }) => {
             console.warn('MonthFilter follow-up persist failed (non-blocking):', monthPersistErr);
           }
         }
+        if (/^\d+$/.test(keeperStatutoryId) && payloadIncludesSampleDataSnapshot(payload)) {
+          try {
+            const importPersistPayload = {
+              sampleDataHeader: payload.sampleDataHeader,
+              sampleHeaderFormData: payload.sampleHeaderFormData,
+              sampleData: payload.sampleData,
+              headerFieldDefinitions: payload.headerFieldDefinitions,
+              formName: formNameValue,
+              monthFilter: monthFilterValue,
+              MonthFilter: monthFilterValue,
+              monthfilter: monthFilterValue
+            };
+            const importPersist = await postImportDataSnapshot(keeperStatutoryId, importPersistPayload);
+            if (!importPersist.ok || importPersist.data?.status !== 'success') {
+              console.warn(
+                'ImportData persist after save failed:',
+                importPersist.data?.message || importPersist.rawText || importPersist.status
+              );
+            }
+            const statutoryDataPersist = await postStatutoryDataFields(keeperStatutoryId, importPersistPayload);
+            if (!statutoryDataPersist.ok || statutoryDataPersist.data?.status !== 'success') {
+              console.warn(
+                'StatutoryData persist after save failed:',
+                statutoryDataPersist.data?.message || statutoryDataPersist.rawText || statutoryDataPersist.status
+              );
+            }
+          } catch (importPersistErr) {
+            console.warn('ImportData/StatutoryData persist after save failed (non-blocking):', importPersistErr);
+          }
+        }
         if (/^\d+$/.test(keeperStatutoryId)) {
           try {
             const updatedData = await fetch('/server/statutoryreg_function/statutory').then(res => res.json());
@@ -17513,7 +18545,23 @@ const Statutory = ({ userEmail, userRole }) => {
     const downloadFastPath = returnMappedData && options.downloadFullEnrichment !== true;
     const enrichOnlyPhase = options.enrichOnly === true && !returnMappedData;
     const modalData = options.formFileModalData || formFileModalData;
-    const useEmployeePagination = !returnMappedData && options.paginateEmployees !== false;
+    const form15Part1EarlyContext = isForm15Part1AutofillContext(
+      String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+      modalData?.parsedFormHeader || {},
+      modalData?.item
+    );
+    const form25EarlyContext = isForm25StatutoryContext({
+      fileName: modalData?.fileName || modalData?.formFileName || options?.fileName,
+      formFileName: modalData?.formFileName,
+      item: modalData?.item,
+      formHeaderTitle: modalData?.parsedFormHeader?.title,
+      formHeaderSubtitle: modalData?.parsedFormHeader?.subtitle,
+    });
+    const useEmployeePagination =
+      !returnMappedData &&
+      options.paginateEmployees !== false &&
+      !form15Part1EarlyContext &&
+      !form25EarlyContext;
     const employeePageSize = useEmployeePagination
       ? Math.max(1, parseInt(options.employeePageSize, 10) || FORM_TABLE_PAGE_SIZE)
       : Number.MAX_SAFE_INTEGER;
@@ -17531,7 +18579,12 @@ const Statutory = ({ userEmail, userRole }) => {
       employeePage === 0 &&
       !skipPeopleLoad &&
       !enrichOnlyPhase;
-    const fastPaginatedAutofill = !returnMappedData && useEmployeePagination && !enrichOnlyPhase;
+    const fastPaginatedAutofill =
+      !returnMappedData &&
+      useEmployeePagination &&
+      !enrichOnlyPhase &&
+      !form15Part1EarlyContext &&
+      !form25EarlyContext;
 
     const mergeMappedIntoFormTable = (rows, urgent = false) => {
       if (returnMappedData || !Array.isArray(rows)) return;
@@ -17550,15 +18603,36 @@ const Statutory = ({ userEmail, userRole }) => {
       else startTransition(apply);
     };
 
+    const autofillRowItem = modalData?.item || options?.item || autofillItem;
+    const useClraCreatorEmployees = resolveClraCreatorAutofillContext(autofillRowItem, {
+      allowedActCategoryList,
+      siteDetailsList,
+      resolveSiteName: (row) =>
+        resolveStatutorySiteNameForContractorAutofill(row, {
+          siteFromUrl,
+          allowedSiteNameList,
+          resolveSiteFn: resolveSiteDisplayName,
+          allRows: statutoryData,
+        }),
+    });
+
     try {
       if (!returnMappedData) {
         if (!skipPeopleLoad) {
-          const cachedQuick = getCachedPeopleData();
-          const quickCacheCount = flattenZohoPeopleEmployees(cachedQuick).length;
+          const cachedQuick = useClraCreatorEmployees
+            ? getCachedClraData()
+            : getCachedPeopleData();
+          const quickCacheCount = useClraCreatorEmployees
+            ? flattenClraEmployeesForAutofill(cachedQuick).length
+            : flattenZohoPeopleEmployees(cachedQuick).length;
           const cacheReady = cachedQuick?.success && quickCacheCount > 0;
           if (!(fastModalAutofill && cacheReady)) {
             setTableAutofillLoading(true);
-            setTableAutofillProgress('Loading employee data…');
+            setTableAutofillProgress(
+              useClraCreatorEmployees
+                ? 'Loading CLRA employees from Zoho Creator…'
+                : 'Loading employee data…'
+            );
           }
         }
         setError('');
@@ -17806,6 +18880,58 @@ const Statutory = ({ userEmail, userRole }) => {
               `Loading employees ${employeePageOffset + 1}–${pageEnd} of ${employees.length}…`
             );
           }
+        } else if (useClraCreatorEmployees) {
+          let result;
+          try {
+            if (options.forcePeopleRefresh === true) {
+              if (!returnMappedData) {
+                setTableAutofillProgress('Refreshing CLRA employees from Zoho Creator…');
+              }
+              result = await fetchClraData({ force: true });
+            } else {
+              result = getCachedClraData();
+              const loadedCount = flattenClraEmployeesForAutofill(result).length;
+              if (!result?.success || loadedCount === 0) {
+                if (!returnMappedData) {
+                  setTableAutofillProgress('Fetching employees from Zoho Creator (CLRA)…');
+                }
+                result = await fetchClraData({ force: false });
+              }
+              if ((!result?.success || flattenClraEmployeesForAutofill(result).length === 0) && !fastModalAutofill) {
+                if (!returnMappedData) {
+                  setTableAutofillProgress('Refreshing CLRA employees from Zoho Creator…');
+                }
+                result = await fetchClraData({ force: true });
+              }
+            }
+          } catch (clraErr) {
+            const friendly =
+              clraErr?.message ||
+              'Failed to load employee data from Zoho Creator (CLRA Employee_Master_Report).';
+            console.warn('Zoho Creator CLRA autofill skipped:', friendly);
+            if (!returnMappedData) {
+              setError(
+                `${friendly} The form template is still open — fill rows manually or retry after fixing Zoho Creator connection.`
+              );
+              setTableAutofillLoading(false);
+              setTableAutofillProgress('');
+            }
+            if (returnMappedData) return [];
+            return;
+          }
+
+          if (!result?.success) {
+            const friendly = result?.error || 'No employee data received from Zoho Creator CLRA report';
+            if (!returnMappedData) {
+              setError(friendly);
+              setTableAutofillLoading(false);
+              setTableAutofillProgress('');
+            }
+            if (returnMappedData) return [];
+            return;
+          }
+
+          employees = flattenClraEmployeesForAutofill(result);
         } else {
         // Prefer in-memory/localStorage cache (from People page) — avoids slow Zoho pagination on every autofill.
         let result;
@@ -17884,7 +19010,7 @@ const Statutory = ({ userEmail, userRole }) => {
         }
 
         employees = flattenZohoPeopleEmployees(result);
-      }
+        }
 
       if (!skipPeopleLoad) {
         const resolvedSiteForEmployeeFilter = resolveStatutorySiteNameForContractorAutofill(
@@ -17948,8 +19074,12 @@ const Statutory = ({ userEmail, userRole }) => {
         });
         const emptyMsg =
           emptyLocationTargets.length > 0
-            ? `No employees found for location ${emptyLocationTargets.join(', ')}. Check LocationName in Zoho People matches Site Management Location.`
-            : 'No employee data found in response. Please check the API response structure.';
+            ? useClraCreatorEmployees
+              ? `No CLRA employees found for location ${emptyLocationTargets.join(', ')}. Check Location in Zoho Creator Employee_Master_Report matches Site Management Location.`
+              : `No employees found for location ${emptyLocationTargets.join(', ')}. Check LocationName in Zoho People matches Site Management Location.`
+            : useClraCreatorEmployees
+              ? 'No employee data found in Zoho Creator Employee_Master_Report.'
+              : 'No employee data found in response. Please check the API response structure.';
         throw new Error(emptyMsg);
       }
 
@@ -17968,6 +19098,8 @@ const Statutory = ({ userEmail, userRole }) => {
       const getZohoEmployeeLookupCode = (emp) => pickFirstFilledValue(
         emp.EmployeeID,
         emp['EmployeeID'],
+        emp.Employee_ID,
+        emp['Employee_ID'],
         emp['Employee ID'],
         emp.employeeId,
         emp.employeeCode,
@@ -17983,10 +19115,15 @@ const Statutory = ({ userEmail, userRole }) => {
           emp['Full Name'],
           emp.Name,
           emp['Name'],
+          emp.Name_as_per_aadhaar,
+          emp['Name_as_per_aadhaar'],
+          emp.Employee_Name,
+          emp['Employee_Name'],
           emp.Name1,
           emp['Name1'],
           emp.employeeName,
-          emp['Employee Name']
+          emp['Employee Name'],
+          emp['Name of employee']
         );
         if (directName) return directName;
         const firstName = pickFirstFilledValue(emp.FirstName, emp['FirstName'], emp.firstName, emp['First Name']);
@@ -18047,11 +19184,15 @@ const Statutory = ({ userEmail, userRole }) => {
               cmsMatch['Bank_Name']
             );
             const mergedAccountNumber = pickFirstFilledValue(
+              sourceEmp.Bank_Account_Number,
+              sourceEmp['Bank_Account_Number'],
               sourceEmp.Account_Number,
               sourceEmp['Account_Number'],
               sourceEmp.AccountNumber,
               sourceEmp['Account Number'],
               sourceEmp.accountNumber,
+              cmsMatch.Bank_Account_Number,
+              cmsMatch['Bank_Account_Number'],
               cmsMatch.accountNumber,
               cmsMatch.AccountNumber,
               cmsMatch['Account Number'],
@@ -18098,6 +19239,7 @@ const Statutory = ({ userEmail, userRole }) => {
               enrichedEmp.bankName = mergedBankName;
             }
             if (mergedAccountNumber) {
+              enrichedEmp.Bank_Account_Number = mergedAccountNumber;
               enrichedEmp.Account_Number = mergedAccountNumber;
               enrichedEmp.AccountNumber = mergedAccountNumber;
               enrichedEmp.accountNumber = mergedAccountNumber;
@@ -18458,18 +19600,17 @@ const Statutory = ({ userEmail, userRole }) => {
       );
       const form25HeadersJoined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
       const form25DayColumnCount = currentHeaders.filter((h) => isLikelyDayOfMonthColumnHeader(h)).length;
+      const form25HasExplicitDailyHoursBand =
+        /daily\s+hours|hours\s+of\s+work|hours\s+worked|daily\s+hours\s+of\s+work/.test(
+          form25HeadersJoined
+        );
       const form25DailyHoursGrid =
-        form25SkipLossPayAndNationalHolidayBenefit &&
-        (/daily\s+hours|hours\s+of\s+work|hours\s+worked|daily\s+hours\s+of\s+work/.test(form25HeadersJoined) ||
-          ((/time\s+at\s+which\s+work\s+commence|scheme\s+of\s+shift/.test(form25HeadersJoined) ||
-            currentHeaders.some(isForm25WorkCommencesHeader) ||
-            currentHeaders.some(isForm25SchemeOfShiftsHeader)) &&
-            form25DayColumnCount >= 5));
+        form25SkipLossPayAndNationalHolidayBenefit && form25HasExplicitDailyHoursBand;
       const form25DayStatusGrid =
         !form25DailyHoursGrid &&
         (form25SkipLossPayAndNationalHolidayBenefit ||
           formXXVIAutofillContext ||
-          currentHeaders.filter((h) => isLikelyDayOfMonthColumnHeader(h)).length >= 5);
+          form25DayColumnCount >= 5);
       if (form25DayStatusGrid || form25DailyHoursGrid) {
         console.log('Form 25 daily grid enabled:', {
           fileName: form25ContextHints.fileName,
@@ -18873,17 +20014,7 @@ const Statutory = ({ userEmail, userRole }) => {
         return /section\s*9\b/.test(s) || /section\s*10\b/.test(s);
       };
 
-      const isFormXLeaveMetricHeader = (h) => {
-        const s = String(h || '').toLowerCase().replace(/\s+/g, ' ').trim();
-        if (!s.includes('leave')) return false;
-        if (s.includes('name of the employee') || s.includes('employee identification') || s.includes('gender')) return false;
-        return (
-          s.includes('beginning of the month') ||
-          s.includes('earned during the period') ||
-          s.includes('availed during the month') ||
-          s.includes('balance at the end of the month')
-        );
-      };
+      const isFormXLeaveMetricHeader = (h) => isLeaveRegisterMetricHeader(h);
 
       const getFallbackName = (emp) =>
         emp.FirstName ||
@@ -19069,8 +20200,24 @@ const Statutory = ({ userEmail, userRole }) => {
         modalData?.item || formFileModalData?.item,
         formWFileHint
       );
+      const form15Part1AutofillContext = isForm15Part1AutofillContext(
+        formWFileHint,
+        modalData?.parsedFormHeader || formHeader,
+        modalData?.item || formFileModalData?.item
+      );
+      const form15Part2AutofillContext =
+        isForm15Part2Context(
+          modalData?.parsedFormHeader || formHeader,
+          modalData?.item || formFileModalData?.item,
+          formWFileHint,
+          currentHeaders
+        ) ||
+        looksLikeForm15Part2TableHeaders(currentHeaders) ||
+        (currentHeaders.some((h) => isForm15Part2BasicWagesHeader(h)) &&
+          currentHeaders.some((h) => isForm15Part2GrossWagesHeader(h)));
       const isLikelyFormW =
-        formXXVIIAutofillContext ||
+        !form15Part2AutofillContext &&
+        (formXXVIIAutofillContext ||
         isRegisterOfWagesFormContext(
           modalData?.parsedFormHeader || formHeader,
           modalData?.item || formFileModalData?.item,
@@ -19083,7 +20230,7 @@ const Statutory = ({ userEmail, userRole }) => {
           formWHeaderBlob.includes('overtime')) ||
         (formWHeaderBlob.includes('register') &&
           formWHeaderBlob.includes('wage') &&
-          (/basic\s*wag/.test(formWHeaderBlob) || formWHeaderBlob.includes('basic wage')));
+          (/basic\s*wag/.test(formWHeaderBlob) || formWHeaderBlob.includes('basic wage'))));
       const isLikelyForm10 =
         !formXXIIIAutofillContext &&
         currentHeaders.some((h) => /number\s+in\s+register|register\s+number/i.test(String(h || ''))) &&
@@ -19311,6 +20458,8 @@ const Statutory = ({ userEmail, userRole }) => {
         const byPayrollPayload = new Map();
         if (!Array.isArray(payrollRows)) return { byPayrollPayload };
 
+        const normWorkerCode = (code) => String(code || '').trim().toUpperCase();
+
         payrollRows.forEach((it) => {
           if (!it || typeof it !== 'object' || it.fetch_error) return;
           const payload = getPayrollPayloadObject(it);
@@ -19333,6 +20482,24 @@ const Statutory = ({ userEmail, userRole }) => {
           ]
             .map(normalizePayrollLookupValue)
             .filter(Boolean);
+          const employeeCodes = [
+            it.employee_number,
+            it.employee_code,
+            it.employee_no,
+            it.emp_id,
+            it.employee_display_id,
+            payload.employee_number,
+            payload.employee_code,
+            payload.employee_no,
+            payload.emp_id,
+            payload.employee_display_id,
+            payload.EmployeeID,
+            payload['Employee ID'],
+            payload.EmployeeId,
+            payload['Employee Id'],
+          ]
+            .map((value) => String(value || '').trim())
+            .filter(Boolean);
 
           const register = (key) => {
             if (!key || byPayrollPayload.has(key)) return;
@@ -19340,12 +20507,32 @@ const Statutory = ({ userEmail, userRole }) => {
           };
 
           if (payrollEmployeeId) register(payrollEmployeeId);
+          employeeCodes.forEach((code) => {
+            register(code);
+            register(normWorkerCode(code));
+            register(code.toLowerCase());
+          });
           if (email) register(`email:${email}`);
           nameCandidates.forEach((name) => register(`name:${name}`));
           if (firstName) register(`first:${firstName}`);
         });
 
         return { byPayrollPayload };
+      };
+
+      const lookupPayrollRowByIds = (byPayrollPayload, ids) => {
+        if (!byPayrollPayload || byPayrollPayload.size === 0) return null;
+        const normWorkerCode = (code) => String(code || '').trim().toUpperCase();
+        for (let i = 0; i < ids.length; i += 1) {
+          const raw = String(ids[i] || '').trim();
+          if (!raw) continue;
+          const hit =
+            byPayrollPayload.get(raw) ||
+            byPayrollPayload.get(normWorkerCode(raw)) ||
+            byPayrollPayload.get(raw.toLowerCase());
+          if (hit) return hit;
+        }
+        return null;
       };
 
       const resolvePayrollRowForEmployee = (byPayrollPayload, emp, row, rowNameCandidates = []) => {
@@ -19365,7 +20552,7 @@ const Statutory = ({ userEmail, userRole }) => {
           .filter(Boolean);
 
         return (
-          payrollEmpIds.map((id) => byPayrollPayload.get(id)).find(Boolean) ||
+          lookupPayrollRowByIds(byPayrollPayload, payrollEmpIds) ||
           (empEmail && byPayrollPayload.get(`email:${empEmail}`)) ||
           empNameCandidates.map((name) => byPayrollPayload.get(`name:${name}`)).find(Boolean) ||
           (empFirstName && byPayrollPayload.get(`first:${empFirstName}`)) ||
@@ -19623,6 +20810,261 @@ const Statutory = ({ userEmail, userRole }) => {
         };
       };
 
+      const pickForm15Part2BasicAmount = (earnings) => {
+        const list = Array.isArray(earnings) ? earnings : [];
+        const exact = list.find((it) => {
+          const name = payrollEarningName(it);
+          return name === 'basic' || name === 'basic earnings';
+        });
+        if (exact) {
+          const a = getPayrollLineAmount(exact);
+          if (Number.isFinite(a)) return a;
+        }
+        return findEarningAmount(
+          list,
+          (type, name) =>
+            type === 'basic' || name === 'basic' || name.includes('basic earnings') || name.includes('basic wage')
+        );
+      };
+
+      const pickForm15Part2HraAmount = (earnings) => {
+        const list = Array.isArray(earnings) ? earnings : [];
+        const exact = list.find((it) => {
+          const name = payrollEarningName(it);
+          return name === 'hra' || name === 'house rent allowance';
+        });
+        if (exact) {
+          const a = getPayrollLineAmount(exact);
+          if (Number.isFinite(a)) return a;
+        }
+        return pickFormWHouseRentAllowanceAmount(earnings);
+      };
+
+      /** Read a payroll amount from top-level API keys or an earnings object map ({ Basic: 1000, HRA: 500 }). */
+      const pickPayrollApiScalarAmount = (p, keys) => {
+        if (!p || typeof p !== 'object') return '';
+        for (let i = 0; i < keys.length; i += 1) {
+          const key = keys[i];
+          const variants = [key, String(key).toLowerCase(), String(key).replace(/\s+/g, '_').toLowerCase()];
+          for (let j = 0; j < variants.length; j += 1) {
+            const v = p[variants[j]];
+            if (v == null || v === '') continue;
+            const n = toNumber(v);
+            if (Number.isFinite(n)) return n;
+          }
+        }
+        const earnMap = p.earnings;
+        if (earnMap && typeof earnMap === 'object' && !Array.isArray(earnMap)) {
+          for (let i = 0; i < keys.length; i += 1) {
+            const key = keys[i];
+            const variants = [key, String(key).toLowerCase()];
+            for (let j = 0; j < variants.length; j += 1) {
+              const v = earnMap[variants[j]];
+              if (v == null || v === '') continue;
+              if (typeof v === 'object' && v !== null) {
+                const nested = getPayrollLineAmount(v);
+                if (Number.isFinite(nested)) return nested;
+              }
+              const n = toNumber(v);
+              if (Number.isFinite(n)) return n;
+            }
+          }
+        }
+        return '';
+      };
+
+      const buildForm15Part2PayrollMap = (payrollRow) => {
+        const p = getPayrollPayloadObject(payrollRow);
+        const earnings = getEarningsArray(p);
+        const basicFromEarnings = pickForm15Part2BasicAmount(earnings);
+        const hraFromEarnings = pickForm15Part2HraAmount(earnings);
+        const basic = firstPresent(
+          payrollRow?.basic,
+          p.basic,
+          p['basic'],
+          p.Basic,
+          payrollRow?.earned_basic,
+          p.earned_basic,
+          p['earned_basic'],
+          basicFromEarnings !== '' && basicFromEarnings != null ? basicFromEarnings : '',
+          pickPayrollApiScalarAmount(p, [
+            'basic',
+            'Basic',
+            'basic_pay',
+            'basic_amount',
+            'basic_earnings',
+            'Basic Earnings',
+            'earned_basic',
+            'basic_wage',
+            'basic_wages',
+          ])
+        );
+        const hra = firstPresent(
+          payrollRow?.hra,
+          p.hra,
+          p['hra'],
+          p.HRA,
+          hraFromEarnings !== '' && hraFromEarnings != null ? hraFromEarnings : '',
+          pickPayrollApiScalarAmount(p, [
+            'hra',
+            'HRA',
+            'Hra',
+            'house_rent_allowance',
+            'House Rent Allowance',
+            'hra_amount',
+          ])
+        );
+        const grossPay = firstPresent(
+          payrollRow?.total_earnings,
+          p.total_earnings,
+          p['total_earnings'],
+          p.gross_pay,
+          p['gross_pay'],
+          p.GrossPay,
+          p['GrossPay'],
+          p.monthly_gross_amount,
+          p['monthly_gross_amount'],
+          p.gross_amount,
+          p['gross_amount']
+        );
+        const netPay = firstPresent(
+          payrollRow?.net_pay,
+          p.net_pay,
+          p['net_pay'],
+          p.NetPay,
+          p['NetPay'],
+          p.monthly_salary,
+          p['monthly_salary'],
+          p.MonthlySalary,
+          p['MonthlySalary']
+        );
+        let totalDeductions = firstPresent(
+          payrollRow?.total_deductions,
+          p.total_deductions,
+          p['total_deductions'],
+          p.totalDeductions,
+          p['totalDeductions'],
+          p.total_employee_deductions,
+          p['total_employee_deductions']
+        );
+        if (totalDeductions === '') {
+          const dedSum = sumPayrollLineItems(getDeductionsArray(p));
+          if (dedSum !== '') totalDeductions = dedSum;
+        }
+        const grossNum = toNumber(grossPay);
+        const netNum = toNumber(netPay);
+        if (totalDeductions === '' && Number.isFinite(grossNum) && Number.isFinite(netNum) && grossNum >= netNum) {
+          totalDeductions = Math.round((grossNum - netNum) * 100) / 100;
+        }
+        const basicNum = toNumber(basic);
+        const hraNum = toNumber(hra);
+        let otherAllowances = firstPresent(
+          payrollRow?.other_allowance,
+          p.other_allowance,
+          p['other_allowance'],
+          ''
+        );
+        if (otherAllowances === '' && Number.isFinite(grossNum)) {
+          const known = (Number.isFinite(basicNum) ? basicNum : 0) + (Number.isFinite(hraNum) ? hraNum : 0);
+          otherAllowances = Math.round((grossNum - known) * 100) / 100;
+          if (!Number.isFinite(otherAllowances)) otherAllowances = '';
+        }
+        return {
+          basicWages: basic !== '' && basic != null ? basic : '',
+          houseRentAllowance: hra !== '' && hra != null ? hra : '',
+          dearnessAllowance: firstPresent(
+            payrollRow?.dearness_allowance,
+            p.dearness_allowance,
+            p['dearness_allowance'],
+            pickPayrollApiScalarAmount(p, ['Dearness Allowance', 'dearness_allowance', 'da'])
+          ),
+          grossWages: grossPay !== '' ? grossPay : '',
+          otherAllowances,
+          overtimeWages: firstPresent(
+            payrollRow?.overtime,
+            p.overtime,
+            p['overtime'],
+            p.overtime_wages,
+            pickPayrollApiScalarAmount(p, ['Overtime', 'overtime', 'overtime_wages'])
+          ),
+          daysWorked: firstPresent(
+            payrollRow?.paid_days,
+            p.paid_days,
+            p['paid_days'],
+            p.days_worked,
+            p['days_worked'],
+            p.no_of_days_worked
+          ),
+          totalDeductions: totalDeductions !== '' ? totalDeductions : '',
+          netWages: netPay !== '' ? netPay : '',
+          anyOtherDeductions: firstPresent(
+            payrollRow?.total_benefits,
+            p.total_benefits,
+            p['total_benefits'],
+            pickPayrollApiScalarAmount(p, ['total_benefits', 'Total Benefits', 'totalBenefits'])
+          ),
+        };
+      };
+
+      const resolveForm15Part2PaymentDate = () => {
+        const fromPayroll = formatForm15Part2PayrollPayDate(form15Part2PayDate);
+        if (fromPayroll) return fromPayroll;
+        const month =
+          form15Part2ResolvedPayrollMonth ||
+          (resolvePayrollMonthIsoCandidates(
+            selectedMonth,
+            modalData?.item || formFileModalData?.item,
+            modalData?.parsedFormHeader?.wagePeriodText ||
+              formFileModalData?.parsedFormHeader?.wagePeriodText ||
+              ''
+          )[0] ||
+            '');
+        return formatForm15Part2MonthEndPaymentDate(month);
+      };
+
+      const applyForm15Part2PayrollToRow = (row, payrollMap, form15Headers, { overwrite = false } = {}) => {
+        if (!row || !payrollMap || !form15Headers) return;
+        const cellIsEmpty = (header) => {
+          const v = String(row[header] || '').trim();
+          return !v || isPlaceholderStatutoryCellValue(v);
+        };
+        const setCell = (header, value) => {
+          if (!header || value == null || value === '') return;
+          if (!overwrite && !cellIsEmpty(header)) return;
+          row[header] = sanitizeValue(value);
+        };
+        const setNumericCell = (header, value) => {
+          if (!header || value == null || value === '') return;
+          const num = Number(value);
+          if (!Number.isFinite(num)) return;
+          if (!overwrite && !cellIsEmpty(header)) return;
+          row[header] = sanitizeValue(num);
+        };
+        setCell(form15Headers.basicWages, payrollMap.basicWages);
+        setCell(form15Headers.houseRentAllowance, payrollMap.houseRentAllowance);
+        setCell(form15Headers.dearnessAllowance, payrollMap.dearnessAllowance);
+        setCell(form15Headers.grossWages, payrollMap.grossWages);
+        setNumericCell(form15Headers.otherAllowances, payrollMap.otherAllowances);
+        setCell(form15Headers.overtimeWages, payrollMap.overtimeWages);
+        setCell(form15Headers.daysWorked, payrollMap.daysWorked);
+        setCell(form15Headers.totalDeductions, payrollMap.totalDeductions);
+        setCell(form15Headers.netWages, payrollMap.netWages);
+        setNumericCell(form15Headers.anyOtherDeductions, payrollMap.anyOtherDeductions);
+      };
+
+      const applyForm15Part2MonthFieldsToRow = (row, form15Headers, { overwrite = false } = {}) => {
+        if (!row || !form15Headers) return false;
+        const paymentDate = resolveForm15Part2PaymentDate();
+        if (!form15Headers.dateOfPayment || !paymentDate) return false;
+        const cellIsEmpty = (header) => {
+          const v = String(row[header] || '').trim();
+          return !v || isPlaceholderStatutoryCellValue(v);
+        };
+        if (!overwrite && !cellIsEmpty(form15Headers.dateOfPayment)) return false;
+        row[form15Headers.dateOfPayment] = sanitizeValue(paymentDate);
+        return true;
+      };
+
       const parseTimeToMinutes = (raw) => {
         const value = String(raw || '').trim();
         if (!value) return null;
@@ -19730,6 +21172,42 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
         return '';
+      };
+
+      const getEmployeeBankAccountNumber = (emp) => {
+        if (!emp || typeof emp !== 'object') return '';
+        const accountNumber =
+          emp.Bank_Account_Number ||
+          emp['Bank_Account_Number'] ||
+          emp.BankAccountNumber ||
+          emp['Bank Account Number'] ||
+          emp.Account_Number ||
+          emp['Account_Number'] ||
+          emp.AccountNumber ||
+          emp['Account Number'] ||
+          emp.accountNumber ||
+          findValueByNormalizedKey(emp, 'bankaccountnumber') ||
+          findValueByNormalizedKey(emp, 'accountnumber') ||
+          findValueByNormalizedKey(emp, 'account_number') ||
+          '';
+        return accountNumber != null ? String(accountNumber).trim() : '';
+      };
+
+      const applyForm15Part2PeopleToRow = (row, emp, form15Headers, { overwrite = false } = {}) => {
+        if (!row || !emp || !form15Headers) return false;
+        let changed = false;
+        const cellIsEmpty = (header) => {
+          const v = String(row[header] || '').trim();
+          return !v || isPlaceholderStatutoryCellValue(v);
+        };
+        const setCell = (header, value) => {
+          if (!header || value == null || value === '') return;
+          if (!overwrite && !cellIsEmpty(header)) return;
+          row[header] = sanitizeValue(value);
+          changed = true;
+        };
+        setCell(form15Headers.receiptByWorker, getEmployeeBankAccountNumber(emp));
+        return changed;
       };
 
       const computeNormalHoursFromShift = (emp) => {
@@ -20431,6 +21909,8 @@ const Statutory = ({ userEmail, userRole }) => {
       let formWPayrollLookup = null;
       let formWHeadersResolved = null;
       let statutoryPayrollRows = null;
+      let form15Part2ResolvedPayrollMonth = '';
+      let form15Part2PayDate = '';
       const formTSEHeadersResolved = formTSEAutofillContext
         ? resolveFormTSETableHeaders(currentHeaders)
         : null;
@@ -20445,7 +21925,12 @@ const Statutory = ({ userEmail, userRole }) => {
         formDAutofillContext ||
         formIIAutofillContext ||
         formTSEAutofillContext ||
-        formXVIIIAutofillContext;
+        formXVIIIAutofillContext ||
+        form15Part2AutofillContext;
+
+      let form15Part2HeadersResolved = form15Part2AutofillContext
+        ? resolveForm15Part2TableHeaders(currentHeaders)
+        : null;
 
       if (isLikelyFormW) {
         formWHeadersResolved = resolveFormWTableHeaders(currentHeaders);
@@ -20701,6 +22186,284 @@ const Statutory = ({ userEmail, userRole }) => {
         return;
       }
 
+      const runPayrollPreload = async () => {
+        if (!needsPayrollBulkPreload) return;
+        try {
+          if (form15Part2AutofillContext) {
+            const payrollMonthCandidates = resolvePayrollMonthIsoCandidates(
+              selectedMonth,
+              modalData?.item || formFileModalData?.item,
+              modalData?.parsedFormHeader?.wagePeriodText ||
+                formFileModalData?.parsedFormHeader?.wagePeriodText ||
+                ''
+            );
+            if (payrollMonthCandidates.length === 0) {
+              console.warn('Form 15 Part 2 payroll: could not resolve month from filter/due date');
+              return;
+            }
+            const payrollMonthIso = payrollMonthCandidates[0];
+            form15Part2ResolvedPayrollMonth = payrollMonthIso;
+            if (!returnMappedData && !fastModalAutofill) {
+              setTableAutofillProgress(`Loading ${payrollMonthIso} payroll for Form 15 Part 2…`);
+            }
+            const tableLoad = await fetchPayrollTableRowsForMonths(payrollMonthCandidates, {
+              timeoutMs: fastModalAutofill ? 12000 : 45000,
+            });
+            let merged = tableLoad.rows;
+            let resolvedPayrollMonth = tableLoad.payrollMonth || payrollMonthIso;
+            form15Part2ResolvedPayrollMonth = resolvedPayrollMonth;
+            if (tableLoad.meta?.payDate) {
+              form15Part2PayDate = String(tableLoad.meta.payDate).trim();
+            }
+            if (merged.length > 0) {
+              console.log(
+                `Form 15 Part 2 payroll preload: ${merged.length} row(s) from Payroll table for ${resolvedPayrollMonth}`
+              );
+            } else {
+              for (let ci = 0; ci < payrollMonthCandidates.length; ci += 1) {
+                const tryMonth = payrollMonthCandidates[ci];
+                if (!returnMappedData && !fastModalAutofill) {
+                  setTableAutofillProgress(`Fetching ${tryMonth} payroll from Zoho…`);
+                }
+                const batchMerged = [];
+                let offset = 0;
+                let capturedPayDate = '';
+                while (true) {
+                  const monthQs = new URLSearchParams({
+                    organization_id: payrollOrgIdForForms,
+                    payroll_month_data: '1',
+                    payroll_month: tryMonth,
+                    payroll_run_type: 'regular',
+                    employee_offset: String(offset),
+                    employee_limit: '200',
+                  });
+                  const { resp: monthRes, json: monthJson } = await fetchJsonWithTimeout(
+                    `/server/payroll_function?${monthQs.toString()}`,
+                    { cache: 'no-store' },
+                    fastModalAutofill ? 12000 : 45000
+                  );
+                  if (!monthRes.ok || !monthJson?.success) {
+                    console.warn(
+                      `Form 15 Part 2 payroll month fetch failed for ${tryMonth}:`,
+                      monthJson?.error || monthRes.status
+                    );
+                    break;
+                  }
+                  if (!capturedPayDate && monthJson.meta?.pay_date) {
+                    capturedPayDate = String(monthJson.meta.pay_date).trim();
+                  }
+                  const batch = Array.isArray(monthJson.data) ? monthJson.data : [];
+                  batchMerged.push(...batch);
+                  const hasMore =
+                    monthJson.meta?.has_more === true ||
+                    (monthJson.meta?.has_more !== false && batch.length >= 200);
+                  if (!hasMore || batch.length === 0) break;
+                  offset += batch.length;
+                }
+                if (batchMerged.length > 0) {
+                  merged = batchMerged;
+                  resolvedPayrollMonth = tryMonth;
+                  form15Part2ResolvedPayrollMonth = resolvedPayrollMonth;
+                  if (capturedPayDate) form15Part2PayDate = capturedPayDate;
+                  console.log(
+                    `Form 15 Part 2 payroll preload: ${merged.length} row(s) from Zoho API for ${resolvedPayrollMonth}`
+                  );
+                  break;
+                }
+              }
+            }
+            if (merged.length === 0) {
+              console.warn(
+                `Form 15 Part 2 payroll: no rows for ${payrollMonthCandidates.join(', ')} — fetch payroll on Payroll page first`
+              );
+            } else {
+              formWPayrollLookup = buildPayrollLookupFromRows(merged);
+              autofillPayrollLookupRef.current = formWPayrollLookup;
+              statutoryPayrollRows = merged;
+            }
+            return;
+          }
+
+          let bulkPayrollRows = getCachedPayrollBulkRows();
+          if ((!Array.isArray(bulkPayrollRows) || bulkPayrollRows.length === 0) && !skipPeopleLoad) {
+            const listQs = new URLSearchParams({
+              list_employees: '1',
+              organization_id: payrollOrgIdForForms,
+            });
+            const listUrl = `/server/payroll_function?${listQs.toString()}`;
+            const { resp: listRes, json: listJson } = await fetchJsonWithTimeout(
+              listUrl,
+              { cache: 'no-store' },
+              fastModalAutofill ? 5000 : 15000
+            );
+            if (listRes.ok && listJson?.success && Array.isArray(listJson.data)) {
+              bulkPayrollRows = listJson.data;
+            }
+          }
+          if (Array.isArray(bulkPayrollRows) && bulkPayrollRows.length > 0) {
+            if (formTSEAutofillContext || formXVIIIAutofillContext || formIIAutofillContext) {
+              statutoryPayrollRows = bulkPayrollRows;
+            }
+            if (
+              isLikelyFormW ||
+              isLikelyForm10 ||
+              formBAutofillContext ||
+              formDAutofillContext
+            ) {
+              formWPayrollLookup = buildPayrollLookupFromRows(bulkPayrollRows);
+              autofillPayrollLookupRef.current = formWPayrollLookup;
+            }
+          }
+        } catch (payPreloadErr) {
+          console.warn('Statutory payroll preload skipped:', payPreloadErr?.message || payPreloadErr);
+        }
+      };
+
+      const resolveForm15Part2PayrollRow = (em, row, rowNameCandidates, byPayrollPayload, payrollRows) => {
+        let matched =
+          byPayrollPayload && byPayrollPayload.size > 0
+            ? resolvePayrollRowForEmployee(byPayrollPayload, em, row, rowNameCandidates)
+            : null;
+        if (matched && !matched.fetch_error) return matched;
+        if (!Array.isArray(payrollRows) || payrollRows.length === 0) return null;
+        const zid = String(em?.Zoho_ID || em?.['Zoho_ID'] || em?.ZohoID || '').trim();
+        const eid = String(em?.EmployeeID || em?.['EmployeeID'] || em?.['Employee ID'] || '').trim();
+        const rowIdCandidates = getEmployeeLookupIdCandidates(em, row);
+        const email = String(em?.EmailID || em?.Email || em?.email || em?.['Email ID'] || '')
+          .trim()
+          .toLowerCase();
+        const fn = String(em?.FirstName || em?.['FirstName'] || '').trim().toLowerCase();
+        const ln = String(em?.LastName || em?.['LastName'] || '').trim().toLowerCase();
+        const combo = `${fn} ${ln}`.trim();
+        const payrollCodeFields = (r) =>
+          [
+            r.employee_id,
+            r.employee_number,
+            r.employee_code,
+            r.employee_no,
+            r.emp_id,
+            r.employee_display_id,
+            getPayrollPayloadObject(r).employee_number,
+            getPayrollPayloadObject(r).employee_code,
+            getPayrollPayloadObject(r).EmployeeID,
+            getPayrollPayloadObject(r)['Employee ID'],
+          ]
+            .map((value) => String(value || '').trim())
+            .filter(Boolean);
+        const matchByCodes = (codes) => {
+          const normWorkerCode = (code) => String(code || '').trim().toUpperCase();
+          return (
+            payrollRows.find((r) => {
+              if (r?.fetch_error) return false;
+              const payrollCodes = payrollCodeFields(r);
+              return codes.some((code) => {
+                const raw = String(code || '').trim();
+                if (!raw) return false;
+                const variants = [raw, normWorkerCode(raw), raw.toLowerCase()];
+                return variants.some((variant) => payrollCodes.some((pc) => {
+                  const pRaw = String(pc || '').trim();
+                  return pRaw === variant || normWorkerCode(pRaw) === normWorkerCode(variant);
+                }));
+              });
+            }) || null
+          );
+        };
+        let hit = matchByCodes([zid, eid, ...rowIdCandidates].filter(Boolean));
+        if (hit) return hit;
+        hit = payrollRows.find(
+          (r) => email && String(r.work_mail || r.email || r.work_email || '').trim().toLowerCase() === email
+        );
+        if (hit) return hit;
+        const normalizedRowNames = rowNameCandidates.map(normalizePayrollLookupValue).filter(Boolean);
+        hit =
+          payrollRows.find((r) => {
+            if (r?.fetch_error) return false;
+            const rName = normalizePayrollLookupValue(
+              r.employee_name || `${r.first_name || ''} ${r.last_name || ''}`
+            );
+            return normalizedRowNames.some((name) => name && name === rName);
+          }) || null;
+        if (hit) return hit;
+        return (
+          payrollRows.find((r) => {
+            const rfn = String(r.first_name || '').trim().toLowerCase();
+            const rln = String(r.last_name || '').trim().toLowerCase();
+            return combo && `${rfn} ${rln}`.trim() === combo;
+          }) ||
+          payrollRows.find((r) => {
+            const rfn = String(r.first_name || '').trim().toLowerCase();
+            return fn && rfn === fn;
+          }) ||
+          null
+        );
+      };
+
+      const enrichForm15Part2PayrollRows = ({ overwrite = true } = {}) => {
+        if (!form15Part2AutofillContext) return 0;
+        let byPayrollPayload = formWPayrollLookup?.byPayrollPayload;
+        const payrollRows =
+          Array.isArray(statutoryPayrollRows) && statutoryPayrollRows.length > 0
+            ? statutoryPayrollRows
+            : null;
+        if (!byPayrollPayload || byPayrollPayload.size === 0) {
+          const bulkRows = payrollRows || getPayrollBulkRowsForAutofill();
+          if (Array.isArray(bulkRows) && bulkRows.length > 0) {
+            byPayrollPayload = buildPayrollLookupFromRows(bulkRows).byPayrollPayload;
+          }
+        }
+        const form15Headers =
+          form15Part2HeadersResolved || resolveForm15Part2TableHeaders(currentHeaders);
+        if (!form15Headers) return 0;
+        let filled = 0;
+        mappedData.forEach((row, rowIndex) => {
+          const empItem = employeesForMapping[rowIndex];
+          const em = unwrapEmp(empItem);
+          if (applyForm15Part2PeopleToRow(row, em, form15Headers, { overwrite })) {
+            filled += 1;
+          }
+          if (applyForm15Part2MonthFieldsToRow(row, form15Headers, { overwrite })) {
+            filled += 1;
+          }
+        });
+        if (
+          (!byPayrollPayload || byPayrollPayload.size === 0) &&
+          (!Array.isArray(payrollRows) || payrollRows.length === 0)
+        ) {
+          return filled;
+        }
+        mappedData.forEach((row, rowIndex) => {
+          const empItem = employeesForMapping[rowIndex];
+          const em = unwrapEmp(empItem);
+          const rowNameCandidates =
+            form15Headers.employeeName && row[form15Headers.employeeName]
+              ? [String(row[form15Headers.employeeName]).trim().toLowerCase()]
+              : [];
+          const matchedPayrollRow = resolveForm15Part2PayrollRow(
+            em,
+            row,
+            rowNameCandidates,
+            byPayrollPayload,
+            payrollRows
+          );
+          if (!matchedPayrollRow || matchedPayrollRow.fetch_error) return;
+          applyForm15Part2PayrollToRow(
+            row,
+            buildForm15Part2PayrollMap(matchedPayrollRow),
+            form15Headers,
+            { overwrite }
+          );
+          filled += 1;
+        });
+        return filled;
+      };
+
+      if (form15Part2AutofillContext && needsPayrollBulkPreload) {
+        if (!returnMappedData && !fastModalAutofill && !enrichOnlyPhase) {
+          setTableAutofillProgress('Fetching payroll for Form 15 Part 2…');
+        }
+        await runPayrollPreload();
+      }
+
       let mappedData;
       if (enrichOnlyPhase) {
         mappedData = employeesForMapping.map((_, index) => {
@@ -20714,6 +22477,11 @@ const Statutory = ({ userEmail, userRole }) => {
           currentHeaders.forEach((header) => {
             if (row[header] == null) row[header] = '';
           });
+          if (form15Part1AutofillContext) {
+            currentHeaders.forEach((header) => {
+              if (isLeaveRegisterMetricHeader(header)) row[header] = '';
+            });
+          }
           return row;
         });
       } else {
@@ -20877,12 +22645,14 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
          
-          // For Form W / XXVII, wage/deduction and days-worked columns come from payroll / Form 25 — not People.
+          // For Form W / XXVII / Form 15 Part 2, wage/deduction columns come from payroll — not People.
           if (
-            (isLikelyFormW || formXXVIIAutofillContext) &&
-            (isFormWWageOrDeductionHeader(header) ||
-              isFormWDaysWorkedHeader(header) ||
-              isFormXXVIIRateOrPeriodColumnHeader(header))
+            (isLikelyFormW || formXXVIIAutofillContext || form15Part2AutofillContext) &&
+            ((form15Part2AutofillContext && isForm15Part2SkipPeopleAutofillHeader(header)) ||
+              ((isLikelyFormW || formXXVIIAutofillContext) &&
+                (isFormWWageOrDeductionHeader(header) ||
+                  isFormWDaysWorkedHeader(header) ||
+                  isFormXXVIIRateOrPeriodColumnHeader(header))))
           ) {
             row[header] = '';
             return;
@@ -20915,6 +22685,11 @@ const Statutory = ({ userEmail, userRole }) => {
           }
 
           if (formVIFestivalAutofillContext && isFormVIFestivalManualHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (form15Part1AutofillContext && isForm15Part1LeaveRegisterHeader(header)) {
             row[header] = '';
             return;
           }
@@ -21323,10 +23098,13 @@ const Statutory = ({ userEmail, userRole }) => {
             }
           }
           // Worker Identity / Identify No. - fetch from EmployeeID (Form 12, Form 25)
-          else if ((headerLower.includes('worker') &&
-                    (headerLower.includes('identity') || headerLower.includes('identify'))) ||
-                   headerLower === 'worker identity no.' ||
-                   headerLower === 'worker identity no') {
+          else if (
+            !isForm15Part2ReceiptByWorkerHeader(header) &&
+            ((headerLower.includes('worker') &&
+              (headerLower.includes('identity') || headerLower.includes('identify'))) ||
+              headerLower === 'worker identity no.' ||
+              headerLower === 'worker identity no')
+          ) {
             // Form 12 rule: Worker Identity No <- EmployeeID
             const workerIdValue = emp.EmployeeID ||
                          emp['EmployeeID'] ||
@@ -21998,6 +23776,11 @@ const Statutory = ({ userEmail, userRole }) => {
               console.log(`ℹ Branch left blank for employee ${index + 1} (Branch_Name not found in Zoho People data)`);
             }
           }
+          // Form 15 Part 2: Receipt by Worker / Bank Transaction — bank account from People
+          else if (form15Part2AutofillContext && isForm15Part2ReceiptByWorkerHeader(header)) {
+            const accountNumber = getEmployeeBankAccountNumber(emp);
+            row[header] = sanitizeValue(accountNumber);
+          }
           // Reason for Exit - explicitly only use exit-related fields, never use Dateofjoining or other date fields
           else if (headerLower.includes('reason') && headerLower.includes('exit')) {
             // Only check for exit-related fields, do not use any date fields as fallback
@@ -22031,6 +23814,11 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           // Default: try to find matching field by checking all emp properties
           else {
+            if (isLeaveRegisterMetricHeader(header)) {
+              row[header] = '';
+              return;
+            }
+
             if (formXVIIIAutofillContext && isFormXVIIIGenericPeopleSkipHeader(header)) {
               row[header] = '';
               return;
@@ -22038,6 +23826,16 @@ const Statutory = ({ userEmail, userRole }) => {
 
             if (formXVAutofillContext) {
               row[header] = '';
+              return;
+            }
+
+            if (form15Part2AutofillContext && isForm15Part2SkipPeopleAutofillHeader(header)) {
+              row[header] = '';
+              return;
+            }
+
+            if (form15Part2AutofillContext && isForm15Part2ReceiptByWorkerHeader(header)) {
+              row[header] = sanitizeValue(getEmployeeBankAccountNumber(emp));
               return;
             }
 
@@ -22080,8 +23878,15 @@ const Statutory = ({ userEmail, userRole }) => {
             if (!headerKey && headerWords.length > 0) {
               headerKey = Object.keys(emp).find(key => {
                 const keyLower = key.toLowerCase();
+                if (isLeaveRegisterMetricHeader(header)) return false;
                 // Don't match Zoho_ID to specific number fields
                 if (isSpecificNumberField && (keyLower.includes('zoho') || key === 'Zoho_ID' || key === 'ZohoID')) {
+                  return false;
+                }
+                if (
+                  headerLower.includes('leave') &&
+                  (keyLower.includes('zoho') || key === 'Zoho_ID' || key === 'ZohoID')
+                ) {
                   return false;
                 }
                 // Don't match date/joining fields to Reason for Exit
@@ -22114,6 +23919,10 @@ const Statutory = ({ userEmail, userRole }) => {
             }
            
             if (headerKey) {
+              if (isLeaveRegisterMetricHeader(header)) {
+                row[header] = '';
+                return;
+              }
               const value = emp[headerKey];
               // Handle displayValue fields (e.g., "EL_Balance.displayValue")
               if (value === '' || value === null || value === undefined) {
@@ -22125,6 +23934,10 @@ const Statutory = ({ userEmail, userRole }) => {
                 }
               } else {
                 row[header] = sanitizeValue(value);
+              }
+              if (isSuspiciousZohoRecordIdValue(row[header])) {
+                row[header] = '';
+                return;
               }
              
               if (row[header]) {
@@ -22167,6 +23980,34 @@ const Statutory = ({ userEmail, userRole }) => {
               buildFormWPayrollMap(matchedPayrollRow),
               formWHeadersResolved
             );
+          }
+        }
+
+        if (form15Part2AutofillContext) {
+          const form15Headers =
+            form15Part2HeadersResolved || resolveForm15Part2TableHeaders(currentHeaders);
+          applyForm15Part2PeopleToRow(row, emp, form15Headers, { overwrite: true });
+          applyForm15Part2MonthFieldsToRow(row, form15Headers, { overwrite: true });
+          if (formWPayrollLookup) {
+            const rowNameCandidates =
+              form15Headers.employeeName && row[form15Headers.employeeName]
+                ? [String(row[form15Headers.employeeName]).trim().toLowerCase()]
+                : [];
+            const matchedPayrollRow = resolveForm15Part2PayrollRow(
+              emp,
+              row,
+              rowNameCandidates,
+              formWPayrollLookup.byPayrollPayload,
+              statutoryPayrollRows
+            );
+            if (matchedPayrollRow && !matchedPayrollRow.fetch_error) {
+              applyForm15Part2PayrollToRow(
+                row,
+                buildForm15Part2PayrollMap(matchedPayrollRow),
+                form15Headers,
+                { overwrite: true }
+              );
+            }
           }
         }
 
@@ -22436,48 +24277,13 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
 
-      const runPayrollPreload = async () => {
-        if (!needsPayrollBulkPreload) return;
-        try {
-          let bulkPayrollRows = getCachedPayrollBulkRows();
-          if ((!Array.isArray(bulkPayrollRows) || bulkPayrollRows.length === 0) && !skipPeopleLoad) {
-            const listQs = new URLSearchParams({
-              list_employees: '1',
-              organization_id: payrollOrgIdForForms,
-            });
-            const listUrl = `/server/payroll_function?${listQs.toString()}`;
-            const { resp: listRes, json: listJson } = await fetchJsonWithTimeout(
-              listUrl,
-              { cache: 'no-store' },
-              fastModalAutofill ? 5000 : 15000
-            );
-            if (listRes.ok && listJson?.success && Array.isArray(listJson.data)) {
-              bulkPayrollRows = listJson.data;
-            }
-          }
-          if (Array.isArray(bulkPayrollRows) && bulkPayrollRows.length > 0) {
-            if (formTSEAutofillContext || formXVIIIAutofillContext || formIIAutofillContext) {
-              statutoryPayrollRows = bulkPayrollRows;
-            }
-            if (
-              isLikelyFormW ||
-              isLikelyForm10 ||
-              formBAutofillContext ||
-              formDAutofillContext
-            ) {
-              formWPayrollLookup = buildPayrollLookupFromRows(bulkPayrollRows);
-              autofillPayrollLookupRef.current = formWPayrollLookup;
-            }
-          }
-        } catch (payPreloadErr) {
-          console.warn('Statutory payroll preload skipped:', payPreloadErr?.message || payPreloadErr);
-        }
-      };
-
       if (!returnMappedData && !fastModalAutofill) {
         setTableAutofillProgress('Enriching payroll & attendance…');
       }
-      const payrollPreloadPromise = runPayrollPreload();
+      const payrollPreloadPromise =
+        form15Part2AutofillContext && formWPayrollLookup
+          ? Promise.resolve()
+          : runPayrollPreload();
       if (!fastModalAutofill) {
         await payrollPreloadPromise;
       }
@@ -22543,6 +24349,39 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         } catch (formBPayErr) {
           console.warn('Form B all_salaries payroll enrich skipped:', formBPayErr?.message || formBPayErr);
+        }
+      }
+
+      if (form15Part2AutofillContext) {
+        try {
+          if (fastModalAutofill && needsPayrollBulkPreload) {
+            await payrollPreloadPromise.catch(() => null);
+          }
+          const filled = enrichForm15Part2PayrollRows({ overwrite: true });
+          if (filled > 0) {
+            console.log(`Form 15 Part 2 payroll enrich: ${filled} row(s) updated`);
+            if (!returnMappedData) {
+              mergeMappedIntoFormTable(mappedData, true);
+            }
+          } else if (
+            !returnMappedData &&
+            (!Array.isArray(statutoryPayrollRows) || statutoryPayrollRows.length === 0)
+          ) {
+            const monthHint = resolvePayrollMonthIsoCandidates(
+              selectedMonth,
+              modalData?.item || formFileModalData?.item,
+              modalData?.parsedFormHeader?.wagePeriodText ||
+                formFileModalData?.parsedFormHeader?.wagePeriodText ||
+                ''
+            ).join(', ');
+            setError(
+              monthHint
+                ? `No payroll data found for ${monthHint}. Open Payroll, fetch ${selectedMonth || 'this month'} (YYYY-MM), then click Autofill again.`
+                : 'No payroll data found for this month. Fetch payroll on the Payroll page first, then Autofill again.'
+            );
+          }
+        } catch (form15PayErr) {
+          console.warn('Form 15 Part 2 payroll enrich skipped:', form15PayErr?.message || form15PayErr);
         }
       }
 
@@ -23228,7 +25067,11 @@ const Statutory = ({ userEmail, userRole }) => {
                   const status = getForm25DayCellDisplay(rec);
                   return status ? form25DayCountFromStatus(status) > 0 : false;
                 }
-                if (form25DayStatusGrid || form25DailyHoursGrid) {
+                if (form25DayStatusGrid) {
+                  const bucket = formatForm25DayAttendanceStatus(rec);
+                  return bucket === 'Present' || bucket === 'Weekend';
+                }
+                if (form25DailyHoursGrid) {
                   return formatForm25DayAttendanceStatus(rec) === 'Present';
                 }
                 return hasValidAttendanceTime(rec);
@@ -23557,10 +25400,6 @@ const Statutory = ({ userEmail, userRole }) => {
                     const today = new Date();
                     const isCurrentSelectedMonth =
                       targetYear === today.getFullYear() && targetMonthIndex === today.getMonth();
-                    const isWeekendCalendarDay = (d) => {
-                      const dow = d.getDay();
-                      return dow === 0 || dow === 6;
-                    };
                     dateDayHeaders.forEach(({ header, day }) => {
                       const dayDate = new Date(targetYear, targetMonthIndex, day);
                       if (dayDate.getMonth() !== targetMonthIndex) return;
@@ -23584,13 +25423,24 @@ const Statutory = ({ userEmail, userRole }) => {
                           ? attendanceByEmailDate.get(`${emailCandidate}::${iso}`)
                           : null;
                       const rec = byId || byName || byFirstName || byEmail;
-                      if (form25DailyHoursGrid || form25DayStatusGrid) {
+                      if (form25DayStatusGrid) {
+                        row[header] = formatForm25DayAttendanceCode(rec, dayDate);
+                        return;
+                      }
+                      if (form25DailyHoursGrid) {
                         row[header] = rec ? getForm25DayCellDisplay(rec) : '';
+                        return;
+                      }
+                      if (
+                        form25SkipLossPayAndNationalHolidayBenefit &&
+                        form25DayColumnCount >= 5
+                      ) {
+                        row[header] = formatForm25DayAttendanceCode(rec, dayDate);
                         return;
                       }
                       if (rec && hasValidAttendanceTime(rec)) {
                         row[header] = formatHoursForDayCell(rec);
-                      } else if (isWeekendCalendarDay(dayDate)) {
+                      } else if (isWeekendCalendarDate(dayDate)) {
                         const fromAtt = rec ? formatHoursForDayCell(rec) : '';
                         row[header] = fromAtt || computeNormalHoursFromShift(emp || {}) || '';
                       } else {
@@ -23650,6 +25500,49 @@ const Statutory = ({ userEmail, userRole }) => {
       } catch (attendanceErr) {
         console.error('Error fetching attendance data for hours columns:', attendanceErr);
         // Do not fail autofill when attendance endpoint is unavailable
+      }
+
+      if (
+        (form25DayStatusGrid ||
+          (form25SkipLossPayAndNationalHolidayBenefit && form25DayColumnCount >= 5)) &&
+        Array.isArray(mappedData)
+      ) {
+        const form25DayHeaders = currentHeaders
+          .map((header) => {
+            const t = String(header || '').trim();
+            const direct = t.match(/^(\d{1,2})$/);
+            if (direct) {
+              const day = Number(direct[1]);
+              if (day >= 1 && day <= 31) return { header, day };
+            }
+            const suffixed = t.match(/(?:^|_)(\d{1,2})$/);
+            if (suffixed) {
+              const day = Number(suffixed[1]);
+              if (day >= 1 && day <= 31) return { header, day };
+            }
+            return null;
+          })
+          .filter(Boolean);
+        if (form25DayHeaders.length > 0) {
+          const now = new Date();
+          let targetMonthIndex = now.getMonth();
+          const selectedMonthIndex = MONTH_NAMES.findIndex((month) =>
+            month.toLowerCase().startsWith(String(selectedMonth || '').toLowerCase().trim())
+          );
+          if (selectedMonthIndex >= 0) targetMonthIndex = selectedMonthIndex;
+          const targetYear = now.getFullYear();
+          const isCurrentSelectedMonth =
+            targetYear === now.getFullYear() && targetMonthIndex === now.getMonth();
+          mappedData.forEach((row) => {
+            form25DayHeaders.forEach(({ header, day }) => {
+              if (String(row[header] ?? '').trim()) return;
+              if (isCurrentSelectedMonth && day > now.getDate()) return;
+              const dayDate = new Date(targetYear, targetMonthIndex, day);
+              if (dayDate.getMonth() !== targetMonthIndex) return;
+              row[header] = formatForm25DayAttendanceCode(null, dayDate);
+            });
+          });
+        }
       }
 
       // Form W: Number of days worked from Form 25 Total Worked Days
@@ -24326,44 +26219,37 @@ const Statutory = ({ userEmail, userRole }) => {
         console.log('Fetching leave data...');
         const { fromDate, toDate } = zohoBookedBalanceRangeForUiMonth(selectedMonth);
         const unit = 'Day';
+        const leaveFetchTimeoutMs = form15Part1AutofillContext
+          ? 60000
+          : enrichOnlyPhase
+            ? 8000
+            : fastModalAutofill
+              ? 2000
+              : 300000;
         let leaveResult = getCachedLeaveData(fromDate, toDate, unit);
-        if (!leaveResult) {
+        if (!leaveResult || form15Part1AutofillContext) {
           leaveResult = await fetchLeaveData({
             fromDate,
             toDate,
             unit,
-            force: enrichOnlyPhase ? false : !fastModalAutofill,
-            timeoutMs: enrichOnlyPhase ? 8000 : fastModalAutofill ? 2000 : 300000,
+            force: form15Part1AutofillContext ? true : enrichOnlyPhase ? false : !fastModalAutofill,
+            timeoutMs: leaveFetchTimeoutMs,
           }).catch((err) => {
             console.warn('Leave autofill fetch failed:', err?.message || err);
-            return null;
+            return leaveResult || null;
           });
         }
-        const leaveTypeLabels = (leaveResult && leaveResult.leaveTypeLabels) || {};
+        let leaveTypeLabels =
+          (leaveResult && leaveResult.leaveTypeLabels) || {};
 
         if (leaveResult && typeof leaveResult === 'object') {
           console.log('Leave data received:', leaveResult);
 
-          // Extract leave records. Backend may send a populated `records` map while `leaveRecords` is []
-          // (normalizeLeaveResponse does not always match Zoho bookedAndBalance shape). Empty array must not win.
-          let leaveRecords = [];
-
-          if (Array.isArray(leaveResult.leaveRecords) && leaveResult.leaveRecords.length > 0) {
-            leaveRecords = leaveResult.leaveRecords;
-          } else if (
-            leaveResult.records &&
-            typeof leaveResult.records === 'object' &&
-            !Array.isArray(leaveResult.records) &&
-            Object.keys(leaveResult.records).length > 0
-          ) {
-            leaveRecords = Object.entries(leaveResult.records).map(([employeeId, row]) => ({
-              employeeId: String(employeeId),
-              ...(row && typeof row === 'object' ? row : {}),
-            }));
-          } else {
+          const extractedLeave = extractLeaveRecordsFromApiResult(leaveResult);
+          let leaveRecords = extractedLeave.records;
+          if (leaveRecords.length === 0) {
             const leaveData =
               (leaveResult.data && typeof leaveResult.data === 'object' ? leaveResult.data : null) ||
-              leaveResult.records ||
               leaveResult;
 
             if (Array.isArray(leaveData) && leaveData.length > 0) {
@@ -24381,6 +26267,9 @@ const Statutory = ({ userEmail, userRole }) => {
               }));
               if (objectRows.length > 0) leaveRecords = objectRows;
             }
+          }
+          if (!Object.keys(leaveTypeLabels).length && extractedLeave.leaveTypeLabels) {
+            leaveTypeLabels = extractedLeave.leaveTypeLabels;
           }
 
           console.log('Extracted leave records:', leaveRecords);
@@ -24407,15 +26296,25 @@ const Statutory = ({ userEmail, userRole }) => {
             modalData?.parsedFormHeader || formFileModalData?.parsedFormHeader || options?.parsedFormHeader,
             modalData?.item || formFileModalData?.item || options?.item
           );
+          const form15LeaveHeaders = form15Part1LeaveMapping
+            ? resolveForm15Part1LeaveColumnHeaders(normalizedCurrentHeaders, parsedGroupLabels)
+            : null;
           const directFormFLeavesEarnedHeader = normalizedCurrentHeaders.find(
             (header) => normalizeLooseHeaderText(header) === 'leaves earned'
           );
           const directFormFReturnBalanceHeader = normalizedCurrentHeaders.find((header) =>
             normalizeLooseHeaderText(header).includes('balance on return from leave')
           );
-          const leaveEarnedHeader = directFormFLeavesEarnedHeader || formXLeaveSections.earnedEarned;
-          const leaveAvailedHeader = formXLeaveSections.earnedAvailed;
-          const leaveReturnBalanceHeader = directFormFReturnBalanceHeader || formXLeaveSections.earnedBalance;
+          const leaveEarnedHeader = form15LeaveHeaders?.earnedDuring
+            || directFormFLeavesEarnedHeader
+            || formXLeaveSections.earnedEarned;
+          const leaveAvailedHeader = form15LeaveHeaders?.earnedAvailed || formXLeaveSections.earnedAvailed;
+          const leaveReturnBalanceHeader = form15LeaveHeaders?.earnedBalance
+            || directFormFReturnBalanceHeader
+            || formXLeaveSections.earnedBalance;
+          const leaveEarnedBeginningHeader = form15Part1LeaveMapping
+            ? form15LeaveHeaders?.earnedBeginning || formXLeaveSections.earnedBeginning
+            : null;
           const otherLeaveHeaderMap = {
             beginning: formXLeaveSections.otherBeginning,
             availed: formXLeaveSections.otherAvailed,
@@ -24461,6 +26360,7 @@ const Statutory = ({ userEmail, userRole }) => {
             leaveBeginningHeader ||
             leaveBalanceHeader ||
             leaveReturnBalanceHeader ||
+            leaveEarnedBeginningHeader ||
             formXLeaveSections.earnedBalance
           ) {
             hasLeaveBalanceColumn = true;
@@ -24484,6 +26384,7 @@ const Statutory = ({ userEmail, userRole }) => {
             leaveBeginningHeader ||
             leaveBalanceHeader ||
             leaveReturnBalanceHeader ||
+            leaveEarnedBeginningHeader ||
             leaveEarnedHeader ||
             leaveAvailedHeader ||
             hasOtherLeaveColumn;
@@ -24497,6 +26398,9 @@ const Statutory = ({ userEmail, userRole }) => {
             }
             if (leaveReturnBalanceHeader) {
               console.log(`Found leave return balance column: "${leaveReturnBalanceHeader}"`);
+            }
+            if (leaveEarnedBeginningHeader) {
+              console.log(`Found earned leave beginning column: "${leaveEarnedBeginningHeader}"`);
             }
             if (leaveEarnedHeader) {
               console.log(`Found leave earned column: "${leaveEarnedHeader}"`);
@@ -24578,43 +26482,12 @@ const Statutory = ({ userEmail, userRole }) => {
               console.log(`Found other leave balance column: "${otherLeaveHeaderMap.balance}"`);
             }
 
-            const collectLeaveApiIdentityKeys = (leaveRecord) => {
-              const names = [];
-              const ids = [];
-              const addName = (v) => {
-                if (v == null || !String(v).trim()) return;
-                names.push(String(v).toLowerCase().trim());
-              };
-              const addId = (v) => {
-                if (v == null || !String(v).trim()) return;
-                ids.push(String(v).toLowerCase().trim());
-              };
-              const emp = leaveRecord.employee;
-              if (emp && typeof emp === 'object') {
-                addName(emp.name);
-                addId(emp.id);
-              }
-              addName(
-                leaveRecord.EmployeeName ||
-                  leaveRecord.employeeName ||
-                  leaveRecord['Employee Name'] ||
-                  leaveRecord.name
-              );
-              addId(
-                leaveRecord.EmployeeID ||
-                  leaveRecord.Employee_ID ||
-                  leaveRecord.employee_id ||
-                  leaveRecord['Employee ID'] ||
-                  leaveRecord.employeeId ||
-                  leaveRecord.ZohoID ||
-                  leaveRecord['Zoho.ID']
-              );
-              return { names: [...new Set(names)], ids: [...new Set(ids)] };
-            };
+            const collectLeaveApiIdentityKeys = collectLeaveRecordIdentityKeys;
 
             // Create maps of leave data by employee identifier
             const leaveBeginningMap = new Map();
             const leaveBalanceMap = new Map();
+            const leaveEarnedBeginningMap = new Map();
             const leaveEarnedMap = new Map();
             const leaveAvailedMap = new Map();
             const leaveReturnBalanceMap = new Map();
@@ -24631,24 +26504,24 @@ const Statutory = ({ userEmail, userRole }) => {
               const earnedLeaveMetrics = form15Part1LeaveMapping
                 ? getEarnedLeaveTypeMetrics(leaveRecord, leaveTypeLabels)
                 : null;
-              const contingencyLeaveMetrics = form15Part1LeaveMapping
-                ? getContingencyLeaveMetrics(leaveRecord, leaveTypeLabels)
-                : null;
               const otherLeaveMetrics = form15Part1LeaveMapping
-                ? contingencyLeaveMetrics || { beginning: '', availed: '', balance: '' }
+                ? getForm15Part1OtherLeaveMetrics(leaveRecord, leaveTypeLabels)
                 : getCombinedOtherLeaveMetrics(leaveRecord, leaveTypeLabels);
 
               const earnedDuringStr = form15Part1LeaveMapping
-                ? earnedLeaveMetrics?.balance || ''
+                ? sanitizeLeaveMetricDisplayValue(earnedLeaveMetrics?.balance)
                 : useFormFEarnedLeaveMapping
                   ? earnedBookedStr
                   : earnedBalanceStr;
               const earnedAvailedStr = form15Part1LeaveMapping
-                ? earnedLeaveMetrics?.availed || ''
+                ? sanitizeLeaveMetricDisplayValue(earnedLeaveMetrics?.availed)
                 : earnedBookedStr;
               const earnedBalanceEndStr = form15Part1LeaveMapping
-                ? earnedLeaveMetrics?.balance || ''
+                ? sanitizeLeaveMetricDisplayValue(earnedLeaveMetrics?.balance)
                 : earnedBalanceStr;
+              const earnedBeginningStr = form15Part1LeaveMapping
+                ? sanitizeLeaveMetricDisplayValue(earnedLeaveMetrics?.balance)
+                : '';
 
               const setIdentityLeaveMaps = (identityKey) => {
                 if (!identityKey) return;
@@ -24664,6 +26537,9 @@ const Statutory = ({ userEmail, userRole }) => {
                 }
                 if (leaveBalanceHeader) {
                   leaveBalanceMap.set(identityKey, balance);
+                }
+                if (leaveEarnedBeginningHeader && earnedBeginningStr !== '') {
+                  leaveEarnedBeginningMap.set(identityKey, earnedBeginningStr);
                 }
                 if (leaveEarnedHeader && earnedDuringStr !== '') {
                   leaveEarnedMap.set(identityKey, earnedDuringStr);
@@ -24682,26 +26558,17 @@ const Statutory = ({ userEmail, userRole }) => {
             });
            
             console.log('Leave beginning map:', Array.from(leaveBeginningMap.entries()));
+            console.log('Leave earned beginning map:', Array.from(leaveEarnedBeginningMap.entries()));
             console.log('Leave balance map:', Array.from(leaveBalanceMap.entries()));
             console.log('Leave earned map:', Array.from(leaveEarnedMap.entries()));
             console.log('Leave availed map:', Array.from(leaveAvailedMap.entries()));
             console.log('Leave return balance map:', Array.from(leaveReturnBalanceMap.entries()));
            
-            // Find employee name column to match employees
-            const employeeNameHeader = currentHeaders.find(header => {
-              const headerLower = header.toLowerCase().trim();
-              return headerLower.includes('name') &&
-                     (headerLower.includes('employee') || headerLower.includes('emp'));
-            });
-           
-            // Find employee ID column for matching
-            const employeeIdHeader = currentHeaders.find(header => {
-              const headerLower = header.toLowerCase().trim();
-              return (headerLower.includes('identification') ||
-                     (headerLower.includes('employee') && headerLower.includes('id')) ||
-                     (headerLower.includes('emp') && headerLower.includes('code'))) &&
-                     !headerLower.includes('zoho');
-            });
+            const { employeeNameHeader, employeeIdHeader } =
+              resolveFormEmployeeMatchHeaders(currentHeaders);
+            const form15LeaveLookup = form15Part1LeaveMapping
+              ? buildLeaveRecordLookupMap(leaveRecords)
+              : null;
            
             // Populate leave values for each employee
             mappedData.forEach((row, index) => {
@@ -24710,8 +26577,21 @@ const Statutory = ({ userEmail, userRole }) => {
               const empNameCandidates = getEmployeeNameCandidates(emp || {});
               const empWorkerId = String(getFallbackWorkerId(emp || {}) || '').toLowerCase().trim();
               const empVisibleId = String(getFallbackEmployeeId(emp || {}) || '').toLowerCase().trim();
+              const empZohoId = String(
+                emp?.Zoho_ID ||
+                  emp?.['Zoho_ID'] ||
+                  emp?.ZohoID ||
+                  emp?.['ZohoID'] ||
+                  emp?.zoho_id ||
+                  emp?.['zoho_id'] ||
+                  emp?.zohoId ||
+                  ''
+              )
+                .toLowerCase()
+                .trim();
               let matchedBeginning = null;
               let matchedBalance = null;
+              let matchedEarnedBeginning = null;
               let matchedEarned = null;
               let matchedAvailed = null;
               let matchedReturnBalance = null;
@@ -24740,6 +26620,9 @@ const Statutory = ({ userEmail, userRole }) => {
                 if (leaveBalanceHeader && matchedBalance == null && leaveBalanceMap.has(employeeName)) {
                   matchedBalance = leaveBalanceMap.get(employeeName);
                 }
+                if (leaveEarnedBeginningHeader && matchedEarnedBeginning == null && leaveEarnedBeginningMap.has(employeeName)) {
+                  matchedEarnedBeginning = leaveEarnedBeginningMap.get(employeeName);
+                }
                 if (leaveEarnedHeader && matchedEarned == null && leaveEarnedMap.has(employeeName)) {
                   matchedEarned = leaveEarnedMap.get(employeeName);
                 }
@@ -24753,11 +26636,12 @@ const Statutory = ({ userEmail, userRole }) => {
               }
 
               // If not matched by name, try by employee ID
-              if ((!matchedBeginning && leaveBeginningHeader) || (!matchedBalance && leaveBalanceHeader) || (!matchedEarned && leaveEarnedHeader) || (!matchedAvailed && leaveAvailedHeader) || (!matchedReturnBalance && leaveReturnBalanceHeader)) {
+              if ((!matchedBeginning && leaveBeginningHeader) || (!matchedBalance && leaveBalanceHeader) || (!matchedEarnedBeginning && leaveEarnedBeginningHeader) || (!matchedEarned && leaveEarnedHeader) || (!matchedAvailed && leaveAvailedHeader) || (!matchedReturnBalance && leaveReturnBalanceHeader)) {
                 const candidateIds = [
                   employeeIdHeader && row[employeeIdHeader] ? String(row[employeeIdHeader]).toLowerCase().trim() : '',
                   empVisibleId,
-                  empWorkerId
+                  empWorkerId,
+                  empZohoId
                 ].filter(Boolean);
                 for (const employeeId of candidateIds) {
                   if (leaveBeginningHeader && !matchedBeginning && leaveBeginningMap.has(employeeId)) {
@@ -24765,6 +26649,9 @@ const Statutory = ({ userEmail, userRole }) => {
                   }
                   if (leaveBalanceHeader && !matchedBalance && leaveBalanceMap.has(employeeId)) {
                     matchedBalance = leaveBalanceMap.get(employeeId);
+                  }
+                  if (leaveEarnedBeginningHeader && !matchedEarnedBeginning && leaveEarnedBeginningMap.has(employeeId)) {
+                    matchedEarnedBeginning = leaveEarnedBeginningMap.get(employeeId);
                   }
                   if (leaveEarnedHeader && !matchedEarned && leaveEarnedMap.has(employeeId)) {
                     matchedEarned = leaveEarnedMap.get(employeeId);
@@ -24794,6 +26681,14 @@ const Statutory = ({ userEmail, userRole }) => {
                   for (const [key, value] of leaveBalanceMap.entries()) {
                     if (key.includes(employeeName) || employeeName.includes(key)) {
                       matchedBalance = value;
+                      break;
+                    }
+                  }
+                }
+                if (leaveEarnedBeginningHeader && !matchedEarnedBeginning) {
+                  for (const [key, value] of leaveEarnedBeginningMap.entries()) {
+                    if (key.includes(employeeName) || employeeName.includes(key)) {
+                      matchedEarnedBeginning = value;
                       break;
                     }
                   }
@@ -24866,9 +26761,24 @@ const Statutory = ({ userEmail, userRole }) => {
                 console.log(`✓ Populated leave return balance for employee ${index + 1}: ${matchedReturnBalance}`);
               }
 
+              if (matchedEarnedBeginning !== null && leaveEarnedBeginningHeader) {
+                row[leaveEarnedBeginningHeader] = String(matchedEarnedBeginning);
+                leaveBalancePopulated++;
+                console.log(`✓ Populated earned leave beginning for employee ${index + 1}: ${matchedEarnedBeginning}`);
+              }
+
               if (form15Part1LeaveMapping) {
                 medicalLeaveHeaders.forEach((header) => {
                   row[header] = '';
+                });
+                const earnedHeaders = [
+                  leaveEarnedBeginningHeader,
+                  leaveEarnedHeader,
+                  leaveAvailedHeader,
+                  leaveReturnBalanceHeader,
+                ].filter(Boolean);
+                earnedHeaders.forEach((header) => {
+                  if (isSuspiciousZohoRecordIdValue(row[header])) row[header] = '';
                 });
               }
 
@@ -24897,6 +26807,66 @@ const Statutory = ({ userEmail, userRole }) => {
                 row[otherLeaveHeaderMap.balance] = String(matchedOtherLeave.balance);
                 otherLeavePopulated++;
               }
+
+              if (form15Part1LeaveMapping && form15LeaveHeaders) {
+                const directLeaveRecord =
+                  (form15LeaveLookup &&
+                    findLeaveRecordForFormRow(
+                      form15LeaveLookup,
+                      row,
+                      employeeIdHeader,
+                      employeeNameHeader
+                    )) ||
+                  findLeaveRecordForEmployee(
+                    leaveRecords,
+                    emp,
+                    row,
+                    employeeIdHeader,
+                    employeeNameHeader
+                  );
+                if (directLeaveRecord) {
+                  const appliedEarned = applyForm15Part1EarnedLeaveToRow(
+                    row,
+                    directLeaveRecord,
+                    form15LeaveHeaders,
+                    leaveTypeLabels,
+                    { overwrite: true }
+                  );
+                  const appliedOther = applyForm15Part1OtherLeaveToRow(
+                    row,
+                    directLeaveRecord,
+                    form15LeaveHeaders,
+                    leaveTypeLabels,
+                    { overwrite: true }
+                  );
+                  if (appliedEarned > 0) {
+                    if (form15LeaveHeaders.earnedDuring) leaveEarnedPopulated += 1;
+                    const directMetrics = getEarnedLeaveTypeMetrics(directLeaveRecord, leaveTypeLabels);
+                    if (form15LeaveHeaders.earnedAvailed && directMetrics?.availed) leaveAvailedPopulated += 1;
+                    if (
+                      form15LeaveHeaders.earnedBeginning ||
+                      form15LeaveHeaders.earnedBalance
+                    ) {
+                      leaveBalancePopulated += 1;
+                    }
+                  }
+                  if (appliedOther > 0) {
+                    const otherMetrics = getForm15Part1OtherLeaveMetrics(
+                      directLeaveRecord,
+                      leaveTypeLabels
+                    );
+                    if (otherLeaveHeaderMap.beginning && otherMetrics.beginning !== '') {
+                      otherLeavePopulated += 1;
+                    }
+                    if (otherLeaveHeaderMap.availed && otherMetrics.availed !== '') {
+                      otherLeavePopulated += 1;
+                    }
+                    if (otherLeaveHeaderMap.balance && otherMetrics.balance !== '') {
+                      otherLeavePopulated += 1;
+                    }
+                  }
+                }
+              }
             });
 
             console.log(`Leave balance populated for ${leaveBalancePopulated} out of ${mappedData.length} employees`);
@@ -24904,9 +26874,29 @@ const Statutory = ({ userEmail, userRole }) => {
             console.log(`Leave availed populated for ${leaveAvailedPopulated} out of ${mappedData.length} employees`);
             console.log(
               form15Part1LeaveMapping
-                ? `Form 15 Part 1 other leave (Contingency Leave) populated for ${otherLeavePopulated} cell(s)`
+                ? `Form 15 Part 1 other leave (Legacy / Paternity / Contingency) populated for ${otherLeavePopulated} cell(s)`
                 : `Other leave (Privilege/LWP/Sick/Wedding totals) populated for ${otherLeavePopulated} cell(s)`
             );
+
+            if (form15Part1LeaveMapping && leaveRecords.length > 0) {
+              const refRows = formTableDataRef.current;
+              if (Array.isArray(refRows) && refRows.length > mappedData.length) {
+                for (let i = 0; i < refRows.length; i++) {
+                  mappedData[i] = { ...(refRows[i] || {}), ...(mappedData[i] || {}) };
+                }
+              }
+              const finalized = finalizeForm15Part1LeaveAutofill(
+                mappedData,
+                employeesForMapping,
+                normalizedCurrentHeaders,
+                parsedGroupLabels,
+                leaveRecords,
+                leaveTypeLabels
+              );
+              if (finalized > 0) {
+                console.log(`Form 15 Part 1 earned leave finalized for ${finalized} employee(s)`);
+              }
+            }
           } else {
             if (!leaveBalanceHeader && !leaveEarnedHeader && !leaveAvailedHeader && !hasOtherLeaveColumn) {
               console.warn('⚠️ No leave columns matched (earned / other leave / balance at end).');
@@ -25009,6 +26999,16 @@ const Statutory = ({ userEmail, userRole }) => {
       }
      
       // Update form table data with employee data (including leave balance and leave earned)
+      if (form15Part2AutofillContext) {
+        try {
+          const refilled = enrichForm15Part2PayrollRows({ overwrite: true });
+          if (refilled > 0) {
+            console.log(`Form 15 Part 2 re-applied before save: ${refilled} row(s)`);
+          }
+        } catch (form15FinalPayErr) {
+          console.warn('Form 15 Part 2 final enrich pass skipped:', form15FinalPayErr?.message || form15FinalPayErr);
+        }
+      }
       let tableDataToSet = mappedData;
       if (formIIAutofillContext) {
         tableDataToSet = remapFormIIRowsToHeaders(
@@ -26678,7 +28678,6 @@ const Statutory = ({ userEmail, userRole }) => {
     }
    
     // Extract table data – use expanded headers when subcolumns exist so each column maps correctly
-    const hasSubColumns = subColumnsData && Object.keys(subColumnsData).length > 0;
     let headersToUse = expandedHeaders.length > 0 ? expandedHeaders : headers;
     const earlyFormUHints = {
       fileName: firstSheetName,
@@ -26690,6 +28689,21 @@ const Statutory = ({ userEmail, userRole }) => {
     ) {
       headersToUse = normalizeFormUConfidentialHeaders(headersToUse, earlyFormUHints);
     }
+
+    const form15Part2Sheet =
+      isForm15Part2Context(formHeaderInfo, null, firstSheetName, headersToUse) ||
+      isForm15Part2Context(formHeaderInfo, null, firstSheetName, headers) ||
+      looksLikeForm15Part2TableHeaders(headersToUse) ||
+      looksLikeForm15Part2TableHeaders(headers);
+    if (form15Part2Sheet) {
+      subColumnsData = {};
+      expandedHeaders = [];
+      headersToUse = headers;
+    }
+
+    let hasSubColumns =
+      subColumnsData &&
+      Object.keys(subColumnsData).some((k) => (subColumnsData[k] || []).length > 0);
 
     let tableStartCol = 0;
     const sheetTextBlobEarly = jsonData
@@ -26703,15 +28717,34 @@ const Statutory = ({ userEmail, userRole }) => {
       !formAMusterProbeEarly &&
       !headersIndicateFormAMusterRoll(headersToUse) &&
       !headersLookLikePivotOrWrongFormATable(headersToUse) &&
-      (isFormXXVIIContext(formHeaderInfo, null, firstSheetName) ||
+      (form15Part2Sheet ||
+        isFormXXVIIContext(formHeaderInfo, null, firstSheetName) ||
         looksLikeWageRegisterTableHeaders(headersToUse) ||
         looksLikeWageRegisterTableHeaders(headers));
     if (wageRegisterSheet && headerRowIndex >= 0) {
-      const anchor = findWageRegisterTableAnchor(
-        getMergedAwareCellText,
-        Math.min(45, jsonData.length),
-        Math.max(effectiveSheetCols, 28)
-      );
+      const anchor = form15Part2Sheet
+        ? findForm15Part2TableAnchor(
+            getMergedAwareCellText,
+            Math.min(45, jsonData.length),
+            Math.max(effectiveSheetCols, 28)
+          ) ||
+          findWageRegisterTableAnchor(
+            getMergedAwareCellText,
+            Math.min(45, jsonData.length),
+            Math.max(effectiveSheetCols, 28)
+          )
+        : findWageRegisterTableAnchor(
+            getMergedAwareCellText,
+            Math.min(45, jsonData.length),
+            Math.max(effectiveSheetCols, 28)
+          ) ||
+          (form15Part2Sheet
+            ? findForm15Part2TableAnchor(
+                getMergedAwareCellText,
+                Math.min(45, jsonData.length),
+                Math.max(effectiveSheetCols, 28)
+              )
+            : null);
       if (anchor) {
         headerRowIndex = anchor.r;
         tableStartCol = anchor.c;
@@ -26774,12 +28807,32 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
 
-    /** Wage registers (Form XXVII, Form W): one header per Excel column from Sr. No. through NET WAGES. */
+    /** Wage registers (Form XXVII, Form W, Form 15 Part 2): one header per Excel column. */
     if (!hasSubColumns && headerRowIndex >= 0 && wageRegisterSheet) {
-      const leafRow = Math.max(headerRowIndex, firstRowAfterHeaderBlock - 1 - extraRowsAfterHeader);
+      let wageTopRow = headerRowIndex;
+      let wageLeafRow = Math.max(headerRowIndex, firstRowAfterHeaderBlock - 1 - extraRowsAfterHeader);
+      if (form15Part2Sheet) {
+        for (let r = headerRowIndex; r < firstRowAfterHeaderBlock; r += 1) {
+          let rowScore = 0;
+          for (let c = tableStartCol; c < tableStartCol + 32; c += 1) {
+            const t = normalizeWageRegisterHeaderCell(getMergedAwareCellText(r, c));
+            if (!t) continue;
+            if (t.includes('advance paid')) rowScore += 8;
+            if (t.includes('advance recover')) rowScore += 4;
+            if (t.includes('pending recovery')) rowScore += 3;
+            if (t.includes('employee') && t.includes('insurance')) rowScore += 6;
+            if (t.includes('labour welfare fund')) rowScore += 4;
+            if (isWageRegisterParentBannerText(t)) rowScore -= 6;
+          }
+          if (rowScore > 0) {
+            wageLeafRow = Math.max(wageLeafRow, r);
+            wageTopRow = Math.min(wageTopRow, r);
+          }
+        }
+      }
       const wageRegisterHeaders = extractWageRegisterLeafHeaders({
-        headerRowIndex,
-        leafRow,
+        headerRowIndex: wageTopRow,
+        leafRow: wageLeafRow,
         startIndex,
         effectiveSheetCols,
         tableStartCol,
@@ -27661,8 +29714,8 @@ const Statutory = ({ userEmail, userRole }) => {
         formmasterFormFileByMatchKey
       );
       const candidateStatutoryIds = buildStatutorySampleDataFetchIds(currentItem, currentItem, {});
-      let sampleDataSaved = false;
-      let sampleDataSaveError = '';
+      let gridDataSaved = false;
+      let gridDataSaveError = '';
       if (candidateStatutoryIds.length > 0) {
         const headerDataForSampleSave =
           headerFormData && typeof headerFormData === 'object' && !Array.isArray(headerFormData)
@@ -27689,6 +29742,9 @@ const Statutory = ({ userEmail, userRole }) => {
           sampleDataHeader: prepareSampleDataHeadersForSave(normalizedHeaders),
           sampleHeaderFormData: headerDataForSampleSave,
           sampleData: prepareSampleDataRowsForSave(mergedRows),
+          headerFieldDefinitions: prepareHeaderFieldDefinitionsForSave(
+            formFileModalData?.parsedFormHeader?.fields || formHeader?.fields || []
+          ),
           formName: formNameValue,
           monthFilter: monthFilterValue,
           MonthFilter: monthFilterValue,
@@ -27696,38 +29752,41 @@ const Statutory = ({ userEmail, userRole }) => {
         };
         for (const tryStatutoryId of candidateStatutoryIds) {
           try {
-            const sampleResp = await postStatutorySampleDataSnapshot(tryStatutoryId, samplePayload);
-            if (sampleResp.ok && sampleResp.data?.status === 'success') {
-              sampleDataSaved = true;
-              sampleDataSaveError = '';
+            const persistResp = await persistStatutoryGridSnapshots(tryStatutoryId, samplePayload);
+            if (persistResp.ok) {
+              gridDataSaved = true;
+              gridDataSaveError = '';
               break;
             }
-            sampleDataSaveError =
-              sampleResp.data?.message ||
-              sampleResp.rawText ||
-              `SampleData save failed for statutory id ${tryStatutoryId}.`;
-            console.warn('SampleData persist after import failed:', sampleDataSaveError);
-          } catch (samplePersistErr) {
-            sampleDataSaveError =
-              samplePersistErr?.message || `SampleData save failed for statutory id ${tryStatutoryId}.`;
-            console.warn('SampleData persist after import failed:', samplePersistErr);
+            gridDataSaveError =
+              persistResp.data?.message ||
+              persistResp.importResult?.data?.message ||
+              persistResp.sampleResult?.data?.message ||
+              persistResp.importResult?.rawText ||
+              persistResp.sampleResult?.rawText ||
+              `ImportData save failed for statutory id ${tryStatutoryId}.`;
+            console.warn('Grid persist after import failed:', gridDataSaveError);
+          } catch (persistErr) {
+            gridDataSaveError =
+              persistErr?.message || `ImportData save failed for statutory id ${tryStatutoryId}.`;
+            console.warn('Grid persist after import failed:', persistErr);
           }
         }
       }
 
-      if (sampleDataSaved) {
-        setSuccess(`Imported ${importedRows.length} rows and saved to SampleData.`);
+      if (gridDataSaved) {
+        setSuccess(`Imported ${importedRows.length} rows and saved to ImportData.`);
         setError('');
       } else if (candidateStatutoryIds.length > 0) {
         setSuccess(`Imported ${importedRows.length} rows into the form.`);
         setError(
-          sampleDataSaveError
-            ? `SampleData was not saved: ${sampleDataSaveError}`
-            : 'SampleData was not saved. Click Save to retry, or redeploy statutoryreg_function.'
+          gridDataSaveError
+            ? `ImportData was not saved: ${gridDataSaveError}`
+            : 'ImportData was not saved. Click Save to retry, or redeploy importdata_function.'
         );
       } else {
         setSuccess(`Imported ${importedRows.length} rows into the form.`);
-        setError('SampleData was not saved because this row has no statutory record id yet. Click Save first.');
+        setError('ImportData was not saved because this row has no statutory record id yet. Click Save first.');
       }
     } catch (err) {
       console.error('Import rows error:', err);
@@ -28200,9 +30259,12 @@ const Statutory = ({ userEmail, userRole }) => {
             tableHeaders: parsed.headers
           })
         ) {
-          const periodLine = fullMonthForPeriod
-            ? buildForm25PeriodLine(fullMonthForPeriod, yearForPeriod)
-            : '';
+          const { fullMonth, year } = resolveForm25DisplayPeriodMonthYear(
+            selectedMonth || rawMonthToken,
+            item,
+            templateWageLine
+          );
+          const periodLine = fullMonth ? buildForm25PeriodLine(fullMonth, year) : '';
           if (periodLine) {
             formHeaderForModal = {
               ...(formHeaderForModal || {
@@ -28213,6 +30275,31 @@ const Statutory = ({ userEmail, userRole }) => {
                 textRows: []
               }),
               wagePeriodText: periodLine
+            };
+          }
+        }
+
+        if (
+          formHeaderForModal &&
+          isForm15Part1AutofillContext(displayFileName, formHeaderForModal, item)
+        ) {
+          let wageLine = '';
+          if (fullMonthForPeriod) {
+            wageLine = buildRegisterWagePeriodLine(fullMonthForPeriod, yearForPeriod);
+          }
+          if (!wageLine && /wage\s*period/i.test(templateWageLine)) {
+            wageLine = repairTruncatedYearsInWagePeriodLine(templateWageLine, yearForPeriod);
+          }
+          if (wageLine) {
+            formHeaderForModal = {
+              ...(formHeaderForModal || {
+                title: '',
+                subtitle: '',
+                reference: '',
+                fields: [],
+                textRows: []
+              }),
+              wagePeriodText: wageLine
             };
           }
         }
@@ -28517,8 +30604,12 @@ const Statutory = ({ userEmail, userRole }) => {
                 (isNumericStatutoryBackendId(savedDraftSourceItem?.id) ? String(savedDraftSourceItem.id).trim() : null) ||
                 (isNumericStatutoryBackendId(item?.id) ? String(item.id).trim() : null);
               if (sampleRowId) {
-                // SampleData is the exact grid the site user saved, including manual add/delete/edit cells.
-                const sampleBlock = await fetchFirstAvailableStatutorySampleDataSnapshot(sampleRowId);
+                // ImportData / SampleData is the exact grid the site user saved, including manual add/delete/edit cells.
+                const sampleBlock = await fetchFirstAvailableStatutorySampleDataSnapshot(
+                  ...buildStatutorySampleDataFetchIds(item, item, {}),
+                  sampleRowId,
+                  buildStatutorySampleDataFetchContext(item, item)
+                );
                 if (sampleBlock) {
                   const sampleRows = sampleBlock.rows;
                   const sampleHeaders = Array.isArray(sampleBlock.headers) ? sampleBlock.headers : [];
@@ -29405,7 +31496,7 @@ const Statutory = ({ userEmail, userRole }) => {
         formHeaderSubtitle: base?.subtitle
       })
     ) {
-      const { fullMonth, year } = resolveForm25PeriodMonthYear(
+      const { fullMonth, year } = resolveForm25DisplayPeriodMonthYear(
         selectedMonth,
         item,
         base?.wagePeriodText || ''
@@ -29413,6 +31504,17 @@ const Statutory = ({ userEmail, userRole }) => {
       const periodLine = buildForm25PeriodLine(fullMonth, year);
       if (periodLine) {
         base = { ...base, wagePeriodText: periodLine };
+      }
+    }
+    if (isForm15Part1AutofillContext(fn, base, item)) {
+      const { fullMonth, year } = resolveForm25PeriodMonthYear(
+        selectedMonth,
+        item,
+        base?.wagePeriodText || ''
+      );
+      const wageLine = buildRegisterWagePeriodLine(fullMonth, year);
+      if (wageLine) {
+        base = { ...base, wagePeriodText: wageLine };
       }
     }
     if (isForm26RegisterOfAccidentsContext(base, item, fn, formFileModalData?.parsedTableHeaders)) {
@@ -29428,6 +31530,20 @@ const Statutory = ({ userEmail, userRole }) => {
     selectedMonth
   ]);
   const isFormFileReadOnly = !!formFileModalData?.readOnly;
+  const form15Part1ModalContext = useMemo(
+    () =>
+      isForm15Part1AutofillContext(
+        formFileModalData?.fileName || formFileModalData?.formFileName || '',
+        formFileModalData?.parsedFormHeader,
+        formFileModalData?.item
+      ),
+    [
+      formFileModalData?.fileName,
+      formFileModalData?.formFileName,
+      formFileModalData?.parsedFormHeader,
+      formFileModalData?.item
+    ]
+  );
   const displayTableHeaders = useMemo(() => {
     const parsed = formFileModalData?.parsedTableHeaders;
     let baseHeaders = Array.isArray(parsed) && parsed.length > 0 ? parsed : tableHeaders || [];
@@ -29593,6 +31709,7 @@ const Statutory = ({ userEmail, userRole }) => {
         try {
           await fetchAndPopulateEmployeeData(headers, {
             formFileModalData: formFileModalData || undefined,
+            columnGroupLabels: formFileModalData?.parsedColumnGroupLabels ?? null,
             skipPeopleFetch: true,
             employeesOverride: autofillEmployeesRef.current,
             employeePage: targetPage,
@@ -32435,12 +34552,35 @@ const Statutory = ({ userEmail, userRole }) => {
                       <button
                         onClick={() => {
                           prefetchPeopleData();
+                          const form15Part1File = isForm15Part1AutofillContext(
+                            String(
+                              formFileModalData?.fileName ||
+                                formFileModalData?.formFileName ||
+                                ''
+                            ),
+                            formFileModalData?.parsedFormHeader || {},
+                            formFileModalData?.item
+                          );
+                          if (form15Part1File) {
+                            const { fromDate, toDate } =
+                              zohoBookedBalanceRangeForUiMonth(selectedMonth);
+                            prefetchLeaveData({ fromDate, toDate, unit: 'Day' });
+                          }
+                          if (
+                            /\bform[\s._-]*25\b/i.test(
+                              String(formFileModalData?.fileName || formFileModalData?.formFileName || '')
+                            )
+                          ) {
+                            prefetchAttendanceData();
+                          }
                           fetchAndPopulateEmployeeData(
                             formFileModalData?.parsedTableHeaders?.length
                               ? formFileModalData.parsedTableHeaders
                               : tableHeaders,
                             {
                               formFileModalData: formFileModalData || undefined,
+                              columnGroupLabels:
+                                formFileModalData?.parsedColumnGroupLabels ?? null,
                               form25PeopleSkipManualColumns: /\bform[\s._-]*25\b/i.test(
                                 String(formFileModalData?.fileName || formFileModalData?.formFileName || '')
                               )
@@ -32876,7 +35016,21 @@ const Statutory = ({ userEmail, userRole }) => {
                                 }}>
                                   <input
                                     type="text"
-                                    value={row[header] === false || row[header] === 'false' || !row[header] ? '' : row[header]}
+                                    value={(() => {
+                                      const raw =
+                                        row[header] === false || row[header] === 'false' || !row[header]
+                                          ? ''
+                                          : row[header];
+                                      if (
+                                        form15Part1ModalContext &&
+                                        isLeaveRegisterMetricHeader(header) &&
+                                        (isSuspiciousZohoRecordIdValue(raw) ||
+                                          isJunkLeaveRegisterCellValue(raw))
+                                      ) {
+                                        return '';
+                                      }
+                                      return raw;
+                                    })()}
                                     onChange={(e) => {
                                       if (isFormFileReadOnly) return;
                                       const newData = [...formTableData];

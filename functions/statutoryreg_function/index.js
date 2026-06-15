@@ -377,7 +377,186 @@ async function persistSampleDataSnapshot(catalyst, payload, statutoryRow = null)
       throw err;
     }
   }
-  return { saved: true, rowId: insertResp?.ROWID || null, monthFilter: monthFilterValue };
+  let statutoryDataResult = { saved: false, inserted: 0 };
+  try {
+    statutoryDataResult = await persistStatutoryDataFields(
+      catalyst,
+      {
+        ...payload,
+        headers,
+        rows,
+        headerFormData,
+        monthfilter: monthFilterValue,
+        monthFilter: monthFilterValue,
+        MonthFilter: monthFilterValue
+      },
+      statutoryRow
+    );
+  } catch (statDataErr) {
+    console.warn('StatutoryData field save failed:', statDataErr?.message || statDataErr);
+  }
+
+  return {
+    saved: true,
+    rowId: insertResp?.ROWID || null,
+    monthFilter: monthFilterValue,
+    statutoryDataSaved: !!statutoryDataResult.saved,
+    statutoryDataInserted: statutoryDataResult.inserted || 0
+  };
+}
+
+const STATUTORY_DATA_TABLE = 'StatutoryData';
+
+function pickStatutoryDataRow(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return entry.StatutoryData || entry.statutorydata || entry;
+}
+
+function normalizeStatutoryDataHeaderKey(key) {
+  return String(key || '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function resolveStatutoryDataHeaderLabel(key, fieldDefinitions) {
+  if (Array.isArray(fieldDefinitions)) {
+    const match = fieldDefinitions.find((f) => String(f?.key || '') === String(key));
+    if (match?.label) return normalizeStatutoryDataHeaderKey(match.label);
+  }
+  return normalizeStatutoryDataHeaderKey(key);
+}
+
+function statutoryDataPayloadFromBody(body) {
+  const headers = Array.isArray(body?.sampleDataHeader)
+    ? body.sampleDataHeader
+    : Array.isArray(body?.headers)
+      ? body.headers
+      : [];
+  const rows = Array.isArray(body?.sampleData)
+    ? body.sampleData
+    : Array.isArray(body?.rows)
+      ? body.rows
+      : [];
+  const headerFormData =
+    body?.sampleHeaderFormData &&
+    typeof body.sampleHeaderFormData === 'object' &&
+    !Array.isArray(body.sampleHeaderFormData)
+      ? body.sampleHeaderFormData
+      : body?.headerFormData &&
+          typeof body.headerFormData === 'object' &&
+          !Array.isArray(body.headerFormData)
+        ? body.headerFormData
+        : {};
+  const headerFieldDefinitions = Array.isArray(body?.headerFieldDefinitions)
+    ? body.headerFieldDefinitions
+    : [];
+  const monthfilterRaw = normalizeMonthFilterValue(body);
+  return {
+    headers,
+    rows,
+    headerFormData,
+    headerFieldDefinitions,
+    monthfilter: trimMonthFilterForDatastore(monthfilterRaw),
+    monthFilter: trimMonthFilterForDatastore(monthfilterRaw),
+    MonthFilter: trimMonthFilterForDatastore(monthfilterRaw)
+  };
+}
+
+function buildStatutoryDataFieldEntries(payload) {
+  const headers = Array.isArray(payload?.headers) ? payload.headers : [];
+  const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+  const headerFormData =
+    payload?.headerFormData && typeof payload.headerFormData === 'object' && !Array.isArray(payload.headerFormData)
+      ? payload.headerFormData
+      : {};
+  const fieldDefs = Array.isArray(payload?.headerFieldDefinitions) ? payload.headerFieldDefinitions : [];
+  const entries = [];
+  const seen = new Set();
+
+  const pushEntry = (changeHeader, value) => {
+    const header = normalizeStatutoryDataHeaderKey(changeHeader);
+    const val = value == null ? '' : String(value).trim();
+    if (!header || val === '') return;
+    const dedupeKey = `${header}\0${val}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    entries.push({ changeHeader: header, value: val });
+  };
+
+  for (const [key, value] of Object.entries(headerFormData)) {
+    if (String(key).startsWith('__')) continue;
+    pushEntry(resolveStatutoryDataHeaderLabel(key, fieldDefs), value);
+  }
+
+  const normalizedHeaders = headers.map((h) => normalizeStatutoryDataHeaderKey(h)).filter(Boolean);
+  rows.forEach((row, rowIdx) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return;
+    normalizedHeaders.forEach((header, colIdx) => {
+      const originalHeader = headers[colIdx] || header;
+      let cellVal = row[originalHeader];
+      if (cellVal == null) {
+        const matchKey = Object.keys(row).find((k) => normalizeStatutoryDataHeaderKey(k) === header);
+        if (matchKey) cellVal = row[matchKey];
+      }
+      if (cellVal == null || String(cellVal).trim() === '') return;
+      const changeHeader = rows.length > 1 ? `${header} (Row ${rowIdx + 1})` : header;
+      pushEntry(changeHeader, cellVal);
+    });
+  });
+
+  return entries;
+}
+
+/** Save form field headers and values into StatutoryData (ChangeDataHeader, Value, MonthStore). */
+async function persistStatutoryDataFields(catalyst, payload, statutoryRow = null) {
+  const monthStore =
+    resolveMonthFilterForSampleDataSave(payload, statutoryRow) || MONTH_NAMES[new Date().getMonth()];
+  const entries = buildStatutoryDataFieldEntries(payload);
+  if (entries.length === 0) {
+    return { saved: false, reason: 'empty_entries' };
+  }
+
+  const table = catalyst.datastore().table(STATUTORY_DATA_TABLE);
+  const zcql = catalyst.zcql();
+  const headersToReplace = new Set(entries.map((e) => e.changeHeader));
+
+  try {
+    const escapedMonth = String(monthStore).replace(/'/g, "''");
+    const query = `SELECT ROWID, ChangeDataHeader, MonthStore FROM ${STATUTORY_DATA_TABLE} WHERE MonthStore = '${escapedMonth}'`;
+    const existing = await zcql.executeZCQLQuery(query);
+    const list = Array.isArray(existing) ? existing : [];
+    const toDelete = [];
+    for (const item of list) {
+      const row = pickStatutoryDataRow(item);
+      if (!row?.ROWID) continue;
+      const hdr = normalizeStatutoryDataHeaderKey(row.ChangeDataHeader);
+      if (headersToReplace.has(hdr)) {
+        toDelete.push(row.ROWID);
+      }
+    }
+    if (toDelete.length > 0) {
+      await table.deleteRows(toDelete);
+    }
+  } catch (queryErr) {
+    console.warn('StatutoryData upsert lookup failed, inserting anyway:', queryErr.message);
+  }
+
+  let inserted = 0;
+  for (const entry of entries) {
+    try {
+      await table.insertRow({
+        ChangeDataHeader: entry.changeHeader,
+        Value: entry.value,
+        MonthStore: monthStore
+      });
+      inserted += 1;
+    } catch (insertErr) {
+      console.error('StatutoryData insert failed:', insertErr.message, entry.changeHeader);
+    }
+  }
+
+  return { saved: inserted > 0, inserted, monthStore };
 }
 
 /** Catalyst/API payloads vary: monthfilter | monthFilter | MonthFilter */
@@ -1187,6 +1366,9 @@ app.post('/statutory/:id/sampledata', async (req, res) => {
           null,
         headers,
         headerFormData,
+        headerFieldDefinitions: Array.isArray(req.body?.headerFieldDefinitions)
+          ? req.body.headerFieldDefinitions
+          : [],
         rows
       },
       existingRecord
@@ -1217,7 +1399,9 @@ app.post('/statutory/:id/sampledata', async (req, res) => {
         rowCount: rows.length,
         sampleDataRowId: persistResult.rowId,
         MonthFilter: persistResult.monthFilter || null,
-        monthfilter: persistResult.monthFilter || null
+        monthfilter: persistResult.monthFilter || null,
+        statutoryDataSaved: !!persistResult.statutoryDataSaved,
+        statutoryDataInserted: persistResult.statutoryDataInserted || 0
       }
     });
   } catch (err) {
@@ -1225,6 +1409,70 @@ app.post('/statutory/:id/sampledata', async (req, res) => {
     return res.status(500).json({
       status: 'failure',
       message: err.message || 'Failed to save SampleData snapshot.'
+    });
+  }
+});
+
+// Save autofill/import field values into StatutoryData (ChangeDataHeader, Value, MonthStore)
+app.post('/statutory/:id/statutorydata', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const idStr = String(id || '').trim();
+    if (!/^\d+$/.test(idStr)) {
+      return res.status(400).json({ status: 'failure', message: 'Invalid statutory id for StatutoryData save.' });
+    }
+
+    const { catalyst } = res.locals;
+    const table = catalyst.datastore().table('Statutory');
+    let existingRecord = null;
+    try {
+      existingRecord = await table.getRow(idStr);
+    } catch (getRowErr) {
+      console.warn('StatutoryData save: statutory row lookup failed, saving fields anyway:', getRowErr.message);
+    }
+
+    const dataPayload = statutoryDataPayloadFromBody(req.body);
+    const { headers, rows, headerFormData, headerFieldDefinitions } = dataPayload;
+    if (
+      headers.length === 0 &&
+      rows.length === 0 &&
+      Object.keys(headerFormData).length === 0
+    ) {
+      return res.status(400).json({ status: 'failure', message: 'No field data to save.' });
+    }
+
+    const persistResult = await persistStatutoryDataFields(
+      catalyst,
+      {
+        ...dataPayload,
+        statutoryId: existingRecord?.ROWID || idStr,
+        formName: req.body?.formName || existingRecord?.FormName || null
+      },
+      existingRecord
+    );
+
+    if (!persistResult?.saved) {
+      return res.status(400).json({
+        status: 'failure',
+        message: 'Could not save StatutoryData fields.',
+        reason: persistResult?.reason || 'unknown'
+      });
+    }
+
+    return res.status(200).json({
+      status: 'success',
+      message: 'StatutoryData fields saved.',
+      data: {
+        statutoryId: String(existingRecord?.ROWID || idStr),
+        inserted: persistResult.inserted || 0,
+        MonthStore: persistResult.monthStore || null
+      }
+    });
+  } catch (err) {
+    console.error('Error saving StatutoryData fields:', err);
+    return res.status(500).json({
+      status: 'failure',
+      message: err.message || 'Failed to save StatutoryData fields.'
     });
   }
 });
@@ -1431,7 +1679,8 @@ app.post('/statutory', async (req, res) => {
       approvedDate,
       sampleDataHeader,
       sampleHeaderFormData,
-      sampleData
+      sampleData,
+      headerFieldDefinitions
     } = req.body;
     const submittedDateRaw = submittedDateFromBody(req.body);
     const approvedDateRaw = approvedDateFromBody(req.body);
@@ -1523,6 +1772,7 @@ app.post('/statutory', async (req, res) => {
           MonthFilter: created.MonthFilter || trimMonthFilterForDatastore(monthfilterRaw) || null,
           headers: sampleDataHeader,
           headerFormData: sampleHeaderFormData,
+          headerFieldDefinitions,
           rows: sampleData
         },
         created
@@ -1656,7 +1906,8 @@ app.put('/statutory/:id', async (req, res) => {
       approvedDate,
       sampleDataHeader,
       sampleHeaderFormData,
-      sampleData
+      sampleData,
+      headerFieldDefinitions
     } = req.body;
     const submittedDateRaw = submittedDateFromBody(req.body);
     const approvedDateRaw = approvedDateFromBody(req.body);
@@ -1853,6 +2104,7 @@ app.put('/statutory/:id', async (req, res) => {
               null,
             headers: sampleDataHeader,
             headerFormData: sampleHeaderFormData,
+            headerFieldDefinitions,
             rows: sampleData
           },
           updated

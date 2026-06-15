@@ -2,10 +2,18 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import './People.css';
 import { getPayrollOrganizationId } from '../utils/payrollOrgId';
+import {
+  collectPayrollColumnKeys,
+  flattenPayrollEarningColumns,
+  unwrapSalaryEmployeePayload,
+} from '../utils/payrollEarnings';
 
 const API_BASE = '/server/payroll_function';
 const EMPLOYEE_BATCH_SIZE = 200;
-const DETAIL_BATCH_SIZE = 6;
+const DETAIL_BATCH_SIZE = 1;
+const DETAIL_DELAY_MS = 800;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const getDefaultPayrollMonth = () => {
   const now = new Date();
@@ -33,6 +41,43 @@ async function fetchPayrollJson(qs) {
   return json;
 }
 
+async function savePayrollSnapshot({
+  payrollMonth,
+  organizationId,
+  runMeta,
+  records,
+  hasBreakdown = false,
+  totalExpected,
+  breakdownComplete = false,
+}) {
+  const res = await fetch(`${API_BASE}/save`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      payrollMonth,
+      organizationId,
+      runMeta,
+      records,
+      hasBreakdown: hasBreakdown === true,
+      totalExpected: totalExpected ?? records.length,
+      breakdownComplete: breakdownComplete === true,
+    }),
+  });
+  const text = await res.text();
+  let json = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(
+      `Payroll save returned HTTP ${res.status} (not JSON). Redeploy payroll_function and check Catalyst logs.`
+    );
+  }
+  if (!res.ok || !json.success) {
+    throw new Error(json.error || json.message || `Save failed (HTTP ${res.status})`);
+  }
+  return json;
+}
+
 /**
  * Zoho Payroll pay-run data — month-wise employee summary from processed pay runs.
  */
@@ -45,6 +90,7 @@ const Payroll = ({ userRole, userEmail }) => {
   const [error, setError] = useState('');
   const [loadMode, setLoadMode] = useState('list');
   const [progress, setProgress] = useState('');
+  const [saveMessage, setSaveMessage] = useState('');
   const runMetaRef = useRef(null);
   const dataRef = useRef(null);
 
@@ -66,6 +112,7 @@ const Payroll = ({ userRole, userEmail }) => {
     setLoading(true);
     setError('');
     setProgress('');
+    setSaveMessage('');
     if (mode !== 'full') {
       setData(null);
       setRunMeta(null);
@@ -90,22 +137,14 @@ const Payroll = ({ userRole, userEmail }) => {
               try {
                 const qs = new URLSearchParams({
                   organization_id: organizationId,
-                  payrun_employee_detail: '1',
-                  payroll_run_id: payrollRunId,
                   employee_id: String(employeeId),
                 });
                 const json = await fetchPayrollJson(qs);
-                return {
+                const detail = unwrapSalaryEmployeePayload(json.data);
+                return flattenPayrollEarningColumns({
                   ...row,
-                  earnings: json.data?.earnings || [],
-                  deductions: json.data?.deductions || [],
-                  benefits: json.data?.benefits || [],
-                  taxes: json.data?.taxes || [],
-                  gross_pay: json.data?.gross_pay ?? row.gross_pay,
-                  net_pay: json.data?.net_pay ?? row.net_pay,
-                  paid_days: json.data?.paid_days ?? row.paid_days,
-                  lop_days: json.data?.lop_days ?? row.lop_days,
-                };
+                  ...detail,
+                });
               } catch (detailErr) {
                 return {
                   ...row,
@@ -116,8 +155,26 @@ const Payroll = ({ userRole, userEmail }) => {
             })
           );
           merged.push(...details);
-          setProgress(`Loading earnings breakdown… ${merged.length} / ${baseRows.length}`);
+          if (i + DETAIL_BATCH_SIZE < baseRows.length) {
+            await sleep(DETAIL_DELAY_MS);
+          }
+          setProgress(
+            `Loading salary components… ${merged.length} / ${baseRows.length} · saving to Payroll table…`
+          );
           setData([...merged]);
+          const saveResult = await savePayrollSnapshot({
+            payrollMonth,
+            organizationId,
+            runMeta: runMetaRef.current,
+            records: merged,
+            hasBreakdown: true,
+            totalExpected: baseRows.length,
+            breakdownComplete: merged.length >= baseRows.length,
+          });
+          const savedCount = saveResult?.data?.recordCount ?? merged.length;
+          setSaveMessage(
+            `Stored ${savedCount} / ${baseRows.length} employee record(s) in Payroll table.`
+          );
         }
       } else {
         const merged = [];
@@ -135,7 +192,9 @@ const Payroll = ({ userRole, userEmail }) => {
             employee_limit: String(EMPLOYEE_BATCH_SIZE),
           });
           const json = await fetchPayrollJson(qs);
-          const batch = Array.isArray(json.data) ? json.data : [];
+          const batch = (Array.isArray(json.data) ? json.data : []).map((row) =>
+            flattenPayrollEarningColumns(row)
+          );
           merged.push(...batch);
           meta = json.meta || meta;
 
@@ -144,13 +203,29 @@ const Payroll = ({ userRole, userEmail }) => {
           }
           const loaded = merged.length;
           const displayTotal = total ?? loaded;
-          setProgress(`Loading ${payrollMonth} payroll… ${loaded} / ${displayTotal}`);
-          setData([...merged]);
-          setRunMeta(meta);
-
           const hasMore =
             json.meta?.has_more === true ||
             (json.meta?.has_more !== false && batch.length >= EMPLOYEE_BATCH_SIZE);
+          setProgress(
+            `Loading ${payrollMonth} payroll… ${loaded} / ${displayTotal} · saving to Payroll table…`
+          );
+          setData([...merged]);
+          setRunMeta(meta);
+
+          const saveResult = await savePayrollSnapshot({
+            payrollMonth,
+            organizationId,
+            runMeta: meta,
+            records: merged,
+            hasBreakdown: false,
+            totalExpected: displayTotal,
+            breakdownComplete: false,
+          });
+          const savedCount = saveResult?.data?.recordCount ?? loaded;
+          setSaveMessage(
+            `Stored ${savedCount} / ${displayTotal} employee record(s) in Payroll table.`
+          );
+
           if (!hasMore || batch.length === 0) break;
           offset += batch.length;
         }
@@ -172,21 +247,22 @@ const Payroll = ({ userRole, userEmail }) => {
   }, [fetchData, location.pathname]);
 
   const records = (() => {
-    if (!data) return [];
-    if (Array.isArray(data)) return data;
-    const res = data.response || data.result || data;
-    if (Array.isArray(res)) return res;
-    const rec = res?.record ?? res?.records ?? res?.data;
-    if (Array.isArray(rec)) return rec;
-    if (res && typeof res === 'object') return [res];
-    return [];
+    let raw = [];
+    if (!data) return raw;
+    if (Array.isArray(data)) raw = data;
+    else {
+      const res = data.response || data.result || data;
+      if (Array.isArray(res)) raw = res;
+      else {
+        const rec = res?.record ?? res?.records ?? res?.data;
+        if (Array.isArray(rec)) raw = rec;
+        else if (res && typeof res === 'object') raw = [res];
+      }
+    }
+    return raw.map((row) => flattenPayrollEarningColumns(row));
   })();
 
-  const firstRecord = records[0];
-  const keys =
-    firstRecord && typeof firstRecord === 'object'
-      ? Object.keys(firstRecord).filter((k) => !/^_|^\./.test(k))
-      : [];
+  const keys = records.length > 0 ? collectPayrollColumnKeys(records) : [];
 
   const formatMonthLabel = (value) => {
     if (!value || !/^\d{4}-\d{2}$/.test(value)) return value || '';
@@ -200,8 +276,8 @@ const Payroll = ({ userRole, userEmail }) => {
       <header className="people-header">
         <h1 className="people-title">Salary details</h1>
         <p className="people-subtitle">
-          Fetch month-wise payroll from Zoho Payroll pay runs (regular monthly run). Use Load salary
-          breakdown for earnings and deductions per employee (slower).
+          Fetch month-wise payroll from Zoho Payroll pay runs (regular monthly run). Click Load salary
+          breakdown to fetch Basic, HRA, allowances from each employee salary structure (slower).
         </p>
       </header>
 
@@ -249,6 +325,12 @@ const Payroll = ({ userRole, userEmail }) => {
       )}
 
       {error && <div className="people-error">{error}</div>}
+
+      {saveMessage && !loading && !error && (
+        <p className="people-subtitle" style={{ marginTop: 8, color: '#047857' }}>
+          {saveMessage}
+        </p>
+      )}
 
       {loading && (
         <div className="people-loading">

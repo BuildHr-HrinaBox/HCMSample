@@ -1,0 +1,17 @@
+{
+	"deployment": {
+		"name": "clra_function",
+		"stack": "node24",
+		"type": "advancedio",
+		"env_variables": {
+			"ZOHO_CLRA_ACCESS_TOKEN": "1000.7d13bea96006a227e825ad339200eb2e.1f4267d7dfa9d18c5fcde58e502d6860",
+			"ZOHO_CREATOR_API_DOMAIN": "https://www.zohoapis.in",
+			"ZOHO_CREATOR_OWNER": "zohoadmin_vayonaenergy",
+			"ZOHO_CREATOR_APP": "cms-contract-management-system",
+			"ZOHO_CREATOR_REPORT": "Employee_Master_Report"
+		}
+	},
+	"execution": {
+		"main": "index.js"
+	}
+}

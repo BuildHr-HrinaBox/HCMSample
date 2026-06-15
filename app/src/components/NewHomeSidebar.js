@@ -127,6 +127,7 @@ const navigationItems = [
       { label: 'Attendance', path: '/rule-book/attendance' },
       { label: 'Leave', path: '/rule-book/leave' },
       { label: 'Payroll', path: '/rule-book/payroll' },
+      { label: 'CLRA', path: '/rule-book/clra' },
     ],
   },
   { type: 'item', icon: <BarChart3 size={20} strokeWidth={2} />, label: 'Report', path: '/reports', color: 'blue' },

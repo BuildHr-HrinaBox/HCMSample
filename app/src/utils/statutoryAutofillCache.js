@@ -1,5 +1,11 @@
 import { fetchAttendanceAll } from './attendanceApi';
 import { getPayrollOrganizationId } from './payrollOrgId';
+import {
+  fetchClraData,
+  flattenClraEmployeesForAutofill,
+  getCachedClraData,
+  prefetchClraData,
+} from './CLRA';
 
 const SITE_DETAILS_CACHE_KEY = 'statutorySiteDetails_v1';
 const PEOPLE_CACHE_KEY = 'statutoryPeopleData_v3';
@@ -698,13 +704,24 @@ export function prefetchPayrollBulkRows() {
   return fetchPayrollBulkRows().catch(() => null);
 }
 
-export function prefetchStatutoryAutofillData() {
+export function prefetchStatutoryAutofillData(options = {}) {
   prefetchSiteDetails();
-  prefetchPeopleData();
+  if (options?.clraIndustry === true) {
+    prefetchClraData();
+  } else {
+    prefetchPeopleData();
+  }
   prefetchAttendanceData();
   prefetchLeaveData();
   // Do not prefetch all_salaries here — it blocks payroll_function for minutes on large orgs.
 }
+
+export {
+  fetchClraData,
+  flattenClraEmployeesForAutofill,
+  getCachedClraData,
+  prefetchClraData,
+};
 
 export function getFormTemplateCacheKey(item) {
   const rowId = String(item?.formFetchRowId ?? item?.id ?? '').trim();

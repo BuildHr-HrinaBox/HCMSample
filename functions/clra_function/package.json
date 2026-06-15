@@ -1,0 +1,10 @@
+{
+	"name": "clra_function",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "zohoadmin@vayonaenergy.com",
+	"dependencies": {
+		"axios": "^1.13.5",
+		"zcatalyst-sdk-node": "latest"
+	}
+}

@@ -108,6 +108,8 @@ function normalizePayrollEmployee(row) {
 function getEarningsArray(row) {
   if (!row || typeof row !== 'object') return [];
   const employee = normalizePayrollEmployee(row);
+  const payrollEmployee =
+    row.payroll_employee && typeof row.payroll_employee === 'object' ? row.payroll_employee : null;
   const collected = [];
   [
     row.earnings,
@@ -115,6 +117,9 @@ function getEarningsArray(row) {
     employee.fbp_components,
     employee.variable_earnings,
     employee.reimbursements,
+    payrollEmployee?.earnings,
+    payrollEmployee?.fbp_components,
+    payrollEmployee?.variable_earnings,
     row.fbp_components,
     row.variable_earnings,
     row.employee_earnings,
@@ -248,6 +253,16 @@ function pickOtherAllowanceAmount(earnings) {
   );
 }
 
+function readPayrollForm15WageAmounts(payrollRow) {
+  const flat = flattenPayrollEarningColumns(payrollRow || {});
+  return {
+    flat,
+    basic: coalesceAmount(flat.basic, flat.earned_basic),
+    hra: coalesceAmount(flat.hra_fbp, flat.hra),
+    other_allowance: coalesceAmount(flat.other_allowance),
+  };
+}
+
 function flattenPayrollEarningColumns(row) {
   if (!row || typeof row !== 'object') return row;
   const employee = normalizePayrollEmployee(row);
@@ -291,8 +306,14 @@ function flattenPayrollEarningColumns(row) {
     componentColumns.hra,
     componentColumns.hra_fbp,
     componentColumns.house_rent_allowance,
-    pickScalarAmount(row, ['hra', 'HRA', 'house_rent_allowance', 'House Rent Allowance']),
-    pickAmountByPatterns(row, [/^hra$/, /^house_rent_allowance$/, /house.*rent/])
+    pickScalarAmount(row, ['hra', 'HRA', 'hra_fbp', 'house_rent_allowance', 'House Rent Allowance']),
+    pickAmountByPatterns(row, [/^hra(_fbp)?$/, /^house_rent_allowance$/, /house.*rent/])
+  );
+
+  const hra_fbp = coalesceAmount(
+    componentColumns.hra_fbp,
+    pickScalarAmount(row, ['hra_fbp', 'HRA (FBP)', 'hra (fbp)']),
+    hra
   );
 
   const other_allowance = coalesceAmount(
@@ -310,6 +331,7 @@ function flattenPayrollEarningColumns(row) {
     earned_basic,
     basic,
     hra,
+    hra_fbp,
     other_allowance,
     dearness_allowance: coalesceAmount(
       findEarningAmount(earnings, (type, name) => type === 'da' || name.includes('dearness')),
@@ -339,6 +361,24 @@ function flattenPayrollEarningColumns(row) {
       pickScalarAmount(row, ['overtime', 'Overtime', 'overtime_wages']),
       pickAmountByPatterns(row, [/overtime/])
     ),
+    gross_pay: coalesceAmount(
+      pickScalarAmount(row, ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'monthly_gross_amount']),
+      pickAmountByPatterns(row, [/^gross_pay$/, /^total_earnings$/])
+    ),
+    net_pay: coalesceAmount(
+      pickScalarAmount(row, ['net_pay', 'Net Pay', 'netPay', 'monthly_salary', 'MonthlySalary']),
+      pickAmountByPatterns(row, [/^net_pay$/, /^monthly_salary$/])
+    ),
+    total_deductions: coalesceAmount(
+      pickScalarAmount(row, [
+        'total_deductions',
+        'Total Deductions',
+        'totalDeductions',
+        'total_employee_deductions',
+        'total_deduction',
+      ]),
+      pickAmountByPatterns(row, [/^total_deductions?$/, /^total_employee_deductions$/])
+    ),
   };
 }
 
@@ -358,11 +398,17 @@ function mergePayrollRunEmployeePayload(data) {
     'fbp_components',
     'variable_earnings',
   ];
-  nestedKeys.forEach((key) => {
-    if (data[key] != null && employee[key] == null) employee[key] = data[key];
+  const nestedSources = [data];
+  if (data.payroll_employee && typeof data.payroll_employee === 'object') {
+    nestedSources.push(data.payroll_employee);
+  }
+  nestedSources.forEach((source) => {
+    nestedKeys.forEach((key) => {
+      if (source[key] != null && employee[key] == null) employee[key] = source[key];
+    });
   });
   Object.entries(data).forEach(([key, value]) => {
-    if (['employee', 'code', 'message', 'page_context'].includes(key)) return;
+    if (['employee', 'code', 'message', 'page_context', 'payroll_employee'].includes(key)) return;
     if (nestedKeys.includes(key)) return;
     if (Array.isArray(value)) return;
     if (value != null && typeof value !== 'object') {
@@ -382,5 +428,6 @@ module.exports = {
   getEarningsArray,
   mergePayrollRunEmployeePayload,
   normalizePayrollEmployee,
+  readPayrollForm15WageAmounts,
   unwrapSalaryEmployeePayload,
 };

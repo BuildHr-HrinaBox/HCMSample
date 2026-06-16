@@ -644,6 +644,46 @@ export function writePayrollBulkCache(rows) {
   payrollBulkMemoryTs = Date.now();
 }
 
+const FORM15_PAYROLL_TABLE_TTL_MS = 30 * 60 * 1000;
+/** @type {Map<string, { rows: unknown[], ts: number, meta: object|null, payDate: string }>} */
+const form15PayrollTableByMonth = new Map();
+
+/** Reuse Form 15 Part 2 payroll table rows across modal reopen (keyed by YYYY-MM). */
+export function getCachedForm15PayrollTableRows(monthCandidates) {
+  const list = Array.isArray(monthCandidates) ? monthCandidates : [];
+  for (let i = 0; i < list.length; i += 1) {
+    const month = String(list[i] || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(month)) continue;
+    const entry = form15PayrollTableByMonth.get(month);
+    if (
+      entry &&
+      Date.now() - entry.ts < FORM15_PAYROLL_TABLE_TTL_MS &&
+      Array.isArray(entry.rows) &&
+      entry.rows.length > 0
+    ) {
+      return {
+        payrollMonth: month,
+        rows: entry.rows,
+        meta: entry.meta || null,
+        payDate: entry.payDate || '',
+        source: 'cache',
+      };
+    }
+  }
+  return null;
+}
+
+export function cacheForm15PayrollTableRows(payrollMonth, rows, meta = null, payDate = '') {
+  const month = String(payrollMonth || '').trim();
+  if (!/^\d{4}-\d{2}$/.test(month) || !Array.isArray(rows) || rows.length === 0) return;
+  form15PayrollTableByMonth.set(month, {
+    rows,
+    ts: Date.now(),
+    meta: meta && typeof meta === 'object' ? meta : null,
+    payDate: String(payDate || '').trim(),
+  });
+}
+
 const PAYROLL_SALARY_BATCH_SIZE = 6;
 
 async function fetchPayrollBulkRowsBatched(organizationId) {

@@ -5,7 +5,6 @@ import { getPayrollOrganizationId } from '../utils/payrollOrgId';
 import {
   collectPayrollColumnKeys,
   flattenPayrollEarningColumns,
-  unwrapSalaryEmployeePayload,
 } from '../utils/payrollEarnings';
 
 const API_BASE = '/server/payroll_function';
@@ -137,13 +136,14 @@ const Payroll = ({ userRole, userEmail }) => {
               try {
                 const qs = new URLSearchParams({
                   organization_id: organizationId,
+                  payrun_employee_detail: '1',
+                  payroll_run_id: String(payrollRunId),
                   employee_id: String(employeeId),
                 });
                 const json = await fetchPayrollJson(qs);
-                const detail = unwrapSalaryEmployeePayload(json.data);
                 return flattenPayrollEarningColumns({
                   ...row,
-                  ...detail,
+                  ...(json.data || {}),
                 });
               } catch (detailErr) {
                 return {
@@ -190,6 +190,7 @@ const Payroll = ({ userRole, userEmail }) => {
             payroll_run_type: 'regular',
             employee_offset: String(offset),
             employee_limit: String(EMPLOYEE_BATCH_SIZE),
+            include_earnings_detail: '1',
           });
           const json = await fetchPayrollJson(qs);
           const batch = (Array.isArray(json.data) ? json.data : []).map((row) =>
@@ -207,7 +208,7 @@ const Payroll = ({ userRole, userEmail }) => {
             json.meta?.has_more === true ||
             (json.meta?.has_more !== false && batch.length >= EMPLOYEE_BATCH_SIZE);
           setProgress(
-            `Loading ${payrollMonth} payroll… ${loaded} / ${displayTotal} · saving to Payroll table…`
+            `Loading ${payrollMonth} payroll (Basic, HRA, allowances)… ${loaded} / ${displayTotal} · saving to Payroll table…`
           );
           setData([...merged]);
           setRunMeta(meta);
@@ -217,9 +218,9 @@ const Payroll = ({ userRole, userEmail }) => {
             organizationId,
             runMeta: meta,
             records: merged,
-            hasBreakdown: false,
+            hasBreakdown: true,
             totalExpected: displayTotal,
-            breakdownComplete: false,
+            breakdownComplete: !hasMore || batch.length === 0,
           });
           const savedCount = saveResult?.data?.recordCount ?? loaded;
           setSaveMessage(
@@ -276,8 +277,9 @@ const Payroll = ({ userRole, userEmail }) => {
       <header className="people-header">
         <h1 className="people-title">Salary details</h1>
         <p className="people-subtitle">
-          Fetch month-wise payroll from Zoho Payroll pay runs (regular monthly run). Click Load salary
-          breakdown to fetch Basic, HRA, allowances from each employee salary structure (slower).
+          Fetch month-wise payroll from Zoho Payroll pay runs. Basic, HRA, and allowances are loaded
+          from each employee&apos;s pay-run earnings. Use Load salary breakdown to refresh rows
+          already fetched.
         </p>
       </header>
 

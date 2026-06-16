@@ -419,12 +419,457 @@ function normalizeStatutoryDataHeaderKey(key) {
     .trim();
 }
 
+function statutoryDataHeaderKeysMatch(a, b) {
+  return (
+    normalizeStatutoryDataHeaderKey(a).toLowerCase() ===
+    normalizeStatutoryDataHeaderKey(b).toLowerCase()
+  );
+}
+
+function findStatutoryDataHeaderIndex(headers, targetHeader) {
+  if (!Array.isArray(headers)) return -1;
+  const exact = headers.findIndex((header) => statutoryDataHeaderKeysMatch(header, targetHeader));
+  if (exact >= 0) return exact;
+  const targetNorm = normalizeStatutoryDataHeaderForMatch(targetHeader);
+  return headers.findIndex((header) => {
+    const raw = String(header || '');
+    const underscoreIdx = raw.indexOf('_');
+    if (underscoreIdx < 0) return false;
+    const sub = raw.slice(underscoreIdx + 1).trim();
+    return sub && normalizeStatutoryDataHeaderForMatch(sub) === targetNorm;
+  });
+}
+
+function findStatutoryDataRowObjectKey(row, targetHeader) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const keys = Object.keys(row);
+  const match = keys.find((key) => statutoryDataHeaderKeysMatch(key, targetHeader));
+  if (match) return match;
+  const targetNorm = normalizeStatutoryDataHeaderForMatch(targetHeader);
+  return (
+    keys.find((key) => {
+      const raw = String(key || '');
+      const underscoreIdx = raw.indexOf('_');
+      if (underscoreIdx < 0) return false;
+      const sub = raw.slice(underscoreIdx + 1).trim();
+      return sub && normalizeStatutoryDataHeaderForMatch(sub) === targetNorm;
+    }) || null
+  );
+}
+
+const STATUTORY_ROMAN_PART_TO_DIGIT = {
+  i: '1',
+  ii: '2',
+  iii: '3',
+  iv: '4',
+  v: '5',
+  vi: '6',
+  vii: '7',
+  viii: '8',
+  ix: '9',
+  x: '10'
+};
+
+function extractStatutoryFormPartToken(formName, extraText = '') {
+  const blob = `${formName || ''} ${extraText || ''}`
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const m = blob.match(/\bpart\s*(?:no\.?|number)?\s*(\d+|[ivx]+)\b/);
+  if (!m) return '';
+  const token = String(m[1] || '').trim();
+  if (/^\d+$/.test(token)) return String(parseInt(token, 10));
+  return STATUTORY_ROMAN_PART_TO_DIGIT[token] || token;
+}
+
+function formatStatutoryFormPartSuffix(partToken) {
+  if (!partToken) return '';
+  if (/^\d+$/.test(String(partToken))) return `Part ${parseInt(String(partToken), 10)}`;
+  return `Part ${String(partToken).toUpperCase()}`;
+}
+
+function canonicalStatutoryDataFormName(name) {
+  const raw = String(name || '').trim();
+  if (!raw) return '';
+  const lower = raw.toLowerCase().replace(/\s+/g, ' ');
+  const m = lower.match(/^form\s+([a-z0-9]+)\b/);
+  if (!m) return raw;
+  const suffix = m[1];
+  const base = /^\d+$/.test(suffix) ? `Form ${suffix}` : `Form ${suffix.toUpperCase()}`;
+  const partSuffix = formatStatutoryFormPartSuffix(extractStatutoryFormPartToken(raw));
+  return partSuffix ? `${base} ${partSuffix}` : base;
+}
+
 function resolveStatutoryDataHeaderLabel(key, fieldDefinitions) {
   if (Array.isArray(fieldDefinitions)) {
     const match = fieldDefinitions.find((f) => String(f?.key || '') === String(key));
     if (match?.label) return normalizeStatutoryDataHeaderKey(match.label);
   }
   return normalizeStatutoryDataHeaderKey(key);
+}
+
+function normalizeStatutoryDataHeaderForMatch(header) {
+  return String(header || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isStatutoryDataEmployeeNameHeader(header) {
+  const n = normalizeStatutoryDataHeaderForMatch(header);
+  return (
+    /name\s+of\s+the\s+employee/.test(n) ||
+    /name\s+of\s+employee/.test(n) ||
+    /name\s+of\s+the\s+worker/.test(n) ||
+    /name\s+of\s+the\s+workman/.test(n) ||
+    /name\s+of\s+the\s+woman/.test(n) ||
+    /name\s+of\s+the\s+person/.test(n) ||
+    /full\s+name/.test(n) ||
+    /employee\s+name/.test(n) ||
+    /worker\s+name/.test(n) ||
+    /workman\s+name/.test(n) ||
+    (n.includes('name') &&
+      (n.includes('employee') ||
+        n.includes('worker') ||
+        n.includes('workman') ||
+        n.includes('woman') ||
+        n.includes('person') ||
+        n.includes('staff') ||
+        n.includes('member')) &&
+      !(/\bage\b/.test(n) && n.includes('woman'))) ||
+    n === 'name'
+  );
+}
+
+function isStatutoryDataEmployeeIdHeader(header) {
+  const n = normalizeStatutoryDataHeaderForMatch(header);
+  return (
+    /employee\s+id/.test(n) ||
+    /number\s+in\s+register/.test(n) ||
+    /register\s+number/.test(n) ||
+    /emp\s*id/.test(n) ||
+    /employee\s+identification/.test(n) ||
+    /employee\s+number/.test(n) ||
+    /employee\s+code/.test(n) ||
+    /emp\s*code/.test(n) ||
+    /staff\s+id/.test(n) ||
+    /token\s+number/.test(n) ||
+    /ticket\s+number/.test(n) ||
+    (/worker/.test(n) && /identity/.test(n)) ||
+    (/worker/.test(n) && /identify/.test(n)) ||
+    /identification\s+no/.test(n) ||
+    /identity\s+no/.test(n) ||
+    ((/\bid\b/.test(n) || n.includes('code') || n.includes('number')) &&
+      (n.includes('employee') ||
+        n.includes('emp') ||
+        n.includes('worker') ||
+        n.includes('staff') ||
+        n.includes('roll') ||
+        n.includes('register')))
+  );
+}
+
+function isStatutoryDataSerialOnlyHeader(header) {
+  const n = normalizeStatutoryDataHeaderForMatch(header);
+  return (
+    /^s\.?\s*no/.test(n) ||
+    /serial\s+number/.test(n) ||
+    /sl\.?\s*no/.test(n) ||
+    n === 'sno' ||
+    n === 'serial no'
+  );
+}
+
+function isStatutoryDataPrimaryValueHeader(header) {
+  const n = normalizeStatutoryDataHeaderForMatch(header);
+  return (
+    (n.includes('total') && n.includes('earn')) ||
+    (n.includes('normal') && n.includes('earn')) ||
+    (n.includes('overtime') && n.includes('earn')) ||
+    n.includes('total earnings') ||
+    n.includes('overtime earnings') ||
+    n.includes('gross wage') ||
+    n.includes('net wage') ||
+    n.includes('basic wage') ||
+    n === 'remarks' ||
+    n.includes('remark') ||
+    n.includes('rate of remuneration') ||
+    n.includes('emolument') ||
+    n.includes('basic wage') ||
+    n.includes('dearness') ||
+    n.includes('house rent') ||
+    n.includes('other allowance')
+  );
+}
+
+function isStatutoryDataDesignationRowKeyHeader(header) {
+  const n = normalizeStatutoryDataHeaderForMatch(header);
+  return (
+    /category\s+of\s+workers?/.test(n) ||
+    /category\s+of\s+workmen?/.test(n) ||
+    /^designation$/.test(n) ||
+    (n.includes('designation') && !n.includes('nature')) ||
+    /post\s+held/.test(n) ||
+    /job\s+title/.test(n) ||
+    /class\s+of\s+workers?/.test(n)
+  );
+}
+
+function isStatutoryDataIdentityHeader(header) {
+  const n = normalizeStatutoryDataHeaderForMatch(header);
+  return (
+    isStatutoryDataEmployeeNameHeader(header) ||
+    isStatutoryDataEmployeeIdHeader(header) ||
+    isStatutoryDataDesignationRowKeyHeader(header) ||
+    isStatutoryDataSerialOnlyHeader(header)
+  );
+}
+
+function resolveStatutoryDataRowCell(row, headers, colIdx, normalizedHeader) {
+  const originalHeader = headers[colIdx] || normalizedHeader;
+  let cellVal = row[originalHeader];
+  if (cellVal == null) {
+    const matchKey = findStatutoryDataRowObjectKey(row, normalizedHeader);
+    if (matchKey) cellVal = row[matchKey];
+  }
+  if (cellVal == null || String(cellVal).trim() === '') return '';
+  return String(cellVal).trim();
+}
+
+function resolveStatutoryDataEmployeeKeyFromRowValues(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
+  for (const [key, val] of Object.entries(row)) {
+    if (String(key).startsWith('__')) continue;
+    const text = String(val ?? '').trim();
+    if (!text) continue;
+    if (/^VE\d{3,}$/i.test(text)) return text;
+  }
+  return '';
+}
+
+function resolveStatutoryDataEmployeeKeyFromFirstTextColumn(row, headers) {
+  for (let colIdx = 0; colIdx < headers.length; colIdx += 1) {
+    const header = headers[colIdx];
+    if (isStatutoryDataIdentityHeader(header)) continue;
+    const val = resolveStatutoryDataRowCell(
+      row,
+      headers,
+      colIdx,
+      normalizeStatutoryDataHeaderKey(header)
+    );
+    if (!val || /^\d+(\.\d+)?$/.test(val)) continue;
+    if (/[a-zA-Z]{2,}/.test(val) && val.length >= 3) return val;
+  }
+  return '';
+}
+
+function headersHaveStatutoryDataEmployeeIdentityColumn(headers) {
+  return (Array.isArray(headers) ? headers : []).some(
+    (h) => isStatutoryDataEmployeeIdHeader(h) || isStatutoryDataEmployeeNameHeader(h)
+  );
+}
+
+function resolveStatutoryDataEmployeeKey(row, headers, rowIdx = -1, employeeOrder = null) {
+  let employeeId = '';
+  let employeeName = '';
+  headers.forEach((header, colIdx) => {
+    const normalizedHeader = normalizeStatutoryDataHeaderKey(header);
+    const val = resolveStatutoryDataRowCell(row, headers, colIdx, normalizedHeader);
+    if (!val) return;
+    if (isStatutoryDataEmployeeIdHeader(header)) employeeId = employeeId || val;
+    else if (isStatutoryDataEmployeeNameHeader(header)) employeeName = employeeName || val;
+  });
+  if (employeeId || employeeName) return employeeId || employeeName;
+
+  if (
+    !headersHaveStatutoryDataEmployeeIdentityColumn(headers) &&
+    Number.isInteger(rowIdx) &&
+    rowIdx >= 0 &&
+    Array.isArray(employeeOrder) &&
+    employeeOrder.length > 0
+  ) {
+    const ordered = String(employeeOrder[rowIdx] ?? '').trim();
+    if (ordered) return ordered;
+    return `ROW_${rowIdx + 1}`;
+  }
+
+  let designationKey = '';
+  headers.forEach((header, colIdx) => {
+    const normalizedHeader = normalizeStatutoryDataHeaderKey(header);
+    const val = resolveStatutoryDataRowCell(row, headers, colIdx, normalizedHeader);
+    if (!val) return;
+    if (isStatutoryDataDesignationRowKeyHeader(header)) designationKey = designationKey || val;
+  });
+  if (designationKey && (!Array.isArray(employeeOrder) || employeeOrder.length === 0)) {
+    return designationKey;
+  }
+
+  const fromRowValues = resolveStatutoryDataEmployeeKeyFromRowValues(row);
+  if (fromRowValues) return fromRowValues;
+  const fromTextColumn = resolveStatutoryDataEmployeeKeyFromFirstTextColumn(row, headers);
+  if (fromTextColumn) return fromTextColumn;
+  if (Number.isInteger(rowIdx) && rowIdx >= 0) return `ROW_${rowIdx + 1}`;
+  return '';
+}
+
+function resolveStatutoryDataPrimaryValue(row, headers) {
+  for (let colIdx = 0; colIdx < headers.length; colIdx += 1) {
+    const header = headers[colIdx];
+    if (!isStatutoryDataPrimaryValueHeader(header)) continue;
+    const val = resolveStatutoryDataRowCell(
+      row,
+      headers,
+      colIdx,
+      normalizeStatutoryDataHeaderKey(header)
+    );
+    if (val) return val;
+  }
+  for (let colIdx = 0; colIdx < headers.length; colIdx += 1) {
+    const header = headers[colIdx];
+    if (isStatutoryDataIdentityHeader(header)) continue;
+    const val = resolveStatutoryDataRowCell(
+      row,
+      headers,
+      colIdx,
+      normalizeStatutoryDataHeaderKey(header)
+    );
+    if (val) return val;
+  }
+  return '';
+}
+
+function resolveStatutoryDataCellValueByHeader(row, headers, targetHeader) {
+  const normalizedTarget = normalizeStatutoryDataHeaderKey(targetHeader);
+  if (!normalizedTarget) return '';
+  const colIdx = findStatutoryDataHeaderIndex(headers, normalizedTarget);
+  if (colIdx >= 0) {
+    const val = resolveStatutoryDataRowCell(row, headers, colIdx, normalizedTarget);
+    if (val) return val;
+  }
+  const matchKey = findStatutoryDataRowObjectKey(row, normalizedTarget);
+  if (matchKey && row[matchKey] != null && String(row[matchKey]).trim() !== '') {
+    return String(row[matchKey]).trim();
+  }
+  return '';
+}
+
+function resolveStatutoryDataHeaderLabelFromGrid(headers, targetHeader) {
+  const colIdx = findStatutoryDataHeaderIndex(headers, targetHeader);
+  if (colIdx >= 0) return normalizeStatutoryDataHeaderKey(headers[colIdx]);
+  return normalizeStatutoryDataHeaderKey(targetHeader);
+}
+
+function resolveStatutoryDataFieldsForRow(row, headers, editedHeaders = null) {
+  const fields = [];
+  const seen = new Set();
+  const pushField = (columnName, value) => {
+    const col = normalizeStatutoryDataHeaderKey(columnName);
+    const val = value == null ? '' : String(value).trim();
+    if (!col || !val) return;
+    const key = `${col}\0${val}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    fields.push({ columnName: col, value: val });
+  };
+
+  if (Array.isArray(editedHeaders) && editedHeaders.length > 0) {
+    editedHeaders.forEach((header) => {
+      if (!header || isStatutoryDataSerialOnlyHeader(header)) return;
+      const val = resolveStatutoryDataCellValueByHeader(row, headers, header);
+      if (val) pushField(resolveStatutoryDataHeaderLabelFromGrid(headers, header), val);
+    });
+    if (fields.length > 0) return fields;
+  }
+
+  if (Array.isArray(editedHeaders)) {
+    for (let colIdx = 0; colIdx < headers.length; colIdx += 1) {
+      const header = headers[colIdx];
+      if (isStatutoryDataIdentityHeader(header)) continue;
+      const val = resolveStatutoryDataRowCell(
+        row,
+        headers,
+        colIdx,
+        normalizeStatutoryDataHeaderKey(header)
+      );
+      if (val) pushField(header, val);
+    }
+    return fields;
+  }
+
+  for (let colIdx = 0; colIdx < headers.length; colIdx += 1) {
+    const header = headers[colIdx];
+    if (!isStatutoryDataPrimaryValueHeader(header)) continue;
+    const val = resolveStatutoryDataRowCell(
+      row,
+      headers,
+      colIdx,
+      normalizeStatutoryDataHeaderKey(header)
+    );
+    if (val) {
+      pushField(header, val);
+      return fields;
+    }
+  }
+  for (let colIdx = 0; colIdx < headers.length; colIdx += 1) {
+    const header = headers[colIdx];
+    if (isStatutoryDataIdentityHeader(header)) continue;
+    const val = resolveStatutoryDataRowCell(
+      row,
+      headers,
+      colIdx,
+      normalizeStatutoryDataHeaderKey(header)
+    );
+    if (val) {
+      pushField(header, val);
+      return fields;
+    }
+  }
+  return fields;
+}
+
+function buildStatutoryDataEditedHeadersByRow(payload) {
+  const byRow = new Map();
+  const cells = Array.isArray(payload?.statutoryDataEditedCells) ? payload.statutoryDataEditedCells : [];
+  cells.forEach((cell) => {
+    if (!cell || typeof cell !== 'object') return;
+    const rowIdx = Number(cell.rowIndex);
+    if (!Number.isInteger(rowIdx) || rowIdx < 0) return;
+    const header = normalizeStatutoryDataHeaderKey(cell.header);
+    if (!byRow.has(rowIdx)) byRow.set(rowIdx, []);
+    if (header) byRow.get(rowIdx).push(header);
+  });
+  return byRow;
+}
+
+function resolveStatutoryDataEligibleRowIndexes(payload, rows, headers) {
+  const indexes = new Set();
+  const touched = Array.isArray(payload?.statutoryDataTouchedRowIndexes)
+    ? payload.statutoryDataTouchedRowIndexes
+        .map((idx) => Number(idx))
+        .filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < rows.length)
+    : [];
+  touched.forEach((idx) => indexes.add(idx));
+
+  const editedCells = Array.isArray(payload?.statutoryDataEditedCells)
+    ? payload.statutoryDataEditedCells
+    : [];
+  editedCells.forEach((cell) => {
+    const rowIdx = Number(cell?.rowIndex);
+    if (Number.isInteger(rowIdx) && rowIdx >= 0 && rowIdx < rows.length) indexes.add(rowIdx);
+  });
+
+  if (indexes.size > 0) return Array.from(indexes);
+
+  const eligible = [];
+  rows.forEach((row, rowIdx) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return;
+    const employeeKey = resolveStatutoryDataEmployeeKey(row, headers, rowIdx);
+    const value = resolveStatutoryDataPrimaryValue(row, headers);
+    if (employeeKey && value) eligible.push(rowIdx);
+  });
+  return eligible.length === 1 ? eligible : [];
 }
 
 function statutoryDataPayloadFromBody(body) {
@@ -452,11 +897,29 @@ function statutoryDataPayloadFromBody(body) {
     ? body.headerFieldDefinitions
     : [];
   const monthfilterRaw = normalizeMonthFilterValue(body);
+  const statutoryDataTouchedRowIndexes = Array.isArray(body?.statutoryDataTouchedRowIndexes)
+    ? body.statutoryDataTouchedRowIndexes
+        .map((idx) => Number(idx))
+        .filter((idx) => Number.isInteger(idx) && idx >= 0)
+    : [];
+  const statutoryDataEditedCells = Array.isArray(body?.statutoryDataEditedCells)
+    ? body.statutoryDataEditedCells.filter((cell) => cell && typeof cell === 'object')
+    : [];
+  const statutoryDataEmployeeOrder = Array.isArray(body?.statutoryDataEmployeeOrder)
+    ? body.statutoryDataEmployeeOrder.map((id) => String(id ?? '').trim())
+    : [];
   return {
     headers,
     rows,
     headerFormData,
     headerFieldDefinitions,
+    formName: pickNonEmptyText(body?.formName, body?.FormName, body?.formname),
+    FormName: pickNonEmptyText(body?.FormName, body?.formName, body?.formname),
+    formHeaderTitle: pickNonEmptyText(body?.formHeaderTitle, body?.parsedFormHeaderTitle),
+    parsedFormHeaderTitle: pickNonEmptyText(body?.parsedFormHeaderTitle, body?.formHeaderTitle),
+    statutoryDataTouchedRowIndexes,
+    statutoryDataEditedCells,
+    statutoryDataEmployeeOrder,
     monthfilter: trimMonthFilterForDatastore(monthfilterRaw),
     monthFilter: trimMonthFilterForDatastore(monthfilterRaw),
     MonthFilter: trimMonthFilterForDatastore(monthfilterRaw)
@@ -466,72 +929,206 @@ function statutoryDataPayloadFromBody(body) {
 function buildStatutoryDataFieldEntries(payload) {
   const headers = Array.isArray(payload?.headers) ? payload.headers : [];
   const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-  const headerFormData =
-    payload?.headerFormData && typeof payload.headerFormData === 'object' && !Array.isArray(payload.headerFormData)
-      ? payload.headerFormData
-      : {};
-  const fieldDefs = Array.isArray(payload?.headerFieldDefinitions) ? payload.headerFieldDefinitions : [];
+  const employeeOrder = Array.isArray(payload?.statutoryDataEmployeeOrder)
+    ? payload.statutoryDataEmployeeOrder.map((id) => String(id ?? '').trim())
+    : [];
   const entries = [];
   const seen = new Set();
+  const editedHeadersByRow = buildStatutoryDataEditedHeadersByRow(payload);
+  const resolveRowKey = (row, rowIdx) =>
+    resolveStatutoryDataEmployeeKey(row, headers, rowIdx, employeeOrder);
 
-  const pushEntry = (changeHeader, value) => {
-    const header = normalizeStatutoryDataHeaderKey(changeHeader);
+  const pushEntry = (changeHeader, columnName, value) => {
+    const employeeKey = normalizeStatutoryDataHeaderKey(changeHeader);
+    const col = normalizeStatutoryDataHeaderKey(columnName);
     const val = value == null ? '' : String(value).trim();
-    if (!header || val === '') return;
-    const dedupeKey = `${header}\0${val}`;
+    if (!employeeKey || !col || val === '') return;
+    const dedupeKey = `${employeeKey}\0${col}\0${val}`;
     if (seen.has(dedupeKey)) return;
     seen.add(dedupeKey);
-    entries.push({ changeHeader: header, value: val });
+    entries.push({ changeHeader: employeeKey, columnName: col, value: val });
   };
 
-  for (const [key, value] of Object.entries(headerFormData)) {
-    if (String(key).startsWith('__')) continue;
-    pushEntry(resolveStatutoryDataHeaderLabel(key, fieldDefs), value);
-  }
+  const editedCells = Array.isArray(payload?.statutoryDataEditedCells)
+    ? payload.statutoryDataEditedCells
+    : [];
+  editedCells.forEach((cell) => {
+    if (!cell || typeof cell !== 'object') return;
+    const rowIdx = Number(cell.rowIndex);
+    const header = normalizeStatutoryDataHeaderKey(cell.header);
+    if (!Number.isInteger(rowIdx) || rowIdx < 0 || rowIdx >= rows.length || !header) return;
+    if (isStatutoryDataSerialOnlyHeader(header)) return;
+    const row = rows[rowIdx];
+    const employeeKey = resolveRowKey(row, rowIdx);
+    if (!employeeKey) return;
+    const val = resolveStatutoryDataCellValueByHeader(row, headers, header);
+    if (!val) return;
+    pushEntry(employeeKey, resolveStatutoryDataHeaderLabelFromGrid(headers, header), val);
+  });
 
-  const normalizedHeaders = headers.map((h) => normalizeStatutoryDataHeaderKey(h)).filter(Boolean);
-  rows.forEach((row, rowIdx) => {
+  const eligibleRowIndexes = resolveStatutoryDataEligibleRowIndexes(payload, rows, headers);
+  const touchedRowSet = new Set(
+    (Array.isArray(payload?.statutoryDataTouchedRowIndexes)
+      ? payload.statutoryDataTouchedRowIndexes
+      : []
+    )
+      .map((idx) => Number(idx))
+      .filter((idx) => Number.isInteger(idx) && idx >= 0)
+  );
+  eligibleRowIndexes.forEach((rowIdx) => {
+    const row = rows[rowIdx];
     if (!row || typeof row !== 'object' || Array.isArray(row)) return;
-    normalizedHeaders.forEach((header, colIdx) => {
-      const originalHeader = headers[colIdx] || header;
-      let cellVal = row[originalHeader];
-      if (cellVal == null) {
-        const matchKey = Object.keys(row).find((k) => normalizeStatutoryDataHeaderKey(k) === header);
-        if (matchKey) cellVal = row[matchKey];
-      }
-      if (cellVal == null || String(cellVal).trim() === '') return;
-      const changeHeader = rows.length > 1 ? `${header} (Row ${rowIdx + 1})` : header;
-      pushEntry(changeHeader, cellVal);
+    const employeeKey = resolveRowKey(row, rowIdx);
+    if (!employeeKey) return;
+    const editedHeaders = editedHeadersByRow.has(rowIdx)
+      ? editedHeadersByRow.get(rowIdx)
+      : touchedRowSet.has(rowIdx)
+        ? []
+        : null;
+    const fieldEntries = resolveStatutoryDataFieldsForRow(row, headers, editedHeaders);
+    fieldEntries.forEach(({ columnName, value }) => {
+      pushEntry(employeeKey, columnName, value);
     });
   });
 
   return entries;
 }
 
-/** Save form field headers and values into StatutoryData (ChangeDataHeader, Value, MonthStore). */
+function buildStatutoryDataReplaceKey(entry) {
+  const form = normalizeStatutoryDataHeaderKey(entry.formName || '');
+  const hdr = normalizeStatutoryDataHeaderKey(entry.changeHeader);
+  const col = normalizeStatutoryDataHeaderKey(entry.columnName);
+  return `${form}\0${hdr}\0${col}`;
+}
+
+function buildStatutoryDataRowReplaceKey(row) {
+  const form = normalizeStatutoryDataHeaderKey(row?.FormName || row?.formName || '');
+  const hdr = normalizeStatutoryDataHeaderKey(row?.ChangeDataHeader);
+  const col = normalizeStatutoryDataHeaderKey(row?.ColumnName || row?.columnName || '');
+  return `${form}\0${hdr}\0${col}`;
+}
+
+function resolveStatutoryDataFormName(payload, statutoryRow = null) {
+  const titleLine = (value) => {
+    const t = String(value || '').trim();
+    if (!t) return '';
+    return t.split('\n')[0].trim();
+  };
+  const raw =
+    pickNonEmptyText(
+      payload?.formName,
+      payload?.FormName,
+      payload?.formname,
+      titleLine(payload?.formHeaderTitle),
+      titleLine(payload?.parsedFormHeaderTitle),
+      payload?.description,
+      payload?.Description,
+      payload?.act,
+      payload?.Act
+    ) ||
+    pickNonEmptyText(statutoryRow?.FormName, statutoryRow?.Act, statutoryRow?.Description) ||
+    '';
+  return canonicalStatutoryDataFormName(raw) || raw;
+}
+
+async function insertStatutoryDataRow(table, entry, monthStore) {
+  const baseRow = {
+    ChangeDataHeader: entry.changeHeader,
+    Value: entry.value,
+    MonthStore: monthStore
+  };
+  const layerCandidates = [
+    entry.formName || entry.columnName
+      ? {
+          ...baseRow,
+          ...(entry.columnName ? { ColumnName: entry.columnName } : {}),
+          ...(entry.formName ? { FormName: entry.formName } : {})
+        }
+      : null,
+    entry.columnName ? { ...baseRow, ColumnName: entry.columnName } : null,
+    baseRow
+  ].filter(Boolean);
+  const layers = [];
+  const seen = new Set();
+  layerCandidates.forEach((row) => {
+    const key = JSON.stringify(row);
+    if (seen.has(key)) return;
+    seen.add(key);
+    layers.push(row);
+  });
+
+  let lastErr = null;
+  for (const row of layers) {
+    try {
+      await table.insertRow(row);
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (!isDatastoreColumnError(err)) throw err;
+    }
+  }
+  if (lastErr) throw lastErr;
+}
+
+/** Save employee field values into StatutoryData (FormName, ChangeDataHeader, ColumnName, Value, MonthStore). */
 async function persistStatutoryDataFields(catalyst, payload, statutoryRow = null) {
   const monthStore =
     resolveMonthFilterForSampleDataSave(payload, statutoryRow) || MONTH_NAMES[new Date().getMonth()];
-  const entries = buildStatutoryDataFieldEntries(payload);
+  const formName = resolveStatutoryDataFormName(payload, statutoryRow);
+  const entries = buildStatutoryDataFieldEntries(payload).map((entry) => ({
+    ...entry,
+    formName
+  }));
   if (entries.length === 0) {
     return { saved: false, reason: 'empty_entries' };
   }
 
   const table = catalyst.datastore().table(STATUTORY_DATA_TABLE);
   const zcql = catalyst.zcql();
-  const headersToReplace = new Set(entries.map((e) => e.changeHeader));
+  const replaceKeys = new Set(entries.map((entry) => buildStatutoryDataReplaceKey(entry)));
+  const employeesToReplace = new Set(
+    entries.map(
+      (entry) =>
+        `${normalizeStatutoryDataHeaderKey(entry.formName)}\0${normalizeStatutoryDataHeaderKey(entry.changeHeader)}`
+    )
+  );
+  const replacingEmployeeColumns = new Set(
+    entries.map(
+      (entry) =>
+        `${normalizeStatutoryDataHeaderKey(entry.changeHeader)}\0${normalizeStatutoryDataHeaderKey(entry.columnName)}`
+    )
+  );
 
   try {
     const escapedMonth = String(monthStore).replace(/'/g, "''");
-    const query = `SELECT ROWID, ChangeDataHeader, MonthStore FROM ${STATUTORY_DATA_TABLE} WHERE MonthStore = '${escapedMonth}'`;
-    const existing = await zcql.executeZCQLQuery(query);
+    let existing = [];
+    const queryAttempts = [
+      `SELECT ROWID, FormName, ChangeDataHeader, ColumnName, MonthStore FROM ${STATUTORY_DATA_TABLE} WHERE MonthStore = '${escapedMonth}'`,
+      `SELECT ROWID, ChangeDataHeader, ColumnName, MonthStore FROM ${STATUTORY_DATA_TABLE} WHERE MonthStore = '${escapedMonth}'`,
+      `SELECT ROWID, ChangeDataHeader, MonthStore FROM ${STATUTORY_DATA_TABLE} WHERE MonthStore = '${escapedMonth}'`
+    ];
+    for (const query of queryAttempts) {
+      try {
+        existing = await zcql.executeZCQLQuery(query);
+        break;
+      } catch (queryErr) {
+        if (!isDatastoreColumnError(queryErr)) throw queryErr;
+      }
+    }
     const list = Array.isArray(existing) ? existing : [];
     const toDelete = [];
     for (const item of list) {
       const row = pickStatutoryDataRow(item);
       if (!row?.ROWID) continue;
+      const rowKey = buildStatutoryDataRowReplaceKey(row);
+      const form = normalizeStatutoryDataHeaderKey(row.FormName || row.formName || '');
       const hdr = normalizeStatutoryDataHeaderKey(row.ChangeDataHeader);
-      if (headersToReplace.has(hdr)) {
+      const col = normalizeStatutoryDataHeaderKey(row.ColumnName || row.columnName || '');
+      if (
+        replaceKeys.has(rowKey) ||
+        (employeesToReplace.has(`${form}\0${hdr}`) && !col) ||
+        (!form && col && replacingEmployeeColumns.has(`${hdr}\0${col}`))
+      ) {
         toDelete.push(row.ROWID);
       }
     }
@@ -545,18 +1142,20 @@ async function persistStatutoryDataFields(catalyst, payload, statutoryRow = null
   let inserted = 0;
   for (const entry of entries) {
     try {
-      await table.insertRow({
-        ChangeDataHeader: entry.changeHeader,
-        Value: entry.value,
-        MonthStore: monthStore
-      });
+      await insertStatutoryDataRow(table, entry, monthStore);
       inserted += 1;
     } catch (insertErr) {
-      console.error('StatutoryData insert failed:', insertErr.message, entry.changeHeader);
+      console.error(
+        'StatutoryData insert failed:',
+        insertErr.message,
+        entry.formName,
+        entry.changeHeader,
+        entry.columnName
+      );
     }
   }
 
-  return { saved: inserted > 0, inserted, monthStore };
+  return { saved: inserted > 0, inserted, monthStore, formName: formName || null };
 }
 
 /** Catalyst/API payloads vary: monthfilter | monthFilter | MonthFilter */
@@ -1477,6 +2076,100 @@ app.post('/statutory/:id/statutorydata', async (req, res) => {
   }
 });
 
+function statutoryDataMonthsMatch(stored, query) {
+  if (!query) return true;
+  if (!stored) return false;
+  const a = String(stored).trim().toLowerCase();
+  const b = String(query).trim().toLowerCase();
+  if (a === b) return true;
+  if (a.slice(0, 3) === b.slice(0, 3)) return true;
+  return false;
+}
+
+function statutoryDataFormsMatch(storedForm, queryForm) {
+  const formNorm = canonicalStatutoryDataFormName(storedForm).toLowerCase();
+  const queryNorm = canonicalStatutoryDataFormName(queryForm).toLowerCase();
+  if (!queryNorm) return true;
+  if (!formNorm) return false;
+  if (formNorm === queryNorm) return true;
+  const baseStored = formNorm.match(/^form\s+\d+/)?.[0] || formNorm;
+  const baseQuery = queryNorm.match(/^form\s+\d+/)?.[0] || queryNorm;
+  if (baseStored === baseQuery) {
+    const partStored = extractStatutoryFormPartToken(storedForm);
+    const partQuery = extractStatutoryFormPartToken(queryForm);
+    if (partStored && partQuery) return partStored === partQuery;
+  }
+  const formAlnum = formNorm.replace(/[^a-z0-9]/g, '');
+  const queryAlnum = queryNorm.replace(/[^a-z0-9]/g, '');
+  if (formAlnum && queryAlnum && formAlnum === queryAlnum) return true;
+  if (formNorm.length >= 6 && queryNorm.length >= 6) {
+    return formNorm.includes(queryNorm) || queryNorm.includes(formNorm);
+  }
+  return false;
+}
+
+// Fetch saved StatutoryData field values for autofill/download restore (FormName + MonthStore).
+app.get('/statutory/:id/statutorydata', async (req, res) => {
+  try {
+    const { catalyst } = res.locals;
+    const zcql = catalyst.zcql();
+    const formNameQ = String(
+      req.query?.formName || req.query?.FormName || req.query?.formname || ''
+    ).trim();
+    const monthQ = trimMonthFilterForDatastore(
+      req.query?.monthFilter || req.query?.monthfilter || req.query?.month || ''
+    );
+
+    const queryAttempts = [
+      `SELECT ROWID, FormName, ChangeDataHeader, ColumnName, Value, MonthStore FROM ${STATUTORY_DATA_TABLE}`,
+      `SELECT ROWID, ChangeDataHeader, ColumnName, Value, MonthStore FROM ${STATUTORY_DATA_TABLE}`,
+      `SELECT ROWID, ChangeDataHeader, Value, MonthStore FROM ${STATUTORY_DATA_TABLE}`
+    ];
+
+    let result = [];
+    for (const query of queryAttempts) {
+      try {
+        result = await zcql.executeZCQLQuery(query);
+        break;
+      } catch (queryErr) {
+        if (!isDatastoreColumnError(queryErr)) throw queryErr;
+      }
+    }
+
+    const rows = Array.isArray(result)
+      ? result.map((entry) => pickStatutoryDataRow(entry)).filter(Boolean)
+      : [];
+
+    const filtered = rows.filter((row) => {
+      if (monthQ && !statutoryDataMonthsMatch(row.MonthStore || row.monthStore, monthQ)) return false;
+      if (formNameQ && !statutoryDataFormsMatch(row.FormName || row.formName, formNameQ)) return false;
+      const employeeKey = String(row.ChangeDataHeader || '').trim();
+      const value = row.Value != null ? String(row.Value).trim() : '';
+      return Boolean(employeeKey && value);
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      data: {
+        statutoryData: filtered.map((row) => ({
+          ROWID: row.ROWID,
+          FormName: row.FormName || row.formName || null,
+          ChangeDataHeader: row.ChangeDataHeader || null,
+          ColumnName: row.ColumnName || row.columnName || null,
+          Value: row.Value != null ? String(row.Value) : '',
+          MonthStore: row.MonthStore || row.monthStore || null
+        }))
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching StatutoryData fields:', err);
+    return res.status(500).json({
+      status: 'failure',
+      message: err.message || 'Failed to fetch StatutoryData fields.'
+    });
+  }
+});
+
 function normalizeStatutoryIdForSampleDataMatch(value) {
   const s = String(value ?? '').trim();
   if (!/^\d+$/.test(s)) return s;
@@ -1773,7 +2466,10 @@ app.post('/statutory', async (req, res) => {
           headers: sampleDataHeader,
           headerFormData: sampleHeaderFormData,
           headerFieldDefinitions,
-          rows: sampleData
+          rows: sampleData,
+          statutoryDataTouchedRowIndexes: statutoryDataPayloadFromBody(req.body).statutoryDataTouchedRowIndexes,
+          statutoryDataEditedCells: statutoryDataPayloadFromBody(req.body).statutoryDataEditedCells,
+          statutoryDataEmployeeOrder: statutoryDataPayloadFromBody(req.body).statutoryDataEmployeeOrder
         },
         created
       );
@@ -2105,7 +2801,10 @@ app.put('/statutory/:id', async (req, res) => {
             headers: sampleDataHeader,
             headerFormData: sampleHeaderFormData,
             headerFieldDefinitions,
-            rows: sampleData
+            rows: sampleData,
+            statutoryDataTouchedRowIndexes: statutoryDataPayloadFromBody(req.body).statutoryDataTouchedRowIndexes,
+            statutoryDataEditedCells: statutoryDataPayloadFromBody(req.body).statutoryDataEditedCells,
+            statutoryDataEmployeeOrder: statutoryDataPayloadFromBody(req.body).statutoryDataEmployeeOrder
           },
           updated
         );

@@ -4,7 +4,10 @@
 		"stack": "node24",
 		"type": "advancedio",
 		"env_variables": {
-			"ZOHO_CLRA_ACCESS_TOKEN": "1000.7d13bea96006a227e825ad339200eb2e.1f4267d7dfa9d18c5fcde58e502d6860",
+			"ZOHO_CREATOR_REFRESH_TOKEN": "",
+			"ZOHO_CLIENT_ID": "1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA",
+			"ZOHO_CLIENT_SECRET": "b6d3935145d59974934b981d6291b40af69a3ab150",
+			"ZOHO_CLRA_ACCESS_TOKEN": "1000.767fc92f63f27fd283f56af2b9ef794f.23bd9cb66e60db4227b5102ce0be1a0d",
 			"ZOHO_CREATOR_API_DOMAIN": "https://www.zohoapis.in",
 			"ZOHO_CREATOR_OWNER": "zohoadmin_vayonaenergy",
 			"ZOHO_CREATOR_APP": "cms-contract-management-system",

@@ -14,6 +14,12 @@ const ALLOWED_PAGE_SIZES = [200, 500, 1000];
 let cachedCreatorAccessToken = null;
 let cachedCreatorAccessTokenExpiresAt = 0;
 
+/** Zoho India OAuth client (same org as People / Payroll). Env overrides when set. */
+const DEFAULT_ZOHO_CLIENT_ID = '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
+const DEFAULT_ZOHO_CLIENT_SECRET = 'b6d3935145d59974934b981d6291b40af69a3ab150';
+/** Creator-scoped refresh token — set ZOHO_CREATOR_REFRESH_TOKEN in Catalyst env to override. */
+const DEFAULT_ZOHO_CREATOR_REFRESH_TOKEN = '';
+
 /**
  * Fetch Employee Master data from Zoho Creator (ZohoCreator.report.READ).
  * GET .../creator/v2.1/data/{owner}/{app}/report/Employee_Master_Report?max_records=1000
@@ -93,58 +99,128 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function creatorTokenProfiles() {
+  const creatorRefresh = envOr('ZOHO_CREATOR_REFRESH_TOKEN', '') || DEFAULT_ZOHO_CREATOR_REFRESH_TOKEN;
+  const sharedRefresh = envOr('ZOHO_REFRESH_TOKEN', '');
+  const clientId = envOr('ZOHO_CLIENT_ID', '') || DEFAULT_ZOHO_CLIENT_ID;
+  const clientSecret = envOr('ZOHO_CLIENT_SECRET', '') || DEFAULT_ZOHO_CLIENT_SECRET;
+  const profiles = [];
+
+  const pushProfile = (refreshToken) => {
+    if (!refreshToken || !clientId || !clientSecret) return;
+    profiles.push({ refreshToken, clientId, clientSecret });
+  };
+
+  pushProfile(creatorRefresh);
+  if (sharedRefresh && sharedRefresh !== creatorRefresh) {
+    pushProfile(sharedRefresh);
+  }
+
+  const seen = new Set();
+  return profiles.filter((profile) => {
+    const key = `${profile.refreshToken}|${profile.clientId}`;
+    if (!profile.refreshToken || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function creatorOAuthSetupHint(reason) {
+  return (
+    `${reason} Configure Catalyst env for clra_function: ` +
+    'ZOHO_CREATOR_REFRESH_TOKEN (refresh token with ZohoCreator.report.READ scope) + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET, ' +
+    'or set a fresh ZOHO_CLRA_ACCESS_TOKEN, then redeploy.'
+  );
+}
+
+async function refreshCreatorAccessToken() {
+  const now = Date.now();
+  if (cachedCreatorAccessToken && now < cachedCreatorAccessTokenExpiresAt - 60_000) {
+    return cachedCreatorAccessToken;
+  }
+
+  const profiles = creatorTokenProfiles();
+  if (profiles.length === 0) {
+    throw new Error(creatorOAuthSetupHint('No Zoho Creator OAuth refresh credentials are configured.'));
+  }
+
+  let lastErr = null;
+  for (const profile of profiles) {
+    try {
+      const params = new URLSearchParams({
+        refresh_token: profile.refreshToken,
+        client_id: profile.clientId,
+        client_secret: profile.clientSecret,
+        grant_type: 'refresh_token',
+      });
+      const { data } = await axios.post('https://accounts.zoho.in/oauth/v2/token', params, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+      if (!data?.access_token) {
+        const errorMsg = data?.error || data?.error_description || 'Failed to obtain access token from Zoho.';
+        throw new Error(`Token refresh failed: ${errorMsg}`);
+      }
+      cachedCreatorAccessToken = data.access_token;
+      const expiresIn = parseInt(data.expires_in, 10) || 3600;
+      cachedCreatorAccessTokenExpiresAt = now + expiresIn * 1000;
+      return cachedCreatorAccessToken;
+    } catch (err) {
+      lastErr = err;
+      const detail =
+        err.response?.data?.error ||
+        err.response?.data?.error_description ||
+        err.message ||
+        'refresh failed';
+      console.warn('clra_function: token profile failed:', detail);
+    }
+  }
+
+  throw lastErr || new Error(creatorOAuthSetupHint('Failed to refresh Zoho Creator access token.'));
+}
+
 async function getCreatorAccessToken(options = {}) {
   const forceRefresh = options.forceRefresh === true;
+  const hasRefreshProfiles = creatorTokenProfiles().length > 0;
+
+  if (forceRefresh) {
+    cachedCreatorAccessToken = null;
+    cachedCreatorAccessTokenExpiresAt = 0;
+  }
+
+  // Prefer refresh when configured — access tokens expire in ~1 hour; refresh tokens do not.
+  if (hasRefreshProfiles) {
+    return refreshCreatorAccessToken();
+  }
 
   if (!forceRefresh) {
     const direct =
       envOr('ZOHO_CLRA_ACCESS_TOKEN', '') ||
       envOr('ZOHO_CREATOR_ACCESS_TOKEN', '') ||
       envOr('ZOHO_ACCESS_TOKEN', '');
-    if (direct.length > 10) return direct;
-
-    const now = Date.now();
-    if (cachedCreatorAccessToken && now < cachedCreatorAccessTokenExpiresAt - 60_000) {
-      return cachedCreatorAccessToken;
+    if (direct.length > 10) {
+      const now = Date.now();
+      if (!cachedCreatorAccessToken || cachedCreatorAccessToken !== direct) {
+        cachedCreatorAccessToken = direct;
+        cachedCreatorAccessTokenExpiresAt = now + 55 * 60 * 1000;
+      }
+      if (now < cachedCreatorAccessTokenExpiresAt - 60_000) {
+        return cachedCreatorAccessToken;
+      }
+    } else {
+      const now = Date.now();
+      if (cachedCreatorAccessToken && now < cachedCreatorAccessTokenExpiresAt - 60_000) {
+        return cachedCreatorAccessToken;
+      }
     }
-  } else {
-    cachedCreatorAccessToken = null;
-    cachedCreatorAccessTokenExpiresAt = 0;
   }
 
-  const refreshToken = envOr('ZOHO_CREATOR_REFRESH_TOKEN', '') || envOr('ZOHO_REFRESH_TOKEN', '');
-  const clientId = envOr('ZOHO_CLIENT_ID', '');
-  const clientSecret = envOr('ZOHO_CLIENT_SECRET', '');
-
-  if (!refreshToken || !clientId || !clientSecret) {
-    const reason = forceRefresh
-      ? 'The Zoho Creator access token is expired or invalid.'
-      : 'No Zoho Creator OAuth credentials are configured.';
-    throw new Error(
-      `${reason} Set ZOHO_CLRA_ACCESS_TOKEN (access_token with ZohoCreator.report.READ) in Catalyst env for clra_function, or add ZOHO_CREATOR_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET for auto-refresh, then redeploy.`
-    );
-  }
-
-  const params = new URLSearchParams({
-    refresh_token: refreshToken,
-    client_id: clientId,
-    client_secret: clientSecret,
-    grant_type: 'refresh_token',
-  });
-
-  const { data } = await axios.post('https://accounts.zoho.in/oauth/v2/token', params, {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  });
-
-  if (!data?.access_token) {
-    const errorMsg = data?.error || data?.error_description || 'Failed to obtain access token from Zoho.';
-    throw new Error(`Token refresh failed: ${errorMsg}`);
-  }
-
-  cachedCreatorAccessToken = data.access_token;
-  const expiresIn = parseInt(data.expires_in, 10) || 3600;
-  cachedCreatorAccessTokenExpiresAt = Date.now() + expiresIn * 1000;
-  return cachedCreatorAccessToken;
+  throw new Error(
+    creatorOAuthSetupHint(
+      forceRefresh
+        ? 'The Zoho Creator access token is expired or invalid.'
+        : 'No Zoho Creator OAuth credentials are configured.'
+    )
+  );
 }
 
 function creatorApiBase() {

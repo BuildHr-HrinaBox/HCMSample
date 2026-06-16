@@ -106,6 +106,8 @@ export function normalizePayrollEmployee(row) {
 export function getEarningsArray(row) {
   if (!row || typeof row !== 'object') return [];
   const employee = normalizePayrollEmployee(row);
+  const payrollEmployee =
+    row.payroll_employee && typeof row.payroll_employee === 'object' ? row.payroll_employee : null;
   const collected = [];
   [
     row.earnings,
@@ -113,6 +115,9 @@ export function getEarningsArray(row) {
     employee.fbp_components,
     employee.variable_earnings,
     employee.reimbursements,
+    payrollEmployee?.earnings,
+    payrollEmployee?.fbp_components,
+    payrollEmployee?.variable_earnings,
     row.fbp_components,
     row.variable_earnings,
     row.employee_earnings,
@@ -246,6 +251,48 @@ function pickOtherAllowanceAmount(earnings) {
   );
 }
 
+/** Form 15 Part 2 wage columns from flattened payroll row (basic, hra_fbp, other_allowance). */
+export function readPayrollForm15WageAmounts(payrollRow) {
+  const flat = flattenPayrollEarningColumns(payrollRow || {});
+  return {
+    flat,
+    basic: coalesceAmount(flat.basic, flat.earned_basic),
+    hra: coalesceAmount(flat.hra_fbp, flat.hra),
+    other_allowance: coalesceAmount(flat.other_allowance),
+  };
+}
+
+/** True when a payroll row has explicit Basic or HRA amounts (not just gross/net summary). */
+export function payrollRowHasWageBreakdown(payrollRow) {
+  const wages = readPayrollForm15WageAmounts(payrollRow);
+  return wages.basic !== '' || wages.hra !== '';
+}
+
+export function payrollRowsHaveWageBreakdown(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  return rows.some((row) => row && !row.fetch_error && payrollRowHasWageBreakdown(row));
+}
+
+/** True when a payroll row has a usable net/gross pay amount for Form 10 autofill. */
+export function payrollRowHasNetPay(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return false;
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const candidates = [
+    flat.net_pay,
+    flat.total_earnings,
+    flat.gross_pay,
+    payrollRow.net_pay,
+    payrollRow.total_earnings,
+    payrollRow.gross_pay,
+    payrollRow.monthly_salary,
+    flat.monthly_salary,
+  ];
+  return candidates.some((value) => {
+    const n = Number(String(value ?? '').replace(/,/g, '').trim());
+    return Number.isFinite(n) && n > 0;
+  });
+}
+
 export function flattenPayrollEarningColumns(row) {
   if (!row || typeof row !== 'object') return row;
   const employee = normalizePayrollEmployee(row);
@@ -289,8 +336,14 @@ export function flattenPayrollEarningColumns(row) {
     componentColumns.hra,
     componentColumns.hra_fbp,
     componentColumns.house_rent_allowance,
-    pickScalarAmount(row, ['hra', 'HRA', 'house_rent_allowance', 'House Rent Allowance']),
-    pickAmountByPatterns(row, [/^hra$/, /^house_rent_allowance$/, /house.*rent/])
+    pickScalarAmount(row, ['hra', 'HRA', 'hra_fbp', 'house_rent_allowance', 'House Rent Allowance']),
+    pickAmountByPatterns(row, [/^hra(_fbp)?$/, /^house_rent_allowance$/, /house.*rent/])
+  );
+
+  const hra_fbp = coalesceAmount(
+    componentColumns.hra_fbp,
+    pickScalarAmount(row, ['hra_fbp', 'HRA (FBP)', 'hra (fbp)']),
+    hra
   );
 
   const other_allowance = coalesceAmount(
@@ -308,6 +361,7 @@ export function flattenPayrollEarningColumns(row) {
     earned_basic,
     basic,
     hra,
+    hra_fbp,
     other_allowance,
     dearness_allowance: coalesceAmount(
       findEarningAmount(earnings, (type, name) => type === 'da' || name.includes('dearness')),
@@ -337,6 +391,24 @@ export function flattenPayrollEarningColumns(row) {
       pickScalarAmount(row, ['overtime', 'Overtime', 'overtime_wages']),
       pickAmountByPatterns(row, [/overtime/])
     ),
+    gross_pay: coalesceAmount(
+      pickScalarAmount(row, ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'monthly_gross_amount']),
+      pickAmountByPatterns(row, [/^gross_pay$/, /^total_earnings$/])
+    ),
+    net_pay: coalesceAmount(
+      pickScalarAmount(row, ['net_pay', 'Net Pay', 'netPay', 'monthly_salary', 'MonthlySalary']),
+      pickAmountByPatterns(row, [/^net_pay$/, /^monthly_salary$/])
+    ),
+    total_deductions: coalesceAmount(
+      pickScalarAmount(row, [
+        'total_deductions',
+        'Total Deductions',
+        'totalDeductions',
+        'total_employee_deductions',
+        'total_deduction',
+      ]),
+      pickAmountByPatterns(row, [/^total_deductions?$/, /^total_employee_deductions$/])
+    ),
   };
 }
 
@@ -356,11 +428,17 @@ export function mergePayrollRunEmployeePayload(data) {
     'fbp_components',
     'variable_earnings',
   ];
-  nestedKeys.forEach((key) => {
-    if (data[key] != null && employee[key] == null) employee[key] = data[key];
+  const nestedSources = [data];
+  if (data.payroll_employee && typeof data.payroll_employee === 'object') {
+    nestedSources.push(data.payroll_employee);
+  }
+  nestedSources.forEach((source) => {
+    nestedKeys.forEach((key) => {
+      if (source[key] != null && employee[key] == null) employee[key] = source[key];
+    });
   });
   Object.entries(data).forEach(([key, value]) => {
-    if (['employee', 'code', 'message', 'page_context'].includes(key)) return;
+    if (['employee', 'code', 'message', 'page_context', 'payroll_employee'].includes(key)) return;
     if (nestedKeys.includes(key)) return;
     if (Array.isArray(value)) return;
     if (value != null && typeof value !== 'object') {
@@ -384,7 +462,9 @@ export const PAYROLL_PREFERRED_COLUMNS = [
   'paid_days',
   'lop_days',
   'earned_basic',
+  'basic',
   'hra',
+  'hra_fbp',
   'other_allowance',
   'dearness_allowance',
   'conveyance_allowance',
@@ -401,7 +481,9 @@ export const PAYROLL_PREFERRED_COLUMNS = [
 
 const ALWAYS_SHOW_COLUMNS = new Set([
   'earned_basic',
+  'basic',
   'hra',
+  'hra_fbp',
   'other_allowance',
   'dearness_allowance',
   'conveyance_allowance',

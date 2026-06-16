@@ -22,6 +22,7 @@ const PAYROLL_TABLE = 'Payroll';
  *   - salary_offset / salary_limit (optional) — process a slice of employees per request (avoids HTTP 408)
  *   - list_employees=1 (optional) — fast employee list without per-employee salary calls
  *   - payroll_month_data=1 (optional) — pay-run employee summary for payroll_month=YYYY-MM (or year + month)
+ *   - include_earnings_detail=0 (optional) — skip per-employee pay-run detail (faster; no Basic/HRA)
  *   - payrun_employee_detail=1 (optional) — earnings/deductions for one employee in a pay run (payroll_run_id + employee_id)
  *
  * OAuth (same pattern as peopledata_function / leavedata_function):
@@ -168,6 +169,29 @@ async function persistPayrollSnapshot(catalyst, payload) {
   };
 }
 
+function buildPayrollSnapshotResult(best, payrollMonth) {
+  const records = Array.isArray(best.parsed.records)
+    ? best.parsed.records.map((row) => flattenPayrollEarningColumns(row))
+    : [];
+  return {
+    found: true,
+    rowId: best.row.ROWID,
+    payrollMonth,
+    records,
+    meta: {
+      hasBreakdown: best.parsed.hasBreakdown === true,
+      loadedCount: best.parsed.loadedCount,
+      totalExpected: best.parsed.totalExpected,
+      breakdownComplete: best.parsed.breakdownComplete === true,
+      savedAt: best.parsed.savedAt || null,
+      payDate: best.parsed.runMeta?.pay_date || best.parsed.runMeta?.payDate || null,
+      payroll_run_id: best.parsed.runMeta?.payroll_run_id || null,
+      organizationId: best.parsed.organizationId || null,
+      source: best.parsed.source || null,
+    },
+  };
+}
+
 async function loadPayrollSnapshotFromTable(catalyst, payrollMonth) {
   const month = String(payrollMonth || '').trim();
   if (!/^\d{4}-\d{2}$/.test(month)) {
@@ -192,26 +216,38 @@ async function loadPayrollSnapshotFromTable(catalyst, payrollMonth) {
     if (!best) {
       return { found: false, reason: 'not_found' };
     }
-    const records = Array.isArray(best.parsed.records)
-      ? best.parsed.records.map((row) => flattenPayrollEarningColumns(row))
-      : [];
-    return {
-      found: true,
-      rowId: best.row.ROWID,
-      payrollMonth: month,
-      records,
-      meta: {
-        hasBreakdown: best.parsed.hasBreakdown === true,
-        loadedCount: best.parsed.loadedCount,
-        totalExpected: best.parsed.totalExpected,
-        breakdownComplete: best.parsed.breakdownComplete === true,
-        savedAt: best.parsed.savedAt || null,
-        payDate: best.parsed.runMeta?.pay_date || best.parsed.runMeta?.payDate || null,
-        organizationId: best.parsed.organizationId || null,
-      },
-    };
+    return buildPayrollSnapshotResult(best, month);
   } catch (err) {
     console.error('Payroll load error:', err.message || err);
+    return { found: false, reason: 'query_failed', error: err.message || String(err) };
+  }
+}
+
+/** Most recently modified payroll snapshot in the Payroll table (any month). */
+async function loadLatestPayrollSnapshotFromTable(catalyst) {
+  const zcql = catalyst.zcql();
+  try {
+    const rows = await zcql.executeZCQLQuery(`SELECT ROWID, Data, MODIFIEDTIME FROM ${PAYROLL_TABLE}`);
+    const list = Array.isArray(rows) ? rows : [];
+    let best = null;
+    for (const entry of list) {
+      const row = pickPayrollDatastoreRow(entry);
+      if (!row || row.ROWID == null) continue;
+      const parsed = safeJsonParse(row.Data, {});
+      const payrollMonth = String(parsed?.payrollMonth || '').trim();
+      if (!parsed || !/^\d{4}-\d{2}$/.test(payrollMonth)) continue;
+      if (!Array.isArray(parsed.records) || parsed.records.length === 0) continue;
+      const modified = String(row.MODIFIEDTIME || row.CREATEDTIME || '');
+      if (!best || modified > String(best.row.MODIFIEDTIME || best.row.CREATEDTIME || '')) {
+        best = { row, parsed, payrollMonth };
+      }
+    }
+    if (!best) {
+      return { found: false, reason: 'not_found' };
+    }
+    return buildPayrollSnapshotResult(best, best.payrollMonth);
+  } catch (err) {
+    console.error('Payroll latest load error:', err.message || err);
     return { found: false, reason: 'query_failed', error: err.message || String(err) };
   }
 }
@@ -279,6 +315,7 @@ async function handlePayrollFetch(req, res) {
         ? Math.max(1, Math.min(200, parseInt(employeeLimitRaw, 10) || 1))
         : 200;
       const runType = readQueryParam(req, 'payroll_run_type') || 'regular';
+      const includeEarningsDetail = readQueryParam(req, 'include_earnings_detail') !== '0';
 
       const payload = await fetchPayrollMonthEmployeeBatch({
         accessToken,
@@ -288,6 +325,7 @@ async function handlePayrollFetch(req, res) {
         offset: employeeOffset,
         limit: employeeLimit,
         runType,
+        includeEarningsDetail,
       });
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -814,6 +852,69 @@ async function fetchPayrollRunEmployeesPage({
   };
 }
 
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const list = Array.isArray(items) ? items : [];
+  if (list.length === 0) return [];
+  const results = new Array(list.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, list.length));
+
+  async function worker() {
+    while (nextIndex < list.length) {
+      const current = nextIndex;
+      nextIndex += 1;
+      results[current] = await mapper(list[current], current);
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+/** Pay-run list rows only include net_pay / total_earnings; per-employee detail has Basic, HRA, etc. */
+async function enrichPayrollRunRowsWithEmployeeDetail({
+  accessToken,
+  organizationId,
+  payrollRunId,
+  rows,
+  concurrency = 5,
+}) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const runId = String(payrollRunId || '').trim();
+  if (!runId) return rows.map((row) => flattenPayrollEarningColumns(row));
+
+  const detailConcurrency = Math.max(
+    1,
+    concurrency ||
+      parseInt(process.env.ZOHO_PAYROLL_DETAIL_CONCURRENCY || '5', 10) ||
+      5
+  );
+
+  return mapWithConcurrency(rows, detailConcurrency, async (row) => {
+    const employeeId = getEmployeeRecordId(row);
+    if (!employeeId) return flattenPayrollEarningColumns(row);
+    try {
+      const detail = await fetchPayrollRunEmployeeDetail({
+        accessToken,
+        organizationId,
+        payrollRunId: runId,
+        employeeId,
+      });
+      return flattenPayrollEarningColumns({
+        ...row,
+        ...detail,
+        employee_id: employeeId,
+      });
+    } catch (detailErr) {
+      console.warn(
+        `payroll_function: payrun employee detail failed for ${employeeId}:`,
+        detailErr.message || detailErr
+      );
+      return flattenPayrollEarningColumns(row);
+    }
+  });
+}
+
 async function fetchPayrollRunEmployeeDetail({
   accessToken,
   organizationId,
@@ -859,6 +960,7 @@ async function fetchPayrollMonthEmployeeBatch({
   offset = 0,
   limit = 200,
   runType = 'regular',
+  includeEarningsDetail = true,
 }) {
   const runs = await fetchAllPayrollRunPages({ accessToken, organizationId });
   const run = findPayrollRunForMonth(runs, year, month, runType);
@@ -909,8 +1011,17 @@ async function fetchPayrollMonthEmployeeBatch({
     );
   });
 
+  const flattenedRows = includeEarningsDetail
+    ? await enrichPayrollRunRowsWithEmployeeDetail({
+        accessToken,
+        organizationId,
+        payrollRunId,
+        rows,
+      })
+    : rows.map((row) => flattenPayrollEarningColumns(row));
+
   return {
-    rows: rows.map((row) => flattenPayrollEarningColumns(row)),
+    rows: flattenedRows,
     meta: {
       payroll_run_id: payrollRunId,
       processing_period: run.processing_period || `${PAYROLL_MONTH_NAMES[month - 1]} ${year}`,
@@ -1062,16 +1173,20 @@ function sendPayrollTableJson(res, result) {
 }
 
 async function handlePayrollTableGet(req, res) {
+  const payrollTableLatest = readQueryParam(req, 'payroll_table_latest') === '1';
   const payrollMonth = readQueryParam(req, 'payroll_month') || readQueryParam(req, 'payrollMonth');
   const { catalyst } = res.locals;
-  const result = await loadPayrollSnapshotFromTable(catalyst, payrollMonth);
+  const result = payrollTableLatest
+    ? await loadLatestPayrollSnapshotFromTable(catalyst)
+    : await loadPayrollSnapshotFromTable(catalyst, payrollMonth);
   sendPayrollTableJson(res, result);
 }
 
 async function handlePayrollGet(req, res) {
-  const payrollTable = readQueryParam(req, 'payroll_table') === '1';
+  const payrollTableLatest = readQueryParam(req, 'payroll_table_latest') === '1';
+  const payrollTable = readQueryParam(req, 'payroll_table') === '1' || payrollTableLatest;
   const payrollMonth = readQueryParam(req, 'payroll_month') || readQueryParam(req, 'payrollMonth');
-  if (payrollTable && payrollMonth) {
+  if (payrollTable && (payrollMonth || payrollTableLatest)) {
     try {
       await handlePayrollTableGet(req, res);
     } catch (err) {
@@ -1096,6 +1211,19 @@ app.get('/payroll', async (req, res) => {
     res.status(500).json({
       success: false,
       error: err.message || 'Failed to load payroll data',
+    });
+  }
+});
+
+app.get('/payroll/latest', async (req, res) => {
+  try {
+    req.query = { ...(req.query || {}), payroll_table_latest: '1' };
+    await handlePayrollTableGet(req, res);
+  } catch (err) {
+    console.error('payroll_function GET /payroll/latest error:', err.message || err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to load latest payroll data',
     });
   }
 });

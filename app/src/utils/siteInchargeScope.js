@@ -198,3 +198,63 @@ export async function fetchAllowedActCategoriesFromSites(userEmailProp) {
   const { actCategories } = await fetchInchargeDisplayScopeFromSites(userEmailProp);
   return actCategories;
 }
+
+/** Org-wide viewers (not restricted to Incharge sites). */
+export function isOrgWideSiteViewer(role) {
+  const r = String(role || '').trim();
+  return r === 'App Administrator' || r === 'HR Admin';
+}
+
+/**
+ * Scope labels from sites where the login email is Incharge.
+ * @returns {{ stateLabels: string[], industryLabels: string[], mine: object[] } | null}
+ */
+export function buildInchargeSiteScopeFromList(sites, loginEmail) {
+  const loginNorm = normalizeEmail(loginEmail);
+  if (!loginNorm) return null;
+  const list = Array.isArray(sites) ? sites : [];
+  const mine = list.filter((s) => normalizeEmail(siteInchargeEmail(s)) === loginNorm);
+  if (!mine.length) return null;
+  const stateLabels = [...new Set(mine.map(siteStateFromRecord).filter(Boolean))];
+  const industryLabels = [...new Set(mine.map(siteIndustry).filter(Boolean))];
+  return { stateLabels, industryLabels, mine };
+}
+
+function siteMatchesInchargeStateIndustry(site, stateLabels, industryLabels) {
+  const st = siteStateFromRecord(site);
+  const ind = siteIndustry(site);
+  const stateOk =
+    !stateLabels.length ||
+    stateLabels.some(
+      (label) => normalizeStateCompareKey(label) === normalizeStateCompareKey(st)
+    );
+  const industryOk =
+    !industryLabels.length || sectorMatchesInchargeSiteIndustries(ind, industryLabels);
+  return stateOk && industryOk;
+}
+
+/**
+ * Site Management table rows visible to the current login.
+ * Incharge users see only their assigned state + industry (e.g. Tamil Nadu · Shops and Establishment).
+ * App User without an Incharge assignment sees none; org admins see all.
+ */
+export function filterSitesForLoginUser(sites, loginEmail, userRole) {
+  const list = Array.isArray(sites) ? sites : [];
+  const loginNorm = normalizeEmail(loginEmail);
+  if (!loginNorm) {
+    return isOrgWideSiteViewer(userRole) ? list : [];
+  }
+
+  const scope = buildInchargeSiteScopeFromList(list, loginNorm);
+  if (scope) {
+    const { stateLabels, industryLabels, mine } = scope;
+    return mine.filter((s) => siteMatchesInchargeStateIndustry(s, stateLabels, industryLabels));
+  }
+
+  if (isOrgWideSiteViewer(userRole)) return list;
+  return [];
+}
+
+export function hasInchargeSiteScope(sites, loginEmail) {
+  return buildInchargeSiteScopeFromList(sites, loginEmail) != null;
+}

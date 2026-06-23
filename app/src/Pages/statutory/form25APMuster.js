@@ -130,6 +130,7 @@ export function readForm25APMusterCellValue(row, header) {
     `For the period ending ${day}`,
     String(day),
     `Day ${day}`,
+    `Dates_${day}`,
     `DATES_${day}`
   ];
   for (let i = 0; i < aliases.length; i += 1) {
@@ -450,6 +451,24 @@ export function remapForm25APMusterRowsToHeaders(rows, sourceHeaders, targetHead
     });
     return out;
   });
+}
+
+export function isForm25APPeriodOfWorkHeader(h) {
+  return /^period\s+of\s+work$/i.test(form25APMusterHeaderNorm(h));
+}
+
+/** Shift name or "start - end" for Form 25 AP Muster "Period of work" column. */
+export function formatForm25APPeriodOfWorkValue({ shiftName = '', shiftStart = '', shiftEnd = '' } = {}) {
+  const name = String(shiftName || '').trim();
+  if (name && name !== '-') return name;
+  const start = String(shiftStart || '').trim();
+  const end = String(shiftEnd || '').trim();
+  if (start && end && start !== '-' && end !== '-') {
+    return `${start} - ${end}`;
+  }
+  if (start && start !== '-') return start;
+  if (end && end !== '-') return end;
+  return '';
 }
 
 export function isForm25APMusterSkipAutofillHeader(h, normalizeLooseHeaderText) {

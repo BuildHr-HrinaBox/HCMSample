@@ -4,6 +4,13 @@ import { CheckCircle2, Trash2 } from 'lucide-react';
 import './SiteManagement.css';
 import './CompanyDetails.css';
 import { resolveLoginEmailString, stringifyUserEmail } from '../utils/resolveLoginEmail';
+import {
+  filterSitesForLoginUser,
+  hasInchargeSiteScope,
+  siteIndustry,
+  siteInchargeEmail,
+  siteStateFromRecord,
+} from '../utils/siteInchargeScope';
 import { INDIAN_CITIES } from '../utils/indianCities';
 import { INDIAN_STATES } from '../utils/indianStates';
 import CityCombobox, { StateCombobox } from '../components/CityCombobox';
@@ -38,16 +45,6 @@ function normalizeEmail(value) {
   return String(value || '')
     .trim()
     .toLowerCase();
-}
-
-function siteInchargeEmail(s) {
-  if (!s || typeof s !== 'object') return '';
-  return String(s.inchargeEmail ?? s.InchargeEmail ?? s.incharge_email ?? '').trim();
-}
-
-function siteIndustry(s) {
-  if (!s || typeof s !== 'object') return '';
-  return String(s.industry ?? s.Industry ?? '').trim();
 }
 
 function siteLocation(s) {
@@ -206,7 +203,7 @@ function extractSiteIdFromResponse(data) {
   return id == null ? '' : String(id);
 }
 
-const SiteManagement = ({ userEmail }) => {
+const SiteManagement = ({ userEmail, userRole }) => {
   const [sites, setSites] = useState([]);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
@@ -248,23 +245,25 @@ const SiteManagement = ({ userEmail }) => {
 
   const loginEmailNorm = normalizeEmail(sessionLoginEmail || stringifyUserEmail(userEmail));
 
-  /**
-   * When the login email is Incharge on at least one site, the table lists only those rows.
-   * Same industry with a different Incharge email does not appear (each site stays with its own email).
-   * If the login is not Incharge on any site, the full list is shown (e.g. org admin).
-   */
-  const inchargeIndustryScope = useMemo(() => {
-    if (!loginEmailNorm) return { restrictToLoginIncharge: false };
-    const isInchargeOnAny = sites.some((s) => normalizeEmail(siteInchargeEmail(s)) === loginEmailNorm);
-    return { restrictToLoginIncharge: isInchargeOnAny };
-  }, [sites, loginEmailNorm]);
+  const hasInchargeIndustryScope = useMemo(
+    () => hasInchargeSiteScope(sites, loginEmailNorm),
+    [sites, loginEmailNorm]
+  );
 
-  const hasInchargeIndustryScope = inchargeIndustryScope.restrictToLoginIncharge;
+  const displaySites = useMemo(
+    () => filterSitesForLoginUser(sites, loginEmailNorm, userRole),
+    [sites, loginEmailNorm, userRole]
+  );
 
-  const displaySites = useMemo(() => {
-    if (!inchargeIndustryScope.restrictToLoginIncharge) return sites;
-    return sites.filter((s) => normalizeEmail(siteInchargeEmail(s)) === loginEmailNorm);
-  }, [sites, inchargeIndustryScope]);
+  const scopeSubtitle = useMemo(() => {
+    if (!hasInchargeIndustryScope) return '';
+    const states = [...new Set(displaySites.map(siteStateFromRecord).filter(Boolean))];
+    const industries = [...new Set(displaySites.map(siteIndustry).filter(Boolean))];
+    const parts = [];
+    if (states.length) parts.push(states.join(', '));
+    if (industries.length) parts.push(industries.join(', '));
+    return parts.length ? `Showing sites for ${parts.join(' · ')}` : '';
+  }, [hasInchargeIndustryScope, displaySites]);
 
   const filteredSites = useMemo(() => {
     const q = tableSearch.trim().toLowerCase();
@@ -451,8 +450,10 @@ const SiteManagement = ({ userEmail }) => {
   };
 
   const emptyListMessage = hasInchargeIndustryScope
-    ? 'No sites are assigned to your login as Incharge.'
-    : 'No sites. Click Add to create one.';
+    ? 'No sites are assigned to your login for this state and industry.'
+    : userRole && userRole !== 'App Administrator' && userRole !== 'HR Admin'
+      ? 'No sites are assigned to your login as Incharge.'
+      : 'No sites. Click Add to create one.';
 
   const fetchSites = useCallback(async (options = {}) => {
     const { clearMessage = true, useCacheFirst = false, silentRefresh = false } = options;
@@ -794,7 +795,7 @@ const SiteManagement = ({ userEmail }) => {
     }
   };
 
-  const subtitle = '';
+  const subtitle = scopeSubtitle;
 
   const TABLE_COL_COUNT = 13;
 

@@ -599,7 +599,7 @@ function MainApp({ userRole, userEmail, userName }) {
                     userInitials={dashboardInitials}
                     userEmail={userEmail}
                   >
-                    <SiteManagement userEmail={userEmail} />
+                    <SiteManagement userEmail={userEmail} userRole={userRole} />
                   </HcmDashboardPageShell>
                 }
               />

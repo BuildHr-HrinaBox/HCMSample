@@ -2266,3 +2266,40 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
     font-weight: 700;
     font-size: 15px;
   }
+
+  /* Form 6 (AP Humidity): certification row above signatory block (Excel model) */
+  .form-file-modal-content .statutory-form6-ap-certification {
+    margin-top: 20px;
+    padding-top: 12px;
+    border-top: 1px solid #e5e7eb;
+    font-family: Georgia, 'Times New Roman', Times, serif;
+    color: #111827;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .form-file-modal-content .statutory-form6-ap-certification__row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 10px;
+  }
+
+  .form-file-modal-content .statutory-form6-ap-certification__row--signed-only {
+    justify-content: flex-end;
+    margin-bottom: 0;
+  }
+
+  .form-file-modal-content .statutory-form6-ap-certification__text {
+    flex: 1 1 auto;
+    font-weight: 600;
+    min-width: 0;
+  }
+
+  .form-file-modal-content .statutory-form6-ap-certification__signed {
+    flex: 0 0 auto;
+    min-width: 72px;
+    text-align: center;
+    font-weight: 600;
+  }

@@ -56,10 +56,16 @@ const getStatutoryTransactionStatusNorm = (row) =>
     .trim()
     .toLowerCase();
 
-const isStatutoryTransactionStatusApproved = (row) => {
-  const s = getStatutoryTransactionStatusNorm(row);
-  return s === 'approved' || s === 'approve';
+const isStatutoryRowApproved = (row) => {
+  const st = getStatutoryTransactionStatusNorm(row);
+  if (st === 'approved' || st === 'approve') return true;
+  const appr = String(row?.approval ?? row?.Approval ?? '')
+    .trim()
+    .toLowerCase();
+  return appr === 'approved' || appr === 'approve';
 };
+
+const isStatutoryTransactionStatusApproved = (row) => isStatutoryRowApproved(row);
 
 /** Strip draft URL if not approved (table UI); keep draftFileId for consolidated ZIP. */
 const sanitizeMainReportApiRow = (row) => {
@@ -76,25 +82,29 @@ const isYetToCompleteStatusText = (stLower) =>
   stLower.includes('incomplete') ||
   stLower.includes('not complete');
 
+const rowHasStoredDraft = (row) => {
+  if (row?.hasStatutoryDraftStored === true) return true;
+  const id = row?.draftFileId ?? row?.draftFile;
+  return id != null && String(id).trim() !== '' && String(id).toLowerCase() !== 'null';
+};
+
+/** Match Statutory.js `getStatutoryRowDisplayStatus` for KPI cards and table STATUS column. */
 const getStatusLabel = (row) => {
+  const hasDraftStored = rowHasStoredDraft(row);
+  if (!hasDraftStored) return 'Yet to Complete';
+
   const st = String(row?.statutoryStatus || row?.status || '').trim();
   const stLower = st.toLowerCase();
   const appr = String(row?.approval || '').trim().toLowerCase();
-  const hasDraftStored = row?.hasStatutoryDraftStored === true;
 
   if (appr === 'rejected' || appr === 'reject' || stLower.includes('reject')) return 'Rejected';
-
   if (stLower === 'approved' || stLower === 'approve') return 'Approved';
-
-  if (hasDraftStored && (st === '' || st === '-' || st === '—')) return 'Pending';
-  if (hasDraftStored && stLower === 'pending') return 'Pending';
-
+  if (appr === 'approved' || appr === 'approve') return 'Approved';
+  if (st === '' || st === '-' || st === '—') return 'Pending';
+  if (stLower === 'pending') return 'Pending';
   if (isYetToCompleteStatusText(stLower)) return 'Yet to Complete';
 
-  if (!hasDraftStored) return 'Yet to Complete';
-
-  /** Never surface raw DB typos / stray values (e.g. "change") in Reports — bucket as Yet to Complete. */
-  return 'Yet to Complete';
+  return st || 'Pending';
 };
 
 const getSectorGroupLabel = (row) => {
@@ -262,7 +272,7 @@ const ensureUniqueFileName = (baseName, used) => {
 
 const countRowStatusBucket = (row) => {
   const status = getStatusLabel(row);
-  if (isStatutoryTransactionStatusApproved(row) && status === 'Approved') return 'approved';
+  if (status === 'Approved') return 'approved';
   if (status === 'Pending') return 'pending';
   return 'yet';
 };
@@ -1055,7 +1065,7 @@ const Mainreport = ({ userEmail: userEmailProp }) => {
     let yetToComplete = 0;
     for (const row of filteredRows) {
       const status = getStatusLabel(row);
-      if (isStatutoryTransactionStatusApproved(row) && status === 'Approved') approved += 1;
+      if (status === 'Approved') approved += 1;
       else if (status === 'Pending') pending += 1;
       else if (status === 'Yet to Complete') yetToComplete += 1;
     }

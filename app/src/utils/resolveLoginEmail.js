@@ -33,11 +33,10 @@ export function stringifyUserEmail(userEmail) {
 }
 
 /**
- * Best-effort login email for matching Site Incharge email: prop → Catalyst → localStorage.
+ * Best-effort login email for matching Site Incharge email: Catalyst session → prop → localStorage.
+ * Catalyst is checked first so a fresh sign-in is not overridden by a stale React prop / localStorage value.
  */
 export async function resolveLoginEmailString(userEmailProp) {
-  const fromProp = stringifyUserEmail(userEmailProp);
-  if (fromProp) return fromProp;
   try {
     if (typeof window !== 'undefined' && window.catalyst?.auth?.isUserAuthenticated) {
       const auth = await window.catalyst.auth.isUserAuthenticated();
@@ -47,6 +46,8 @@ export async function resolveLoginEmailString(userEmailProp) {
   } catch (_) {
     /* ignore */
   }
+  const fromProp = stringifyUserEmail(userEmailProp);
+  if (fromProp) return fromProp;
   try {
     return (localStorage.getItem('userEmail') || '').trim();
   } catch (_) {

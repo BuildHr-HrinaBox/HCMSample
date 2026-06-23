@@ -258,19 +258,59 @@ export function readPayrollForm15WageAmounts(payrollRow) {
     flat,
     basic: coalesceAmount(flat.basic, flat.earned_basic),
     hra: coalesceAmount(flat.hra_fbp, flat.hra),
+    hra_fbp: coalesceAmount(flat.hra_fbp, flat.hra),
     other_allowance: coalesceAmount(flat.other_allowance),
   };
+}
+
+function payrollAmountIsPresent(value) {
+  return coalesceAmount(value) !== '';
 }
 
 /** True when a payroll row has explicit Basic or HRA amounts (not just gross/net summary). */
 export function payrollRowHasWageBreakdown(payrollRow) {
   const wages = readPayrollForm15WageAmounts(payrollRow);
-  return wages.basic !== '' || wages.hra !== '';
+  return payrollAmountIsPresent(wages.basic) || payrollAmountIsPresent(wages.hra);
+}
+
+/** True when a Payroll table row has basic / hra_fbp / other_allowance scalars. */
+export function payrollRowHasForm15Part2WageFields(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return false;
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  return (
+    payrollAmountIsPresent(flat.basic) ||
+    payrollAmountIsPresent(flat.earned_basic) ||
+    payrollAmountIsPresent(flat.hra_fbp) ||
+    payrollAmountIsPresent(flat.hra) ||
+    payrollAmountIsPresent(flat.other_allowance)
+  );
+}
+
+export function payrollRowsHaveForm15Part2WageFields(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  return rows.some((row) => payrollRowHasForm15Part2WageFields(row));
 }
 
 export function payrollRowsHaveWageBreakdown(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return false;
   return rows.some((row) => row && !row.fetch_error && payrollRowHasWageBreakdown(row));
+}
+
+/** Form 10 — net_pay from Payroll table / Zoho pay run (Total earnings & Normal rate of pay). */
+export function readForm10NetPayAmount(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const candidates = [flat.net_pay, payrollRow.net_pay];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const n = Number(String(candidates[i] ?? '').replace(/,/g, '').trim());
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return '';
+}
+
+export function payrollRowsHaveForm10NetPay(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  return rows.some((row) => readForm10NetPayAmount(row) !== '');
 }
 
 /** True when a payroll row has a usable net/gross pay amount for Form 10 autofill. */

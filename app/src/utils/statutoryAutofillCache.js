@@ -744,13 +744,9 @@ export function prefetchPayrollBulkRows() {
   return fetchPayrollBulkRows().catch(() => null);
 }
 
-export function prefetchStatutoryAutofillData(options = {}) {
+export function prefetchStatutoryAutofillData() {
   prefetchSiteDetails();
-  if (options?.clraIndustry === true) {
-    prefetchClraData();
-  } else {
-    prefetchPeopleData();
-  }
+  prefetchPeopleData();
   prefetchAttendanceData();
   prefetchLeaveData();
   // Do not prefetch all_salaries here — it blocks payroll_function for minutes on large orgs.
@@ -776,10 +772,56 @@ export function getFormTemplateCacheKey(item) {
   return `${rowId}|${id}|${lineKey}`;
 }
 
+/** True when a PK zip buffer includes an end-of-central-directory record (not truncated). */
+export function hasZipEndOfCentralDirectory(arrayBuffer) {
+  if (!arrayBuffer || arrayBuffer.byteLength < 22) return false;
+  const u8 = new Uint8Array(arrayBuffer);
+  const minEOCDSize = 22;
+  const searchStart = Math.max(0, u8.length - 65557);
+  for (let i = u8.length - minEOCDSize; i >= searchStart; i -= 1) {
+    if (u8[i] === 0x50 && u8[i + 1] === 0x4b && u8[i + 2] === 0x05 && u8[i + 3] === 0x06) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** True when buffer looks like xlsx (PK zip) or legacy xls (OLE), not JSON/HTML error bodies. */
+export function isValidExcelArrayBuffer(arrayBuffer) {
+  if (!arrayBuffer || arrayBuffer.byteLength < 4) return false;
+  const u8 = new Uint8Array(arrayBuffer.slice(0, 8));
+  if (u8[0] === 0x50 && u8[1] === 0x4b) {
+    return arrayBuffer.byteLength >= 512 && hasZipEndOfCentralDirectory(arrayBuffer);
+  }
+  if (u8[0] === 0xd0 && u8[1] === 0xcf && u8[2] === 0x11 && u8[3] === 0xe0) return true;
+  const head = new TextDecoder('utf-8', { fatal: false })
+    .decode(new Uint8Array(arrayBuffer.slice(0, Math.min(120, arrayBuffer.byteLength))))
+    .trim()
+    .toLowerCase();
+  if (head.startsWith('<!doctype') || head.startsWith('<html')) return false;
+  if (
+    head.startsWith('{') &&
+    (head.includes('"failure"') || head.includes('"status"') || head.includes('"error"') || head.includes('"message"'))
+  ) {
+    return false;
+  }
+  return false;
+}
+
+export function invalidateFormTemplateCache(cacheKey) {
+  if (cacheKey) formTemplateCache.delete(cacheKey);
+}
+
 export function readFormTemplateCache(cacheKey) {
   if (!cacheKey) return null;
   const entry = formTemplateCache.get(cacheKey);
-  if (entry && Date.now() - entry.ts < FORM_TEMPLATE_TTL_MS) return entry;
+  if (entry && Date.now() - entry.ts < FORM_TEMPLATE_TTL_MS) {
+    if (entry.arrayBuffer && !isValidExcelArrayBuffer(entry.arrayBuffer)) {
+      formTemplateCache.delete(cacheKey);
+      return null;
+    }
+    return entry;
+  }
   if (entry) formTemplateCache.delete(cacheKey);
   return null;
 }
@@ -810,6 +852,12 @@ export async function fetchFormTemplateArrayBuffer(urls, cacheKey, options = {})
   const task = fetchFirstOkResponse(list)
     .then(async ({ resp, url }) => {
       const arrayBuffer = await resp.arrayBuffer();
+      if (!isValidExcelArrayBuffer(arrayBuffer)) {
+        if (cacheKey) invalidateFormTemplateCache(cacheKey);
+        throw new Error(
+          'Form template download returned an invalid Excel file. Refresh the page and try again, or re-upload the template in Form Master.'
+        );
+      }
       const contentType = (resp.headers.get('content-type') || '').toLowerCase();
       const cdName = resp.headers.get('content-disposition') || '';
       const entry = { arrayBuffer, ts: Date.now(), url, contentType, contentDisposition: cdName };

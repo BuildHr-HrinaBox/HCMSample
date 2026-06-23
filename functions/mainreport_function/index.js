@@ -202,6 +202,9 @@ function filterRowsForInchargeLocation(rows, stateLabels, siteNamesLower) {
   if (!Array.isArray(rows)) return rows;
   return rows.filter((r) => {
     const site = String(r.Site || r.site || '').trim().toLowerCase();
+    if (siteNamesLower && siteNamesLower.size > 0 && site && siteNamesLower.has(site)) {
+      return true;
+    }
     if (siteNamesLower && siteNamesLower.size > 0 && site && !siteNamesLower.has(site)) return false;
     const stateRaw = getStateFromAnyRow(r);
     /** ChecklistBulk master rows often have no Site; resolve State later from bulk/sector/site scope. */
@@ -381,6 +384,8 @@ function statutoryRowMatchesMonth(stRow, selectedMonth) {
   const selectedPrefix = selectedNorm.toLowerCase().substring(0, 3);
   const storedNorm = getStatutoryStoredMonthRaw(stRow).toLowerCase().substring(0, 3);
   if (storedNorm) return storedNorm === selectedPrefix;
+  const submitted = getDraftDateFromStatutoryRow(stRow);
+  if (submitted && submittedDateMatchesMonth(submitted, selectedMonth)) return true;
   const dueDate = String(stRow.DueDate || stRow.dueDate || '')
     .toLowerCase()
     .trim();
@@ -393,6 +398,106 @@ function statutoryRowMatchesMonth(stRow, selectedMonth) {
   const monthAbbrName = monthAbbr[idx];
   /** Never treat "Monthly Basis" alone as matching every month — that showed May-only drafts under January Reports. */
   return dueDate.includes(fullMonthName) || dueDate.includes(monthAbbrName);
+}
+
+function submittedDateMatchesMonth(submittedRaw, selectedMonth) {
+  const raw = String(submittedRaw || '').trim();
+  if (!raw) return false;
+  const selectedNorm = normalizeMonth(selectedMonth);
+  if (!selectedNorm) return false;
+  const selectedPrefix = selectedNorm.toLowerCase().substring(0, 3);
+  const lower = raw.toLowerCase();
+  if (lower.includes(selectedPrefix)) return true;
+  const idx = MONTH_ORDER.indexOf(selectedNorm);
+  if (idx === -1) return false;
+  return lower.includes(MONTH_ORDER[idx].toLowerCase());
+}
+
+function statutoryRowMatchesYear(stRow, selectedYear) {
+  const y = parseInt(String(selectedYear || '').trim(), 10);
+  if (isNaN(y)) return true;
+  const dateFields = [
+    getDraftDateFromStatutoryRow(stRow),
+    getApprovalDateFromStatutoryRow(stRow),
+    String(stRow.DueDate || stRow.dueDate || '').trim()
+  ];
+  let sawYear = false;
+  for (const raw of dateFields) {
+    if (!raw) continue;
+    const m = String(raw).match(/\b(20\d{2})\b/);
+    if (m) {
+      sawYear = true;
+      if (parseInt(m[1], 10) === y) return true;
+    }
+  }
+  return !sawYear;
+}
+
+/** Same as Statutory.js baseFormNameKey — "Form B - TN LWF..." → "form b". */
+function baseFormNameKey(name) {
+  const n = String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  const m = n.match(/^form\s+[a-z0-9]+/);
+  return m ? m[0] : n;
+}
+
+function hasStatutoryDraftFromRow(stRow) {
+  if (!stRow) return false;
+  const draft = stRow.DraftFile ?? stRow.draftFile ?? stRow.draftfile;
+  return draft != null && String(draft).trim() !== '' && String(draft).toLowerCase() !== 'null';
+}
+
+function formKeysMatchForReport(meta, stRow, strictFormKey) {
+  if (getMasterKeyFromAnyRow(stRow) === strictFormKey) return true;
+  const bulkName = getFormNameFromAnyRow(meta);
+  const stName = getFormNameFromAnyRow(stRow);
+  if (normalizeFormKey(bulkName) === normalizeFormKey(stName)) return true;
+  const baseBulk = baseFormNameKey(bulkName);
+  const baseSt = baseFormNameKey(stName);
+  return Boolean(baseBulk && baseBulk === baseSt);
+}
+
+/** Link checklist bulk row → Statutory transaction (loose form key + site + month/year). */
+function findStatutoryMatchForReport(meta, formKey, statutoryRows, month, year, siteParam) {
+  if (!Array.isArray(statutoryRows) || statutoryRows.length === 0) return null;
+  const siteLower = String(siteParam || '').trim().toLowerCase();
+
+  let candidates = statutoryRows.filter((r) => formKeysMatchForReport(meta, r, formKey));
+
+  if (siteLower) {
+    const siteMatches = candidates.filter(
+      (r) =>
+        String(r.Site || r.site || '')
+          .trim()
+          .toLowerCase() === siteLower
+    );
+    const noSite = candidates.filter((r) => !String(r.Site || r.site || '').trim());
+    candidates = siteMatches.length ? siteMatches : noSite;
+  }
+
+  const monthYearMatches = candidates.filter(
+    (r) => statutoryRowMatchesMonth(r, month) && statutoryRowMatchesYear(r, year)
+  );
+  if (monthYearMatches.length) return pickBestStatutoryRow(monthYearMatches);
+
+  const withDraft = candidates.filter((r) => {
+    if (!hasStatutoryDraftFromRow(r)) return false;
+    if (statutoryRowMatchesMonth(r, month) && statutoryRowMatchesYear(r, year)) return true;
+    const sub = getDraftDateFromStatutoryRow(r);
+    if (sub && submittedDateMatchesMonth(sub, month) && statutoryRowMatchesYear(r, year)) return true;
+    const appr = getApprovalDateFromStatutoryRow(r);
+    return appr && submittedDateMatchesMonth(appr, month) && statutoryRowMatchesYear(r, year);
+  });
+  if (withDraft.length) return pickBestStatutoryRow(withDraft);
+
+  const approvedRows = candidates.filter(
+    (r) => isStatutoryTransactionApproved(r) && statutoryRowMatchesYear(r, year)
+  );
+  if (approvedRows.length) return pickBestStatutoryRow(approvedRows);
+
+  return null;
 }
 
 function getDraftDateFromStatutoryRow(stRow) {
@@ -427,10 +532,14 @@ function getStatutoryRowStatusRaw(stRow) {
   return '';
 }
 
-/** Match Statutory.js STATUS column: only transaction `Status` is Approved (not Pending / Yet to Complete). */
+/** Match Statutory.js STATUS column: transaction Status or Approval field Approved. */
 function isStatutoryTransactionApproved(stRow) {
   const st = getStatutoryRowStatusRaw(stRow).toLowerCase();
-  return st === 'approved' || st === 'approve';
+  if (st === 'approved' || st === 'approve') return true;
+  const appr = String(stRow.Approval || stRow.approval || '')
+    .trim()
+    .toLowerCase();
+  return appr === 'approved' || appr === 'approve';
 }
 
 function pickBestStatutoryRow(matches) {
@@ -438,11 +547,13 @@ function pickBestStatutoryRow(matches) {
   if (matches.length === 1) return matches[0];
   const score = (r) => {
     let s = 0;
-    const draft = r.DraftFile;
-    const hasDraft =
-      draft != null && String(draft).trim() !== '' && String(draft).toLowerCase() !== 'null';
-    if (hasDraft) s += 100;
+    if (isStatutoryTransactionApproved(r)) s += 1000;
+    if (hasStatutoryDraftFromRow(r)) s += 100;
     if (r.ROWID != null) s += 50;
+    const sub = getDraftDateFromStatutoryRow(r);
+    if (sub) s += 10;
+    const appr = getApprovalDateFromStatutoryRow(r);
+    if (appr) s += 10;
     return s;
   };
   return [...matches].sort((a, b) => score(b) - score(a))[0];
@@ -466,8 +577,7 @@ function buildStatutoryDraftRow(stRow) {
   const description = getDescriptionFromAnyRow(stRow);
   const sector = getSectorFromAnyRow(stRow);
   const approved = isStatutoryTransactionApproved(stRow);
-  const hasDraftStored =
-    stRow.DraftFile != null && String(stRow.DraftFile).trim() !== '' && String(stRow.DraftFile).toLowerCase() !== 'null';
+  const hasDraftStored = hasStatutoryDraftFromRow(stRow);
   const draftFile = hasDraftStored ? String(stRow.DraftFile).trim() : null;
   const draftFileName =
     stRow.DraftFileName != null && String(stRow.DraftFileName).trim() !== ''
@@ -970,14 +1080,30 @@ async function buildMainReportEntries(catalyst, { year, month, userEmail, sitePa
     inchargeStateLabels: inchargeScope.stateLabels
   };
 
-  const statutoryForMatch = siteParam
-    ? statutoryAll.filter((r) => {
+  const statutoryForMatch = (() => {
+    let pool = filterRowsByActCategoryScope(statutoryAll, narrowActCategories);
+    if (siteParam) {
+      const want = String(siteParam).trim().toLowerCase();
+      pool = pool.filter((r) => {
         const site = String(r.Site || r.site || '')
           .trim()
           .toLowerCase();
-        return site === siteParam.toLowerCase();
-      })
-    : statutoryAll;
+        return !site || site === want;
+      });
+    }
+    return pool;
+  })();
+
+  const mergePickedStatutoryIntoReportRow = (picked, meta, listKey, stateOptions) => {
+    const built = buildStatutoryDraftRow(picked);
+    if (!built.act && meta?.act) built.act = meta.act;
+    if (!built.description && meta?.description) built.description = meta.description;
+    if (meta?.sector) built.sector = meta.sector;
+    built.state = resolveReportState(picked, meta?.state, siteStateByName, siteParam, stateOptions);
+    built.monthFilter = getStatutoryMonthFilterDisplay(picked, reportMonthNorm) || reportMonthNorm;
+    built.bulkRowId = listKey;
+    return finalizeReportRowForSite(built, siteParam, selectedSiteState);
+  };
 
   const pushReportRowForBulkMeta = (listKey, meta, formKey) => {
     const masterState =
@@ -985,19 +1111,10 @@ async function buildMainReportEntries(catalyst, { year, month, userEmail, sitePa
       findStateForMasterKey(formKey, bulkForReport, statutoryForMatch) ||
       findStateByFormNameLoose(meta?.formName, bulkForReport, statutoryForMatch) ||
       String(meta?.state || '').trim();
-    const candidates = statutoryForMatch.filter((r) => getMasterKeyFromAnyRow(r) === formKey);
-    const monthCandidates = candidates.filter((r) => statutoryRowMatchesMonth(r, month));
-    const picked = monthCandidates.length > 0 ? pickBestStatutoryRow(monthCandidates) : null;
+    const picked = findStatutoryMatchForReport(meta, formKey, statutoryForMatch, month, year, siteParam);
     const stateOptions = { ...resolveOptsBase, masterState, sector: meta?.sector || '' };
     if (picked) {
-      const built = buildStatutoryDraftRow(picked);
-      if (!built.act && meta?.act) built.act = meta.act;
-      if (!built.description && meta?.description) built.description = meta.description;
-      if (meta?.sector) built.sector = meta.sector;
-      built.state = resolveReportState(picked, meta?.state, siteStateByName, siteParam, stateOptions);
-      built.monthFilter = getStatutoryMonthFilterDisplay(picked, reportMonthNorm) || reportMonthNorm;
-      built.bulkRowId = listKey;
-      return finalizeReportRowForSite(built, siteParam, selectedSiteState);
+      return mergePickedStatutoryIntoReportRow(picked, meta, listKey, stateOptions);
     }
     const emptyState = resolveReportState(null, meta?.state, siteStateByName, siteParam, stateOptions);
     const empty = buildEmptyFormRow(
@@ -1051,6 +1168,33 @@ async function buildMainReportEntries(catalyst, { year, month, userEmail, sitePa
   }
 
   out.sort((a, b) => String(a.formName || '').localeCompare(String(b.formName || ''), undefined, { sensitivity: 'base' }));
+
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].statutoryRowId != null) continue;
+    const meta = {
+      formName: out[i].formName,
+      act: out[i].act,
+      description: out[i].description,
+      sector: out[i].sector,
+      state: out[i].state
+    };
+    const formKey = getMasterKeyFromAnyRow(meta);
+    const masterState =
+      getStateFromAnyRow(meta) ||
+      findStateForMasterKey(formKey, bulkForReport, statutoryForMatch) ||
+      findStateByFormNameLoose(meta?.formName, bulkForReport, statutoryForMatch) ||
+      String(meta?.state || '').trim();
+    const stateOptions = { ...resolveOptsBase, masterState, sector: meta?.sector || '' };
+    const picked = findStatutoryMatchForReport(meta, formKey, statutoryForMatch, month, year, siteParam);
+    if (picked) {
+      out[i] = mergePickedStatutoryIntoReportRow(
+        picked,
+        meta,
+        out[i].bulkRowId || out[i].rowId,
+        stateOptions
+      );
+    }
+  }
 
   let rows = out;
   if (siteParam && selectedSiteState) {

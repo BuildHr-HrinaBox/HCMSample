@@ -1,5 +1,7 @@
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
+import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
+import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
 
 /** AP Shops Form X — Register of Fines (Rules under Payment of Wages / Minimum Wages / S&E). */
 
@@ -171,6 +173,19 @@ export function sheetBlobIndicatesFormXXIRegisterOfFines(blob) {
   );
 }
 
+/** AP Shops Form X — Register of Leave and Social Security Benefits (not Register of Fines). */
+export function sheetBlobIndicatesFormXLeaveRegister(blob) {
+  const text = String(blob || '').toLowerCase();
+  if (/register\s+of\s+fines/i.test(text)) return false;
+  return (
+    /register\s+of\s+leave/i.test(text) ||
+    /leave\s+and\s+social\s+security/i.test(text) ||
+    /leave\s+with\s+wages/i.test(text) ||
+    (/earned\s+leave/i.test(text) &&
+      (/medical\s+leave/i.test(text) || /leave\s+at\s+the\s+beginning/i.test(text)))
+  );
+}
+
 /** AP Shops & Establishment Form X — Register of Fines. */
 export function sheetBlobIndicatesFormXAPRegisterOfFines(blob) {
   const text = String(blob || '').toLowerCase();
@@ -289,6 +304,10 @@ export function isFormXAPRegisterOfFinesContext(
 
   if (sheetBlobIndicatesFormXAPRegisterOfFines(parts)) return true;
 
+  if (rowMetadataWantsFormXAP(rowItem, fileName) && /register\s+of\s+fines/i.test(parts)) {
+    return true;
+  }
+
   if (!rowMetadataWantsFormXAP(rowItem, fileName)) return false;
 
   if (Array.isArray(tableHeaders) && tableHeaders.length > 0) {
@@ -333,6 +352,7 @@ function scoreFormXAPSheet(sheetName, sheetText, hintsBlob) {
   if (sheetBlobIndicatesFormXXIRegisterOfFines(sheetBlob)) score -= 300;
   if (matchesFormXXIHint(sheetBlob)) score -= 250;
   if (/contract\s+labou?r/i.test(sheetBlob) && /register\s+of\s+fines/i.test(sheetBlob)) score -= 220;
+  if (sheetBlobIndicatesFormXLeaveRegister(sheetBlob)) score -= 280;
 
   if (sheetBlobIndicatesFormXAPRegisterOfFines(sheetBlob)) score += 180;
   if (matchesFormXHint(sheetLower) && !matchesFormXXIHint(sheetLower)) score += 120;
@@ -394,16 +414,34 @@ export function repickFormXWorkbookSheetIfNeeded(workbook, hints, currentSheetNa
   if (names.length <= 1) return null;
 
   const wantsFormX =
-    rowMetadataWantsFormXAP(hints.item, hints.fileName || hints.formFileName) ||
     isFormXAPRegisterOfFinesContext(
       parsedFormHeader,
       hints.item,
       hints.fileName || hints.formFileName
-    );
+    ) ||
+    (rowMetadataWantsFormXAP(hints.item, hints.fileName || hints.formFileName) &&
+      /register\s+of\s+fines/i.test(
+        [
+          hints.item?.formName,
+          hints.item?.FormName,
+          hints.item?.description,
+          hints.fileName,
+          hints.formFileName
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+      ));
   if (!wantsFormX) return null;
 
   const currentText = currentSheetName ? buildSheetTextBlob(workbook, currentSheetName) : '';
   const currentBlob = `${parsedFormHeader?.title || ''} ${currentSheetName || ''} ${currentText}`.toLowerCase();
+  if (sheetBlobIndicatesFormXLeaveRegister(currentBlob)) {
+    return resolveFormXWorkbookSheetName(workbook, {
+      ...hints,
+      formHeader: parsedFormHeader
+    });
+  }
   if (
     sheetBlobIndicatesFormXAPRegisterOfFines(currentBlob) &&
     !sheetBlobIndicatesFormXXIRegisterOfFines(currentBlob)
@@ -462,7 +500,11 @@ export function resolveFormXAPFinesTableLayout(workbook, hints = {}) {
   let sheetName = preferred;
   if (sheetName) {
     const prefText = buildSheetTextBlob(workbook, sheetName);
-    if (sheetBlobIndicatesFormXXIRegisterOfFines(`${sheetName} ${prefText}`)) {
+    const prefBlob = `${sheetName} ${prefText}`;
+    if (sheetBlobIndicatesFormXXIRegisterOfFines(prefBlob)) {
+      sheetName = null;
+    }
+    if (sheetBlobIndicatesFormXLeaveRegister(prefBlob)) {
       sheetName = null;
     }
   }
@@ -471,7 +513,11 @@ export function resolveFormXAPFinesTableLayout(workbook, hints = {}) {
       resolveFormXWorkbookSheetName(workbook, hints) ||
       names.find((n) => {
         const sheetText = buildSheetTextBlob(workbook, n);
-        return sheetBlobIndicatesFormXAPRegisterOfFines(`${n} ${sheetText}`);
+        const blob = `${n} ${sheetText}`;
+        return (
+          sheetBlobIndicatesFormXAPRegisterOfFines(blob) &&
+          !sheetBlobIndicatesFormXLeaveRegister(blob)
+        );
       }) ||
       null;
   }
@@ -502,6 +548,7 @@ export function resolveFormXAPFinesTableLayout(workbook, hints = {}) {
     }
     const rowText = cells.map((x) => x.lower).join(' ');
     const combinedText = `${rowText} ${nextRowCells.join(' ')}`.trim();
+    if (sheetBlobIndicatesFormXLeaveRegister(combinedText)) continue;
     if (sheetBlobIndicatesFormXXIRegisterOfFines(combinedText) && !/nature\s*&\s*date\s+of\s+offence/i.test(combinedText)) {
       continue;
     }
@@ -561,6 +608,242 @@ export function resolveFormXAPFinesTableLayout(workbook, hints = {}) {
       dataStartIndex: dataStart,
       tableStartCol: startCol,
       headers
+    };
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+
+  return best;
+}
+
+function scoreFormXXIAPSheet(sheetName, sheetText, hintsBlob) {
+  const sheetLower = String(sheetName || '').toLowerCase();
+  const sheetBlob = `${sheetLower} ${sheetText}`;
+  let score = 0;
+
+  if (sheetBlobIndicatesFormXXIRegisterOfFines(sheetBlob)) score += 200;
+  if (matchesFormXXIHint(sheetBlob)) score += 120;
+  if (/register\s+of\s+fines/i.test(sheetBlob)) score += 80;
+  if (/act\/omission|fine\s+imposed|show\s+cause|rate\s+of\s+wages/i.test(sheetText)) score += 60;
+  if (
+    CLRA_WORKMEN_NAME_HEADER_RE.test(sheetText) ||
+    /father'?s\/husband'?s|nature\s+of\s+employ/.test(sheetText)
+  ) {
+    score += 40;
+  }
+  if (sheetBlobIndicatesFormXXAPRegisterOfDeductions(sheetBlob)) score -= 220;
+  if (blobIndicatesRegisterOfDeductionsForDamage(sheetBlob)) score -= 200;
+  if (sheetBlobIndicatesFormXAPRegisterOfFines(sheetBlob)) score -= 150;
+  if (matchesFormXXHint(sheetBlob) && !blobIndicatesRegisterOfDeductionsForDamage(sheetBlob)) score -= 180;
+  if (matchesFormXXIHint(hintsBlob) && matchesFormXXIHint(sheetLower)) score += 30;
+
+  return score;
+}
+
+/** Pick the CLRA Form XXI fines worksheet from a multi-tab AP workbook. */
+export function resolveFormXXIWorkbookSheetName(workbook, hints = {}) {
+  const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
+  if (names.length <= 1) return names[0] || null;
+
+  const blob = [
+    hints.fileName,
+    hints.formFileName,
+    hints.formName,
+    hints.item?.formName,
+    hints.item?.FormName,
+    hints.formHeaderTitle,
+    hints.formHeader?.title
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  let best = null;
+  let bestScore = -Infinity;
+  for (const name of names) {
+    const sheetText = buildSheetTextBlob(workbook, name);
+    const score = scoreFormXXIAPSheet(name, sheetText, blob);
+    if (score > bestScore) {
+      bestScore = score;
+      best = name;
+    }
+  }
+  if (bestScore > 0 && best) return best;
+
+  const xxiSheet = names.find((n) => {
+    const sheetText = buildSheetTextBlob(workbook, n);
+    return sheetBlobIndicatesFormXXIRegisterOfFines(`${n} ${sheetText}`);
+  });
+  return xxiSheet || null;
+}
+
+/** Locate the fines register table on the correct CLRA Form XXI workbook tab (SheetJS). */
+export function resolveFormXXIAPFinesTableLayout(workbook, hints = {}) {
+  const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
+  if (!names.length) return null;
+
+  const preferred =
+    hints.preferredSheetName && workbook.Sheets?.[hints.preferredSheetName]
+      ? hints.preferredSheetName
+      : null;
+  let sheetName = preferred;
+  if (sheetName) {
+    const prefText = buildSheetTextBlob(workbook, sheetName);
+    const prefBlob = `${sheetName} ${prefText}`;
+    if (blobIndicatesRegisterOfDeductionsForDamage(prefBlob)) {
+      sheetName = null;
+    }
+    if (sheetBlobIndicatesFormXAPRegisterOfFines(prefBlob) && !sheetBlobIndicatesFormXXIRegisterOfFines(prefBlob)) {
+      sheetName = null;
+    }
+  }
+  if (!sheetName) {
+    sheetName =
+      resolveFormXXIWorkbookSheetName(workbook, hints) ||
+      names.find((n) => {
+        const sheetText = buildSheetTextBlob(workbook, n);
+        return sheetBlobIndicatesFormXXIRegisterOfFines(`${n} ${sheetText}`);
+      }) ||
+      null;
+  }
+  if (!sheetName) return null;
+
+  const ws = workbook?.Sheets?.[sheetName];
+  if (!ws) return null;
+
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const merges = ws['!merges'] || [];
+  const maxScan = Math.min(rows.length, 90);
+  let best = null;
+  let bestScore = -1;
+
+  for (let r = 0; r < maxScan; r += 1) {
+    const cells = [];
+    const maxCols = Math.max((rows[r] || []).length, (rows[r + 1] || []).length, 24);
+    for (let c = 0; c < maxCols; c += 1) {
+      const text = getSheetMergedCellText(rows, merges, r, c);
+      if (text) cells.push({ c, text, lower: text.toLowerCase() });
+    }
+    if (cells.length < 2) continue;
+
+    const nextRowCells = [];
+    for (let c = 0; c < maxCols; c += 1) {
+      const text = getSheetMergedCellText(rows, merges, r + 1, c);
+      if (text) nextRowCells.push(text.toLowerCase());
+    }
+    const rowText = cells.map((x) => x.lower).join(' ');
+    const combinedText = `${rowText} ${nextRowCells.join(' ')}`.trim();
+    if (blobIndicatesRegisterOfDeductionsForDamage(combinedText)) continue;
+    if (
+      sheetBlobIndicatesFormXAPRegisterOfFines(combinedText) &&
+      !sheetBlobIndicatesFormXXIRegisterOfFines(combinedText)
+    ) {
+      continue;
+    }
+
+    let score = 0;
+    if (/register\s+of\s+fines/i.test(combinedText)) score += 60;
+    if (/act\/omission|fine\s+imposed|show\s+cause/i.test(combinedText)) score += 50;
+    if (/rate\s+of\s+wages/i.test(combinedText)) score += 25;
+    if (
+      CLRA_WORKMEN_NAME_HEADER_RE.test(combinedText) ||
+      /name\s+of\s+workmen|name\s+of\s+workman/.test(combinedText)
+    ) {
+      score += 35;
+    }
+    if (/father'?s\/husband'?s|nature\s+of\s+employ/.test(combinedText)) score += 25;
+    if (/particulars\s+of\s+damage|date\s+of\s+damage|amount\s+of\s+deduction/.test(combinedText)) {
+      score -= 45;
+    }
+    if (/s\.?\s*no|serial|sl\.?\s*no/.test(combinedText)) score += 15;
+    score += cells.length * 2;
+
+    if (score < 15) continue;
+
+    let startCol = cells[0].c;
+    for (const cell of cells) {
+      if (/^s\.?\s*no\.?$|^sl\.?\s*no\.?$|serial/i.test(cell.lower)) {
+        startCol = cell.c;
+        break;
+      }
+    }
+
+    const headers = [];
+    for (let c = startCol; c < maxCols; c += 1) {
+      let h = getSheetMergedCellText(rows, merges, r, c);
+      if (!h) h = getSheetMergedCellText(rows, merges, r + 1, c);
+      if (!h && r > 0) h = getSheetMergedCellText(rows, merges, r - 1, c);
+      h = String(h || '').replace(/\s+/g, ' ').trim();
+      if (!h) {
+        if (headers.length > 0) break;
+        continue;
+      }
+      if (/^\d+$/.test(h) && headers.length === 0) continue;
+      headers.push(h);
+    }
+    if (headers.length < 3) continue;
+
+    const rowHasSerialHeader = (rowIdx) => {
+      for (let c = startCol; c < Math.min(startCol + 14, maxCols); c += 1) {
+        const h = String(getSheetMergedCellText(rows, merges, rowIdx, c) || '')
+          .toLowerCase()
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (/^s\.?\s*no\.?$|^sl\.?\s*no\.?$|serial(\s+number)?/.test(h)) return true;
+      }
+      return false;
+    };
+
+    let headerRowIndex = r;
+    if (!rowHasSerialHeader(headerRowIndex) && rowHasSerialHeader(headerRowIndex + 1)) {
+      headerRowIndex = r + 1;
+    }
+
+    const resolvedHeaders = [];
+    for (let c = startCol; c < maxCols; c += 1) {
+      let h = getSheetMergedCellText(rows, merges, headerRowIndex, c);
+      if (!h) h = getSheetMergedCellText(rows, merges, headerRowIndex + 1, c);
+      if (!h && headerRowIndex > 0) h = getSheetMergedCellText(rows, merges, headerRowIndex - 1, c);
+      h = String(h || '').replace(/\s+/g, ' ').trim();
+      if (!h) {
+        if (resolvedHeaders.length > 0) break;
+        continue;
+      }
+      if (/^\d+$/.test(h) && resolvedHeaders.length === 0) continue;
+      resolvedHeaders.push(h);
+    }
+    if (resolvedHeaders.length < 3) continue;
+
+    let dataStart = headerRowIndex + 1;
+    const probeRow = rows[dataStart] || [];
+    let seqHits = 0;
+    for (let i = 0; i < Math.min(resolvedHeaders.length, 12); i += 1) {
+      const t = String(probeRow[startCol + i] ?? '').trim();
+      if (t === String(i + 1)) seqHits += 1;
+    }
+    if (seqHits >= 3) {
+      dataStart = headerRowIndex + 2;
+    } else {
+      const probeText = probeRow
+        .slice(startCol, startCol + 6)
+        .map((x) => String(x || '').toLowerCase())
+        .join(' ');
+      if (
+        /name\s+of|father|husband|nature\s+of|act\/omission|fine|show\s+cause|rate\s+of/.test(probeText) &&
+        !/^\d+$/.test(String(probeRow[startCol] ?? '').trim())
+      ) {
+        dataStart = headerRowIndex + 2;
+      }
+    }
+
+    const candidate = {
+      sheetName,
+      headerRowIndex,
+      dataStartIndex: dataStart,
+      tableStartCol: startCol,
+      headers: resolvedHeaders
     };
     if (score > bestScore) {
       bestScore = score;
@@ -867,7 +1150,7 @@ function rowTextLooksLikeFormXXTableHeader(normalize, excelCellValueToString, wo
   if (!joined.trim()) return false;
   return (
     excelCellLooksLikeSerialHeader(parts[0]) ||
-    /name\s+of\s+workmen|name\s+of\s+workman|particulars\s+of\s+damage|father|husband|nature\s+of\s+employ|date\s+of\s+damage|amount\s+of\s+deduction|date\s+of\s+recovery/.test(
+    /name\s+of\s+workmen|name\s+of\s+workman|particulars\s+of\s+damage|father|husband|nature\s+of\s+employ|date\s+of\s+damage|amount\s+of\s+deduction|date\s+of\s+recovery|act\/omission|fine\s+imposed|show\s+cause|rate\s+of\s+wages|wage\s*period.*wages?\s+payable/.test(
       joined
     )
   );
@@ -889,6 +1172,9 @@ function locateFormXXColumnHeaderRow(worksheet, hintHeaderRow, startCol, normali
     const text = joined.join(' ');
     if (/name\s+of\s+workmen|name\s+of\s+workman/.test(text)) score += 40;
     if (/particulars\s+of\s+damage|date\s+of\s+damage|amount\s+of\s+deduction/.test(text)) score += 30;
+    if (/act\/omission|fine\s+imposed|show\s+cause|rate\s+of\s+wages|wage\s*period.*wages?\s+payable/.test(text)) {
+      score += 30;
+    }
     if (/father|husband|nature\s+of\s+employ/.test(text)) score += 20;
     if (/date\s+of\s+recovery/.test(text) && !/name\s+of\s+workmen|name\s+of\s+workman/.test(text)) score -= 25;
     if (score > bestScore) {
@@ -1017,27 +1303,13 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
     dataStartRow += 1;
   }
 
-  const headerFields = parsedFormHeader?.fields;
   const headerValues = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
-  if (Array.isArray(headerFields) && headerFields.length > 0) {
-    for (let r = 1; r < columnHeaderRow; r += 1) {
-      for (let c = 1; c <= 12; c += 1) {
-        const cellStr = String(excelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
-        if (!cellStr) continue;
-        for (const field of headerFields) {
-          const label = String(field?.label || '').trim();
-          if (!label) continue;
-          if (cellStr === label || cellStr.startsWith(label) || label.startsWith(cellStr)) {
-            const value = headerValues[field.key] ?? field.value ?? '';
-            if (value != null && String(value).trim() !== '') {
-              worksheet.getCell(r, c + 1).value = String(value);
-            }
-            break;
-          }
-        }
-      }
-    }
-  }
+  writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
+    headerFormData: headerValues,
+    parsedFormHeader,
+    headerRowEnd: columnHeaderRow,
+    maxScanCols: 12
+  });
 
   const rowLooksMeaningful = (row) => {
     if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
@@ -1058,6 +1330,35 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
       const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
       return hdrs.map((h) => row?.[h] ?? '');
     });
+
+  const tableColMax = startCol + hdrCount - 1;
+  const countTemplateBodyRows = () => {
+    let rows = 0;
+    for (let r = dataStartRow; r < dataStartRow + 120; r += 1) {
+      let hasBorder = false;
+      for (let c = startCol; c <= tableColMax; c += 1) {
+        const b = worksheet.getCell(r, c)?.border;
+        if (b && (b.top?.style || b.bottom?.style || b.left?.style || b.right?.style)) {
+          hasBorder = true;
+          break;
+        }
+      }
+      if (hasBorder) rows += 1;
+      else if (rows > 0) break;
+    }
+    return Math.max(rows, 1);
+  };
+
+  if (sourceRows.length > 0) {
+    ensureExcelJSDataRowsWithBorders(worksheet, {
+      dataStartRow,
+      dataRowCount: sourceRows.length,
+      colFrom: startCol,
+      colTo: tableColMax,
+      templateRow: dataStartRow,
+      templateBodyRows: countTemplateBodyRows()
+    });
+  }
 
   // Write only data cells — never clear header rows (preserves merged column headers).
   for (let i = 0; i < sourceRows.length; i += 1) {
@@ -1088,3 +1389,6 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
   });
   return { blob, fileName };
 }
+
+/** Form XXI CLRA fines register — same Excel write path as Form XX deductions. */
+export const buildFormXXIAPWorkbookWithTemplateStyles = buildFormXXAPWorkbookWithTemplateStyles;

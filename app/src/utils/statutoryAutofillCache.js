@@ -78,6 +78,62 @@ export function prefetchSiteDetails() {
   return fetchSiteDetails().catch(() => null);
 }
 
+const COMPANY_DETAILS_CACHE_KEY = 'statutoryCompanyDetails_v1';
+let companyDetailsMemory = null;
+let companyDetailsInflight = null;
+
+export function readCompanyDetailsCache() {
+  if (Array.isArray(companyDetailsMemory) && companyDetailsMemory.length > 0) return companyDetailsMemory;
+  try {
+    const cached = localStorage.getItem(COMPANY_DETAILS_CACHE_KEY);
+    if (!cached) return null;
+    const parsed = JSON.parse(cached);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      companyDetailsMemory = parsed;
+      return parsed;
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return null;
+}
+
+export function writeCompanyDetailsCache(details) {
+  if (!Array.isArray(details)) return;
+  companyDetailsMemory = details;
+  try {
+    localStorage.setItem(COMPANY_DETAILS_CACHE_KEY, JSON.stringify(details));
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+export function fetchCompanyDetails(options = {}) {
+  const { force = false } = options;
+  const cached = readCompanyDetailsCache();
+  if (!force && cached) return Promise.resolve(cached);
+  if (!force && companyDetailsInflight) return companyDetailsInflight;
+
+  companyDetailsInflight = fetch('/server/company_function/company', { cache: 'no-store' })
+    .then(async (resp) => {
+      if (!resp.ok) return cached || [];
+      const json = await resp.json().catch(() => ({}));
+      const details = Array.isArray(json?.data?.companyDetails) ? json.data.companyDetails : [];
+      if (details.length > 0) writeCompanyDetailsCache(details);
+      return details.length > 0 ? details : cached || [];
+    })
+    .catch(() => cached || [])
+    .finally(() => {
+      companyDetailsInflight = null;
+    });
+
+  return companyDetailsInflight;
+}
+
+export function prefetchCompanyDetails() {
+  return fetchCompanyDetails().catch(() => null);
+}
+
 function readPeopleCacheRaw() {
   if (peopleMemory && Date.now() - peopleMemoryTs < PEOPLE_CACHE_TTL_MS) {
     return peopleMemory;
@@ -464,6 +520,16 @@ export function prefetchPeopleData() {
   return fetchPeopleData().catch(() => null);
 }
 
+/** Fast first-page people load for instant statutory form open (<1s target). */
+export function prefetchPeopleDataFast() {
+  const cached = readPeopleCacheRaw();
+  if (cached?.success && flattenZohoPeopleEmployees(cached).length > 0) {
+    return Promise.resolve(cached);
+  }
+  if (peopleInflight) return peopleInflight;
+  return fetchPeopleDataForAutofillDisplay().catch(() => null);
+}
+
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function formatLocalYYYYMMDD(d) {
@@ -744,11 +810,19 @@ export function prefetchPayrollBulkRows() {
   return fetchPayrollBulkRows().catch(() => null);
 }
 
-export function prefetchStatutoryAutofillData() {
+export function prefetchStatutoryAutofillData(options = {}) {
   prefetchSiteDetails();
-  prefetchPeopleData();
-  prefetchAttendanceData();
-  prefetchLeaveData();
+  prefetchCompanyDetails();
+  prefetchPeopleDataFast();
+  void startPeopleDataBackgroundRefresh();
+  const attOpts =
+    options.sdate && options.edate ? { sdate: options.sdate, edate: options.edate } : {};
+  prefetchAttendanceData(attOpts);
+  const leaveOpts =
+    options.fromDate && options.toDate
+      ? { fromDate: options.fromDate, toDate: options.toDate, unit: options.unit || 'Day' }
+      : {};
+  prefetchLeaveData(leaveOpts);
   // Do not prefetch all_salaries here — it blocks payroll_function for minutes on large orgs.
 }
 

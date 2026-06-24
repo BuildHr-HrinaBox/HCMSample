@@ -1,4 +1,6 @@
 import ExcelJS from 'exceljs';
+import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
+import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
 
 export function isForm26NilMonthLineValue(v) {
   return /^nil\s+for\s+the\s+month/i.test(String(v ?? '').trim());
@@ -149,25 +151,12 @@ export async function buildForm26AWorkbookWithTemplateStyles({
   const calendarHeader = findForm26ACalendarYearHeader(hdrs);
 
   const data = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
-  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
-  for (let r = 1; r < headerRow; r += 1) {
-    for (let c = 1; c <= 20; c += 1) {
-      const cellText = String(excelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
-      if (!cellText) continue;
-      for (let fi = 0; fi < fields.length; fi += 1) {
-        const field = fields[fi];
-        const label = String(field?.label || '').trim();
-        if (!label) continue;
-        if (cellText === label || cellText.startsWith(label) || label.startsWith(cellText)) {
-          const value = data[field.key] ?? field.value ?? '';
-          if (value != null && String(value).trim() !== '') {
-            worksheet.getCell(r, c + 1).value = String(value);
-          }
-          break;
-        }
-      }
-    }
-  }
+  writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
+    headerFormData: data,
+    parsedFormHeader,
+    headerRowEnd: headerRow,
+    maxScanCols: 20
+  });
 
   const sourceRows = (
     Array.isArray(mappedData) && mappedData.length > 0
@@ -263,6 +252,19 @@ export async function buildForm26AWorkbookWithTemplateStyles({
         cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'top' };
       }
     }
+  }
+
+  if (sourceRows.length > 0) {
+    const tableColMin = orderedCols.length > 0 ? Math.min(...orderedCols) : startCol;
+    const tableColMax = orderedCols.length > 0 ? Math.max(...orderedCols) : startCol + orderedCols.length - 1;
+    ensureExcelJSDataRowsWithBorders(worksheet, {
+      dataStartRow,
+      dataRowCount: sourceRows.length,
+      colFrom: tableColMin,
+      colTo: tableColMax,
+      templateRow: dataStartRow,
+      templateBodyRows: 1
+    });
   }
 
   const out = await workbook.xlsx.writeBuffer();

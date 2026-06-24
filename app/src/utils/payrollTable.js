@@ -1,5 +1,11 @@
-import { fetchJsonWithTimeout } from './statutoryAutofillCache';
+import {
+  cacheForm15PayrollTableRows,
+  fetchJsonWithTimeout,
+  getCachedForm15PayrollTableRows,
+} from './statutoryAutofillCache';
 import { flattenPayrollEarningColumns } from './payrollEarnings';
+
+const payrollTableInflight = new Map();
 
 function normalizePayrollTableRecords(records) {
   if (!Array.isArray(records)) return [];
@@ -28,32 +34,58 @@ function parsePayrollTableResponse(json) {
   };
 }
 
-async function fetchPayrollTablePayloadOnce(payrollMonth, { timeoutMs = 45000 } = {}) {
+async function fetchPayrollTablePayloadOnce(payrollMonth, { timeoutMs = 45000, force = false } = {}) {
   const month = String(payrollMonth || '').trim();
   if (!/^\d{4}-\d{2}$/.test(month)) return { records: [], meta: null, payrollMonth: '' };
+
+  if (!force) {
+    const cached = getCachedForm15PayrollTableRows([month]);
+    if (cached?.rows?.length > 0) {
+      return {
+        records: cached.rows,
+        meta: cached.meta || null,
+        payrollMonth: cached.payrollMonth || month,
+        source: 'cache',
+      };
+    }
+    if (payrollTableInflight.has(month)) {
+      return payrollTableInflight.get(month);
+    }
+  }
 
   const attempts = [
     `/server/payroll_function/payroll?${new URLSearchParams({ payroll_month: month })}`,
     `/server/payroll_function?${new URLSearchParams({ payroll_table: '1', payroll_month: month })}`,
   ];
 
-  for (let i = 0; i < attempts.length; i += 1) {
-    try {
-      const { resp, json } = await fetchJsonWithTimeout(attempts[i], { cache: 'no-store' }, timeoutMs);
-      if (!resp.ok || !json?.success) continue;
-      const parsed = parsePayrollTableResponse(json);
-      if (parsed.records.length > 0) {
-        return {
-          records: parsed.records,
-          meta: parsed.meta,
-          payrollMonth: parsed.payrollMonth || month,
-        };
+  const task = (async () => {
+    for (let i = 0; i < attempts.length; i += 1) {
+      try {
+        const { resp, json } = await fetchJsonWithTimeout(attempts[i], { cache: 'no-store' }, timeoutMs);
+        if (!resp.ok || !json?.success) continue;
+        const parsed = parsePayrollTableResponse(json);
+        if (parsed.records.length > 0) {
+          const payrollMonth = parsed.payrollMonth || month;
+          cacheForm15PayrollTableRows(payrollMonth, parsed.records, parsed.meta);
+          return {
+            records: parsed.records,
+            meta: parsed.meta,
+            payrollMonth,
+          };
+        }
+      } catch (_) {
+        /* try next URL */
       }
-    } catch (_) {
-      /* try next URL */
     }
+    return { records: [], meta: null, payrollMonth: month };
+  })();
+
+  if (!force) payrollTableInflight.set(month, task);
+  try {
+    return await task;
+  } finally {
+    payrollTableInflight.delete(month);
   }
-  return { records: [], meta: null, payrollMonth: month };
 }
 
 async function fetchLatestPayrollTablePayload({ timeoutMs = 45000 } = {}) {
@@ -115,4 +147,19 @@ export async function fetchPayrollTableRowsForMonths(monthCandidates, options = 
   }
 
   return { payrollMonth: list[0] || '', rows: [], meta: null, source: 'none' };
+}
+
+/** Warm payroll table cache for statutory autofill (non-blocking). */
+export function prefetchPayrollTableRowsForMonths(monthCandidates, options = {}) {
+  const list = Array.isArray(monthCandidates) ? monthCandidates : [];
+  const uncached = list.filter((month) => {
+    const m = String(month || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(m)) return false;
+    const hit = getCachedForm15PayrollTableRows([m]);
+    return !(hit?.rows?.length > 0);
+  });
+  if (uncached.length === 0) return Promise.resolve(null);
+  return fetchPayrollTableRowsForMonths(uncached, { ...options, timeoutMs: options.timeoutMs || 30000 }).catch(
+    () => null
+  );
 }

@@ -1,0 +1,216 @@
+/**
+ * ExcelJS helpers — copy "all borders" table styling from a template data row
+ * onto every populated data row in statutory form exports.
+ */
+
+export function excelJSCellHasBorder(cell) {
+  const b = cell?.border;
+  if (!b) return false;
+  return !!(b.top?.style || b.bottom?.style || b.left?.style || b.right?.style);
+}
+
+export function excelJSCellHasFullBoxBorder(cell) {
+  const b = cell?.border;
+  if (!b) return false;
+  return !!(b.top?.style && b.bottom?.style && b.left?.style && b.right?.style);
+}
+
+function cloneBorderSide(side) {
+  if (!side || !side.style) return undefined;
+  const out = { style: side.style };
+  if (side.color) out.color = { ...side.color };
+  return out;
+}
+
+export function cloneExcelJSBorder(border) {
+  if (!border) return null;
+  const out = {};
+  const top = cloneBorderSide(border.top);
+  const left = cloneBorderSide(border.left);
+  const bottom = cloneBorderSide(border.bottom);
+  const right = cloneBorderSide(border.right);
+  if (top) out.top = top;
+  if (left) out.left = left;
+  if (bottom) out.bottom = bottom;
+  if (right) out.right = right;
+  if (border.diagonal?.style) out.diagonal = cloneBorderSide(border.diagonal);
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function cloneExcelJSStyle(style) {
+  if (!style) return null;
+  try {
+    return JSON.parse(JSON.stringify(style));
+  } catch (_) {
+    return { ...style };
+  }
+}
+
+const DEFAULT_ALL_BORDERS = {
+  top: { style: 'thin', color: { argb: 'FF000000' } },
+  left: { style: 'thin', color: { argb: 'FF000000' } },
+  bottom: { style: 'thin', color: { argb: 'FF000000' } },
+  right: { style: 'thin', color: { argb: 'FF000000' } }
+};
+
+/** First row in [rowFrom, rowTo] that has at least one bordered cell. */
+export function findExcelJSTemplateBorderRow(worksheet, rowFrom, rowTo, colFrom, colTo) {
+  const r0 = Math.max(1, rowFrom);
+  const r1 = Math.max(r0, rowTo);
+  const c0 = Math.max(1, colFrom);
+  const c1 = Math.max(c0, colTo);
+  for (let r = r0; r <= r1; r += 1) {
+    for (let c = c0; c <= c1; c += 1) {
+      if (excelJSCellHasBorder(worksheet.getCell(r, c))) return r;
+    }
+  }
+  return r0;
+}
+
+/** Infer table column span from bordered cells or header row text. */
+export function inferExcelJSTableColumnRange(worksheet, { headerRow, dataStartRow, colScanMax = 80 } = {}) {
+  const cMax = Math.max(1, colScanMax);
+  let colFrom = cMax;
+  let colTo = 0;
+  const r0 = Math.max(1, dataStartRow || headerRow || 1);
+  const r1 = r0 + 8;
+  for (let r = r0; r <= r1; r += 1) {
+    for (let c = 1; c <= cMax; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      if (excelJSCellHasBorder(cell)) {
+        colFrom = Math.min(colFrom, c);
+        colTo = Math.max(colTo, c);
+      }
+    }
+  }
+  if (colTo > 0) return { colFrom: colFrom || 1, colTo };
+  const hr = Math.max(1, headerRow || r0);
+  for (let c = 1; c <= cMax; c += 1) {
+    const v = cellText(worksheet.getCell(hr, c)?.value);
+    if (v) {
+      colFrom = Math.min(colFrom, c);
+      colTo = Math.max(colTo, c);
+    }
+  }
+  return { colFrom: colFrom <= cMax ? colFrom : 1, colTo: colTo || cMax };
+}
+
+function cellText(val) {
+  if (val == null) return '';
+  if (typeof val === 'object' && val.richText) return val.richText.map((t) => t.text || '').join('');
+  if (typeof val === 'object' && val.text != null) return String(val.text);
+  return String(val).trim();
+}
+
+/**
+ * Apply thin box borders to every cell in the data table range.
+ * Always forces a full box on each cell so rows beyond the template body stay bordered.
+ */
+export function applyExcelJSDataRowBorders(
+  worksheet,
+  { dataStartRow, dataRowCount, colFrom, colTo, templateRow = null, forceFullBox = true } = {}
+) {
+  if (!worksheet || !dataRowCount || dataRowCount < 1) return;
+
+  const r0 = Math.max(1, dataStartRow);
+  const r1 = r0 + dataRowCount - 1;
+  let c0 = Math.max(1, colFrom);
+  let c1 = Math.max(c0, colTo);
+  if (!colFrom || !colTo) {
+    const inferred = inferExcelJSTableColumnRange(worksheet, {
+      headerRow: templateRow != null ? templateRow : r0 - 1,
+      dataStartRow: r0
+    });
+    c0 = inferred.colFrom;
+    c1 = inferred.colTo;
+  }
+
+  const styleRow =
+    templateRow != null && templateRow >= 1
+      ? templateRow
+      : findExcelJSTemplateBorderRow(worksheet, r0, r1, c0, c1);
+
+  let templateHasStyle = false;
+  for (let c = c0; c <= c1; c += 1) {
+    const src = worksheet.getCell(styleRow, c);
+    if (src?.style && (excelJSCellHasBorder(src) || src.style.font || src.style.alignment)) {
+      templateHasStyle = true;
+      break;
+    }
+  }
+
+  const defaultBorder = cloneExcelJSBorder(DEFAULT_ALL_BORDERS);
+
+  for (let r = r0; r <= r1; r += 1) {
+    for (let c = c0; c <= c1; c += 1) {
+      const dst = worksheet.getCell(r, c);
+      const src = worksheet.getCell(styleRow, c);
+
+      if (templateHasStyle && src?.style) {
+        try {
+          const cloned = cloneExcelJSStyle(src.style);
+          if (cloned) {
+            dst.style = cloned;
+          }
+        } catch (_) {
+          /* keep existing style */
+        }
+      }
+
+      if (forceFullBox) {
+        dst.border = defaultBorder;
+      } else if (!excelJSCellHasFullBoxBorder(dst)) {
+        if (excelJSCellHasBorder(src)) {
+          const border = cloneExcelJSBorder(src.border);
+          if (border) dst.border = border;
+          else dst.border = defaultBorder;
+        } else {
+          dst.border = defaultBorder;
+        }
+      }
+    }
+  }
+}
+
+/** Duplicate template data rows when needed, then apply borders to the full data block. */
+export function ensureExcelJSDataRowsWithBorders(
+  worksheet,
+  { dataStartRow, dataRowCount, colFrom, colTo, templateRow = null, templateBodyRows = 1 } = {}
+) {
+  if (!worksheet || !dataRowCount || dataRowCount < 1) return;
+
+  const startRow = Math.max(1, dataStartRow);
+  const bodyRows = Math.max(1, templateBodyRows);
+  const extraRows = Math.max(0, dataRowCount - bodyRows);
+
+  if (extraRows > 0) {
+    const anchorRow = startRow + bodyRows - 1;
+    let duplicated = false;
+    if (typeof worksheet.duplicateRow === 'function') {
+      try {
+        worksheet.duplicateRow(anchorRow, extraRows, true);
+        duplicated = true;
+      } catch (_) {
+        duplicated = false;
+      }
+    }
+    if (!duplicated && typeof worksheet.insertRow === 'function') {
+      for (let k = 0; k < extraRows; k += 1) {
+        try {
+          worksheet.insertRow(startRow + bodyRows, []);
+        } catch (_) {
+          break;
+        }
+      }
+    }
+  }
+
+  applyExcelJSDataRowBorders(worksheet, {
+    dataStartRow: startRow,
+    dataRowCount,
+    colFrom,
+    colTo,
+    templateRow: templateRow != null ? templateRow : startRow,
+    forceFullBox: true
+  });
+}

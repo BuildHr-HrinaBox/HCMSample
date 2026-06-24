@@ -1,4 +1,6 @@
 import ExcelJS from 'exceljs';
+import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
+import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
 
 /** Form XXVI (Tamil Nadu CLRA) — Muster with daily hours 1–31 under column band (10). */
 
@@ -383,27 +385,13 @@ export async function buildFormXXVITamilNaduWorkbookWithTemplateStyles({
     return out;
   };
 
-  const headerFields = parsedFormHeader?.fields;
   const headerValues = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
-  if (Array.isArray(headerFields) && headerFields.length > 0) {
-    for (let r = 1; r < headerRow; r += 1) {
-      for (let c = 1; c <= 80; c += 1) {
-        const cellStr = String(getCell(r, c) || '').trim();
-        if (!cellStr) continue;
-        for (const field of headerFields) {
-          const label = String(field?.label || '').trim();
-          if (!label) continue;
-          if (cellStr === label || cellStr.startsWith(label) || label.startsWith(cellStr)) {
-            const value = headerValues[field.key] ?? field.value ?? '';
-            if (value != null && String(value).trim() !== '') {
-              worksheet.getCell(r, c + 1).value = String(value);
-            }
-            break;
-          }
-        }
-      }
-    }
-  }
+  writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
+    headerFormData: headerValues,
+    parsedFormHeader,
+    headerRowEnd: headerRow,
+    maxScanCols: 80
+  });
 
   const sourcePrimary =
     Array.isArray(mappedData) && mappedData.length > 0
@@ -449,6 +437,19 @@ export async function buildFormXXVITamilNaduWorkbookWithTemplateStyles({
         cell.value = String(value);
       }
     }
+  }
+
+  if (sourceRows.length > 0) {
+    const tableColMin = orderedCols.length > 0 ? Math.min(...orderedCols) : startCol;
+    const tableColMax = orderedCols.length > 0 ? Math.max(...orderedCols) : startCol + orderedCols.length - 1;
+    ensureExcelJSDataRowsWithBorders(worksheet, {
+      dataStartRow,
+      dataRowCount: sourceRows.length,
+      colFrom: tableColMin,
+      colTo: tableColMax,
+      templateRow: dataStartRow,
+      templateBodyRows: 1
+    });
   }
 
   const targetSheetName = worksheet.name;

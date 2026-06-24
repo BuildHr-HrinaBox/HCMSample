@@ -1,4 +1,6 @@
 import ExcelJS from 'exceljs';
+import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
+import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
 
 /** AP Form XXII — Register of Employment (Shops & Establishment; P / A / WO day grid). */
 
@@ -39,6 +41,28 @@ export function listFormXXIIAPDayHeaders(headers) {
   return out.sort((a, b) => a.day - b.day);
 }
 
+/** When parsed headers omit day columns, synthesize 1…31 for AP Register of Employment grids. */
+export function ensureFormXXIIAPDayColumnHeaders(headers) {
+  const base = Array.isArray(headers) ? headers.filter(Boolean) : [];
+  const dayByNum = new Map();
+  base.forEach((header) => {
+    const day = resolveFormXXIIAPDayNumberFromHeader(header);
+    if (day >= 1 && day <= 31 && !dayByNum.has(day)) dayByNum.set(day, header);
+  });
+  if (dayByNum.size >= 3) return base;
+  const prefix = base.filter((h) => !isFormXXIIAPDayHeaderKey(h));
+  const joined = prefix.join(' ').toLowerCase();
+  const looksLikeEmploymentRegister =
+    /register\s+of\s+employment/.test(joined) ||
+    (/time\s+at\s+which\s+employment/.test(joined) && /rest\s+interval/.test(joined)) ||
+    (/\bsex\b/.test(joined) && /\bage\b/.test(joined) && /employee/.test(joined) && /dates|attendance/.test(joined));
+  if (!looksLikeEmploymentRegister && dayByNum.size === 0) return base;
+  for (let day = 1; day <= 31; day += 1) {
+    if (!dayByNum.has(day)) dayByNum.set(day, String(day));
+  }
+  return [...prefix, ...[...dayByNum.entries()].sort((a, b) => a[0] - b[0]).map(([, header]) => header)];
+}
+
 /** Merge template/modal headers with day keys present on export rows (SampleData may omit day columns). */
 export function resolveFormXXIIExportHeaders(headersToUse, mappedData) {
   const base = Array.isArray(headersToUse) ? headersToUse.filter(Boolean) : [];
@@ -59,16 +83,117 @@ export function resolveFormXXIIExportHeaders(headersToUse, mappedData) {
   const dayHeaders = [...dayByNum.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, header]) => header);
-  if (dayHeaders.length === 0) return base;
-  if (base.some((h) => isFormXXIIAPDayHeaderKey(h))) {
+  let merged = base;
+  if (dayHeaders.length === 0) {
+    merged = base;
+  } else if (base.some((h) => isFormXXIIAPDayHeaderKey(h))) {
     const missing = dayHeaders.filter((h) => !base.includes(h));
-    return missing.length > 0 ? [...base, ...missing] : base;
+    merged = missing.length > 0 ? [...base, ...missing] : base;
+  } else {
+    merged = [...prefix, ...dayHeaders];
   }
-  return [...prefix, ...dayHeaders];
+  return ensureFormXXIIAPDayColumnHeaders(merged);
+}
+
+export function isFormXXIIAPAttendanceCode(value) {
+  return /^(P|A|WO|H|L|WOP|OD|SL|CL|EL)$/i.test(String(value ?? '').trim());
+}
+
+function rowHasFormXXIIAPEmployeeName(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  for (const [key, val] of Object.entries(row)) {
+    if (String(key).startsWith('__')) continue;
+    if (/name\s+of\s+the\s+(employee|workman|workmen)/i.test(String(key || ''))) {
+      return String(val ?? '').trim().length > 0;
+    }
+  }
+  return false;
+}
+
+function defaultFormXXIIAPAttendanceCode(day, year, monthIndex) {
+  const dayDate = new Date(year, monthIndex, day);
+  if (dayDate.getMonth() !== monthIndex) return '';
+  const dow = dayDate.getDay();
+  if (dow === 0 || dow === 6) return 'WO';
+  return 'A';
+}
+
+export function rowHasAnyFormXXIIAPAttendance(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  for (const [key, val] of Object.entries(row)) {
+    if (String(key).startsWith('__')) continue;
+    if (resolveFormXXIIAPDayNumberFromHeader(key) >= 1 && isFormXXIIAPAttendanceCode(val)) return true;
+  }
+  return false;
+}
+
+/** Ensure every row has P/A/WO on day keys before Excel export (Zoho + calendar fallback). */
+export function normalizeFormXXIIAPRowsForExport(rows, headers, options = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const today = options.today instanceof Date ? options.today : new Date();
+  const year = Number.isFinite(options.year) ? options.year : today.getFullYear();
+  const monthIndex = Number.isFinite(options.monthIndex) ? options.monthIndex : today.getMonth();
+  const fillFallback = options.fillFallback !== false;
+  const onlyFillEmpty = options.onlyFillEmpty !== false;
+  const isCurrentMonth = year === today.getFullYear() && monthIndex === today.getMonth();
+
+  const resolvedHdrs = ensureFormXXIIAPDayColumnHeaders(
+    resolveFormXXIIExportHeaders(headers, list)
+  );
+  const dayHdrs = listFormXXIIAPDayHeaders(resolvedHdrs);
+  if (dayHdrs.length === 0) return list.map((row) => (row && typeof row === 'object' ? { ...row } : row));
+
+  return list.map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+    const out = { ...row };
+    const hasName = rowHasFormXXIIAPEmployeeName(out);
+    const hasAnyAttendance = rowHasAnyFormXXIIAPAttendance(out);
+
+    dayHdrs.forEach(({ header, day }) => {
+      const existingOnHeader = readFormXXIIAPCellValue(out, header);
+      const existingOnDay = readFormXXIIAPCellValue(out, String(day));
+      if (
+        onlyFillEmpty &&
+        (isFormXXIIAPAttendanceCode(existingOnHeader) || isFormXXIIAPAttendanceCode(existingOnDay))
+      ) {
+        if (isFormXXIIAPAttendanceCode(existingOnHeader)) {
+          out[String(day)] = String(existingOnHeader).trim();
+        } else if (isFormXXIIAPAttendanceCode(existingOnDay)) {
+          out[header] = String(existingOnDay).trim();
+        }
+        return;
+      }
+
+      let val = isFormXXIIAPAttendanceCode(existingOnHeader)
+        ? String(existingOnHeader).trim()
+        : isFormXXIIAPAttendanceCode(existingOnDay)
+          ? String(existingOnDay).trim()
+          : '';
+      if (!isFormXXIIAPAttendanceCode(val)) {
+        for (const [key, cellVal] of Object.entries(out)) {
+          if (String(key).startsWith('__')) continue;
+          if (resolveFormXXIIAPDayNumberFromHeader(key) !== day) continue;
+          if (isFormXXIIAPAttendanceCode(cellVal)) {
+            val = String(cellVal).trim();
+            break;
+          }
+        }
+      }
+      if (!isFormXXIIAPAttendanceCode(val) && fillFallback && hasName && !hasAnyAttendance) {
+        if (!(isCurrentMonth && day > today.getDate())) {
+          val = defaultFormXXIIAPAttendanceCode(day, year, monthIndex);
+        }
+      }
+      if (!isFormXXIIAPAttendanceCode(val)) return;
+      out[header] = val;
+      out[String(day)] = val;
+    });
+    return out;
+  });
 }
 
 export function readFormXXIIAPCellValue(row, header) {
-  if (!row || typeof row !== 'object') return '';
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
   if (Object.prototype.hasOwnProperty.call(row, header)) {
     const direct = row[header];
     if (direct != null && String(direct).trim() !== '') return direct;
@@ -107,22 +232,47 @@ export function readFormXXIIAPCellValue(row, header) {
 }
 
 export function detectFormXXIIAPDayColumnMap(getCell, headerRow, maxScanRows, maxScanCols) {
-  const dayCols = new Map();
-  const scanTo = Math.max(maxScanCols, 45);
-  const scanEndRow = Math.min(headerRow + 3, maxScanRows);
-  for (let r = headerRow; r <= scanEndRow; r += 1) {
+  const { dayColumnMap } = detectFormXXIIAPDayColumnMapWithMarker(
+    getCell,
+    headerRow,
+    maxScanRows,
+    maxScanCols
+  );
+  return dayColumnMap;
+}
+
+/** Scan header band (incl. row above label row) for 1–31 day markers — Form XVI two-row thead. */
+export function detectFormXXIIAPDayColumnMapWithMarker(getCell, headerRow, maxScanRows, maxScanCols) {
+  const scanTo = Math.max(maxScanCols, 60);
+  const anchor = headerRow > 0 ? headerRow : 1;
+  const scanStartRow = Math.max(1, anchor - 4);
+  const scanEndRow = Math.min(anchor + 8, maxScanRows);
+  let bestMap = new Map();
+  let bestHits = 0;
+  let markerRow = -1;
+
+  for (let r = scanStartRow; r <= scanEndRow; r += 1) {
+    const rowMap = new Map();
+    let hits = 0;
     for (let c = 1; c <= scanTo; c += 1) {
       const raw = String(getCell(r, c) || '')
         .trim()
         .replace(/[()]/g, '');
       if (!/^\d{1,2}$/.test(raw)) continue;
       const n = Number(raw);
-      if (n >= 1 && n <= 31 && !dayCols.has(n)) {
-        dayCols.set(n, c);
+      if (n >= 1 && n <= 31 && !rowMap.has(n)) {
+        rowMap.set(n, c);
+        hits += 1;
       }
     }
+    if (hits > bestHits) {
+      bestHits = hits;
+      bestMap = rowMap;
+      markerRow = r;
+    }
   }
-  return dayCols;
+
+  return { dayColumnMap: bestMap, markerRow, markerHits: bestHits };
 }
 
 function excelCellValueToString(val) {
@@ -181,7 +331,11 @@ function resolveWorksheet(workbook, sheetNameHint) {
   return (
     workbook.worksheets.find((ws) =>
       /xxii|form[\s._-]*22(?!\d)|register\s+of\s+employment/i.test(String(ws?.name || ''))
-    ) || workbook.worksheets[0]
+    ) ||
+    workbook.worksheets.find((ws) =>
+      /form[\s._-]*xvi(?![a-z])|form[\s._-]*16(?!\d)|muster\s+roll/i.test(String(ws?.name || ''))
+    ) ||
+    workbook.worksheets[0]
   );
 }
 
@@ -199,7 +353,9 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
   parsedFormHeader,
   headerFormData,
   formFileName,
-  sheetNameHint
+  sheetNameHint,
+  attendanceYear,
+  attendanceMonthIndex
 }) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateArrayBuffer);
@@ -219,8 +375,9 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
         if (!t) continue;
         if (
           /s\.?\s*no|serial|sr\.?\s*no/.test(t) ||
-          /name\s+of\s+the\s+employee/.test(t) ||
-          /time\s+at\s+which|rest\s+interval|dates|attendance/.test(t)
+          /name\s+of\s+the\s+(employee|workman|workmen)/.test(t) ||
+          /name\s+of\s+workman|name\s+of\s+workmen/.test(t) ||
+          /time\s+at\s+which|rest\s+interval|dates|attendance|muster\s+roll/.test(t)
         ) {
           hits += 1;
         }
@@ -238,9 +395,28 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
   let nameCol = -1;
   for (let c = 1; c <= maxScanCols; c += 1) {
     const t = normalize(getCell(headerRow, c));
-    if (/name\s+of\s+the\s+employee/.test(t)) {
+    if (
+      /name\s+of\s+the\s+(employee|workman|workmen)/.test(t) ||
+      /name\s+of\s+workman|name\s+of\s+workmen/.test(t)
+    ) {
       nameCol = c;
       break;
+    }
+  }
+  if (nameCol < 1) {
+    for (let r = Math.max(1, headerRow - 5); r <= Math.min(headerRow + 2, maxScanRows); r += 1) {
+      for (let c = 1; c <= maxScanCols; c += 1) {
+        const t = normalize(getCell(r, c));
+        if (
+          /name\s+of\s+the\s+(employee|workman|workmen)/.test(t) ||
+          /name\s+of\s+workman|name\s+of\s+workmen/.test(t)
+        ) {
+          nameCol = c;
+          headerRow = r;
+          break;
+        }
+      }
+      if (nameCol > 0) break;
     }
   }
 
@@ -264,11 +440,30 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
   }
 
   let markerRow = -1;
-  const dayColumnMap = detectFormXXIIAPDayColumnMap(getCell, headerRow, maxScanRows, maxScanCols);
-  const markerCols = [...dayColumnMap.entries()]
+  const { dayColumnMap, markerRow: detectedMarkerRow, markerHits } =
+    detectFormXXIIAPDayColumnMapWithMarker(getCell, headerRow, maxScanRows, maxScanCols);
+  let markerCols = [...dayColumnMap.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, col]) => col);
-  if (markerCols.length >= 2) {
+  if (markerCols.length < 2) {
+    for (let r = headerRow; r <= Math.min(headerRow + 8, maxScanRows); r += 1) {
+      const cols = [];
+      for (let c = startCol; c <= maxScanCols; c += 1) {
+        const t = String(getCell(r, c) || '').trim();
+        if (/^\d{1,2}$/.test(t) && Number(t) >= 1 && Number(t) <= 31) cols.push(c);
+      }
+      if (cols.length > markerCols.length) {
+        markerCols = cols;
+        markerRow = r;
+      }
+    }
+  }
+  if (markerHits >= 2 && detectedMarkerRow > 0) {
+    markerRow = detectedMarkerRow;
+    markerCols = [...dayColumnMap.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, col]) => col);
+  } else if (markerCols.length >= 2) {
     for (let r = headerRow; r <= Math.min(headerRow + 3, maxScanRows); r += 1) {
       let hits = 0;
       for (let d = 1; d <= 31; d += 1) {
@@ -294,30 +489,61 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
     dataStartRow = Math.max(dataStartRow, markerRow + 1);
   }
 
-  const sourcePrimary =
+  const rawPrimary =
     Array.isArray(mappedData) && mappedData.length > 0
       ? mappedData
       : Array.isArray(mappedRowMatrix)
         ? mappedRowMatrix
         : [];
+  const exportYear = Number.isFinite(attendanceYear) ? attendanceYear : new Date().getFullYear();
+  const exportMonthIndex = Number.isFinite(attendanceMonthIndex)
+    ? attendanceMonthIndex
+    : new Date().getMonth();
+  const sourcePrimary = normalizeFormXXIIAPRowsForExport(rawPrimary, headersToUse, {
+    year: exportYear,
+    monthIndex: exportMonthIndex,
+    fillFallback: !rawPrimary.some((row) => rowHasAnyFormXXIIAPAttendance(row)),
+    onlyFillEmpty: true
+  });
   const sourceHeaders = resolveFormXXIIExportHeaders(headersToUse, sourcePrimary);
   const dayStartIdx = sourceHeaders.findIndex((h) => isFormXXIIAPDayHeaderKey(h));
   const prefixCount = dayStartIdx >= 0 ? dayStartIdx : sourceHeaders.length;
+  const firstDayCol = markerCols.length > 0 ? markerCols[0] : -1;
 
   const buildOrderedCols = () => {
     if (markerCols.length >= 2 && dayStartIdx >= 0) {
       const cols = [];
-      for (let j = 0; j < prefixCount; j += 1) cols.push(startCol + j);
+      const templatePrefixSlots =
+        firstDayCol > startCol ? firstDayCol - startCol : prefixCount;
+      for (let j = 0; j < prefixCount; j += 1) {
+        cols.push(startCol + Math.min(j, Math.max(templatePrefixSlots, 1) - 1));
+      }
       const dayCount = Math.max(sourceHeaders.length - dayStartIdx, markerCols.length);
       for (let d = 0; d < dayCount; d += 1) {
-        cols.push(markerCols[d] ?? startCol + prefixCount + d);
+        cols.push(markerCols[d] ?? firstDayCol + d);
       }
       return cols;
     }
     if (markerCols.length >= 2) {
       const cols = [];
-      for (let j = 0; j < prefixCount; j += 1) cols.push(startCol + j);
+      const templatePrefixSlots =
+        firstDayCol > startCol ? firstDayCol - startCol : prefixCount;
+      for (let j = 0; j < prefixCount; j += 1) {
+        cols.push(startCol + Math.min(j, Math.max(templatePrefixSlots, 1) - 1));
+      }
       for (let d = 0; d < markerCols.length; d += 1) cols.push(markerCols[d]);
+      return cols;
+    }
+    if (firstDayCol > startCol && dayStartIdx >= 0) {
+      const cols = [];
+      const templatePrefixSlots = firstDayCol - startCol;
+      for (let j = 0; j < prefixCount; j += 1) {
+        cols.push(startCol + Math.min(j, templatePrefixSlots - 1));
+      }
+      const dayCount = sourceHeaders.length - dayStartIdx;
+      for (let d = 0; d < dayCount; d += 1) {
+        cols.push(firstDayCol + d);
+      }
       return cols;
     }
     return Array.from({ length: Math.max(12, sourceHeaders.length) }, (_, i) => startCol + i);
@@ -326,7 +552,18 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
   const hdrs = sourceHeaders;
 
   const getDayValueByNumber = (rowObj, dayNum) => {
-    if (!rowObj || typeof rowObj !== 'object' || !dayNum) return '';
+    if (!rowObj || !dayNum) return '';
+    if (Array.isArray(rowObj)) {
+      if (dayStartIdx >= 0) {
+        const idx = dayStartIdx + (dayNum - 1);
+        const picked = pickExportCell(rowObj[idx]);
+        if (picked !== '') return picked;
+      }
+      return '';
+    }
+    if (typeof rowObj !== 'object') return '';
+    const directByDayHeader = pickExportCell(readFormXXIIAPCellValue(rowObj, String(dayNum)));
+    if (directByDayHeader !== '') return directByDayHeader;
     for (const [key, val] of Object.entries(rowObj)) {
       if (String(key).startsWith('__')) continue;
       if (resolveFormXXIIAPDayNumberFromHeader(key) !== dayNum) continue;
@@ -338,21 +575,23 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
 
   const getRowValueForHeader = (rowObj, header, headerIndex) => {
     if (!rowObj || typeof rowObj !== 'object' || Array.isArray(rowObj)) return '';
-    const picked = pickExportCell(readFormXXIIAPCellValue(rowObj, header));
-    if (picked !== '') return picked;
     const dayNum = resolveFormXXIIAPDayNumberFromHeader(header);
     if (dayNum >= 1 && dayNum <= 31) {
       const byDay = getDayValueByNumber(rowObj, dayNum);
       if (byDay !== '') return byDay;
     }
+    const picked = pickExportCell(readFormXXIIAPCellValue(rowObj, header));
+    if (picked !== '') {
+      if (dayNum === 0 && isFormXXIIAPAttendanceCode(picked)) return '';
+      return picked;
+    }
     if (headerIndex != null && hdrs[headerIndex]) {
       const alt = pickExportCell(readFormXXIIAPCellValue(rowObj, hdrs[headerIndex]));
-      if (alt !== '') return alt;
-    }
-    if (headerIndex != null && headerIndex >= 0) {
-      const vals = Object.values(rowObj);
-      const indexed = pickExportCell(vals[headerIndex]);
-      if (indexed !== '') return indexed;
+      if (alt !== '') {
+        const altDay = resolveFormXXIIAPDayNumberFromHeader(hdrs[headerIndex]);
+        if (altDay === 0 && isFormXXIIAPAttendanceCode(alt)) return '';
+        return alt;
+      }
     }
     return '';
   };
@@ -361,7 +600,7 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
     if (Array.isArray(row)) {
       const out = [...row];
       const colCount = Math.max(orderedCols.length, hdrs.length, out.length);
-      return Array.from({ length: colCount }, (_, idx) => out[idx] ?? '');
+      return Array.from({ length: colCount }, (_, idx) => pickExportCell(out[idx] ?? ''));
     }
     const colCount = Math.max(orderedCols.length, hdrs.length);
     return Array.from({ length: colCount }, (_, idx) => {
@@ -384,35 +623,26 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
     }
   }
 
-  const headerFields = parsedFormHeader?.fields;
   const headerValues = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
-  if (Array.isArray(headerFields) && headerFields.length > 0) {
-    for (let r = 1; r < headerRow; r += 1) {
-      for (let c = 1; c <= 80; c += 1) {
-        const cellStr = String(getCell(r, c) || '').trim();
-        if (!cellStr) continue;
-        for (const field of headerFields) {
-          const label = String(field?.label || '').trim();
-          if (!label) continue;
-          if (cellStr === label || cellStr.startsWith(label) || label.startsWith(cellStr)) {
-            const value = headerValues[field.key] ?? field.value ?? '';
-            if (value != null && String(value).trim() !== '') {
-              worksheet.getCell(r, c + 1).value = String(value);
-            }
-            break;
-          }
-        }
-      }
-    }
-  }
+  writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
+    headerFormData: headerValues,
+    parsedFormHeader,
+    headerRowEnd: headerRow,
+    maxScanRows,
+    maxScanCols
+  });
 
   const filteredRows = sourcePrimary.filter((row) => rowLooksMeaningful(row));
   const sourceRows = filteredRows.map((row, idx) => toOrderedValues(row, idx));
 
   const writeDayAttendanceGrid = (rowObj, excelRowIdx) => {
-    if (!rowObj || dayColumnMap.size === 0) return;
+    if (!rowObj) return;
     for (let day = 1; day <= 31; day += 1) {
-      const col = dayColumnMap.get(day);
+      let col = dayColumnMap.get(day);
+      if (!col && dayStartIdx >= 0) {
+        const idx = prefixCount + (day - 1);
+        if (idx < orderedCols.length) col = orderedCols[idx];
+      }
       if (!col) continue;
       const val = getDayValueByNumber(rowObj, day);
       if (val == null || val === '') continue;
@@ -450,14 +680,16 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
       const value = row[j];
       if (value == null || value === '') continue;
       const hdr = hdrs[j] || '';
-      if (isFormXXIIAPDayHeaderKey(hdr)) continue;
       const cell = worksheet.getCell(excelRowIdx, orderedCols[j]);
+      const strVal = String(value).trim();
+      const isAttendanceCode = /^(P|A|WO|H|L|WOP|OD|SL|CL|EL)$/i.test(strVal);
       if (
         typeof value === 'number' ||
         (typeof value === 'string' &&
-          /^-?\d+(\.\d+)?$/.test(String(value).trim()) &&
+          /^-?\d+(\.\d+)?$/.test(strVal) &&
           j > 0 &&
-          !/^(P|A|WO|H|L)$/i.test(String(value).trim()))
+          !isAttendanceCode &&
+          !isFormXXIIAPDayHeaderKey(hdr))
       ) {
         if (/^age$/i.test(String(hdr).trim()) || resolveFormXXIIAPDayNumberFromHeader(hdr) === 0) {
           cell.value = Number(value);
@@ -471,6 +703,19 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
     writeDayAttendanceGrid(rowObj, excelRowIdx);
   }
 
+  if (sourceRows.length > 0) {
+    const tableColMin = orderedCols.length > 0 ? Math.min(...orderedCols) : startCol;
+    const tableColMax = orderedCols.length > 0 ? Math.max(...orderedCols) : startCol + 11;
+    ensureExcelJSDataRowsWithBorders(worksheet, {
+      dataStartRow,
+      dataRowCount: sourceRows.length,
+      colFrom: tableColMin,
+      colTo: tableColMax,
+      templateRow: dataStartRow,
+      templateBodyRows: 1
+    });
+  }
+
   const out = await workbook.xlsx.writeBuffer();
   const fileName =
     formFileName ||
@@ -479,3 +724,6 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
   const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   return { blob, fileName };
 }
+
+/** Form XVI AP Muster Roll — same day-grid export as Form XXII (P / A / WO). */
+export const buildFormXVIAPMusterWorkbookWithTemplateStyles = buildFormXXIIAPWorkbookWithTemplateStyles;

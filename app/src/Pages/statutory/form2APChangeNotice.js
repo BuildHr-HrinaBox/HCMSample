@@ -249,6 +249,25 @@ function resolveForm2APWorksheet(workbook) {
   return workbook.Sheets[sheetName] ? { sheetName, worksheet: workbook.Sheets[sheetName] } : null;
 }
 
+export function resolveForm2APWorkbookSheetName(workbook) {
+  const resolved = resolveForm2APWorksheet(workbook);
+  return resolved?.sheetName || workbook?.SheetNames?.[0] || '';
+}
+
+export function repickForm2APWorkbookSheetIfNeeded(workbook, hints, currentSheetName) {
+  if (!isForm2APChangeNoticeContext(
+    hints?.formHeader,
+    hints?.item,
+    hints?.fileName || hints?.formFileName || '',
+    hints?.sheetText || ''
+  )) {
+    return null;
+  }
+  const target = resolveForm2APWorkbookSheetName(workbook);
+  if (target && target !== currentSheetName) return target;
+  return null;
+}
+
 function buildWorksheetHelpers(worksheet) {
   const jsonData = worksheet['!ref']
     ? XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' })
@@ -309,6 +328,12 @@ export function resolveForm2APHeaderFieldLayout(parsed, workbook, hints = {}) {
     return {
       formHeader: {
         ...(formHeader || {}),
+        title:
+          formHeader?.title ||
+          'Form No. 2-A – Notice of Change of Manager / Occupier',
+        subtitle:
+          formHeader?.subtitle ||
+          'Prescribed under Rule 12 (Andhra Pradesh Factories Rules)',
         form2APColumnBoxLayout: true,
         fields
       },
@@ -323,6 +348,12 @@ export function resolveForm2APHeaderFieldLayout(parsed, workbook, hints = {}) {
   return {
     formHeader: {
       ...(formHeader || {}),
+      title:
+        formHeader?.title ||
+        'Form No. 2-A – Notice of Change of Manager / Occupier',
+      subtitle:
+        formHeader?.subtitle ||
+        'Prescribed under Rule 12 (Andhra Pradesh Factories Rules)',
       form2APColumnBoxLayout: true,
       fields: buildForm2APFallbackFields()
     },

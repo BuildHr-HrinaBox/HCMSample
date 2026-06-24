@@ -200,6 +200,15 @@ export function sheetBlobIndicatesFormXAPRegisterOfFines(blob) {
   );
 }
 
+function matchesForm27CHintFromParts(parts) {
+  const text = String(parts || '').toLowerCase();
+  return (
+    /\bform[\s._-]*no\.?\s*27[\s._-]*c\b/.test(text) ||
+    /\bform[\s._-]*27[\s._-]*c\b/.test(text) ||
+    (/\b27[\s._-]*c\b/.test(text) && (/health\s+register/.test(text) || /\bform\b/.test(text)))
+  );
+}
+
 export function isFormXXIAPRegisterOfFinesContext(
   formHeader,
   rowItem,
@@ -224,6 +233,17 @@ export function isFormXXIAPRegisterOfFinesContext(
     .filter((x) => x != null && String(x).trim() !== '')
     .join(' ')
     .toLowerCase();
+
+  if (matchesForm27CHintFromParts(parts)) return false;
+  if (
+    Array.isArray(tableHeaders) &&
+    tableHeaders.length > 0 &&
+    /name\s+of\s+worker/.test(tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n')) &&
+    /department/.test(tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n')) &&
+    /health|medical\s+examin|fit\s*\/\s*unfit/.test(tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n'))
+  ) {
+    return false;
+  }
 
   if (isFormXIIIRegisterOfWorkmenContext(formHeader, rowItem, fileName, sheetText, tableHeaders)) {
     return false;

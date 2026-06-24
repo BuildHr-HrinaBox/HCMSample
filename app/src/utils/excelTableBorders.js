@@ -172,7 +172,12 @@ export function applyExcelJSDataRowBorders(
   }
 }
 
-/** Duplicate template data rows when needed, then apply borders to the full data block. */
+/**
+ * Apply all-borders styling to every populated data row.
+ * Does not insert/duplicate worksheet rows — callers write values directly to
+ * dataStartRow … dataStartRow + dataRowCount - 1. (duplicateRow after write
+ * would clone the first employee row across the sheet.)
+ */
 export function ensureExcelJSDataRowsWithBorders(
   worksheet,
   { dataStartRow, dataRowCount, colFrom, colTo, templateRow = null, templateBodyRows = 1 } = {}
@@ -180,30 +185,7 @@ export function ensureExcelJSDataRowsWithBorders(
   if (!worksheet || !dataRowCount || dataRowCount < 1) return;
 
   const startRow = Math.max(1, dataStartRow);
-  const bodyRows = Math.max(1, templateBodyRows);
-  const extraRows = Math.max(0, dataRowCount - bodyRows);
-
-  if (extraRows > 0) {
-    const anchorRow = startRow + bodyRows - 1;
-    let duplicated = false;
-    if (typeof worksheet.duplicateRow === 'function') {
-      try {
-        worksheet.duplicateRow(anchorRow, extraRows, true);
-        duplicated = true;
-      } catch (_) {
-        duplicated = false;
-      }
-    }
-    if (!duplicated && typeof worksheet.insertRow === 'function') {
-      for (let k = 0; k < extraRows; k += 1) {
-        try {
-          worksheet.insertRow(startRow + bodyRows, []);
-        } catch (_) {
-          break;
-        }
-      }
-    }
-  }
+  void templateBodyRows;
 
   applyExcelJSDataRowBorders(worksheet, {
     dataStartRow: startRow,

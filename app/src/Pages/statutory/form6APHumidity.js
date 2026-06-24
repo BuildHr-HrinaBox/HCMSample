@@ -1,5 +1,7 @@
 /** Form No. 6 (AP) — Humidity register [Rule 22]. */
 
+import { labelMatchScore } from './form18APAccidentNotice';
+
 export function form6APHeaderNorm(txt) {
   return String(txt || '')
     .replace(/\r?\n/g, ' ')
@@ -32,6 +34,96 @@ export function isForm6APHumidityRegisterContext(formHeader, rowItem, fileName, 
     if (/humidity|hygrometer/.test(parts)) return true;
   }
   return false;
+}
+
+export function isForm6APHeaderFieldLayoutFormHeader(formHeader) {
+  return !!formHeader?.form6APHumidityLayout;
+}
+
+export function resolveForm6APWorkbookSheetName(workbook) {
+  if (!workbook?.SheetNames?.length) return '';
+  return (
+    workbook.SheetNames.find((n) => /^6$/i.test(String(n || '').trim())) ||
+    workbook.SheetNames.find((n) => /humidity|hygrometer/i.test(String(n || ''))) ||
+    workbook.SheetNames[0]
+  );
+}
+
+export function repickForm6APWorkbookSheetIfNeeded(workbook, hints, currentSheetName) {
+  if (
+    !isForm6APHumidityRegisterContext(
+      hints?.formHeader,
+      hints?.item,
+      hints?.fileName || hints?.formFileName || '',
+      hints?.sheetText || ''
+    )
+  ) {
+    return null;
+  }
+  const target = resolveForm6APWorkbookSheetName(workbook);
+  if (target && target !== currentSheetName) return target;
+  return null;
+}
+
+/**
+ * Parse humidity table + header fields from the Excel two-row band (time periods + Dry/Wet bulb).
+ */
+export function applyForm6APHumiditySheetParse({
+  jsonData,
+  effectiveSheetCols,
+  getMergedAwareCellText,
+  merges,
+  formHeaderInfo,
+  priorTableData = []
+}) {
+  const form6Rebuild = rebuildForm6APHumidityHeadersFromSheet({
+    jsonData,
+    effectiveSheetCols,
+    getMergedAwareCellText,
+    merges: merges || []
+  });
+  if (!form6Rebuild) return null;
+
+  const headersToUse = form6Rebuild.expandedHeaders;
+  const newTableData = [];
+  for (let i = form6Rebuild.startIndex; i < jsonData.length; i += 1) {
+    const rowData = {};
+    headersToUse.forEach((h, colIdx) => {
+      rowData[h] = sanitizeForm6APHumidityCellValue(
+        String(getMergedAwareCellText(i, colIdx) || '').trim()
+      );
+    });
+    const hasData = Object.values(rowData).some((v) => String(v ?? '').trim() !== '');
+    if (hasData && !isForm6APHumidityFooterRow(rowData, headersToUse)) {
+      newTableData.push(rowData);
+    }
+  }
+
+  let tableData =
+    priorTableData.length > 0
+      ? remapForm6APRowsToHeaders(priorTableData, headersToUse, headersToUse)
+      : newTableData;
+  tableData = ensureForm6APTemplateRows(tableData, headersToUse);
+
+  const formHeader = {
+    ...(formHeaderInfo || {}),
+    title: 'FORM NO. 6',
+    subtitle: '[Prescribed under Rule 22]',
+    reference: formHeaderInfo?.reference || 'Humidity register',
+    form6APHumidityLayout: true,
+    fields: ensureForm6APHeaderFields(form6Rebuild.headerFields || [])
+  };
+
+  return {
+    headers: form6Rebuild.headers,
+    expandedHeaders: headersToUse,
+    subColumnsData: form6Rebuild.subColumnsData,
+    headerRowIndex: form6Rebuild.headerRowIndex,
+    startIndex: form6Rebuild.startIndex,
+    tableStartCol: form6Rebuild.startCol ?? 0,
+    tableData,
+    formHeader
+  };
 }
 
 export function headersIndicateForm6APHumidityTable(tableHeaders) {
@@ -532,5 +624,87 @@ export function remapForm6APRowsToHeaders(rows, oldHeaders, newHeaders) {
       next[newH] = matchKey != null ? row[matchKey] : '';
     });
     return next;
+  });
+}
+
+export function writeForm6APHeaderFieldsToExcelJsWorksheet(worksheet, headerFormData, parsedFormHeader, helpers = {}) {
+  if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
+  const excelCellValueToString =
+    helpers.excelCellValueToString ||
+    ((val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    });
+  const normalize = (txt) => form6APHeaderNorm(txt);
+  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  const maxScanRows = Math.max(12, worksheet.rowCount + 4);
+  const maxScanCols = 9;
+
+  const writeAt = (row, col, value) => {
+    const text = String(value ?? '').trim();
+    if (!text || row == null || col == null) return;
+    worksheet.getCell(row, col).value = text;
+  };
+
+  fields.forEach((field) => {
+    const val = headerFormData[field.key];
+    if (val == null || String(val).trim() === '') return;
+    const labelNorm = normalize(String(field.label || '').replace(/:+$/, ''));
+    if (!labelNorm) return;
+    let bestRow = -1;
+    let bestCol = -1;
+    let bestScore = 0;
+    for (let r = 1; r <= maxScanRows; r += 1) {
+      for (let c = 1; c <= maxScanCols; c += 1) {
+        const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
+        const score = labelMatchScore(labelNorm, normalize(raw.replace(/:+$/, '')));
+        if (score > bestScore) {
+          bestScore = score;
+          bestRow = r;
+          bestCol = c;
+        }
+      }
+    }
+    if (bestRow > 0 && bestCol > 0 && bestScore >= 45) {
+      for (let nc = bestCol + 1; nc <= Math.min(bestCol + 4, maxScanCols + 2); nc += 1) {
+        const nt = normalize(excelCellValueToString(worksheet.getCell(bestRow, nc)?.value));
+        if (!nt || nt === ':') {
+          writeAt(bestRow, nc, val);
+          return;
+        }
+      }
+      writeAt(bestRow, Math.min(bestCol + 2, maxScanCols + 1), val);
+    }
+  });
+}
+
+export function writeForm6APHumidityTableToExcelJsWorksheet(
+  worksheet,
+  mappedData,
+  headersToUse,
+  dataStartRow1Based,
+  tableStartCol1Based = 1,
+  helpers = {}
+) {
+  if (!worksheet || !Array.isArray(mappedData) || !Array.isArray(headersToUse)) return;
+  const startRow = Math.max(1, dataStartRow1Based || 1);
+  const startCol = Math.max(1, tableStartCol1Based || 1);
+  const sanitize = helpers.sanitizeCellValue || sanitizeForm6APHumidityCellValue;
+
+  mappedData.forEach((row, rowIndex) => {
+    if (!row || typeof row !== 'object') return;
+    headersToUse.forEach((header, colIndex) => {
+      const raw = row[header];
+      const val = sanitize(raw);
+      if (val == null || String(val).trim() === '') return;
+      worksheet.getCell(startRow + rowIndex, startCol + colIndex).value = String(val);
+    });
   });
 }

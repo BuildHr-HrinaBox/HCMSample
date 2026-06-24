@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import { isFormXXVITamilNaduClraContext, matchesFormXXVIHint } from './formXXVITamilNaduMuster';
 import { labelMatchScore } from './form18APAccidentNotice';
+import { isForm2APChangeNoticeContext } from './form2APChangeNotice';
 
 /** AP Shops Form XXVI — Letter of Appointment [Rule 30]. Matches the official Excel narrative layout. */
 
@@ -31,6 +32,7 @@ export function isFormXXVIAPAppointmentLetterContext(formHeader, rowItem, fileNa
     .filter((x) => x != null && String(x).trim() !== '')
     .join(' ')
     .toLowerCase();
+  if (isForm2APChangeNoticeContext(formHeader, rowItem, fileName, sheetText)) return false;
   if (isFormXXVITamilNaduClraContext(formHeader, rowItem, fileName, '', sheetText)) return false;
   if (/daily\s+hours|muster\s+roll/i.test(parts) && !/appointment/i.test(parts)) return false;
   const hasAppointment =

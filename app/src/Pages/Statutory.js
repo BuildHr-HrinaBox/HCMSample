@@ -48,12 +48,17 @@ import {
   writeSiteDetailsCache,
   fetchCompanyDetails,
   readCompanyDetailsCache,
+  isValidExcelArrayBuffer,
+  invalidateFormTemplateCache,
   writeCompanyDetailsCache,
 } from '../utils/statutoryAutofillCache';
 import {
   applySiteCompanyHeaderAutofill,
   buildCompanyNameAndAddress,
   enrichEstablishmentPrincipalEmployerHeadersFromSheet,
+  isEstablishmentAddressHeaderLabel,
+  isEstablishmentNameHeaderLabel,
+  isPrincipalEmployerHeaderLabel,
   resolveCompanyRecordForStatutory,
   writeStatutoryHeaderFieldsToExcelJsWorksheet,
   formatStatutoryHeaderLabelValueExport,
@@ -124,6 +129,38 @@ import {
   importFormVIIAPHeaderFieldsFromWorkbook,
   matchesFormVIIHint,
 } from './statutory/formVIIAPNoticeOfChange';
+import {
+  isForm2APChangeNoticeContext,
+  isForm2APHeaderFieldLayoutFormHeader,
+  resolveForm2APHeaderFieldLayout,
+  resolveForm2APWorkbookSheetName,
+  repickForm2APWorkbookSheetIfNeeded,
+  writeForm2APFieldsToExcelJsWorksheet,
+} from './statutory/form2APChangeNotice';
+import {
+  isForm6APHumidityRegisterContext,
+  isForm6APHeaderFieldLayoutFormHeader,
+  headersIndicateForm6APHumidityTable,
+  applyForm6APHumiditySheetParse,
+  ensureForm6APHeaderFields,
+  ensureForm6APTemplateRows,
+  remapForm6APRowsToHeaders,
+  applyForm6APHumidityTableRowsForAutofill,
+  form6APHumidityRowsHaveManualEntryData,
+  prepareForm6APHumidityRowsForExport,
+  sanitizeForm6APHumidityCellValue,
+  formatForm6HumidityHeaderLabel,
+  isForm6APHumiditySkipAutofillHeader,
+  getForm6APHumidityCellPlaceholder,
+  getForm6APHeaderFieldPlaceholder,
+  repickForm6APWorkbookSheetIfNeeded,
+  resolveForm6APWorkbookSheetName,
+  FORM_6_AP_CERTIFICATION_LINE,
+  FORM_6_AP_SIGNED_LABEL,
+  writeForm6APHeaderFieldsToExcelJsWorksheet,
+  writeForm6APHumidityTableToExcelJsWorksheet,
+  writeForm6APHumidityCertificationFooterExcelJs,
+} from './statutory/form6APHumidity';
 import {
   FORM_X_AP_FINES_NIL_OF_MONTH_TEXT,
   FORM_XX_AP_DEDUCTIONS_NIL_OF_MONTH_TEXT,
@@ -2009,6 +2046,20 @@ function resolveAutofillTableHeaders(currentHeaders, hints = {}) {
     return [...FORM_U_FORMAT2_HEADERS];
   }
   if (
+    isForm27CStatutoryContext(
+      hints.item,
+      hints.fileName || hints.formFileName,
+      { title: hints.formHeaderTitle, subtitle: hints.formHeaderSubtitle },
+      raw,
+      hints.sheetText
+    )
+  ) {
+    if (trimmed.length > 0 && headersIndicateForm27CTable(trimmed)) {
+      return normalizeForm27CTableHeaders(trimmed);
+    }
+    return [...FORM_27C_CANONICAL_HEADERS];
+  }
+  if (
     isForm17BStatutoryContext(
       hints.item,
       hints.fileName || hints.formFileName,
@@ -2235,6 +2286,7 @@ function headersIndicateForm17BTable(tableHeaders) {
 }
 
 function isForm17BStatutoryContext(item, fileName, formHeader, tableHeaders, sheetText = '') {
+  if (isForm27CStatutoryContext(item, fileName, formHeader, tableHeaders, sheetText)) return false;
   const blob = [
     item?.formName,
     item?.FormName,
@@ -2256,6 +2308,118 @@ function isForm17BStatutoryContext(item, fileName, formHeader, tableHeaders, she
 }
 
 const FORM_17B_DISPLAY_TITLE = 'Form 17 B';
+const FORM_27C_DISPLAY_TITLE = 'Form 27-C – Health Register';
+const FORM_11_POW_DISPLAY_TITLE = 'FORM NO. 11';
+const FORM_11_POW_DISPLAY_SUBTITLE =
+  '(Prescribed under Rule 79) Notice of period of work for adult and children';
+
+const STATUTORY_ESTABLISHMENT_HIDDEN_HEADER_KEYS = new Set([
+  'statutory_establishment_name',
+  'statutory_establishment_name_shop',
+  'statutory_establishment_address',
+  'statutory_principal_employer'
+]);
+
+function isStatutoryEstablishmentHiddenHeaderField(field) {
+  const key = String(field?.key || '').trim();
+  if (STATUTORY_ESTABLISHMENT_HIDDEN_HEADER_KEYS.has(key)) return true;
+  const label = String(field?.label || '');
+  return (
+    isEstablishmentNameHeaderLabel(label) ||
+    isEstablishmentAddressHeaderLabel(label) ||
+    isPrincipalEmployerHeaderLabel(label)
+  );
+}
+
+function filterStatutoryEstablishmentHeaderFields(fields) {
+  return (Array.isArray(fields) ? fields : []).filter((field) => !isStatutoryEstablishmentHiddenHeaderField(field));
+}
+
+function stripStatutoryEstablishmentHeaderFormDataKeys(headerData) {
+  if (!headerData || typeof headerData !== 'object') return headerData;
+  const out = { ...headerData };
+  let changed = false;
+  STATUTORY_ESTABLISHMENT_HIDDEN_HEADER_KEYS.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(out, key)) {
+      delete out[key];
+      changed = true;
+    }
+  });
+  return changed ? out : headerData;
+}
+
+function shouldHideStatutoryEstablishmentHeaderInAutofill(
+  formHeader,
+  field,
+  fileName = '',
+  tableHeaders = [],
+  sheetText = ''
+) {
+  const form27 =
+    isForm27CStatutoryContext(null, fileName, formHeader, tableHeaders, sheetText) ||
+    matchesForm27CHint(`${fileName} ${formHeader?.title || ''}`);
+  const form11 = isForm11PeriodOfWorkContext(formHeader, null, fileName, tableHeaders, sheetText);
+  const form6 =
+    isForm6APHumidityRegisterContext(formHeader, null, fileName, sheetText) ||
+    headersIndicateForm6APHumidityTable(tableHeaders);
+  if (!form27 && !form11 && !form6) return false;
+  return isStatutoryEstablishmentHiddenHeaderField(field);
+}
+
+function enrichForm6APDisplayHeader(formHeader, fileName = '', item = null, tableHeaders = [], sheetText = '') {
+  if (
+    !isForm6APHumidityRegisterContext(formHeader, item, fileName, sheetText) &&
+    !headersIndicateForm6APHumidityTable(tableHeaders)
+  ) {
+    return formHeader;
+  }
+  const base = formHeader && typeof formHeader === 'object' ? { ...formHeader } : {};
+  base.title = 'FORM NO. 6';
+  base.subtitle = '[Prescribed under Rule 22]';
+  if (!/humidity/i.test(String(base.reference || ''))) {
+    base.reference = 'Humidity register';
+  }
+  base.form6APHumidityLayout = true;
+  base.fields = ensureForm6APHeaderFields(
+    filterStatutoryEstablishmentHeaderFields(base.fields || [])
+  );
+  return base;
+}
+
+function enrichForm11POWDisplayHeader(formHeader, fileName = '', item = null, tableHeaders = [], sheetText = '') {
+  if (!isForm11PeriodOfWorkContext(formHeader, item, fileName, tableHeaders, sheetText)) {
+    return formHeader;
+  }
+  const base = formHeader && typeof formHeader === 'object' ? { ...formHeader } : {};
+  if (!/^form\s*no\.?\s*11\b/i.test(String(base.title || '').trim())) {
+    base.title = FORM_11_POW_DISPLAY_TITLE;
+  }
+  if (!/notice\s+of\s+period\s+of\s+work|rule\s*79/i.test(String(base.subtitle || ''))) {
+    base.subtitle = FORM_11_POW_DISPLAY_SUBTITLE;
+  }
+  if (Array.isArray(base.fields)) {
+    base.fields = filterStatutoryEstablishmentHeaderFields(base.fields);
+  }
+  return base;
+}
+
+function enrichForm27CDisplayHeader(formHeader, fileName = '', item = null, tableHeaders = [], sheetText = '') {
+  if (
+    !isForm27CStatutoryContext(item, fileName, formHeader, tableHeaders, sheetText) &&
+    !matchesForm27CHint(`${fileName} ${formHeader?.title || ''}`)
+  ) {
+    return formHeader;
+  }
+  const base = formHeader && typeof formHeader === 'object' ? { ...formHeader } : {};
+  base.title = FORM_27C_DISPLAY_TITLE;
+  if (!/health\s+register/i.test(String(base.subtitle || ''))) {
+    base.subtitle = 'Health Register';
+  }
+  if (Array.isArray(base.fields)) {
+    base.fields = filterStatutoryEstablishmentHeaderFields(base.fields);
+  }
+  return base;
+}
 
 function enrichForm17BDisplayHeader(formHeader, fileName = '', item = null, tableHeaders = [], sheetText = '') {
   if (
@@ -2277,6 +2441,165 @@ function isForm17BSkipAutofillHeader(h) {
   if (/nature/.test(s) && /symptom/.test(s)) return true;
   if (/medical\s*prac/.test(s) || (/signature/.test(s) && /medical/.test(s))) return true;
   return false;
+}
+
+/** Form No. 27-C (AP) — Health Register; must not collide with Form XXVII (27) quarterly returns. */
+function matchesForm27CHint(blob) {
+  const parts = String(blob || '').toLowerCase();
+  return (
+    /\bform[\s._-]*no\.?\s*27[\s._-]*c\b/.test(parts) ||
+    /\bform[\s._-]*27[\s._-]*c\b/.test(parts) ||
+    (/\b27[\s._-]*c\b/.test(parts) && (/health\s+register/.test(parts) || /\bform\b/.test(parts)))
+  );
+}
+
+/** Form No. 27-C (AP) — Health Register (Schedule XXI / Rule 95). */
+const FORM_27C_CANONICAL_HEADERS = [
+  'Serial Number',
+  'Department / Works',
+  'Name of Worker',
+  'Sex',
+  'Age (last birthday)',
+  'Date of employment on present work',
+  'Date of leaving or transfer to other work with reasons for discharge or transfer',
+  'Nature of Job / Occupation',
+  'Raw materials, products or by products likely to be exposed to',
+  'Date',
+  'Result Fit / Unfit',
+  'Signs and symptoms observed during examination',
+  'Nature of tests and results thereof',
+  'If declared unfit for work, state period of suspension with reasons in detail',
+  'Whether certificate of unfitness issued to the worker',
+  'Date on which certified fit to resume duty',
+  'Signature of the Certifying surgeon with date'
+];
+
+function form27CHeaderNorm(txt) {
+  return form17BHeaderNorm(txt);
+}
+
+function form27CHeaderAliasBucket(norm) {
+  if (!norm) return '';
+  if (/^sex$|\bgender\b/.test(norm)) return 'sex';
+  const b17 = form17BHeaderAliasBucket(norm);
+  if (b17 !== norm) return b17;
+  if (/department/.test(norm) && /works?/.test(norm)) return 'department';
+  if (/medical\s+examin/.test(norm)) return 'manual';
+  if (/fit\s*\/\s*unfit|result\s+fit/.test(norm)) return 'manual';
+  if (/certifying\s+surgeon/.test(norm)) return 'manual';
+  if (/nature/.test(norm) && /test/.test(norm)) return 'manual';
+  if (/unfit/.test(norm) && (/certificate|suspension/.test(norm))) return 'manual';
+  if (/certified\s+fit/.test(norm) && /resume/.test(norm)) return 'manual';
+  return norm;
+}
+
+function normalizeForm27CTableHeaders(parsedHeaders) {
+  const src = Array.isArray(parsedHeaders) ? parsedHeaders.filter((h) => String(h || '').trim()) : [];
+  if (src.length >= 8 && headersIndicateForm27CTable(src)) {
+    return src.map((h) => String(h || '').trim());
+  }
+  const out = [...FORM_27C_CANONICAL_HEADERS];
+  src.forEach((h, i) => {
+    if (i < out.length && String(h || '').trim()) out[i] = String(h).trim();
+  });
+  return out;
+}
+
+function remapForm27CRowsToHeaders(rows, sourceHeaders, targetHeaders) {
+  const src = Array.isArray(sourceHeaders) ? sourceHeaders : [];
+  const tgt = normalizeForm27CTableHeaders(targetHeaders);
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row, rowIndex) => {
+    if (!row || typeof row !== 'object') return {};
+    const out = {};
+    tgt.forEach((targetHeader, colIdx) => {
+      let val = '';
+      if (Object.prototype.hasOwnProperty.call(row, targetHeader)) {
+        val = row[targetHeader];
+      } else if (src[colIdx] && Object.prototype.hasOwnProperty.call(row, src[colIdx])) {
+        val = row[src[colIdx]];
+      } else {
+        const bucket = form27CHeaderAliasBucket(form27CHeaderNorm(targetHeader));
+        for (const [k, v] of Object.entries(row)) {
+          if (form27CHeaderAliasBucket(form27CHeaderNorm(k)) === bucket) {
+            val = v;
+            break;
+          }
+        }
+      }
+      if (
+        (val == null || val === '') &&
+        form27CHeaderAliasBucket(form27CHeaderNorm(targetHeader)) === 'sno'
+      ) {
+        val = rowIndex + 1;
+      }
+      out[targetHeader] = val == null ? '' : val;
+    });
+    return out;
+  });
+}
+
+function headersIndicateForm27CTable(tableHeaders) {
+  if (!Array.isArray(tableHeaders) || tableHeaders.length < 6) return false;
+  const joined = tableHeaders.map((h) => String(h || '').toLowerCase()).join(' ');
+  return (
+    /department/.test(joined) &&
+    /name/.test(joined) &&
+    /worker/.test(joined) &&
+    /\bsex\b/.test(joined) &&
+    /age/.test(joined) &&
+    (/health\s+register/.test(joined) ||
+      /medical\s+examin/.test(joined) ||
+      /certifying\s+surgeon/.test(joined) ||
+      /fit\s*\/\s*unfit/.test(joined) ||
+      (/raw\s*mat|by\s*product/.test(joined) && /symptom/.test(joined)))
+  );
+}
+
+function isForm27CStatutoryContext(item, fileName, formHeader, tableHeaders, sheetText = '') {
+  const blob = [
+    item?.formName,
+    item?.FormName,
+    item?.description,
+    item?.Description,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    sheetText,
+    Array.isArray(tableHeaders) ? tableHeaders.join(' ') : ''
+  ]
+    .map((s) => String(s || ''))
+    .join(' ')
+    .toLowerCase();
+  if (matchesForm27CHint(blob)) return true;
+  return headersIndicateForm27CTable(tableHeaders);
+}
+
+function isForm27CWorkerNameHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  return /name/.test(s) && /worker/.test(s);
+}
+
+function isForm27CSkipAutofillHeader(h) {
+  const s = normalizeLooseHeaderText(h);
+  if (!s) return false;
+  if (isForm17BSkipAutofillHeader(h)) return true;
+  if (/raw\s*mat|by\s*product/.test(s) && (/exposed|likely/.test(s) || /product/.test(s))) return true;
+  if (/medical\s+examin/.test(s)) return true;
+  if (/fit\s*\/\s*unfit|result\s+fit/.test(s)) return true;
+  if (/certifying\s+surgeon/.test(s)) return true;
+  if (/unfit/.test(s) && (/certificate|suspension|period/.test(s))) return true;
+  if (/certified\s+fit/.test(s) && /resume/.test(s)) return true;
+  if (/nature/.test(s) && /test/.test(s)) return true;
+  if (/sign/.test(s) && /symptom/.test(s)) return true;
+  return false;
+}
+
+function getForm27CEmployeeFullName(emp) {
+  const fn = String(emp?.FirstName || emp?.['FirstName'] || emp?.firstName || emp?.['First Name'] || '').trim();
+  const ln = String(emp?.LastName || emp?.['LastName'] || emp?.lastName || emp?.['Last Name'] || '').trim();
+  if (fn && ln) return `${fn} ${ln}`;
+  return fn || ln || '';
 }
 
 /** Form No. 14 (AP) — Register of Child Workers (Rule 86). */
@@ -2476,6 +2799,9 @@ function isForm11PeriodOfWorkContext(formHeader, rowItem, fileName, tableHeaders
   if (/notice\s+of\s+period\s+of\s+work|period\s+of\s+work\s+for\s+adult/.test(parts)) return true;
   if (/\bform[\s._-]*11\b/.test(parts) && /period\s+of\s+work|periods?\s+of\s+work/.test(parts)) return true;
   if (/\bform[\s._-]*11\b/.test(parts) && /rule\s*79/.test(parts)) return true;
+  if (/\bform[\s._-]*11\b/.test(parts) && /andhra/.test(parts) && !/accident\s+book|esic|employees.? state insurance/.test(parts)) {
+    return true;
+  }
   return headersIndicateForm11PeriodOfWork(tableHeaders);
 }
 
@@ -2839,11 +3165,12 @@ const rebuildForm11PeriodOfWorkHeaders = ({
     headersLookLikeBrokenForm11PeriodOfWork(probeHeaders);
   if (!shouldRebuild) return null;
 
-  const layout = resolveForm11APWorksheetColumnMap(
-    (r, c) => getMergedAwareCellText(r, c),
-    effectiveSheetCols
-  );
-  if (!layout) return null;
+  const layout =
+    resolveForm11APWorksheetColumnMap(
+      (r, c) => getMergedAwareCellText(r, c),
+      effectiveSheetCols
+    ) || buildForm11APFallbackColumnMap(startIndex);
+  if (!layout?.colMap?.length) return null;
 
   const { bandStartRow, relayRow, dataStartRow, colMap } = layout;
   const newExpanded = colMap.map((x) => x.header);
@@ -3560,8 +3887,33 @@ const formTableRowHasMeaningfulData = (row) => {
 };
 
 /** Ignore template sample rows that only contain serial numbers (1, 2, 3…) without employee data. */
+const isStatutoryTemplateColumnIndexRow = (row, headers = []) => {
+  if (!row || typeof row !== 'object') return false;
+  const hdrList =
+    Array.isArray(headers) && headers.length > 0 ? headers.filter(Boolean) : Object.keys(row);
+  if (hdrList.length < 4) return false;
+  let sequentialHits = 0;
+  let filled = 0;
+  let allFilledAreNumeric = true;
+  for (let i = 0; i < hdrList.length; i += 1) {
+    const val = String(row[hdrList[i]] ?? '').trim();
+    if (!val) continue;
+    filled += 1;
+    if (!/^\d{1,2}$/.test(val)) allFilledAreNumeric = false;
+    if (/^\d{1,2}$/.test(val) && Number(val) === i + 1) sequentialHits += 1;
+  }
+  if (filled < 4 || !allFilledAreNumeric) return false;
+  return sequentialHits >= Math.min(4, filled);
+};
+
+const filterStatutoryTemplateColumnIndexRows = (rows, headers = []) => {
+  if (!Array.isArray(rows)) return [];
+  return rows.filter((row) => !isStatutoryTemplateColumnIndexRow(row, headers));
+};
+
 const draftTableRowHasSubstantiveData = (row, headers = []) => {
   if (!formTableRowHasMeaningfulData(row)) return false;
+  if (isStatutoryTemplateColumnIndexRow(row, headers)) return false;
   if (isStatutoryTableFooterOrSignatoryRow(row, headers)) return false;
   if (formTablePageHasEmployeeAutofillData(row, headers)) return true;
   let substantiveCells = 0;
@@ -3601,6 +3953,7 @@ const filterStatutoryDraftTableRows = (rows, headers = [], { trustSavedSnapshot 
 /** Paginated autofill: S.No-only template rows must not skip fetching employee + attendance data. */
 const formTablePageHasEmployeeAutofillData = (row, headers = []) => {
   if (!row || typeof row !== 'object') return false;
+  if (isStatutoryTemplateColumnIndexRow(row, headers)) return false;
   for (let i = 0; i < headers.length; i += 1) {
     const header = headers[i];
     const k = String(header || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -3610,7 +3963,8 @@ const formTablePageHasEmployeeAutofillData = (row, headers = []) => {
       k.includes('worker') && (k.includes('identity') || k.includes('identify') || k.includes('id'));
     const isEmpId = /^emp\s*id$/.test(k) || (k.includes('emp') && k.includes('id'));
     const isEmployeeName = k.includes('employee') && k.includes('name');
-    if ((isWorkerName || isWorkerId || isEmpId || isEmployeeName) && String(row[header] || '').trim()) {
+    const cellVal = String(row[header] || '').trim();
+    if ((isWorkerName || isWorkerId || isEmpId || isEmployeeName) && cellVal && /[a-zA-Z]{2,}/.test(cellVal)) {
       return true;
     }
   }
@@ -6622,6 +6976,30 @@ function resolveDraftTemplateLayout(templateWb, opts = {}) {
     return { templateWb, headersToUse: [], headerRowIndex: -1, dataStartIndex: 0, ok: true };
   }
 
+  const form2APHeaderOnlySave =
+    isForm2APHeaderFieldLayoutFormHeader(opts.parsedFormHeader) ||
+    isForm2APChangeNoticeContext(
+      opts.parsedFormHeader,
+      opts.item,
+      opts.fileName || firstSheetName,
+      sheetText
+    );
+  if (form2APHeaderOnlySave) {
+    return { templateWb, headersToUse: [], headerRowIndex: -1, dataStartIndex: 0, ok: true };
+  }
+
+  const form6APHeaderOnlySave =
+    isForm6APHeaderFieldLayoutFormHeader(opts.parsedFormHeader) ||
+    isForm6APHumidityRegisterContext(
+      opts.parsedFormHeader,
+      opts.item,
+      opts.fileName || firstSheetName,
+      sheetText
+    );
+  if (form6APHeaderOnlySave) {
+    return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: true };
+  }
+
   const formXXVIAPHeaderOnlySave =
     isFormXXVIAPHeaderFieldLayoutFormHeader(opts.parsedFormHeader) ||
     isFormXXVIAPAppointmentLetterContext(
@@ -7746,6 +8124,8 @@ const repairTruncatedYearsInWagePeriodLine = (line, year) => {
 const formatStatutoryTableHeaderLabel = (headerKey) => {
   const h = String(headerKey || '');
   if (isFormIILegacySpacerHeader(h)) return '';
+  const form11Relay = h.match(/^(Men|Women)_([A-I])_([123])$/i);
+  if (form11Relay) return form11Relay[3];
   const m = h.match(/^(.+)_(\d{1,2})$/);
   if (!m) return h;
   const day = parseInt(m[2], 10);
@@ -9514,6 +9894,7 @@ const isFormXVContext = (formHeader, rowItem, fileName) => {
 /** Form 27 / XXVII — underscore filenames (Form_XXVII_-_TamilNadu.xlsx) break \\b word boundaries. */
 const matchesFormXXVIIHint = (blob) => {
   const parts = String(blob || '').toLowerCase();
+  if (matchesForm27CHint(parts)) return false;
   return (
     /form[\s._-]*xxvii(?![a-z])/i.test(parts) ||
     /form[\s._-]*27(?!\d)/i.test(parts) ||
@@ -9833,6 +10214,8 @@ function isFormXXVIIQuarterlyReturnsContext(formHeader, rowItem, fileName, table
     .filter((x) => x != null && String(x).trim() !== '')
     .join(' ')
     .toLowerCase();
+  if (matchesForm27CHint(blob)) return false;
+  if (isForm27CStatutoryContext(rowItem, fileName, formHeader, tableHeaders, sheetText)) return false;
   if (!matchesFormXXVIIHint(blob)) return false;
   if (/quarterly\s+return/.test(blob)) return true;
   if (/andhra/.test(blob) && !/tamil/.test(blob)) return true;
@@ -11096,14 +11479,19 @@ function repickFormXXVIWorkbookSheetIfNeeded(workbook, hints, currentSheetName, 
   const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
   if (names.length <= 1) return null;
   const wantsFormXXVI =
-    isFormXXVIContext(null, hints.item, hints.fileName) ||
+    !isForm2APChangeNoticeContext(
+      parsedFormHeader,
+      hints.item,
+      hints.fileName || hints.formFileName
+    ) &&
+    (isFormXXVIContext(null, hints.item, hints.fileName) ||
     isFormXXVIContext(null, hints.item, hints.formFileName) ||
     isFormXXVIAPAppointmentLetterContext(
       parsedFormHeader,
       hints.item,
       hints.fileName || hints.formFileName
     ) ||
-    isFormXXVIAPAppointmentLetterContext(parsedFormHeader, hints.item, hints.formFileName);
+    isFormXXVIAPAppointmentLetterContext(parsedFormHeader, hints.item, hints.formFileName));
   if (!wantsFormXXVI) return null;
   const parsedSheetBlob = [parsedFormHeader?.title, currentSheetName].filter(Boolean).join(' ');
   const currentSheetText = currentSheetName ? buildStatutorySheetTextBlob(workbook, currentSheetName) : '';
@@ -11141,6 +11529,7 @@ function findStatutorySheetByRomanFormHint(workbook, blob) {
   if (names.length <= 1) return null;
   const text = String(blob || '').toLowerCase();
   const matchers = [
+    matchesForm27CHint,
     matchesFormXXVIIHint,
     matchesFormXXVIHint,
     matchesFormXXIIHint,
@@ -11150,6 +11539,14 @@ function findStatutorySheetByRomanFormHint(workbook, blob) {
   for (let i = 0; i < matchers.length; i += 1) {
     const matcher = matchers[i];
     if (!matcher(text)) continue;
+    if (matcher === matchesForm27CHint) {
+      const sheet =
+        names.find((n) => /^27[\s._-]*c$/i.test(String(n).trim())) ||
+        names.find((n) => /27[\s._-]*c/i.test(String(n))) ||
+        names.find((n) => /health\s+register/i.test(String(n)));
+      if (sheet) return sheet;
+      continue;
+    }
     const sheet = names.find((n) => matcher(String(n || '')));
     if (sheet) return sheet;
   }
@@ -11177,6 +11574,13 @@ function resolveStatutoryWorkbookSheetName(workbook, hints = {}) {
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
+  if (matchesForm27CHint(blob)) {
+    const form27Sheet =
+      names.find((n) => /^27[\s._-]*c$/i.test(String(n).trim())) ||
+      names.find((n) => /27[\s._-]*c/i.test(String(n))) ||
+      names.find((n) => /health\s+register/i.test(String(n)));
+    if (form27Sheet) return form27Sheet;
+  }
   const explicitSheet = findStatutorySheetByRomanFormHint(workbook, blob);
   if (explicitSheet) return explicitSheet;
   let targetToken = extractStatutoryFormNumberToken(blob);
@@ -22006,17 +22410,34 @@ const Statutory = ({ userEmail, userRole }) => {
       return bucket === 'sno' ? rowIndex + 1 : '';
     };
 
+    const tableColMin = templateCols.length > 0 ? Math.min(...templateCols.map(({ col }) => col)) : startCol;
+    const tableColMax = templateCols.length > 0 ? Math.max(...templateCols.map(({ col }) => col)) : startCol + 10;
+    const clearToRow = Math.max(dataStartRow + rows.length + 12, dataStartRow + 20);
+    for (let r = dataStartRow; r <= clearToRow; r += 1) {
+      for (let c = tableColMin; c <= tableColMax; c += 1) {
+        worksheet.getCell(r, c).value = '';
+      }
+      const rowObj = worksheet.getRow(r);
+      if (rowObj) rowObj.height = undefined;
+    }
+
     rows.forEach((row, idx) => {
+      const targetRow = worksheet.getRow(dataStartRow + idx);
+      if (targetRow) targetRow.height = 18;
       templateCols.forEach(({ col, bucket }) => {
         const val = getRowValueForBucket(row, bucket, idx);
-        if (val == null || val === '') return;
         const cell = worksheet.getCell(dataStartRow + idx, col);
+        if (val == null || val === '') {
+          cell.value = '';
+          return;
+        }
         if (bucket === 'sno' || bucket === 'age') {
           const n = Number(String(val).replace(/[,]/g, '').trim());
           cell.value = Number.isFinite(n) ? n : String(val);
         } else {
           cell.value = String(val);
         }
+        cell.alignment = { ...(cell.alignment || {}), vertical: 'middle', wrapText: false };
       });
     });
 
@@ -22024,8 +22445,8 @@ const Statutory = ({ userEmail, userRole }) => {
       ensureExcelJSDataRowsWithBorders(worksheet, {
         dataStartRow,
         dataRowCount: rows.length,
-        colFrom: Math.min(...templateCols.map(({ col }) => col)),
-        colTo: Math.max(...templateCols.map(({ col }) => col)),
+        colFrom: tableColMin,
+        colTo: tableColMax,
         templateRow: dataStartRow,
         templateBodyRows: 1
       });
@@ -22036,6 +22457,161 @@ const Statutory = ({ userEmail, userRole }) => {
       formFileName ||
       parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
       'Form_17_B.xlsx';
+    const blob = new Blob([out], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    });
+    return { blob, fileName };
+  };
+
+  const buildForm27CWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedTableStartCol,
+    parsedFormHeader,
+    formFileName
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const sheetCandidates = Array.isArray(workbook.worksheets) ? workbook.worksheets : [];
+    let worksheet =
+      sheetCandidates.find((ws) => /27[\s._-]*c/i.test(String(ws?.name || ''))) ||
+      sheetCandidates.find((ws) => /health\s+register/i.test(String(ws?.name || ''))) ||
+      sheetCandidates[0] ||
+      null;
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    const norm = form27CHeaderNorm;
+    const cellStr = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') {
+        return String(val);
+      }
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+
+    let headerRow =
+      parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? parsedHeaderRowIndex + 1 : -1;
+    let startCol =
+      parsedTableStartCol != null && parsedTableStartCol >= 0 ? parsedTableStartCol + 1 : 1;
+
+    if (headerRow < 1) {
+      for (let r = 1; r <= 25; r += 1) {
+        for (let c = 1; c <= 20; c += 1) {
+          if (excelCellLooksLikeSerialHeader(cellStr(worksheet.getCell(r, c)?.value))) {
+            headerRow = r;
+            startCol = c;
+            break;
+          }
+        }
+        if (headerRow > 0) break;
+      }
+    }
+    if (headerRow < 1) throw new Error('Could not locate Form 27-C table header row.');
+
+    let dataStartRow =
+      parsedDataStartIndex != null && parsedDataStartIndex >= 0
+        ? parsedDataStartIndex + 1
+        : headerRow + 1;
+    let seqMarkers = 0;
+    for (let c = startCol; c < startCol + 20; c += 1) {
+      const v = norm(cellStr(worksheet.getCell(headerRow + 1, c)?.value));
+      if (/^\d+$/.test(v)) seqMarkers += 1;
+    }
+    if (seqMarkers >= 8) dataStartRow = Math.max(dataStartRow, headerRow + 2);
+
+    const templateCols = [];
+    for (let c = startCol; c < startCol + 22; c += 1) {
+      const label = cellStr(worksheet.getCell(headerRow, c)?.value).trim();
+      if (!label && templateCols.length > 0) break;
+      if (label) {
+        templateCols.push({
+          col: c,
+          label,
+          bucket: form27CHeaderAliasBucket(norm(label))
+        });
+      }
+      if (templateCols.length >= 17) break;
+    }
+
+    const normalizedHeaders = normalizeForm27CTableHeaders(headersToUse);
+    const rows = remapForm27CRowsToHeaders(
+      Array.isArray(mappedData) ? mappedData : [],
+      normalizedHeaders,
+      normalizedHeaders
+    );
+
+    const getRowValueForBucket = (row, bucket, rowIndex) => {
+      if (!row || typeof row !== 'object') return bucket === 'sno' ? rowIndex + 1 : '';
+      for (let i = 0; i < normalizedHeaders.length; i += 1) {
+        const h = normalizedHeaders[i];
+        if (form27CHeaderAliasBucket(norm(h)) !== bucket) continue;
+        const v = row[h];
+        if (v != null && String(v).trim() !== '') return v;
+      }
+      for (const [k, v] of Object.entries(row)) {
+        if (form27CHeaderAliasBucket(norm(k)) === bucket && v != null && String(v).trim() !== '') {
+          return v;
+        }
+      }
+      return bucket === 'sno' ? rowIndex + 1 : '';
+    };
+
+    const tableColMin = templateCols.length > 0 ? Math.min(...templateCols.map(({ col }) => col)) : startCol;
+    const tableColMax = templateCols.length > 0 ? Math.max(...templateCols.map(({ col }) => col)) : startCol + 16;
+    const clearToRow = Math.max(dataStartRow + rows.length + 12, dataStartRow + 20);
+    for (let r = dataStartRow; r <= clearToRow; r += 1) {
+      for (let c = tableColMin; c <= tableColMax; c += 1) {
+        worksheet.getCell(r, c).value = '';
+      }
+      const rowObj = worksheet.getRow(r);
+      if (rowObj) rowObj.height = undefined;
+    }
+
+    rows.forEach((row, idx) => {
+      const targetRow = worksheet.getRow(dataStartRow + idx);
+      if (targetRow) targetRow.height = 18;
+      templateCols.forEach(({ col, bucket }) => {
+        const val = getRowValueForBucket(row, bucket, idx);
+        const cell = worksheet.getCell(dataStartRow + idx, col);
+        if (val == null || val === '') {
+          cell.value = '';
+          return;
+        }
+        if (bucket === 'sno' || bucket === 'age') {
+          const n = Number(String(val).replace(/[,]/g, '').trim());
+          cell.value = Number.isFinite(n) ? n : String(val);
+        } else {
+          cell.value = String(val);
+        }
+        cell.alignment = { ...(cell.alignment || {}), vertical: 'middle', wrapText: false };
+      });
+    });
+
+    if (rows.length > 0 && templateCols.length > 0) {
+      ensureExcelJSDataRowsWithBorders(worksheet, {
+        dataStartRow,
+        dataRowCount: rows.length,
+        colFrom: tableColMin,
+        colTo: tableColMax,
+        templateRow: dataStartRow,
+        templateBodyRows: 1
+      });
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName =
+      formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      'Form_27_C.xlsx';
     const blob = new Blob([out], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     });
@@ -22475,6 +23051,101 @@ const Statutory = ({ userEmail, userRole }) => {
     return { blob, fileName };
   };
 
+  const buildForm2APWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    parsedFormHeader,
+    headerFormData,
+    formFileName,
+    sheetNameHint
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const sheetCandidates = Array.isArray(workbook.worksheets) ? workbook.worksheets : [];
+    const preferred = String(sheetNameHint || '').trim();
+    const worksheet =
+      (preferred && sheetCandidates.find((ws) => String(ws?.name || '').trim() === preferred)) ||
+      sheetCandidates.find((ws) => /^2[\s-]*a$/i.test(String(ws?.name || '').trim())) ||
+      sheetCandidates.find((ws) => /2[\s-]*a|change.*manager|manager.*occupier/i.test(String(ws?.name || ''))) ||
+      sheetCandidates[0] ||
+      null;
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    writeForm2APFieldsToExcelJsWorksheet(worksheet, headerFormData, parsedFormHeader, {
+      excelCellValueToString: excelJsCellText
+    });
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName =
+      formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      'Form_2A_AP.xlsx';
+    const blob = new Blob([out], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    });
+    return { blob, fileName };
+  };
+
+  const buildForm6APWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    parsedFormHeader,
+    headerFormData,
+    mappedData,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedTableStartCol,
+    formFileName,
+    sheetNameHint
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const sheetCandidates = Array.isArray(workbook.worksheets) ? workbook.worksheets : [];
+    const preferred = String(sheetNameHint || '').trim();
+    const worksheet =
+      (preferred && sheetCandidates.find((ws) => String(ws?.name || '').trim() === preferred)) ||
+      sheetCandidates.find((ws) => /^6$/i.test(String(ws?.name || '').trim())) ||
+      sheetCandidates.find((ws) => /humidity|hygrometer/i.test(String(ws?.name || ''))) ||
+      sheetCandidates[0] ||
+      null;
+    if (!worksheet) throw new Error('Template worksheet not found.');
+
+    writeForm6APHeaderFieldsToExcelJsWorksheet(worksheet, headerFormData, parsedFormHeader, {
+      excelCellValueToString: excelJsCellText
+    });
+
+    const hdrs = Array.isArray(headersToUse) ? headersToUse : [];
+    const rows = prepareForm6APHumidityRowsForExport(mappedData || [], hdrs);
+    const dataStartRow1Based =
+      parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? parsedDataStartIndex + 1 : 8;
+    const tableStartCol1Based =
+      parsedTableStartCol != null && parsedTableStartCol >= 0 ? parsedTableStartCol + 1 : 1;
+
+    writeForm6APHumidityTableToExcelJsWorksheet(
+      worksheet,
+      rows,
+      hdrs,
+      dataStartRow1Based,
+      tableStartCol1Based,
+      { sanitizeCellValue: sanitizeForm6APHumidityCellValue }
+    );
+
+    writeForm6APHumidityCertificationFooterExcelJs(worksheet, {
+      dataStartRow1Based,
+      tableStartCol1Based,
+      maxCols: Math.max(9, tableStartCol1Based + hdrs.length)
+    });
+
+    const out = await workbook.xlsx.writeBuffer();
+    const fileName =
+      formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      'Form_6_AP.xlsx';
+    const blob = new Blob([out], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    });
+    return { blob, fileName };
+  };
+
   const buildFormXXVIAPWorkbookWithTemplateStyles = async ({
     templateArrayBuffer,
     parsedFormHeader,
@@ -22833,11 +23504,32 @@ const Statutory = ({ userEmail, userRole }) => {
         parsed.sheetName,
         downloadParseHints
       );
+      const wantsForm2ADownload =
+        isForm2APChangeNoticeContext(null, lineItem, fn) ||
+        isForm2APChangeNoticeContext(null, lineItem, templateMeta.formFileName || '');
+      if (wantsForm2ADownload && templateWb.SheetNames?.length >= 1) {
+        const form2Sheet = repickForm2APWorkbookSheetIfNeeded(
+          templateWb,
+          downloadParseHints,
+          resolvedDownloadSheetName
+        );
+        if (form2Sheet) {
+          resolvedDownloadSheetName = form2Sheet;
+          parsed = parseExcelForm(templateWb, {
+            ...downloadParseHints,
+            preferredSheetName: form2Sheet,
+            formHeaderTitle: undefined,
+            formHeaderSubtitle: undefined,
+            formHeader: undefined
+          });
+        }
+      }
       const wantsFormXXVI =
-        isFormXXVIContext(null, lineItem, fn) ||
+        !wantsForm2ADownload &&
+        (isFormXXVIContext(null, lineItem, fn) ||
         isFormXXVIContext(null, lineItem, templateMeta.formFileName || '') ||
         isFormXXVIAPAppointmentLetterContext(null, lineItem, fn) ||
-        isFormXXVIAPAppointmentLetterContext(null, lineItem, templateMeta.formFileName || '');
+        isFormXXVIAPAppointmentLetterContext(null, lineItem, templateMeta.formFileName || ''));
       if (wantsFormXXVI && templateWb.SheetNames?.length > 1) {
         const xxviSheet = repickFormXXVIWorkbookSheetIfNeeded(
           templateWb,
@@ -23161,7 +23853,40 @@ const Statutory = ({ userEmail, userRole }) => {
           downloadHeaderHints.tableHeaders = headersToUse;
         }
       }
-      const formXXVIAPDownloadContext = isFormXXVIAPAppointmentLetterContext(
+      const form2APDownloadContext = isForm2APChangeNoticeContext(
+        parsed.formHeader,
+        lineItem,
+        fn,
+        sheetTextForDownload
+      );
+      if (form2APDownloadContext) {
+        const form2APDownloadLayout = resolveForm2APHeaderFieldLayout(parsed, templateWb, {
+          formHeader: parsed.formHeader,
+          item: lineItem,
+          fileName: fn,
+          formFileName: templateMeta.formFileName,
+          sheetText: sheetTextForDownload,
+          preferredSheetName: resolvedDownloadSheetName
+        });
+        if (form2APDownloadLayout) {
+          parsed = {
+            ...parsed,
+            formHeader: form2APDownloadLayout.formHeader,
+            headers: form2APDownloadLayout.headers,
+            tableData: form2APDownloadLayout.tableData,
+            headerRowIndex: form2APDownloadLayout.headerRowIndex,
+            dataStartIndex: form2APDownloadLayout.dataStartIndex,
+            tableStartCol: form2APDownloadLayout.tableStartCol
+          };
+          headersToUse = [];
+          downloadHeaderHints.formHeaderTitle = parsed.formHeader?.title;
+          downloadHeaderHints.formHeaderSubtitle = parsed.formHeader?.subtitle;
+          downloadHeaderHints.tableHeaders = headersToUse;
+        }
+      }
+      const formXXVIAPDownloadContext =
+        !form2APDownloadContext &&
+        isFormXXVIAPAppointmentLetterContext(
         parsed.formHeader,
         lineItem,
         fn,
@@ -23261,6 +23986,8 @@ const Statutory = ({ userEmail, userRole }) => {
           sheetTextIndicatesFormAHeaderFields(sheetTextForDownload));
       const form18APHeaderOnlyDownloadEarly =
         isForm18APHeaderFieldLayoutFormHeader(parsed?.formHeader) || form18APDownloadContext;
+      const form2APHeaderOnlyDownloadEarly =
+        isForm2APHeaderFieldLayoutFormHeader(parsed?.formHeader) || form2APDownloadContext;
       const formXXVIAPHeaderOnlyDownloadEarly =
         isFormXXVIAPHeaderFieldLayoutFormHeader(parsed?.formHeader) || formXXVIAPDownloadContext;
       const formVIIAPHeaderOnlyDownloadEarly =
@@ -23271,6 +23998,7 @@ const Statutory = ({ userEmail, userRole }) => {
         !headersToUse.length &&
         !formAHeaderOnlyDownloadEarly &&
         !form18APHeaderOnlyDownloadEarly &&
+        !form2APHeaderOnlyDownloadEarly &&
         !formXXVIAPHeaderOnlyDownloadEarly &&
         !formVIIAPHeaderOnlyDownloadEarly &&
         !formXIXAPHeaderOnlyDownloadEarly
@@ -23327,13 +24055,22 @@ const Statutory = ({ userEmail, userRole }) => {
       const isForm25Download =
         /\bform\s*[-"']?\s*25\b/i.test(String(item?.formName || item?.FormName || '')) ||
         /\bform\s*[-"']?\s*25\b/i.test(String(parsed?.formHeader?.title || ''));
-      const isForm17BDownload = isForm17BStatutoryContext(
+      const isForm27CDownload = isForm27CStatutoryContext(
         lineItem,
         fn,
         parsed?.formHeader,
         headersToUse,
         sheetTextForDownload
       );
+      const isForm17BDownload =
+        !isForm27CDownload &&
+        isForm17BStatutoryContext(
+          lineItem,
+          fn,
+          parsed?.formHeader,
+          headersToUse,
+          sheetTextForDownload
+        );
       const isForm11PeriodOfWorkDownload = isForm11PeriodOfWorkContext(
         parsed?.formHeader,
         item,
@@ -23351,8 +24088,11 @@ const Statutory = ({ userEmail, userRole }) => {
         isForm18APHeaderFieldLayoutFormHeader(parsed?.formHeader) ||
         form18APDownloadContext ||
         isForm18APAccidentNoticeContext(parsed?.formHeader, lineItem, fn, sheetTextForDownload);
+      const isForm2APDownload =
+        isForm2APHeaderFieldLayoutFormHeader(parsed?.formHeader) || form2APDownloadContext;
       const isFormXXVIAPDownload =
-        isFormXXVIAPHeaderFieldLayoutFormHeader(parsed?.formHeader) || formXXVIAPDownloadContext;
+        !isForm2APDownload &&
+        (isFormXXVIAPHeaderFieldLayoutFormHeader(parsed?.formHeader) || formXXVIAPDownloadContext);
       const isFormVIIAPDownload =
         isFormVIIAPHeaderFieldLayoutFormHeader(parsed?.formHeader) || formVIIAPDownloadContext;
       const isFormXIXAPDownload =
@@ -23363,6 +24103,10 @@ const Statutory = ({ userEmail, userRole }) => {
         templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
         headersToUse
       );
+      if (isForm27CDownload) {
+        headersToUse = normalizeForm27CTableHeaders(headersToUse);
+        downloadHeaderHints.tableHeaders = headersToUse;
+      }
       if (isForm17BDownload) {
         headersToUse = normalizeForm17BTableHeaders(headersToUse);
         downloadHeaderHints.tableHeaders = headersToUse;
@@ -25008,6 +25752,34 @@ const Statutory = ({ userEmail, userRole }) => {
           // keep existing mappedData if refresh fails
         }
       }
+      if (isForm27CDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
+        try {
+          const form27CFileName = String(
+            item?.formName || item?.FormName || parsed?.formHeader?.title || fn || templateMeta.formFileName || ''
+          );
+          const refreshedForm27CRows = await fetchAndPopulateEmployeeData(headersToUse, {
+            returnMappedData: true,
+            fileName: form27CFileName,
+            parsedFormHeader: parsed.formHeader,
+            item: lineItem,
+            formFileModalData: {
+              parsedFormHeader: parsed.formHeader,
+              parsedTableHeaders: headersToUse,
+              item: lineItem,
+              fileName: form27CFileName,
+              formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || ''
+            }
+          });
+          if (Array.isArray(refreshedForm27CRows) && refreshedForm27CRows.length > 0) {
+            mappedData = refreshedForm27CRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
+          }
+        } catch (_) {
+          /* keep existing mappedData */
+        }
+      }
       if (isForm17BDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
         try {
           const form17BFileName = String(
@@ -25475,12 +26247,14 @@ const Statutory = ({ userEmail, userRole }) => {
           isFormAHeaderFieldLayoutFormHeader(parsed?.formHeader) &&
           Object.values(downloadHeaderFormData || {}).some((v) => String(v ?? '').trim() !== '');
         const form18APHeaderOnlyDownload = isForm18APDownload;
+        const form2APHeaderOnlyDownload = isForm2APDownload;
         const formXXVIAPHeaderOnlyDownload = isFormXXVIAPDownload;
         const formVIIAPHeaderOnlyDownload = isFormVIIAPDownload;
         const formXIXAPHeaderOnlyDownload = isFormXIXAPDownload;
         if (
           !formAHeaderOnlyDownload &&
           !form18APHeaderOnlyDownload &&
+          !form2APHeaderOnlyDownload &&
           !formXXVIAPHeaderOnlyDownload &&
           !formVIIAPHeaderOnlyDownload &&
           !formXIXAPHeaderOnlyDownload
@@ -25842,6 +26616,9 @@ const Statutory = ({ userEmail, userRole }) => {
           );
         }
         savedDraftRowMatrix = null;
+      }
+      if (isForm27CDownload && Array.isArray(mappedData)) {
+        mappedData = remapForm27CRowsToHeaders(mappedData, headersToUse, headersToUse);
       }
       if (isForm17BDownload && Array.isArray(mappedData)) {
         mappedData = remapForm17BRowsToHeaders(mappedData, headersToUse, headersToUse);
@@ -26597,6 +27374,20 @@ const Statutory = ({ userEmail, userRole }) => {
                                 parsedFormHeader: parsed.formHeader,
                                 formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx'
                               })
+                          : isForm27CDownload
+                            ? await buildForm27CWorkbookWithTemplateStyles({
+                                templateArrayBuffer: arrayBuffer,
+                                mappedData,
+                                headersToUse,
+                                parsedHeaderRowIndex: downloadHeaderRowIndex,
+                                parsedDataStartIndex: downloadDataStartIndex,
+                                parsedTableStartCol: downloadTableStartCol,
+                                parsedFormHeader: parsed.formHeader,
+                                formFileName:
+                                  templateMeta.formFileName ||
+                                  resolvedFormFileItem.formFileName ||
+                                  'form-draft.xlsx'
+                              })
                           : isForm17BDownload
                             ? await buildForm17BWorkbookWithTemplateStyles({
                                 templateArrayBuffer: arrayBuffer,
@@ -26832,17 +27623,21 @@ const Statutory = ({ userEmail, userRole }) => {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-      if (isForm17BDownload || isForm14Download || isForm11PeriodOfWorkDownload || generateOptions?.openAutofillModal) {
-        const normalizedHdrs = isForm17BDownload
-          ? normalizeForm17BTableHeaders(headersToUse)
+      if (isForm27CDownload || isForm17BDownload || isForm14Download || isForm11PeriodOfWorkDownload || generateOptions?.openAutofillModal) {
+        const normalizedHdrs = isForm27CDownload
+          ? normalizeForm27CTableHeaders(headersToUse)
+          : isForm17BDownload
+            ? normalizeForm17BTableHeaders(headersToUse)
           : isForm14Download
             ? normalizeForm14APTableHeaders(headersToUse)
           : isForm11PeriodOfWorkDownload
             ? normalizeForm11PeriodOfWorkTableHeaders(headersToUse)
           : headersToUse;
         const gridRows = Array.isArray(mappedData)
-          ? isForm17BDownload
-            ? remapForm17BRowsToHeaders(mappedData, normalizedHdrs, normalizedHdrs)
+          ? isForm27CDownload
+            ? remapForm27CRowsToHeaders(mappedData, normalizedHdrs, normalizedHdrs)
+            : isForm17BDownload
+              ? remapForm17BRowsToHeaders(mappedData, normalizedHdrs, normalizedHdrs)
             : isForm14Download
               ? remapForm14APRowsToHeaders(mappedData, normalizedHdrs, normalizedHdrs)
             : isForm11PeriodOfWorkDownload
@@ -27105,14 +27900,39 @@ const Statutory = ({ userEmail, userRole }) => {
           formFileModalData?.formFileName || formFileModalData?.fileName,
           formFileModalData?.sheetText || ''
         );
-      const formXXVIAPHeaderSaveContext =
-        isFormXXVIAPHeaderFieldLayoutFormHeader(formFileModalData?.parsedFormHeader || formHeader) ||
-        isFormXXVIAPAppointmentLetterContext(
+      const form2APHeaderSaveContext =
+        isForm2APHeaderFieldLayoutFormHeader(formFileModalData?.parsedFormHeader || formHeader) ||
+        isForm2APChangeNoticeContext(
           formFileModalData?.parsedFormHeader || formHeader,
           formFileModalData?.item || autofillItem,
           formFileModalData?.formFileName || formFileModalData?.fileName,
           formFileModalData?.sheetText || ''
         );
+      const form6APHeaderSaveContext =
+        isForm6APHeaderFieldLayoutFormHeader(formFileModalData?.parsedFormHeader || formHeader) ||
+        isForm6APHumidityRegisterContext(
+          formFileModalData?.parsedFormHeader || formHeader,
+          formFileModalData?.item || autofillItem,
+          formFileModalData?.formFileName || formFileModalData?.fileName,
+          formFileModalData?.sheetText || ''
+        );
+      const form6APHasSaveData =
+        form6APHumidityRowsHaveManualEntryData(
+          tableDataForSave,
+          formFileModalData?.parsedTableHeaders?.length
+            ? formFileModalData.parsedTableHeaders
+            : tableHeaders
+        ) ||
+        Object.values(headerDataForSave || {}).some((v) => String(v ?? '').trim() !== '');
+      const formXXVIAPHeaderSaveContext =
+        !form2APHeaderSaveContext &&
+        (isFormXXVIAPHeaderFieldLayoutFormHeader(formFileModalData?.parsedFormHeader || formHeader) ||
+        isFormXXVIAPAppointmentLetterContext(
+          formFileModalData?.parsedFormHeader || formHeader,
+          formFileModalData?.item || autofillItem,
+          formFileModalData?.formFileName || formFileModalData?.fileName,
+          formFileModalData?.sheetText || ''
+        ));
       const formVIIAPHeaderSaveContext =
         isFormVIIAPHeaderFieldLayoutFormHeader(formFileModalData?.parsedFormHeader || formHeader) ||
         isFormVIIAPNoticeOfChangeContext(
@@ -27134,6 +27954,8 @@ const Statutory = ({ userEmail, userRole }) => {
         (!tableDataForSave || tableDataForSave.length === 0) &&
         !(formAHeaderSaveContext && formAHasHeaderData) &&
         !form18APHeaderSaveContext &&
+        !form2APHeaderSaveContext &&
+        !(form6APHeaderSaveContext && form6APHasSaveData) &&
         !formXXVIAPHeaderSaveContext &&
         !formVIIAPHeaderSaveContext &&
         !formXIXAPHeaderSaveContext
@@ -27153,6 +27975,7 @@ const Statutory = ({ userEmail, userRole }) => {
      
       let headersToUse = formFileModalData?.parsedTableHeaders?.length ? formFileModalData.parsedTableHeaders : tableHeaders;
       let templateWb = formFileModalData?.rawData;
+      let saveTemplateArrayBuffer = null;
       let headerRowIndex = formFileModalData?.headerRowIndex;
       let dataStartIndex = formFileModalData?.dataStartIndex;
       let tableStartCol = formFileModalData?.tableStartCol ?? 0;
@@ -27184,6 +28007,7 @@ const Statutory = ({ userEmail, userRole }) => {
           const urls = getFormFileFetchUrlCandidates(itemForTemplateFetch);
           const cacheKey = getFormTemplateCacheKey(itemForTemplateFetch);
           const { arrayBuffer } = await fetchFormTemplateArrayBuffer(urls, cacheKey);
+          saveTemplateArrayBuffer = arrayBuffer;
           templateWb = XLSX.read(arrayBuffer, { type: 'array' });
           const saveParseHints = {
             fileName: draftFileNameForSaveEarly,
@@ -27344,6 +28168,25 @@ const Statutory = ({ userEmail, userRole }) => {
                   tableStartCol: form18SaveLayout.tableStartCol
                 }
               : parsed;
+          const form2APSaveLayout = resolveForm2APHeaderFieldLayout(parsedForSave, templateWb, {
+            formHeader: parsedForSave.formHeader || parsedFormHeaderForSave,
+            item: currentItem,
+            fileName: draftFileNameForSaveEarly,
+            formFileName: formFileModalData?.formFileName,
+            sheetText: saveSheetText,
+            preferredSheetName: resolvedSaveSheetName
+          });
+          if (form2APSaveLayout) {
+            parsedForSave = {
+              ...parsedForSave,
+              formHeader: form2APSaveLayout.formHeader,
+              headers: form2APSaveLayout.headers,
+              tableData: form2APSaveLayout.tableData,
+              headerRowIndex: form2APSaveLayout.headerRowIndex,
+              dataStartIndex: form2APSaveLayout.dataStartIndex,
+              tableStartCol: form2APSaveLayout.tableStartCol
+            };
+          }
           const formXXVIAPSaveLayout = resolveFormXXVIAPHeaderFieldLayout(parsedForSave, templateWb, {
             formHeader: parsedForSave.formHeader || parsedFormHeaderForSave,
             item: currentItem,
@@ -27704,13 +28547,22 @@ const Statutory = ({ userEmail, userRole }) => {
         draftFileNameForSave,
         headersToUse
       );
-      const form17BSave = isForm17BStatutoryContext(
+      const form27CSave = isForm27CStatutoryContext(
         currentItem,
         draftFileNameForSave,
         parsedFormHeaderForSave || formHeader,
         headersToUse,
         formFileModalData?.sheetText || ''
       );
+      const form17BSave =
+        !form27CSave &&
+        isForm17BStatutoryContext(
+          currentItem,
+          draftFileNameForSave,
+          parsedFormHeaderForSave || formHeader,
+          headersToUse,
+          formFileModalData?.sheetText || ''
+        );
       const form14Save = isForm14ChildWorkersContext(
         parsedFormHeaderForSave || formHeader,
         currentItem,
@@ -27725,14 +28577,32 @@ const Statutory = ({ userEmail, userRole }) => {
           draftFileNameForSave,
           formFileModalData?.sheetText || ''
         );
-      const formXXVIAPSave =
-        isFormXXVIAPHeaderFieldLayoutFormHeader(parsedFormHeaderForSave || formHeader) ||
-        isFormXXVIAPAppointmentLetterContext(
+      const form2APSave =
+        isForm2APHeaderFieldLayoutFormHeader(parsedFormHeaderForSave || formHeader) ||
+        isForm2APChangeNoticeContext(
           parsedFormHeaderForSave || formHeader,
           currentItem,
           draftFileNameForSave || draftFileNameForSaveEarly,
           formFileModalData?.sheetText || ''
         );
+      const form6APSave =
+        isForm6APHeaderFieldLayoutFormHeader(parsedFormHeaderForSave || formHeader) ||
+        isForm6APHumidityRegisterContext(
+          parsedFormHeaderForSave || formHeader,
+          currentItem,
+          draftFileNameForSave || draftFileNameForSaveEarly,
+          formFileModalData?.sheetText || ''
+        );
+      const formXXVIAPSave =
+        !form2APSave &&
+        !form6APSave &&
+        (isFormXXVIAPHeaderFieldLayoutFormHeader(parsedFormHeaderForSave || formHeader) ||
+        isFormXXVIAPAppointmentLetterContext(
+          parsedFormHeaderForSave || formHeader,
+          currentItem,
+          draftFileNameForSave || draftFileNameForSaveEarly,
+          formFileModalData?.sheetText || ''
+        ));
       const formVIIAPSave =
         isFormVIIAPHeaderFieldLayoutFormHeader(parsedFormHeaderForSave || formHeader) ||
         isFormVIIAPNoticeOfChangeContext(
@@ -28092,6 +28962,22 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           formFileName: draftFileNameForSave
         }));
+      } else if (form27CSave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const form27CHeaders = normalizeForm27CTableHeaders(
+          Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : []
+        );
+        const form27CRows = remapForm27CRowsToHeaders(tableDataForSave, form27CHeaders, form27CHeaders);
+        ({ blob, fileName } = await buildForm27CWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: form27CRows,
+          headersToUse: form27CHeaders,
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedTableStartCol: tableStartCol,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          formFileName: draftFileNameForSave
+        }));
       } else if (form17BSave && templateWb) {
         const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
         const form17BHeaders = normalizeForm17BTableHeaders(
@@ -28143,6 +29029,76 @@ const Statutory = ({ userEmail, userRole }) => {
               ? headerFormData
               : headerDataForSave,
           formFileName: draftFileNameForSave
+        }));
+      } else if (form2APSave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const form2APHeaderForSave = parsedFormHeaderForSave || formHeader;
+        const form2APFields =
+          form2APHeaderForSave?.fields ||
+          (formFileModalData?.parsedFormHeader || formHeader)?.fields ||
+          [];
+        ({ blob, fileName } = await buildForm2APWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          parsedFormHeader: { ...form2APHeaderForSave, fields: form2APFields },
+          headerFormData:
+            headerFormData && typeof headerFormData === 'object'
+              ? headerFormData
+              : headerDataForSave,
+          formFileName: draftFileNameForSave,
+          sheetNameHint:
+            resolvedSaveSheetNameForBuild ||
+            formFileModalData?.sheetName ||
+            resolveForm2APWorkbookSheetName(templateWb) ||
+            ''
+        }));
+      } else if (form6APSave && (saveTemplateArrayBuffer || templateWb)) {
+        let form6Headers =
+          Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [];
+        let form6HeaderRowIndex = Number.isFinite(headerRowIndex) ? headerRowIndex : -1;
+        let form6DataStartIndex = Number.isFinite(dataStartIndex) ? dataStartIndex : -1;
+        let form6TableStartCol = tableStartCol ?? 0;
+        const form6SheetName =
+          resolvedSaveSheetNameForBuild ||
+          formFileModalData?.sheetName ||
+          resolveForm6APWorkbookSheetName(templateWb) ||
+          '';
+        if (form6Headers.length === 0 && templateWb) {
+          const reparsed = parseExcelForm(templateWb, {
+            fileName: draftFileNameForSave,
+            formFileName: formFileModalData?.formFileName,
+            formName: currentItem?.formName || currentItem?.FormName,
+            item: currentItem,
+            preferredSheetName: form6SheetName
+          });
+          if (Array.isArray(reparsed.headers) && reparsed.headers.length > 0) {
+            form6Headers = reparsed.headers;
+          }
+          if (reparsed.headerRowIndex >= 0) form6HeaderRowIndex = reparsed.headerRowIndex;
+          if (reparsed.dataStartIndex >= 0) form6DataStartIndex = reparsed.dataStartIndex;
+          form6TableStartCol = reparsed.tableStartCol ?? form6TableStartCol;
+          if (reparsed.formHeader) parsedFormHeaderForSave = reparsed.formHeader;
+        }
+        const templateArrayBuffer = saveTemplateArrayBuffer;
+        if (!templateArrayBuffer || !isValidExcelArrayBuffer(templateArrayBuffer)) {
+          throw new Error(
+            'Form 6 template is invalid or corrupted. Refresh the page and try again, or re-upload the template in Form Master.'
+          );
+        }
+        const form6Rows = prepareForm6APHumidityRowsForExport(tableDataForSave, form6Headers);
+        ({ blob, fileName } = await buildForm6APWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          headerFormData:
+            headerFormData && typeof headerFormData === 'object'
+              ? headerFormData
+              : headerDataForSave,
+          mappedData: form6Rows,
+          headersToUse: form6Headers,
+          parsedHeaderRowIndex: form6HeaderRowIndex,
+          parsedDataStartIndex: form6DataStartIndex,
+          parsedTableStartCol: form6TableStartCol,
+          formFileName: draftFileNameForSave,
+          sheetNameHint: form6SheetName
         }));
       } else if (formXXVIAPSave && templateWb) {
         const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
@@ -29111,6 +30067,23 @@ const Statutory = ({ userEmail, userRole }) => {
       modalData?.parsedFormHeader || {},
       modalData?.item
     );
+    const form11POWFileProbe = isForm11PeriodOfWorkContext(
+      modalData?.parsedFormHeader || {},
+      modalData?.item,
+      String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+      modalData?.parsedTableHeaders?.length ? modalData.parsedTableHeaders : tableHeaders,
+      modalData?.sheetText || ''
+    );
+    const form6APFileProbe =
+      isForm6APHumidityRegisterContext(
+        modalData?.parsedFormHeader || {},
+        modalData?.item,
+        String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+        modalData?.sheetText || ''
+      ) ||
+      headersIndicateForm6APHumidityTable(
+        modalData?.parsedTableHeaders?.length ? modalData.parsedTableHeaders : tableHeaders
+      );
     const form25EarlyContext = isForm25StatutoryContext({
       fileName: modalData?.fileName || modalData?.formFileName || options?.fileName,
       formFileName: modalData?.formFileName,
@@ -29122,7 +30095,9 @@ const Statutory = ({ userEmail, userRole }) => {
       !returnMappedData &&
       options.paginateEmployees !== false &&
       !form15Part1EarlyContext &&
-      !form25EarlyContext;
+      !form25EarlyContext &&
+      !form11POWFileProbe &&
+      !form6APFileProbe;
     const employeePageSize = useEmployeePagination
       ? Math.max(1, parseInt(options.employeePageSize, 10) || FORM_TABLE_PAGE_SIZE)
       : Number.MAX_SAFE_INTEGER;
@@ -29145,7 +30120,9 @@ const Statutory = ({ userEmail, userRole }) => {
       useEmployeePagination &&
       !enrichOnlyPhase &&
       !form15Part1EarlyContext &&
-      !form25EarlyContext;
+      !form25EarlyContext &&
+      !form11POWFileProbe &&
+      !form6APFileProbe;
 
     const statutoryOverlayState = { records: [], headers: [], employeeOrder: [] };
     let skipStatutoryOverlayForForm15Payroll = false;
@@ -29247,13 +30224,29 @@ const Statutory = ({ userEmail, userRole }) => {
       if (formIIAutofillHeadersNormalized) {
         currentHeaders = normalizeFormIIMaharashtraTableHeaders(currentHeaders);
       }
-      const form17BEarlyContext = isForm17BStatutoryContext(
+      const form27CEarlyContext = isForm27CStatutoryContext(
         modalData?.item,
         String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
         modalData?.parsedFormHeader || {},
         currentHeaders,
         modalData?.sheetText || ''
       );
+      if (form27CEarlyContext) {
+        currentHeaders = normalizeForm27CTableHeaders(currentHeaders);
+        if (!returnMappedData) {
+          setFormFileModalData((prev) => (prev ? { ...prev, parsedTableHeaders: currentHeaders } : prev));
+          setTableHeaders(currentHeaders);
+        }
+      }
+      const form17BEarlyContext =
+        !form27CEarlyContext &&
+        isForm17BStatutoryContext(
+          modalData?.item,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.parsedFormHeader || {},
+          currentHeaders,
+          modalData?.sheetText || ''
+        );
       if (form17BEarlyContext) {
         currentHeaders = normalizeForm17BTableHeaders(currentHeaders);
         if (!returnMappedData) {
@@ -29288,6 +30281,24 @@ const Statutory = ({ userEmail, userRole }) => {
           setFormFileModalData((prev) => (prev ? { ...prev, parsedTableHeaders: currentHeaders } : prev));
           setTableHeaders(currentHeaders);
         }
+      }
+      const form6APEarlyContext =
+        isForm6APHumidityRegisterContext(
+          modalData?.parsedFormHeader || {},
+          modalData?.item,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.sheetText || ''
+        ) || headersIndicateForm6APHumidityTable(currentHeaders);
+      if (form6APEarlyContext && !returnMappedData && modalData?.parsedFormHeader) {
+        const form6Header = enrichForm6APDisplayHeader(
+          modalData.parsedFormHeader,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.item,
+          currentHeaders,
+          modalData?.sheetText || ''
+        );
+        setFormFileModalData((prev) => (prev ? { ...prev, parsedFormHeader: form6Header } : prev));
+        setFormHeader(form6Header);
       }
       statutoryOverlayState.headers = currentHeaders;
       if (!form10DownloadEnrich) {
@@ -29371,14 +30382,23 @@ const Statutory = ({ userEmail, userRole }) => {
           String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
           modalData?.sheetText || ''
         );
-      const formXXVIAPHeaderFieldLayoutActive =
-        isFormXXVIAPHeaderFieldLayoutFormHeader(modalData?.parsedFormHeader || options?.parsedFormHeader) ||
-        isFormXXVIAPAppointmentLetterContext(
+      const form2APHeaderFieldLayoutActive =
+        isForm2APHeaderFieldLayoutFormHeader(modalData?.parsedFormHeader || options?.parsedFormHeader) ||
+        isForm2APChangeNoticeContext(
           modalData?.parsedFormHeader || options?.parsedFormHeader,
           modalData?.item || options?.item || null,
           String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
           modalData?.sheetText || ''
         );
+      const formXXVIAPHeaderFieldLayoutActive =
+        !form2APHeaderFieldLayoutActive &&
+        (isFormXXVIAPHeaderFieldLayoutFormHeader(modalData?.parsedFormHeader || options?.parsedFormHeader) ||
+        isFormXXVIAPAppointmentLetterContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader,
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.sheetText || ''
+        ));
       const formVIIAPHeaderFieldLayoutActive =
         !isFormXAPRegisterOfFinesContext(
           modalData?.parsedFormHeader || options?.parsedFormHeader,
@@ -29434,6 +30454,42 @@ const Statutory = ({ userEmail, userRole }) => {
                 : prev
             );
             setFormHeader(form18Layout.formHeader);
+            setTableHeaders([]);
+          }
+        }
+      }
+      if (form2APHeaderFieldLayoutActive && !isForm2APHeaderFieldLayoutFormHeader(modalData?.parsedFormHeader)) {
+        const form2APLayout = resolveForm2APHeaderFieldLayout(
+          {
+            formHeader: modalData?.parsedFormHeader,
+            headers: currentHeaders,
+            headerRowIndex: modalData?.headerRowIndex
+          },
+          modalData?.rawData,
+          {
+            formHeader: modalData?.parsedFormHeader,
+            item: modalData?.item,
+            fileName: modalData?.fileName || modalData?.formFileName,
+            formFileName: modalData?.formFileName,
+            sheetText: modalData?.sheetText
+          }
+        );
+        if (form2APLayout?.formHeader) {
+          currentHeaders = [];
+          if (!returnMappedData) {
+            setFormFileModalData((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    parsedFormHeader: form2APLayout.formHeader,
+                    parsedTableHeaders: [],
+                    headerRowIndex: form2APLayout.headerRowIndex,
+                    dataStartIndex: form2APLayout.dataStartIndex,
+                    tableStartCol: form2APLayout.tableStartCol
+                  }
+                : prev
+            );
+            setFormHeader(form2APLayout.formHeader);
             setTableHeaders([]);
           }
         }
@@ -29589,7 +30645,7 @@ const Statutory = ({ userEmail, userRole }) => {
         setTableHeaders(currentHeaders);
       }
 
-      if ((!currentHeaders || currentHeaders.length === 0) && !formAHeaderFieldLayoutActive && !form18APHeaderFieldLayoutActive && !formXXVIAPHeaderFieldLayoutActive && !formVIIAPHeaderFieldLayoutActive && !formXIXAPHeaderFieldLayoutActive) {
+      if ((!currentHeaders || currentHeaders.length === 0) && !formAHeaderFieldLayoutActive && !form18APHeaderFieldLayoutActive && !form2APHeaderFieldLayoutActive && !formXXVIAPHeaderFieldLayoutActive && !formVIIAPHeaderFieldLayoutActive && !formXIXAPHeaderFieldLayoutActive) {
         console.error('⚠️ Table headers not available');
         if (!returnMappedData) setError('Table headers not available. Please try again.');
         if (!returnMappedData) {
@@ -29713,6 +30769,81 @@ const Statutory = ({ userEmail, userRole }) => {
         return;
       }
 
+      // AP Form 11 — Notice of period of work (fixed relay grid; not per-employee autofill).
+      if (
+        form11POWEarlyContext ||
+        isForm11PeriodOfWorkContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          currentHeaders,
+          String(modalData?.sheetText || options?.sheetText || '')
+        )
+      ) {
+        const powHeaders = normalizeForm11PeriodOfWorkTableHeaders(currentHeaders);
+        const sourceRows =
+          Array.isArray(formTableData) && formTableData.length > 0
+            ? formTableData
+            : Array.isArray(modalData?.parsedTableData)
+              ? modalData.parsedTableData
+              : [];
+        const powRows = ensureForm11APTemplateRows(
+          remapForm11PeriodOfWorkRowsToHeaders(sourceRows, currentHeaders, powHeaders),
+          powHeaders
+        );
+        if (!returnMappedData) {
+          setFormFileModalData((prev) =>
+            prev ? { ...prev, parsedTableHeaders: powHeaders } : prev
+          );
+          setTableHeaders(powHeaders);
+          setFormTableData(powRows);
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+          setSuccess('Form 11 — notice of period of work loaded from template.');
+          setTimeout(() => setSuccess(''), 4000);
+        }
+        if (returnMappedData) return powRows;
+        return;
+      }
+
+      // AP Form 6 — Humidity register (manual hygrometer readings; fixed 31-day grid).
+      if (
+        form6APEarlyContext ||
+        isForm6APHumidityRegisterContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          String(modalData?.sheetText || options?.sheetText || '')
+        )
+      ) {
+        const form6Headers = headersIndicateForm6APHumidityTable(currentHeaders)
+          ? currentHeaders
+          : displayTableHeaders;
+        const sourceRows =
+          Array.isArray(formTableData) && formTableData.length > 0
+            ? formTableData
+            : Array.isArray(modalData?.parsedTableData)
+              ? modalData.parsedTableData
+              : [];
+        const form6Rows = applyForm6APHumidityTableRowsForAutofill(
+          remapForm6APRowsToHeaders(sourceRows, currentHeaders, form6Headers),
+          form6Headers
+        );
+        if (!returnMappedData) {
+          setFormFileModalData((prev) =>
+            prev ? { ...prev, parsedTableHeaders: form6Headers } : prev
+          );
+          setTableHeaders(form6Headers);
+          setFormTableData(form6Rows);
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+          setSuccess('Form 6 — humidity register loaded from template.');
+          setTimeout(() => setSuccess(''), 4000);
+        }
+        if (returnMappedData) return form6Rows;
+        return;
+      }
+
       // Form I Register of Fines — show "Nill of the month" when no fine rows exist (manual entry form).
       if (
         isFormIRegisterOfFinesContext(
@@ -29743,6 +30874,7 @@ const Statutory = ({ userEmail, userRole }) => {
 
       // AP Form XXVII Quarterly Returns — show "Nill of the month" when no return rows exist (manual entry form).
       if (
+        !form27CEarlyContext &&
         isFormXXVIIQuarterlyReturnsContext(
           modalData?.parsedFormHeader || options?.parsedFormHeader || {},
           modalData?.item || options?.item || null,
@@ -30132,8 +31264,13 @@ const Statutory = ({ userEmail, userRole }) => {
         if (employeePage === 0) {
           setFormTablePage(0);
           setFormTableData((prev) => {
-            if (!Array.isArray(prev) || prev.length >= employees.length) return prev;
-            const next = [...prev];
+            const hdrs =
+              Array.isArray(currentHeaders) && currentHeaders.length > 0 ? currentHeaders : tableHeaders;
+            const cleaned = Array.isArray(prev)
+              ? prev.filter((row) => !isStatutoryTemplateColumnIndexRow(row, hdrs))
+              : [];
+            if (cleaned.length >= employees.length) return cleaned;
+            const next = [...cleaned];
             while (next.length < employees.length) next.push({});
             return next;
           });
@@ -30881,14 +32018,23 @@ const Statutory = ({ userEmail, userRole }) => {
         if (/\bsex\b/.test(joined) && /\bage\b/.test(joined) && /employee/.test(joined)) return true;
         return false;
       };
-      const form17BAutofillContext =
-        isForm17BStatutoryContext(
+      const form27CAutofillContext =
+        isForm27CStatutoryContext(
           modalData?.item || options?.item || formFileModalData?.item,
           String(modalData?.fileName || modalData?.formFileName || options?.fileName || autofillProbeText),
           modalData?.parsedFormHeader || options?.parsedFormHeader || formFileModalData?.parsedFormHeader || {},
           currentHeaders,
           modalData?.sheetText || formFileModalData?.sheetText || ''
-        ) || headersIndicateForm17BTable(currentHeaders);
+        ) || headersIndicateForm27CTable(currentHeaders);
+      const form17BAutofillContext =
+        !form27CAutofillContext &&
+        (isForm17BStatutoryContext(
+          modalData?.item || options?.item || formFileModalData?.item,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || autofillProbeText),
+          modalData?.parsedFormHeader || options?.parsedFormHeader || formFileModalData?.parsedFormHeader || {},
+          currentHeaders,
+          modalData?.sheetText || formFileModalData?.sheetText || ''
+        ) || headersIndicateForm17BTable(currentHeaders));
       const form14AutofillContext =
         isForm14ChildWorkersContext(
           modalData?.parsedFormHeader || options?.parsedFormHeader || formFileModalData?.parsedFormHeader || {},
@@ -33873,6 +35019,61 @@ const Statutory = ({ userEmail, userRole }) => {
         return;
       }
 
+      if (form2APHeaderFieldLayoutActive) {
+        const resolvedSite = resolveStatutorySiteNameForContractorAutofill(modalData?.item, {
+          siteFromUrl,
+          allowedSiteNameList,
+          resolveSiteFn: resolveSiteDisplayName,
+          allRows: statutoryData
+        });
+        const sitesForHeader =
+          Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+            ? siteDetailsList
+            : readSiteDetailsCache() || [];
+        let nextHeaderData = seedHeaderFormDataFromParsedFields(
+          headerFormData,
+          modalData?.parsedFormHeader?.fields || formFileModalData?.parsedFormHeader?.fields
+        );
+        nextHeaderData = applyStatutorySiteCompanyHeaders(
+          nextHeaderData,
+          resolvedSite,
+          sitesForHeader,
+          modalData?.parsedFormHeader?.fields || formFileModalData?.parsedFormHeader?.fields,
+          modalData?.item,
+          companyDetailsList
+        );
+        const siteFor2AP = findSiteDetailByName(sitesForHeader, resolvedSite);
+        const factoryAddress = siteFor2AP ? buildSiteEstablishmentNameAndAddress(siteFor2AP) : '';
+        const licenceNumber = String(
+          siteFor2AP?.LicenceNumber ||
+            siteFor2AP?.licenceNumber ||
+            siteFor2AP?.LicenseNumber ||
+            siteFor2AP?.licenseNumber ||
+            siteFor2AP?.RegistrationNumber ||
+            siteFor2AP?.registrationNumber ||
+            ''
+        ).trim();
+        const postalAddress = siteFor2AP ? buildFormAEstablishmentAddressFromSite(siteFor2AP) : '';
+        Object.entries(nextHeaderData).forEach(([key, val]) => {
+          if (String(val || '').trim()) return;
+          const labelNorm = String(
+            (modalData?.parsedFormHeader?.fields || []).find((f) => f.key === key)?.label || ''
+          ).toLowerCase();
+          if (/factory/.test(labelNorm) && factoryAddress) nextHeaderData[key] = factoryAddress;
+          if (/licen[cs]e/.test(labelNorm) && licenceNumber) nextHeaderData[key] = licenceNumber;
+          if (/postal|communication/.test(labelNorm) && postalAddress) nextHeaderData[key] = postalAddress;
+        });
+        if (!returnMappedData) {
+          setHeaderFormData(nextHeaderData);
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+          setSuccess('Form 2-A notice fields populated from site data.');
+          setTimeout(() => setSuccess(''), 4000);
+        }
+        if (returnMappedData) return [];
+        return;
+      }
+
       if (formXXVIAPHeaderFieldLayoutActive) {
         const resolvedSite = resolveStatutorySiteNameForContractorAutofill(modalData?.item, {
           siteFromUrl,
@@ -35172,6 +36373,24 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
+          if (form27CAutofillContext && isForm27CWorkerNameHeader(header)) {
+            row[header] = sanitizeValue(getForm27CEmployeeFullName(emp));
+            return;
+          }
+
+          if (form27CAutofillContext && isForm27CSkipAutofillHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (form27CAutofillContext && /\bsex\b/.test(normalizeLooseHeaderText(header))) {
+            const g = resolveFormDEmployeeGender(emp);
+            row[header] = sanitizeValue(
+              g === 'male' ? 'Male' : g === 'female' ? 'Female' : g
+            );
+            return;
+          }
+
           if (formXXIIIAutofillContext && isFormXXIIIWorkmenNameHeader(header)) {
             row[header] = sanitizeValue(getFormXXIIIEmployeeFullName(emp));
             return;
@@ -35601,7 +36820,10 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           // Age from date of birth (Form A muster, Form J/K employment registers, Form 17-B)
           else if (
-            (formAAutofillContext || formEmploymentRegisterAutofillContext || form17BAutofillContext) &&
+            (formAAutofillContext ||
+              formEmploymentRegisterAutofillContext ||
+              form17BAutofillContext ||
+              form27CAutofillContext) &&
             (normalizedHeader === 'age' || /^age\b/i.test(headerLower) || headerLower.includes('age at')) &&
             !headerLower.includes('wage') &&
             !headerLower.includes('average') &&
@@ -35614,6 +36836,10 @@ const Statutory = ({ userEmail, userRole }) => {
           else if (form17BAutofillContext && isForm17BSkipAutofillHeader(header)) {
             row[header] = '';
           }
+          // Form 27-C: manual medical columns — never People autofill
+          else if (form27CAutofillContext && isForm27CSkipAutofillHeader(header)) {
+            row[header] = '';
+          }
           // Form 14: manual columns (group letter from Form 11, certificate, token, relay, remarks)
           else if (form14AutofillContext && isForm14SkipAutofillHeader(header)) {
             row[header] = '';
@@ -35623,7 +36849,7 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           // Form 17-B: Date of employment in present work
           else if (
-            form17BAutofillContext &&
+            (form17BAutofillContext || form27CAutofillContext) &&
             headerLower.includes('date') &&
             (headerLower.includes('employment') ||
               headerLower.includes('present work') ||
@@ -35634,9 +36860,9 @@ const Statutory = ({ userEmail, userRole }) => {
           ) {
             row[header] = sanitizeValue(formatStatutoryDateDisplay(getEmployeeDateofjoiningRaw(emp)));
           }
-          // Form 17-B: Date of leaving or transfer
+          // Form 17-B / 27-C: Date of leaving or transfer
           else if (
-            form17BAutofillContext &&
+            (form17BAutofillContext || form27CAutofillContext) &&
             headerLower.includes('date') &&
             (headerLower.includes('leave') ||
               headerLower.includes('leaving') ||
@@ -35654,7 +36880,7 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           // Form 17-B: Nature of Job or Occupation
           else if (
-            form17BAutofillContext &&
+            (form17BAutofillContext || form27CAutofillContext) &&
             headerLower.includes('nature') &&
             (headerLower.includes('job') || headerLower.includes('occupation'))
           ) {
@@ -41612,12 +42838,41 @@ const Statutory = ({ userEmail, userRole }) => {
               headerFields
             );
           }
-          headerFields = enrichEstablishmentPrincipalEmployerHeadersFromSheet(
-            headerFields,
-            headerRowIndex,
-            effectiveSheetCols,
-            getMergedAwareCellText
+          const form27CHeaderProbe = matchesForm27CHint(
+            [
+              hints.fileName,
+              hints.formFileName,
+              hints.formName,
+              hints.item?.formName,
+              hints.item?.FormName,
+              firstSheetName,
+              formTitle,
+              formSubtitle
+            ]
+              .filter(Boolean)
+              .join(' ')
           );
+          const form11POWHeaderProbe = isForm11PeriodOfWorkContext(
+            { title: formTitle, subtitle: formSubtitle, reference: formReference },
+            hints.item,
+            [hints.fileName, hints.formFileName, hints.formName, firstSheetName].filter(Boolean).join(' '),
+            [],
+            ''
+          );
+          const form6APHeaderProbe = isForm6APHumidityRegisterContext(
+            { title: formTitle, subtitle: formSubtitle, reference: formReference },
+            hints.item,
+            [hints.fileName, hints.formFileName, hints.formName, firstSheetName].filter(Boolean).join(' '),
+            ''
+          );
+          if (!form27CHeaderProbe && !form11POWHeaderProbe && !form6APHeaderProbe) {
+            headerFields = enrichEstablishmentPrincipalEmployerHeadersFromSheet(
+              headerFields,
+              headerRowIndex,
+              effectiveSheetCols,
+              getMergedAwareCellText
+            );
+          }
           formHeaderInfo = {
             title: formTitle,
             subtitle: formSubtitle,
@@ -42481,6 +43736,40 @@ const Statutory = ({ userEmail, userRole }) => {
       .slice(0, Math.min(40, jsonData.length))
       .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
       .join(' ');
+    const form6APProbe = isForm6APHumidityRegisterContext(
+      formHeaderInfo,
+      hints.item,
+      hints.fileName || hints.formFileName || firstSheetName,
+      sheetTextBlobFinal
+    );
+    if (form6APProbe) {
+      const form6Parse = applyForm6APHumiditySheetParse({
+        jsonData,
+        effectiveSheetCols,
+        getMergedAwareCellText,
+        merges,
+        formHeaderInfo,
+        priorTableData: tableData.map((row) => ({ ...row }))
+      });
+      if (form6Parse) {
+        formHeaderInfo = enrichForm6APDisplayHeader(
+          form6Parse.formHeader,
+          hints.fileName || hints.formFileName || firstSheetName,
+          hints.item,
+          form6Parse.expandedHeaders,
+          sheetTextBlobFinal
+        );
+        headers = form6Parse.headers;
+        headersToUse = form6Parse.expandedHeaders;
+        expandedHeaders = [...form6Parse.expandedHeaders];
+        subColumnsData = form6Parse.subColumnsData;
+        headerRowIndex = form6Parse.headerRowIndex;
+        startIndex = form6Parse.startIndex;
+        tableStartCol = form6Parse.tableStartCol ?? tableStartCol;
+        tableData.length = 0;
+        (form6Parse.tableData || []).forEach((r) => tableData.push(r));
+      }
+    }
     const formAProbeFinal =
       isFormAMusterRollContext(formHeaderInfo) ||
       isFormAMusterRollRowContext(formHeaderInfo, null, firstSheetName, sheetTextBlobFinal);
@@ -42636,7 +43925,45 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
 
-    const formXXVIAPProbe = isFormXXVIAPAppointmentLetterContext(
+    const form2APProbe = isForm2APChangeNoticeContext(
+      formHeaderInfo,
+      hints.item,
+      hints.fileName || hints.formFileName || firstSheetName,
+      sheetTextBlobFinal
+    );
+    if (form2APProbe) {
+      const form2APLayout = resolveForm2APHeaderFieldLayout(
+        {
+          formHeader: formHeaderInfo,
+          headers: headersToUse,
+          headerRowIndex,
+          tableData
+        },
+        workbook,
+        {
+          formHeader: formHeaderInfo,
+          item: hints.item,
+          fileName: hints.fileName || hints.formFileName || firstSheetName,
+          formFileName: hints.formFileName,
+          sheetText: sheetTextBlobFinal,
+          preferredSheetName: firstSheetName
+        }
+      );
+      if (form2APLayout) {
+        formHeaderInfo = form2APLayout.formHeader;
+        headersToUse = [];
+        headers = [];
+        expandedHeaders = [];
+        tableData.length = 0;
+        headerRowIndex = -1;
+        startIndex = 0;
+        tableStartCol = 0;
+      }
+    }
+
+    const formXXVIAPProbe =
+      !form2APProbe &&
+      isFormXXVIAPAppointmentLetterContext(
       formHeaderInfo,
       hints.item,
       hints.fileName || hints.formFileName || firstSheetName,
@@ -43776,7 +45103,28 @@ const Statutory = ({ userEmail, userRole }) => {
       const isPdf = extFromName === 'pdf' || contentType.includes('pdf') || arrayBufferLooksLikePdf(arrayBuffer);
 
       if (isExcel) {
-        const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+        let excelArrayBuffer = arrayBuffer;
+        if (!isValidExcelArrayBuffer(excelArrayBuffer)) {
+          invalidateFormTemplateCache(templateCacheKey);
+          const refetched = await fetchFormTemplateArrayBuffer(fileUrls, templateCacheKey, { force: true });
+          excelArrayBuffer = refetched.arrayBuffer;
+        }
+        if (!isValidExcelArrayBuffer(excelArrayBuffer)) {
+          throw new Error(
+            'Form template download returned an invalid Excel file. Refresh the page and try again, or re-upload the template in Form Master.'
+          );
+        }
+        let workbook;
+        try {
+          workbook = XLSX.read(excelArrayBuffer, { type: 'array' });
+        } catch (readErr) {
+          invalidateFormTemplateCache(templateCacheKey);
+          throw new Error(
+            String(readErr?.message || '').includes('central directory')
+              ? 'Form template file is corrupted or incomplete. Refresh the page and try again, or re-upload the template in Form Master.'
+              : readErr?.message || 'Failed to read Excel form template.'
+          );
+        }
         const resolvedFormFileName =
           item.formFileName && !formFileNameLooksLikePlaceholder(item.formFileName)
             ? item.formFileName
@@ -43853,11 +45201,33 @@ const Statutory = ({ userEmail, userRole }) => {
             }
           }
         }
+        const wantsForm2AView =
+          isForm2APChangeNoticeContext(null, item, displayFileName) ||
+          isForm2APChangeNoticeContext(null, item, resolvedFormFileName || '');
+        if (wantsForm2AView && workbook.SheetNames?.length >= 1) {
+          const form2Sheet = repickForm2APWorkbookSheetIfNeeded(
+            workbook,
+            viewParseHints,
+            resolvedSheetName
+          );
+          if (form2Sheet && form2Sheet !== resolvedSheetName) {
+            resolvedSheetName = form2Sheet;
+            parsedRaw = parseExcelForm(workbook, {
+              ...viewParseHints,
+              preferredSheetName: form2Sheet,
+              formHeaderTitle: undefined,
+              formHeaderSubtitle: undefined,
+              formHeader: undefined
+            });
+            resolvedSheetName = parsedRaw.sheetName || form2Sheet;
+          }
+        }
         const wantsFormXXVIView =
-          isFormXXVIContext(null, item, displayFileName) ||
+          !wantsForm2AView &&
+          (isFormXXVIContext(null, item, displayFileName) ||
           isFormXXVIContext(null, item, resolvedFormFileName || '') ||
           isFormXXVIAPAppointmentLetterContext(null, item, displayFileName) ||
-          isFormXXVIAPAppointmentLetterContext(null, item, resolvedFormFileName || '');
+          isFormXXVIAPAppointmentLetterContext(null, item, resolvedFormFileName || ''));
         if (wantsFormXXVIView && workbook.SheetNames?.length > 1) {
           const xxviSheet = repickFormXXVIWorkbookSheetIfNeeded(
             workbook,
@@ -43875,6 +45245,50 @@ const Statutory = ({ userEmail, userRole }) => {
               formHeader: undefined
             });
             resolvedSheetName = parsedRaw.sheetName || xxviSheet;
+          }
+        }
+        const wantsForm6View =
+          isForm6APHumidityRegisterContext(null, item, displayFileName) ||
+          isForm6APHumidityRegisterContext(null, item, resolvedFormFileName || '');
+        if (wantsForm6View && workbook.SheetNames?.length >= 1) {
+          const form6Sheet = repickForm6APWorkbookSheetIfNeeded(
+            workbook,
+            viewParseHints,
+            resolvedSheetName
+          );
+          if (form6Sheet && form6Sheet !== resolvedSheetName) {
+            resolvedSheetName = form6Sheet;
+            parsedRaw = parseExcelForm(workbook, {
+              ...viewParseHints,
+              preferredSheetName: form6Sheet,
+              formHeaderTitle: undefined,
+              formHeaderSubtitle: undefined,
+              formHeader: undefined
+            });
+            resolvedSheetName = parsedRaw.sheetName || form6Sheet;
+          }
+        }
+        const wantsForm27CView =
+          isForm27CStatutoryContext(null, item, displayFileName, parsedRaw?.headers || [], '') ||
+          isForm27CStatutoryContext(null, item, resolvedFormFileName || '', parsedRaw?.headers || [], '') ||
+          /\bform[\s._-]*27[\s._-]*c\b/i.test(
+            [item?.formName, item?.FormName, displayFileName, resolvedFormFileName].filter(Boolean).join(' ')
+          );
+        if (wantsForm27CView && workbook.SheetNames?.length >= 1) {
+          const form27Sheet =
+            workbook.SheetNames.find((n) => /^27[\s._-]*c$/i.test(String(n).trim())) ||
+            workbook.SheetNames.find((n) => /27[\s._-]*c/i.test(String(n))) ||
+            workbook.SheetNames.find((n) => /health\s+register/i.test(String(n)));
+          if (form27Sheet && form27Sheet !== resolvedSheetName) {
+            resolvedSheetName = form27Sheet;
+            parsedRaw = parseExcelForm(workbook, {
+              ...viewParseHints,
+              preferredSheetName: form27Sheet,
+              formHeaderTitle: parsedRaw?.formHeader?.title,
+              formHeaderSubtitle: parsedRaw?.formHeader?.subtitle,
+              formHeader: parsedRaw?.formHeader
+            });
+            resolvedSheetName = parsedRaw.sheetName || form27Sheet;
           }
         }
         const wantsFormVIIView =
@@ -44243,13 +45657,43 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
         if (
-          isFormXXVIAPHeaderFieldLayoutFormHeader(formHeaderForModal) ||
-          isFormXXVIAPAppointmentLetterContext(
+          isForm2APHeaderFieldLayoutFormHeader(formHeaderForModal) ||
+          isForm2APChangeNoticeContext(
             formHeaderForModal,
             item,
             displayFileName,
             sheetTextForVariant
           )
+        ) {
+          const form2APLayout = resolveForm2APHeaderFieldLayout(parsed, workbook, {
+            formHeader: formHeaderForModal,
+            item,
+            fileName: displayFileName,
+            formFileName: resolvedFormFileName || item?.formFileName,
+            sheetText: sheetTextForVariant,
+            preferredSheetName: resolvedSheetName
+          });
+          if (form2APLayout) {
+            formHeaderForModal = form2APLayout.formHeader;
+            tableHeadersForModal = [];
+            parsed.headers = [];
+            parsed.tableData = [];
+          }
+        }
+        if (
+          !isForm2APChangeNoticeContext(
+            formHeaderForModal,
+            item,
+            displayFileName,
+            sheetTextForVariant
+          ) &&
+          (isFormXXVIAPHeaderFieldLayoutFormHeader(formHeaderForModal) ||
+          isFormXXVIAPAppointmentLetterContext(
+            formHeaderForModal,
+            item,
+            displayFileName,
+            sheetTextForVariant
+          ))
         ) {
           const formXXVIAPLayout = resolveFormXXVIAPHeaderFieldLayout(parsed, workbook, {
             formHeader: formHeaderForModal,
@@ -44340,6 +45784,115 @@ const Statutory = ({ userEmail, userRole }) => {
                 : 'Register of Fines and Unpaid Accumulations for the year'
           };
         }
+        const form6APModalOpen =
+          isForm6APHumidityRegisterContext(
+            formHeaderForModal,
+            item,
+            displayFileName,
+            sheetTextForVariant
+          ) || headersIndicateForm6APHumidityTable(tableHeadersForModal);
+        if (form6APModalOpen) {
+          if (formHeaderForModal) {
+            formHeaderForModal = enrichForm6APDisplayHeader(
+              formHeaderForModal,
+              displayFileName,
+              item,
+              tableHeadersForModal,
+              sheetTextForVariant
+            );
+          }
+          if (!headersIndicateForm6APHumidityTable(tableHeadersForModal) && workbook?.Sheets) {
+            const wsName = parsed.sheetName || resolvedSheetName || workbook.SheetNames?.[0];
+            const ws = wsName ? workbook.Sheets[wsName] : null;
+            if (ws) {
+              const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+              const merges = ws['!merges'] || [];
+              const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1');
+              const effectiveSheetCols = range.e && typeof range.e.c === 'number' ? range.e.c + 1 : 9;
+              const rawCell = (r, c) => {
+                const ref = XLSX.utils.encode_cell({ r, c });
+                const cell = ws[ref];
+                return cell && cell.v != null ? String(cell.v).trim() : '';
+              };
+              const getMergedAwareCellText = (r, c) => {
+                const direct = rawCell(r, c);
+                if (direct) return direct;
+                for (let i = 0; i < merges.length; i += 1) {
+                  const m = merges[i];
+                  if (!m?.s || !m?.e) continue;
+                  if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) {
+                    return rawCell(m.s.r, m.s.c);
+                  }
+                }
+                return '';
+              };
+              const form6Parse = applyForm6APHumiditySheetParse({
+                jsonData,
+                effectiveSheetCols,
+                getMergedAwareCellText,
+                merges,
+                formHeaderInfo: formHeaderForModal,
+                priorTableData: parsed.tableData || []
+              });
+              if (form6Parse) {
+                formHeaderForModal = enrichForm6APDisplayHeader(
+                  form6Parse.formHeader,
+                  displayFileName,
+                  item,
+                  form6Parse.expandedHeaders,
+                  sheetTextForVariant
+                );
+                tableHeadersForModal = form6Parse.expandedHeaders;
+                parsed.headers = form6Parse.headers;
+                parsed.tableData = form6Parse.tableData;
+                parsed.subColumns = form6Parse.subColumnsData;
+                parsed.headerRowIndex = form6Parse.headerRowIndex;
+                parsed.dataStartIndex = form6Parse.startIndex;
+                parsed.tableStartCol = form6Parse.tableStartCol ?? parsed.tableStartCol;
+              }
+            }
+          }
+          parsed.tableData = applyForm6APHumidityTableRowsForAutofill(
+            remapForm6APRowsToHeaders(
+              parsed.tableData || [],
+              parsed.headers || [],
+              tableHeadersForModal
+            ),
+            tableHeadersForModal
+          );
+        }
+        const form27CModalOpen = isForm27CStatutoryContext(
+          item,
+          displayFileName,
+          formHeaderForModal,
+          tableHeadersForModal,
+          sheetTextForVariant
+        );
+        if (form27CModalOpen) {
+          if (formHeaderForModal) {
+            formHeaderForModal = enrichForm27CDisplayHeader(
+              formHeaderForModal,
+              displayFileName,
+              item,
+              tableHeadersForModal,
+              sheetTextForVariant
+            );
+          }
+          tableHeadersForModal = normalizeForm27CTableHeaders(tableHeadersForModal);
+          if (Array.isArray(parsed.tableData) && parsed.tableData.length > 0) {
+            parsed.tableData = filterStatutoryTemplateColumnIndexRows(
+              filterStatutoryDraftTableRows(
+                remapForm27CRowsToHeaders(
+                  parsed.tableData,
+                  parsed.headers || [],
+                  tableHeadersForModal
+                ),
+                tableHeadersForModal
+              ),
+              tableHeadersForModal
+            );
+          }
+        }
         const formIFinesModalOpen = isFormIRegisterOfFinesContext(
           item,
           displayFileName,
@@ -44369,6 +45922,7 @@ const Statutory = ({ userEmail, userRole }) => {
           tableHeadersForModal
         );
         const formXXIAPFinesModalOpen =
+          !form27CModalOpen &&
           !formXAPFinesModalOpen &&
           !formXIIIWorkmenModalOpen &&
           !formXXAPDeductionsModalOpen &&
@@ -44385,7 +45939,9 @@ const Statutory = ({ userEmail, userRole }) => {
           displayFileName,
           tableHeadersForModal
         );
-        const formXXVIIQuarterlyModalOpen = isFormXXVIIQuarterlyReturnsContext(
+        const formXXVIIQuarterlyModalOpen =
+          !form27CModalOpen &&
+          isFormXXVIIQuarterlyReturnsContext(
           formHeaderForModal,
           item,
           displayFileName,
@@ -44527,13 +46083,15 @@ const Statutory = ({ userEmail, userRole }) => {
             parsed.tableData = padFormIWorkmenRowsForHeaders(parsed.tableData, tableHeadersForModal);
           }
         }
-        const form17BModalOpen = isForm17BStatutoryContext(
-          item,
-          displayFileName,
-          formHeaderForModal,
-          tableHeadersForModal,
-          sheetTextForVariant
-        );
+        const form17BModalOpen =
+          !form27CModalOpen &&
+          isForm17BStatutoryContext(
+            item,
+            displayFileName,
+            formHeaderForModal,
+            tableHeadersForModal,
+            sheetTextForVariant
+          );
         if (form17BModalOpen) {
           if (formHeaderForModal) {
             formHeaderForModal = enrichForm17BDisplayHeader(
@@ -44546,9 +46104,12 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           tableHeadersForModal = normalizeForm17BTableHeaders(tableHeadersForModal);
           if (Array.isArray(parsed.tableData) && parsed.tableData.length > 0) {
-            parsed.tableData = remapForm17BRowsToHeaders(
-              parsed.tableData,
-              parsed.headers || [],
+            parsed.tableData = filterStatutoryTemplateColumnIndexRows(
+              remapForm17BRowsToHeaders(
+                filterStatutoryDraftTableRows(parsed.tableData, tableHeadersForModal),
+                parsed.headers || [],
+                tableHeadersForModal
+              ),
               tableHeadersForModal
             );
           }
@@ -44577,7 +46138,65 @@ const Statutory = ({ userEmail, userRole }) => {
           sheetTextForVariant
         );
         if (form11POWModalOpen) {
-          tableHeadersForModal = normalizeForm11PeriodOfWorkTableHeaders(tableHeadersForModal);
+          if (formHeaderForModal) {
+            formHeaderForModal = enrichForm11POWDisplayHeader(
+              formHeaderForModal,
+              displayFileName,
+              item,
+              tableHeadersForModal,
+              sheetTextForVariant
+            );
+          }
+          if (!headersIndicateForm11PeriodOfWork(tableHeadersForModal) && workbook?.Sheets) {
+            const wsName = parsed.sheetName || resolvedSheetName || workbook.SheetNames?.[0];
+            const ws = wsName ? workbook.Sheets[wsName] : null;
+            if (ws) {
+              const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+              const merges = ws['!merges'] || [];
+              const rawCell = (r, c) => {
+                const ref = XLSX.utils.encode_cell({ r, c });
+                const cell = ws[ref];
+                return cell && cell.v != null ? String(cell.v).trim() : '';
+              };
+              const getMergedAwareCellText = (r, c) => {
+                const direct = rawCell(r, c);
+                if (direct) return direct;
+                for (let i = 0; i < merges.length; i += 1) {
+                  const m = merges[i];
+                  if (!m?.s || !m?.e) continue;
+                  if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) {
+                    return rawCell(m.s.r, m.s.c);
+                  }
+                }
+                return '';
+              };
+              const rebuilt = rebuildForm11PeriodOfWorkHeaders({
+                jsonData,
+                effectiveSheetCols: 50,
+                getMergedAwareCellText,
+                headers: parsed.headers || [],
+                expandedHeaders: tableHeadersForModal,
+                headerRowIndex: parsed.headerRowIndex,
+                startIndex: parsed.dataStartIndex,
+                tableData: parsed.tableData || [],
+                firstSheetName: wsName,
+                formHeaderInfo: formHeaderForModal
+              });
+              if (rebuilt) {
+                tableHeadersForModal = rebuilt.expandedHeaders;
+                parsed.headers = rebuilt.headers;
+                parsed.tableData = rebuilt.tableData;
+                parsed.headerRowIndex = rebuilt.headerRowIndex;
+                parsed.dataStartIndex = rebuilt.startIndex;
+                parsed.tableStartCol = rebuilt.tableStartCol ?? parsed.tableStartCol;
+              }
+            }
+          }
+          tableHeadersForModal = normalizeForm11PeriodOfWorkTableHeaders(
+            headersIndicateForm11PeriodOfWork(tableHeadersForModal)
+              ? tableHeadersForModal
+              : buildForm11APCanonicalHeaders()
+          );
           parsed.tableData = ensureForm11APTemplateRows(
             remapForm11PeriodOfWorkRowsToHeaders(
               parsed.tableData || [],
@@ -44637,7 +46256,7 @@ const Statutory = ({ userEmail, userRole }) => {
             if (Array.isArray(sitesForContractor) && sitesForContractor.length > 0) {
               setSiteDetailsList(sitesForContractor);
             }
-            const withSiteHeaders = applyStatutorySiteCompanyHeaders(
+            let withSiteHeaders = applyStatutorySiteCompanyHeaders(
               initialHeaderFormData,
               resolvedSiteForContractor,
               sitesForContractor,
@@ -44645,6 +46264,9 @@ const Statutory = ({ userEmail, userRole }) => {
               item,
               companyDetailsList
             );
+            if (form27CModalOpen || form11POWModalOpen || form6APModalOpen) {
+              withSiteHeaders = stripStatutoryEstablishmentHeaderFormDataKeys(withSiteHeaders);
+            }
             if (withSiteHeaders !== initialHeaderFormData) {
               initialHeaderFormData = withSiteHeaders;
               setHeaderFormData(withSiteHeaders);
@@ -44715,6 +46337,7 @@ const Statutory = ({ userEmail, userRole }) => {
           console.log('🔄 Autofill: template from Form File – headers:', tableHeadersForModal.length);
           const formAHeaderOnlyModal = isFormAHeaderFieldLayoutFormHeader(formHeaderForModal);
           const form18APHeaderOnlyModal = isForm18APHeaderFieldLayoutFormHeader(formHeaderForModal);
+          const form2APHeaderOnlyModal = isForm2APHeaderFieldLayoutFormHeader(formHeaderForModal);
           const formXXVIAPHeaderOnlyModal = isFormXXVIAPHeaderFieldLayoutFormHeader(formHeaderForModal);
           const formVIIAPHeaderOnlyModal = isFormVIIAPHeaderFieldLayoutFormHeader(formHeaderForModal);
           const formXIXAPHeaderOnlyModal = isFormXIXAPHeaderFieldLayoutFormHeader(formHeaderForModal);
@@ -44733,10 +46356,19 @@ const Statutory = ({ userEmail, userRole }) => {
               })
             : [];
           // Show the selected form file immediately on first click, then replace rows with saved draft / autofill data.
-          const initialModalRows = formAHeaderOnlyModal || form18APHeaderOnlyModal || formXXVIAPHeaderOnlyModal || formVIIAPHeaderOnlyModal || formXIXAPHeaderOnlyModal
+          const initialModalRows = formAHeaderOnlyModal || form18APHeaderOnlyModal || form2APHeaderOnlyModal || formXXVIAPHeaderOnlyModal || formVIIAPHeaderOnlyModal || formXIXAPHeaderOnlyModal
             ? []
             : formIIModalOpen
             ? remapFormIIRowsToHeaders(parsed.tableData || [], parsed.headers || [], tableHeadersForModal)
+            : form6APModalOpen
+              ? applyForm6APHumidityTableRowsForAutofill(
+                  remapForm6APRowsToHeaders(
+                    parsed.tableData || [],
+                    parsed.headers || [],
+                    tableHeadersForModal
+                  ),
+                  tableHeadersForModal
+                )
             : form11POWModalOpen
               ? ensureForm11APTemplateRows(
                   remapForm11PeriodOfWorkRowsToHeaders(
@@ -44775,6 +46407,8 @@ const Statutory = ({ userEmail, userRole }) => {
                         selectedMonth,
                         item
                       )
+                : form27CModalOpen
+                  ? []
                 : formXXVIIQuarterlyModalOpen
                   ? applyFormXXVIIQuarterlyNilTableRows(
                       tableHeadersForModal,
@@ -44801,8 +46435,11 @@ const Statutory = ({ userEmail, userRole }) => {
                       ),
                       tableHeadersForModal
                     )
-                  : filterStatutoryDraftTableRows(
-                      remapFormARowsByColumnIndex(parsed.tableData || [], parsed.headers || [], tableHeadersForModal),
+                  : filterStatutoryTemplateColumnIndexRows(
+                      filterStatutoryDraftTableRows(
+                        remapFormARowsByColumnIndex(parsed.tableData || [], parsed.headers || [], tableHeadersForModal),
+                        tableHeadersForModal
+                      ),
                       tableHeadersForModal
                     );
           const wageRegisterModalOpen = isRegisterOfWagesFormContext(
@@ -44812,7 +46449,7 @@ const Statutory = ({ userEmail, userRole }) => {
             tableHeadersForModal
           );
           setFormTableData(
-            formAHeaderOnlyModal || form18APHeaderOnlyModal || formXXVIAPHeaderOnlyModal || formVIIAPHeaderOnlyModal || formXIXAPHeaderOnlyModal
+            formAHeaderOnlyModal || form18APHeaderOnlyModal || form2APHeaderOnlyModal || formXXVIAPHeaderOnlyModal || formVIIAPHeaderOnlyModal || formXIXAPHeaderOnlyModal
               ? []
               : form26AModalOpen
               ? applyForm26ANilTableRows(tableHeadersForModal, initialModalRows, selectedMonth, item)
@@ -44826,16 +46463,25 @@ const Statutory = ({ userEmail, userRole }) => {
                   ? shouldAutofill
                     ? initialModalRows
                     : applyForm12AdvancesNilTableRows(tableHeadersForModal, initialModalRows, selectedMonth, item)
+                : form27CModalOpen
+                  ? []
                 : formXXVIIQuarterlyModalOpen
                   ? applyFormXXVIIQuarterlyNilTableRows(tableHeadersForModal, initialModalRows, selectedMonth, item)
                 : formXXIIModalOpen
                   ? filterWageRegisterNilPlaceholderRows(initialModalRows, tableHeadersForModal)
                 : form11POWModalOpen
                   ? ensureForm11APTemplateRows(initialModalRows, tableHeadersForModal)
+                : form6APModalOpen
+                  ? applyForm6APHumidityTableRowsForAutofill(initialModalRows, tableHeadersForModal)
                 : wageRegisterModalOpen
                   ? filterWageRegisterNilPlaceholderRows(initialModalRows, tableHeadersForModal)
                   : initialModalRows
           );
+          if ((form6APModalOpen || form11POWModalOpen) && !shouldPreferSavedDraftData) {
+            setTableAutofillLoading(false);
+            setTableAutofillProgress('');
+            return;
+          }
           if (shouldPreferSavedDraftData) {
             let loadedSavedData =
               draftRowsFromOpenWorkbook.length > 0 &&
@@ -45035,7 +46681,15 @@ const Statutory = ({ userEmail, userRole }) => {
                   const draftResp = await fetch(`/server/statutoryreg_function/statutory/${sampleRowId}/file/Draft?_ts=${modalReqTs}`);
                   if (draftResp.ok) {
                     const draftArrayBuffer = await draftResp.arrayBuffer();
-                    const draftWb = XLSX.read(draftArrayBuffer, { type: 'array' });
+                    if (isValidExcelArrayBuffer(draftArrayBuffer)) {
+                    let draftWb;
+                    try {
+                      draftWb = XLSX.read(draftArrayBuffer, { type: 'array' });
+                    } catch (draftReadErr) {
+                      console.warn('Saved draft Excel could not be read:', draftReadErr);
+                      draftWb = null;
+                    }
+                    if (draftWb) {
                     const draftRows = resolveSavedDraftRowsForModal({
                       workbook: draftWb,
                       parsed: parsedForDraftResolve,
@@ -45060,6 +46714,8 @@ const Statutory = ({ userEmail, userRole }) => {
                       loadedSavedData = true;
                       setSuccess('Loaded saved draft data.');
                       setTimeout(() => setSuccess(''), 2500);
+                    }
+                    }
                     }
                   }
                 }
@@ -45104,7 +46760,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 setError('Could not load the saved draft. Loading employee data from Zoho People…');
                 setTimeout(() => setError(''), 4000);
               }
-              if (form11ModalOpen || form26ModalOpen || form26AModalOpen || formIFinesModalOpen || formXAPFinesModalOpen || formXXVIIQuarterlyModalOpen) {
+              if (form11ModalOpen || form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formIFinesModalOpen || formXAPFinesModalOpen || formXXVIIQuarterlyModalOpen) {
                 setTableAutofillLoading(false);
                 setTableAutofillProgress('');
               } else {
@@ -45132,7 +46788,7 @@ const Statutory = ({ userEmail, userRole }) => {
               });
               }
             }
-          } else if (form11ModalOpen || form26ModalOpen || form26AModalOpen || formIFinesModalOpen || formXAPFinesModalOpen || formXXVIIQuarterlyModalOpen) {
+          } else if (form11ModalOpen || form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formIFinesModalOpen || formXAPFinesModalOpen || formXXVIIQuarterlyModalOpen) {
             setTableAutofillLoading(false);
             setTableAutofillProgress('');
           } else {
@@ -45161,6 +46817,15 @@ const Statutory = ({ userEmail, userRole }) => {
                 : form11POWModalOpen
                   ? ensureForm11APTemplateRows(
                       remapForm11PeriodOfWorkRowsToHeaders(
+                        parsed.tableData || [],
+                        parsed.headers || [],
+                        tableHeadersForModal
+                      ),
+                      tableHeadersForModal
+                    )
+                : form6APModalOpen
+                  ? applyForm6APHumidityTableRowsForAutofill(
+                      remapForm6APRowsToHeaders(
                         parsed.tableData || [],
                         parsed.headers || [],
                         tableHeadersForModal
@@ -45841,6 +47506,27 @@ const Statutory = ({ userEmail, userRole }) => {
       formFileModalData?.parsedTableHeaders || tableHeaders,
       formFileModalData?.sheetText || ''
     );
+    base = enrichForm27CDisplayHeader(
+      base,
+      fn || formFileModalData?.formFileName || '',
+      item,
+      formFileModalData?.parsedTableHeaders || tableHeaders,
+      formFileModalData?.sheetText || ''
+    );
+    base = enrichForm11POWDisplayHeader(
+      base,
+      fn || formFileModalData?.formFileName || '',
+      item,
+      formFileModalData?.parsedTableHeaders || tableHeaders,
+      formFileModalData?.sheetText || ''
+    );
+    base = enrichForm6APDisplayHeader(
+      base,
+      fn || formFileModalData?.formFileName || '',
+      item,
+      formFileModalData?.parsedTableHeaders || tableHeaders,
+      formFileModalData?.sheetText || ''
+    );
     return base;
   }, [
     formFileModalData?.parsedFormHeader,
@@ -45965,6 +47651,26 @@ const Statutory = ({ userEmail, userRole }) => {
     selectedMonth,
     displayFormHeader
   ]);
+
+  const form6APModalOpen = useMemo(
+    () =>
+      isForm6APHeaderFieldLayoutFormHeader(displayFormHeader) ||
+      isForm6APHumidityRegisterContext(
+        displayFormHeader,
+        formFileModalData?.item,
+        formFileModalData?.fileName || formFileModalData?.formFileName || '',
+        formFileModalData?.sheetText || ''
+      ) ||
+      headersIndicateForm6APHumidityTable(displayTableHeaders),
+    [
+      displayFormHeader,
+      displayTableHeaders,
+      formFileModalData?.item,
+      formFileModalData?.fileName,
+      formFileModalData?.formFileName,
+      formFileModalData?.sheetText
+    ]
+  );
 
   const displayFormTableData = useMemo(() => {
     const rows = formTableData;
@@ -46271,10 +47977,11 @@ const Statutory = ({ userEmail, userRole }) => {
     const hdrs = displayTableHeaders;
     const item = formFileModalData?.item;
     const fn = formFileModalData?.fileName || '';
-    if (!Array.isArray(hdrs) || hdrs.length < 28) return null;
+    if (!Array.isArray(hdrs) || hdrs.length < 10) return null;
     if (!isForm11PeriodOfWorkContext(displayFormHeader, item, fn, hdrs, formFileModalData?.sheetText || '')) {
       return null;
     }
+    if (!headersIndicateForm11PeriodOfWork(hdrs)) return null;
 
     const groupHeaderStyle = {
       backgroundColor: STAT_FORM_FILE_ACCENT_BG,
@@ -47091,6 +48798,122 @@ const Statutory = ({ userEmail, userRole }) => {
       </>
     );
   }, [displayTableHeaders, displayFormHeader, formFileModalData?.item, formFileModalData?.fileName]);
+
+  /** Form 6 (AP): two-row humidity band — time periods + Dry/Wet bulb sub-columns. */
+  const form6APHumidityThead = useMemo(() => {
+    const hdrs = displayTableHeaders;
+    const item = formFileModalData?.item;
+    const fn = formFileModalData?.fileName || '';
+    const sheetText = formFileModalData?.sheetText || '';
+    if (!Array.isArray(hdrs) || hdrs.length < 5) return null;
+    if (
+      !isForm6APHumidityRegisterContext(displayFormHeader, item, fn, sheetText) &&
+      !headersIndicateForm6APHumidityTable(hdrs)
+    ) {
+      return null;
+    }
+
+    const splitHeader = (h) => {
+      const m = String(h || '').match(/^(.+)_([\s\S]+)$/);
+      if (!m) return null;
+      return { parent: m[1].trim(), sub: m[2].trim() };
+    };
+
+    let hasGroupWithSubs = false;
+    const chunks = [];
+    for (let i = 0; i < hdrs.length; i += 1) {
+      const first = splitHeader(hdrs[i]);
+      if (!first) {
+        chunks.push({ kind: 'single', header: hdrs[i], start: i, end: i + 1 });
+        continue;
+      }
+      let j = i + 1;
+      while (j < hdrs.length) {
+        const next = splitHeader(hdrs[j]);
+        if (!next || next.parent.toLowerCase() !== first.parent.toLowerCase()) break;
+        j += 1;
+      }
+      const span = j - i;
+      if (span >= 2) {
+        hasGroupWithSubs = true;
+        chunks.push({ kind: 'group', parent: first.parent, start: i, end: j });
+      } else {
+        chunks.push({ kind: 'single', header: hdrs[i], start: i, end: i + 1 });
+      }
+      i = j - 1;
+    }
+    if (!hasGroupWithSubs) return null;
+
+    const groupHeaderStyle = {
+      backgroundColor: STAT_FORM_FILE_ACCENT_BG,
+      color: 'white',
+      padding: '10px 8px',
+      textAlign: 'center',
+      fontWeight: '700',
+      fontSize: '12px',
+      border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
+      verticalAlign: 'middle',
+      whiteSpace: 'normal',
+      lineHeight: 1.3
+    };
+    const leafHeaderStyle = {
+      ...groupHeaderStyle,
+      fontWeight: '600',
+      fontSize: '11px',
+      minWidth: '48px',
+      position: 'sticky',
+      top: 0,
+      zIndex: 10
+    };
+
+    const row1Cells = chunks.map((chunk, idx) => {
+      if (chunk.kind === 'single') {
+        return (
+          <th
+            key={`form6-single-${idx}`}
+            rowSpan={2}
+            style={groupHeaderStyle}
+            title={chunk.header}
+          >
+            {formatForm6HumidityHeaderLabel(chunk.header)}
+          </th>
+        );
+      }
+      return (
+        <th key={`form6-group-${idx}`} colSpan={chunk.end - chunk.start} style={groupHeaderStyle} title={chunk.parent}>
+          {chunk.parent}
+        </th>
+      );
+    });
+
+    const row2Cells = [];
+    chunks.forEach((chunk, chunkIdx) => {
+      if (chunk.kind !== 'group') return;
+      for (let col = chunk.start; col < chunk.end; col += 1) {
+        const split = splitHeader(hdrs[col]);
+        const sub = split?.sub ? formatForm6HumidityHeaderLabel(split.sub) : formatForm6HumidityHeaderLabel(hdrs[col]);
+        row2Cells.push(
+          <th key={`form6-sub-${chunkIdx}-${col}`} style={leafHeaderStyle} title={sub}>
+            {sub}
+          </th>
+        );
+      }
+    });
+
+    if (row2Cells.length === 0) return null;
+    return (
+      <>
+        <tr>{row1Cells}</tr>
+        <tr>{row2Cells}</tr>
+      </>
+    );
+  }, [
+    displayTableHeaders,
+    displayFormHeader,
+    formFileModalData?.item,
+    formFileModalData?.fileName,
+    formFileModalData?.sheetText
+  ]);
 
   /** Form VI: merged festival-holiday band over holiday date columns; vertical sub-headers like Excel. */
   const formVIFestivalThead = useMemo(() => {
@@ -48506,7 +50329,7 @@ const Statutory = ({ userEmail, userRole }) => {
               backgroundColor: 'white',
               borderRadius: '12px',
               width: '90%',
-              maxWidth: registerOfWagesMergedTheadRows || formVDailyHoursThead || formDRemunerationThead || form11PeriodOfWorkThead ? 'min(98vw, 1900px)' : '1200px',
+              maxWidth: registerOfWagesMergedTheadRows || formVDailyHoursThead || formDRemunerationThead || form11PeriodOfWorkThead || form6APHumidityThead ? 'min(98vw, 1900px)' : '1200px',
               maxHeight: '90vh',
               minHeight: 0,
               display: 'flex',
@@ -48915,6 +50738,124 @@ const Statutory = ({ userEmail, userRole }) => {
                           })}
                         </div>
                       )}
+                      {displayFormHeader.fields && displayFormHeader.fields.length > 0 && isForm6APHeaderFieldLayoutFormHeader(displayFormHeader) && (
+                        <div style={{
+                          marginTop: '20px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '8px',
+                          overflow: 'hidden',
+                          backgroundColor: '#fff'
+                        }}>
+                          {displayFormHeader.fields.map((field, index) => (
+                            <div
+                              key={field.key || index}
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'minmax(200px, 1fr) minmax(240px, 1.4fr)',
+                                borderBottom: index < displayFormHeader.fields.length - 1 ? '1px solid #e5e7eb' : 'none',
+                                minHeight: '44px'
+                              }}
+                            >
+                              <div style={{
+                                padding: '10px 12px',
+                                borderRight: '1px solid #e5e7eb',
+                                backgroundColor: '#f9fafb',
+                                fontSize: '13px',
+                                fontWeight: '500',
+                                color: '#374151',
+                                lineHeight: 1.45,
+                                display: 'flex',
+                                alignItems: 'center'
+                              }}>
+                                {field.label}
+                              </div>
+                              <div style={{ padding: '6px 8px', display: 'flex', alignItems: 'center' }}>
+                                <input
+                                  type="text"
+                                  value={headerFormData[field.key] || ''}
+                                  onChange={(e) => {
+                                    if (isFormFileReadOnly) return;
+                                    handleHeaderFieldChange(field.key, e.target.value);
+                                  }}
+                                  readOnly={isFormFileReadOnly}
+                                  placeholder={getForm6APHeaderFieldPlaceholder()}
+                                  style={{
+                                    width: '100%',
+                                    padding: '8px 10px',
+                                    border: '1px solid #d1d5db',
+                                    borderRadius: '4px',
+                                    fontSize: '14px',
+                                    color: '#1f2937',
+                                    backgroundColor: isFormFileReadOnly ? '#f9fafb' : '#fff',
+                                    boxSizing: 'border-box'
+                                  }}
+                                  onFocus={(e) => { e.target.style.borderColor = '#3b82f6'; }}
+                                  onBlur={(e) => { e.target.style.borderColor = '#d1d5db'; }}
+                                />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {displayFormHeader.fields && displayFormHeader.fields.length > 0 && isForm2APHeaderFieldLayoutFormHeader(displayFormHeader) && (
+                        <div style={{
+                          marginTop: '20px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '8px',
+                          overflow: 'hidden',
+                          backgroundColor: '#fff'
+                        }}>
+                          {displayFormHeader.fields.map((field, index) => (
+                            <div
+                              key={field.key || index}
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'minmax(240px, 1.2fr) minmax(200px, 1fr)',
+                                borderBottom: index < displayFormHeader.fields.length - 1 ? '1px solid #e5e7eb' : 'none',
+                                minHeight: '44px'
+                              }}
+                            >
+                              <div style={{
+                                padding: '10px 12px',
+                                borderRight: '1px solid #e5e7eb',
+                                backgroundColor: '#f9fafb',
+                                fontSize: '13px',
+                                fontWeight: '500',
+                                color: '#374151',
+                                lineHeight: 1.45,
+                                display: 'flex',
+                                alignItems: 'center'
+                              }}>
+                                {field.label}
+                              </div>
+                              <div style={{ padding: '6px 8px', display: 'flex', alignItems: 'center' }}>
+                                <input
+                                  type="text"
+                                  value={headerFormData[field.key] || ''}
+                                  onChange={(e) => {
+                                    if (isFormFileReadOnly) return;
+                                    handleHeaderFieldChange(field.key, e.target.value);
+                                  }}
+                                  readOnly={isFormFileReadOnly}
+                                  placeholder={`Enter ${String(field.label || '').replace(/:+$/, '').trim()}`}
+                                  style={{
+                                    width: '100%',
+                                    padding: '8px 10px',
+                                    border: '1px solid #d1d5db',
+                                    borderRadius: '4px',
+                                    fontSize: '14px',
+                                    color: '#1f2937',
+                                    backgroundColor: isFormFileReadOnly ? '#f9fafb' : '#fff',
+                                    boxSizing: 'border-box'
+                                  }}
+                                  onFocus={(e) => { e.target.style.borderColor = '#3b82f6'; }}
+                                  onBlur={(e) => { e.target.style.borderColor = '#d1d5db'; }}
+                                />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       {displayFormHeader.fields && displayFormHeader.fields.length > 0 && isForm18APHeaderFieldLayoutFormHeader(displayFormHeader) && (
                         <div style={{
                           marginTop: '20px',
@@ -48974,7 +50915,7 @@ const Statutory = ({ userEmail, userRole }) => {
                           ))}
                         </div>
                       )}
-                      {displayFormHeader.fields && displayFormHeader.fields.length > 0 && !isForm18APHeaderFieldLayoutFormHeader(displayFormHeader) && !isFormXXVIAPHeaderFieldLayoutFormHeader(displayFormHeader) && !isFormVIIAPHeaderFieldLayoutFormHeader(displayFormHeader) && !isFormXIXAPHeaderFieldLayoutFormHeader(displayFormHeader) && (
+                      {displayFormHeader.fields && displayFormHeader.fields.length > 0 && !isForm6APHeaderFieldLayoutFormHeader(displayFormHeader) && !isForm2APHeaderFieldLayoutFormHeader(displayFormHeader) && !isForm18APHeaderFieldLayoutFormHeader(displayFormHeader) && !isFormXXVIAPHeaderFieldLayoutFormHeader(displayFormHeader) && !isFormVIIAPHeaderFieldLayoutFormHeader(displayFormHeader) && !isFormXIXAPHeaderFieldLayoutFormHeader(displayFormHeader) && (
                         <div style={{
                           display: 'grid',
                           gridTemplateColumns: (displayFormHeader.form12MergedHeaderCell || displayFormHeader.form10MergedHeaderCell || (displayFormHeader.fields || []).some((f) => String(f.key || '').startsWith('form14_header_')) || isFormAMusterRollContext(displayFormHeader) || isFormXXVIAPHeaderFieldLayoutFormHeader(displayFormHeader) || isFormVIIAPHeaderFieldLayoutFormHeader(displayFormHeader) || isFormXIXAPHeaderFieldLayoutFormHeader(displayFormHeader))
@@ -48989,6 +50930,13 @@ const Statutory = ({ userEmail, userRole }) => {
                                 displayFormHeader,
                                 field,
                                 displayTableHeaders
+                              ) &&
+                              !shouldHideStatutoryEstablishmentHeaderInAutofill(
+                                displayFormHeader,
+                                field,
+                                formFileModalData?.fileName || formFileModalData?.formFileName || '',
+                                displayTableHeaders,
+                                formFileModalData?.sheetText || ''
                               )
                             )
                             .map((field, index) => {
@@ -49463,6 +51411,8 @@ const Statutory = ({ userEmail, userRole }) => {
                             registerOfWagesCumMusterRollThead
                           ) : formQGroupedThead ? (
                             formQGroupedThead
+                          ) : form6APHumidityThead ? (
+                            form6APHumidityThead
                           ) : registerOfWagesMergedTheadRows ? (
                             registerOfWagesMergedTheadRows
                           ) : formXVIITablead ? (
@@ -49768,7 +51718,9 @@ const Statutory = ({ userEmail, userRole }) => {
                                     placeholder={
                                       isFormIILegacySpacerHeader(header)
                                         ? ''
-                                        : `Enter ${formatStatutoryTableHeaderLabel(header)}`
+                                        : form6APModalOpen
+                                          ? getForm6APHumidityCellPlaceholder(header)
+                                          : `Enter ${formatStatutoryTableHeaderLabel(header)}`
                                     }
                                   />
                                 </td>
@@ -49809,6 +51761,17 @@ const Statutory = ({ userEmail, userRole }) => {
                         </button>
                       </div>
                     ) : null}
+                    {form6APModalOpen ? (
+                      <div className="statutory-form6-ap-certification" aria-label="Form 6 certification">
+                        <div className="statutory-form6-ap-certification__row">
+                          <div className="statutory-form6-ap-certification__text">{FORM_6_AP_CERTIFICATION_LINE}</div>
+                          <div className="statutory-form6-ap-certification__signed">{FORM_6_AP_SIGNED_LABEL}</div>
+                        </div>
+                        <div className="statutory-form6-ap-certification__row statutory-form6-ap-certification__row--signed-only">
+                          <div className="statutory-form6-ap-certification__signed">{FORM_6_AP_SIGNED_LABEL}</div>
+                        </div>
+                      </div>
+                    ) : (
                     <div className="statutory-form-signature-footer" aria-label="Employer signature block">
                       <div className="statutory-form-signature-footer__inner">
                         <div className="statutory-form-signature-footer__for">
@@ -49820,6 +51783,7 @@ const Statutory = ({ userEmail, userRole }) => {
                         </div>
                       </div>
                     </div>
+                    )}
                     </>
                   )}
                 </div>

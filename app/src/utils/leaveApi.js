@@ -1,4 +1,5 @@
 const API_BASE = '/server/leavedata_function';
+export const NEW_LEAVE_API_BASE = '/server/newleave_function';
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -49,6 +50,7 @@ export async function fetchLeaveReport({
   unit = 'Day',
   fetchAll = true,
   timeoutMs = 300000,
+  apiBase = API_BASE,
 } = {}) {
   const fromErr = validateZohoLeaveDate(from, 'From date');
   if (fromErr) throw new Error(fromErr);
@@ -60,12 +62,29 @@ export async function fetchLeaveReport({
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(`${API_BASE}?${params.toString()}`, {
+    const res = await fetch(`${apiBase}?${params.toString()}`, {
+      cache: 'no-store',
+      credentials: 'include',
       signal: controller.signal,
     });
-    const json = await res.json();
+    const text = await res.text();
+    let json;
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch (_) {
+      const snippet = String(text || '').trim().slice(0, 240);
+      const hint =
+        /cannot find module|function not found|not deployed/i.test(snippet)
+          ? ' Deploy newleave_function: catalyst deploy --only functions:newleave_function'
+          : '';
+      throw new Error(
+        snippet
+          ? `Leave server returned HTTP ${res.status} (not JSON): ${snippet}${hint}`
+          : `Leave server returned HTTP ${res.status} with an empty response`
+      );
+    }
     if (!res.ok) {
-      throw new Error(json.error || json.message || 'Request failed');
+      throw new Error(json.error || json.message || `Request failed (HTTP ${res.status})`);
     }
     if (!json || typeof json !== 'object') {
       throw new Error('Invalid response');

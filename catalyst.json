@@ -10,6 +10,7 @@
       "mainaudit_function",
       "audit_function",
       "leavedata_function",
+      "newleave_function",
       "peopledata_function",
       "statutoryreg_function",
       "employeedata_function",

@@ -162,6 +162,9 @@ const formatReportDateDisplay = (value) => {
   return s;
 };
 
+const statutorySendForApprovalIsSent = (row) =>
+  /^sent$/i.test(String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim());
+
 const getDraftDateLabel = (row) => {
   const raw =
     row?.submittedDate ??
@@ -169,8 +172,14 @@ const getDraftDateLabel = (row) => {
     row?.draftDate ??
     row?.DraftDate ??
     '';
-  const formatted = formatReportDateDisplay(raw);
-  return formatted || '—';
+  let formatted = formatReportDateDisplay(raw);
+  if (formatted) return formatted;
+  const hasDraft = rowHasStoredDraft(row);
+  if (hasDraft || statutorySendForApprovalIsSent(row)) {
+    formatted = formatReportDateDisplay(row?.modifiedTime ?? row?.MODIFIEDTIME ?? '');
+    if (formatted) return formatted;
+  }
+  return '—';
 };
 
 const getApprovedDateLabel = (row) => {
@@ -180,8 +189,20 @@ const getApprovedDateLabel = (row) => {
     row?.approvalDate ??
     row?.ApprovalDate ??
     '';
-  const formatted = formatReportDateDisplay(raw);
-  return formatted || '—';
+  let formatted = formatReportDateDisplay(raw);
+  if (formatted) return formatted;
+  const st = String(row?.statutoryStatus || row?.status || '').trim().toLowerCase();
+  const appr = String(row?.approval || '').trim().toLowerCase();
+  const isApproved =
+    st === 'approved' ||
+    st === 'approve' ||
+    appr === 'approved' ||
+    appr === 'approve';
+  if (isApproved) {
+    formatted = formatReportDateDisplay(row?.modifiedTime ?? row?.MODIFIEDTIME ?? '');
+    if (formatted) return formatted;
+  }
+  return '—';
 };
 
 const sortRowsSectorWise = (rows) =>

@@ -52,6 +52,60 @@ function siteLocation(s) {
   return String(s.location ?? s.Location ?? '').trim();
 }
 
+function siteSandERCNumber(s) {
+  if (!s || typeof s !== 'object') return '';
+  return String(s.sandERCNumber ?? s.SandERCNumber ?? '').trim();
+}
+
+function siteFactoryRCNumber(s) {
+  if (!s || typeof s !== 'object') return '';
+  return String(s.factoryRCNumber ?? s.FactoryRCNumber ?? '').trim();
+}
+
+function siteCLRARCNumber(s) {
+  if (!s || typeof s !== 'object') return '';
+  return String(s.clraRCNumber ?? s.CLRARCNumber ?? '').trim();
+}
+
+function isClraIndustryLabel(industry) {
+  const s = String(industry || '').trim().toLowerCase();
+  return s === 'clra' || s.includes('clra') || s.includes('contract labour') || s.includes('contract labor');
+}
+
+function isShopsAndEstablishmentIndustryLabel(industry) {
+  const s = String(industry || '').trim().toLowerCase();
+  return (
+    (s.includes('shop') || s.includes('shops')) &&
+    s.includes('establishment')
+  );
+}
+
+function isFactoryIndustryLabel(industry) {
+  const s = String(industry || '').trim().toLowerCase();
+  if (!s || isClraIndustryLabel(industry) || isShopsAndEstablishmentIndustryLabel(industry)) {
+    return false;
+  }
+  return (
+    s.includes('factories act') ||
+    s.includes('factory act') ||
+    s.includes('factories') ||
+    s.includes('factory')
+  );
+}
+
+function getSiteRcFieldVisibility(industry) {
+  if (isClraIndustryLabel(industry)) {
+    return { showSandERC: false, showFactoryRC: false, showClraRC: true };
+  }
+  if (isShopsAndEstablishmentIndustryLabel(industry)) {
+    return { showSandERC: true, showFactoryRC: false, showClraRC: false };
+  }
+  if (isFactoryIndustryLabel(industry)) {
+    return { showSandERC: false, showFactoryRC: true, showClraRC: false };
+  }
+  return { showSandERC: false, showFactoryRC: false, showClraRC: false };
+}
+
 /** Avoid opaque `Unexpected token '<'` when the server returns an HTML error page. */
 async function readJsonFromResponse(res) {
   const text = await res.text();
@@ -87,6 +141,9 @@ const initialForm = {
   inchargeEmail: '',
   inchargeDesignation: '',
   industry: '',
+  sandERCNumber: '',
+  factoryRCNumber: '',
+  clraRCNumber: '',
   location: '',
   audit: 'false'
 };
@@ -126,6 +183,9 @@ function sanitizeSiteFormField(name, raw) {
       return v.slice(0, 200);
     case 'inchargeDesignation':
       return v.slice(0, 150);
+    case 'sandERCNumber':
+    case 'factoryRCNumber':
+    case 'clraRCNumber':
     case 'location':
       return v.slice(0, 200);
     default:
@@ -536,6 +596,11 @@ const SiteManagement = ({ userEmail, userRole }) => {
     return list;
   }, [checklistSectors, form.industry]);
 
+  const rcFieldVisibility = useMemo(
+    () => getSiteRcFieldVisibility(form.industry),
+    [form.industry]
+  );
+
   /** City list — same model as Company Details: master list + saved site values + current form. */
   const citySelectOptions = useMemo(() => {
     const set = new Set(INDIAN_CITIES);
@@ -605,6 +670,9 @@ const SiteManagement = ({ userEmail, userRole }) => {
       inchargeEmail: siteInchargeEmail(site) || site.inchargeEmail || '',
       inchargeDesignation: site.inchargeDesignation || '',
       industry: siteIndustry(site) || site.industry || '',
+      sandERCNumber: siteSandERCNumber(site) || site.sandERCNumber || '',
+      factoryRCNumber: siteFactoryRCNumber(site) || site.factoryRCNumber || '',
+      clraRCNumber: siteCLRARCNumber(site) || site.clraRCNumber || '',
       location: siteLocation(site) || site.location || '',
       audit: site.audit === true || site.audit === 'true' ? 'true' : 'false'
     });
@@ -634,6 +702,9 @@ const SiteManagement = ({ userEmail, userRole }) => {
       inchargeEmail: siteInchargeEmail(site) || site.inchargeEmail || '',
       inchargeDesignation: site.inchargeDesignation || '',
       industry: siteIndustry(site) || site.industry || '',
+      sandERCNumber: siteSandERCNumber(site) || site.sandERCNumber || '',
+      factoryRCNumber: siteFactoryRCNumber(site) || site.factoryRCNumber || '',
+      clraRCNumber: siteCLRARCNumber(site) || site.clraRCNumber || '',
       location: siteLocation(site) || site.location || '',
       audit: site.audit === true || site.audit === 'true' ? 'true' : 'false'
     });
@@ -681,7 +752,16 @@ const SiteManagement = ({ userEmail, userRole }) => {
   const handleChange = (e) => {
     const { name, value } = e.target;
     const nextValue = sanitizeSiteFormField(name, value);
-    setForm((prev) => ({ ...prev, [name]: nextValue }));
+    setForm((prev) => {
+      const next = { ...prev, [name]: nextValue };
+      if (name === 'industry') {
+        const vis = getSiteRcFieldVisibility(nextValue);
+        if (!vis.showSandERC) next.sandERCNumber = '';
+        if (!vis.showFactoryRC) next.factoryRCNumber = '';
+        if (!vis.showClraRC) next.clraRCNumber = '';
+      }
+      return next;
+    });
     setFormErrors((prev) => {
       if (!prev[name]) return prev;
       const next = { ...prev };
@@ -730,6 +810,9 @@ const SiteManagement = ({ userEmail, userRole }) => {
         inchargeEmail: form.inchargeEmail.trim(),
         inchargeDesignation: form.inchargeDesignation.trim(),
         industry: form.industry.trim(),
+        sandERCNumber: rcFieldVisibility.showSandERC ? form.sandERCNumber.trim() : '',
+        factoryRCNumber: rcFieldVisibility.showFactoryRC ? form.factoryRCNumber.trim() : '',
+        clraRCNumber: rcFieldVisibility.showClraRC ? form.clraRCNumber.trim() : '',
         location: form.location.trim(),
         audit: form.audit || 'false'
       };
@@ -1023,6 +1106,48 @@ const SiteManagement = ({ userEmail, userRole }) => {
                             </div>
                           )}
                         </div>
+                        {rcFieldVisibility.showSandERC && (
+                          <div className="company-details-field">
+                            <label htmlFor="sm-sandERCNumber">Shops and Establishment RC number</label>
+                            <input
+                              id="sm-sandERCNumber"
+                              name="sandERCNumber"
+                              value={form.sandERCNumber}
+                              onChange={handleChange}
+                              placeholder="Enter Shops and Establishment RC number"
+                              disabled={viewOnly}
+                              maxLength={200}
+                            />
+                          </div>
+                        )}
+                        {rcFieldVisibility.showFactoryRC && (
+                          <div className="company-details-field">
+                            <label htmlFor="sm-factoryRCNumber">Factory RC number</label>
+                            <input
+                              id="sm-factoryRCNumber"
+                              name="factoryRCNumber"
+                              value={form.factoryRCNumber}
+                              onChange={handleChange}
+                              placeholder="Enter Factory RC number"
+                              disabled={viewOnly}
+                              maxLength={200}
+                            />
+                          </div>
+                        )}
+                        {rcFieldVisibility.showClraRC && (
+                          <div className="company-details-field">
+                            <label htmlFor="sm-clraRCNumber">CLRA RC number</label>
+                            <input
+                              id="sm-clraRCNumber"
+                              name="clraRCNumber"
+                              value={form.clraRCNumber}
+                              onChange={handleChange}
+                              placeholder="Enter CLRA RC number"
+                              disabled={viewOnly}
+                              maxLength={200}
+                            />
+                          </div>
+                        )}
                         <div className="company-details-field">
                           <label htmlFor="sm-location">Location</label>
                           <input

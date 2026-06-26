@@ -2181,10 +2181,11 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
   
   .form-file-modal-content table.form-file-modal-table {
     border-collapse: collapse;
-    width: 100%;
-    min-width: 1400px;
+    width: max-content;
+    min-width: 100%;
     font-size: var(--hcm-data-table-body-font-size);
     margin: 0;
+    table-layout: auto;
   }
   
   .form-file-modal-content table.form-file-modal-table th {
@@ -2195,7 +2196,10 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
     font-weight: 600;
     color: #1f2937;
     font-size: var(--hcm-data-table-header-font-size);
-    min-width: 120px;
+    min-width: 100px;
+    white-space: nowrap;
+    line-height: 1.25;
+    vertical-align: middle;
   }
   
   .form-file-modal-content table.form-file-modal-table th:first-child {
@@ -2212,7 +2216,8 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
     padding: 8px 12px;
     color: #374151;
     font-size: var(--hcm-data-table-body-font-size);
-    min-width: 120px;
+    min-width: 100px;
+    white-space: nowrap;
   }
   
   .form-file-modal-content table.form-file-modal-table td:first-child {

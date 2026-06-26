@@ -89,7 +89,7 @@ function formatLeaveTypeCell(val) {
   return JSON.stringify(obj);
 }
 
-const Leave = ({ userRole, userEmail }) => {
+const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
   const defaultRange = getDefaultLeaveReportRange();
   const [fromDate, setFromDate] = useState(defaultRange.from);
   const [toDate, setToDate] = useState(defaultRange.to);
@@ -109,6 +109,7 @@ const Leave = ({ userRole, userEmail }) => {
         to: toDate,
         unit: 'Day',
         fetchAll: true,
+        apiBase,
       });
       if (!result.success) {
         throw new Error('Invalid response');
@@ -222,7 +223,7 @@ const Leave = ({ userRole, userEmail }) => {
   return (
     <div className="leave-page">
       <header className="leave-header">
-        <h1 className="leave-title">Leave</h1>
+        <h1 className="leave-title">{pageTitle}</h1>
         <p className="leave-subtitle">
           Fetch leave booked/balance from Zoho People Leave API. Use the leave year window (typically Apr–Mar);
           calendar-year ranges often return only empty Absent rows. Earned Leave shows balance for the period

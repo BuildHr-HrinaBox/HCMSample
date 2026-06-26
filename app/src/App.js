@@ -45,6 +45,7 @@ import Formmaster from './Pages/Formmaster';
 import People from './Pages/People';
 import Attendance from './Pages/Attendance';
 import Leave from './Pages/Leave';
+import NewLeave from './Pages/NewLeave';
 import Payroll from './Pages/Payroll';
 import CLRA from './utils/CLRA';
 import Reports from './Pages/Reports';
@@ -414,6 +415,7 @@ function MainApp({ userRole, userEmail, userName }) {
   const isPeopleHcmShell = location.pathname === '/rule-book/people';
   const isAttendanceHcmShell = location.pathname === '/rule-book/attendance';
   const isLeaveHcmShell = location.pathname === '/rule-book/leave';
+  const isNewLeaveHcmShell = location.pathname === '/rule-book/newleave';
   const isPayrollHcmShell = location.pathname === '/rule-book/payroll';
   const isClraHcmShell = location.pathname === '/rule-book/clra';
   const isHcmFullShell =
@@ -433,6 +435,7 @@ function MainApp({ userRole, userEmail, userName }) {
     isPeopleHcmShell ||
     isAttendanceHcmShell ||
     isLeaveHcmShell ||
+    isNewLeaveHcmShell ||
     isPayrollHcmShell ||
     isClraHcmShell;
 
@@ -492,7 +495,7 @@ function MainApp({ userRole, userEmail, userName }) {
               : isAuditOnlyUser
                 ? auditOnlyAllowedPaths
                 : isRestrictedUser 
-                  ? ['/', '/new-dashboard', '/hcm-dashboard', '/rule-book/company-details', '/rule-book/site-management', '/rule-book/se-master', '/rule-book/formmaster', '/rule-book/actsbulk', '/rule-book/act-descriptions', '/rule-book/regulationsbulk', '/rule-book/regulations', '/rule-book/statutory', '/rule-book/checklist', '/rule-book/checklistbulk', '/rule-book/people', '/rule-book/attendance', '/rule-book/leave', '/rule-book/payroll', '/rule-book/clra', '/rule-book/todo-list', '/rule-book/calendarbulk', '/rule-book/statutory-master', '/rule-book/statutorymasterfactory', '/form-builder', '/calendar-picker', '/compliance', '/certificate', '/mainreport', '/returned-report', '/settings', '/assessments/assessment-report', '/assessments/vendor-view', '/assessments/face-sheets', '/assessments/category-score'] 
+                  ? ['/', '/new-dashboard', '/hcm-dashboard', '/rule-book/company-details', '/rule-book/site-management', '/rule-book/se-master', '/rule-book/formmaster', '/rule-book/actsbulk', '/rule-book/act-descriptions', '/rule-book/regulationsbulk', '/rule-book/regulations', '/rule-book/statutory', '/rule-book/checklist', '/rule-book/checklistbulk', '/rule-book/people', '/rule-book/attendance', '/rule-book/leave', '/rule-book/newleave', '/rule-book/payroll', '/rule-book/clra', '/rule-book/todo-list', '/rule-book/calendarbulk', '/rule-book/statutory-master', '/rule-book/statutorymasterfactory', '/form-builder', '/calendar-picker', '/compliance', '/certificate', '/mainreport', '/returned-report', '/settings', '/assessments/assessment-report', '/assessments/vendor-view', '/assessments/face-sheets', '/assessments/category-score'] 
                   : ['*']
           }>
             <Routes>
@@ -680,6 +683,20 @@ function MainApp({ userRole, userEmail, userName }) {
                     mainExtraClassName="nd-content--viewport-scroll"
                   >
                     <Leave userRole={userRole} userEmail={userEmail} />
+                  </HcmDashboardPageShell>
+                }
+              />
+              <Route
+                path="/rule-book/newleave"
+                element={
+                  <HcmDashboardPageShell
+                    userName={userName || 'User'}
+                    userRole={userRole || 'App User'}
+                    userInitials={dashboardInitials}
+                    userEmail={userEmail}
+                    mainExtraClassName="nd-content--viewport-scroll"
+                  >
+                    <NewLeave userRole={userRole} userEmail={userEmail} />
                   </HcmDashboardPageShell>
                 }
               />

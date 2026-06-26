@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import { labelMatchScore } from './form18APAccidentNotice';
+import { blobIndicatesRegisterOfDeductionsForDamage } from './formXAPRegisterOfFines';
 
 /** AP CLRA Form XIX — Wage Slip [Rule 78(1)(b)]. */
 
@@ -13,6 +14,7 @@ export function formXIXAPHeaderNorm(txt) {
 
 export function matchesFormXIXHint(blob) {
   const parts = String(blob || '').toLowerCase();
+  if (/form[\s._-]*xxix(?![a-z])/i.test(parts)) return false;
   return (
     /form[\s._-]*xix(?![a-z])/i.test(parts) ||
     /form[\s._-]*19(?!\d)/i.test(parts) ||
@@ -225,6 +227,32 @@ const findNumberedLabelCell = (getMergedAwareCellText, matchRe, effectiveSheetCo
   return findHeaderLabelCell(getMergedAwareCellText, matchRe, effectiveSheetCols, maxRows);
 };
 
+function buildSheetTextBlob(workbook, sheetName) {
+  const ws = workbook?.Sheets?.[sheetName];
+  if (!ws) return '';
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  return rows
+    .slice(0, 35)
+    .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+    .join(' ');
+}
+
+function scoreFormXIXSheet(sheetName, sheetText, hintsBlob) {
+  const sheetLower = String(sheetName || '').toLowerCase();
+  const sheetBlob = `${sheetLower} ${sheetText}`;
+  let score = 0;
+
+  if (matchesFormXIXHint(sheetBlob) || /wage\s+slip/i.test(sheetBlob)) score += 200;
+  if (/rule\s+78\s*\(\s*1\s*\)\s*\(\s*b\s*\)/i.test(sheetText)) score += 80;
+  if (/gross\s+wages\s+payable|net\s+amount\s+of\s+wages/i.test(sheetText)) score += 60;
+  if (/no\.?\s*of\s+days\s+worked/i.test(sheetText)) score += 40;
+  if (blobIndicatesRegisterOfDeductionsForDamage(sheetBlob)) score -= 220;
+  if (/register\s+of\s+deductions/i.test(sheetBlob)) score -= 180;
+  if (matchesFormXIXHint(hintsBlob)) score += 30;
+
+  return score;
+}
+
 function pickWorkbookSheet(workbook, hints = {}) {
   const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
   if (!names.length) return null;
@@ -234,6 +262,21 @@ function pickWorkbookSheet(workbook, hints = {}) {
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
+
+  if (names.length > 1) {
+    let best = null;
+    let bestScore = -Infinity;
+    for (const name of names) {
+      const sheetText = buildSheetTextBlob(workbook, name);
+      const score = scoreFormXIXSheet(name, sheetText, blob);
+      if (score > bestScore) {
+        bestScore = score;
+        best = name;
+      }
+    }
+    if (bestScore > 0 && best) return best;
+  }
+
   let best = null;
   let bestScore = -Infinity;
   for (const name of names) {
@@ -250,7 +293,14 @@ function pickWorkbookSheet(workbook, hints = {}) {
   const slipSheet = names.find((n) => /wage\s+slip|form\s*xix/i.test(String(n || '')));
   if (slipSheet) return slipSheet;
   if (matchesFormXIXHint(blob)) {
-    return names.find((n) => matchesFormXIXHint(String(n || ''))) || names[0];
+    const xixSheet = names.find((n) => {
+      const sheetText = buildSheetTextBlob(workbook, n);
+      return (
+        /wage\s+slip/i.test(sheetText) ||
+        (!blobIndicatesRegisterOfDeductionsForDamage(`${n} ${sheetText}`) && matchesFormXIXHint(sheetText))
+      );
+    });
+    return xixSheet || names.find((n) => matchesFormXIXHint(String(n || ''))) || names[0];
   }
   return names[0];
 }

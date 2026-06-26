@@ -171,6 +171,9 @@ app.post('/sitemanagement', async (req, res) => {
       inchargeEmail,
       inchargeDesignation,
       industry,
+      sandERCNumber,
+      factoryRCNumber,
+      clraRCNumber,
       location,
       audit
     } = req.body;
@@ -233,6 +236,9 @@ app.post('/sitemanagement', async (req, res) => {
       InchargeEmail: inchargeEmail,
       InchargeDesignation: inchargeDesignation,
       Industry: industry,
+      SandERCNumber: sandERCNumber || '',
+      FactoryRCNumber: factoryRCNumber || '',
+      CLRARCNumber: clraRCNumber || '',
       Location: location || '',
       Audit: audit || 'false'
     };
@@ -265,6 +271,9 @@ app.post('/sitemanagement', async (req, res) => {
       InchargeEmail: created.InchargeEmail || inchargeEmail,
       InchargeDesignation: created.InchargeDesignation || inchargeDesignation,
       Industry: created.Industry || industry,
+      SandERCNumber: created.SandERCNumber || sandERCNumber || '',
+      FactoryRCNumber: created.FactoryRCNumber || factoryRCNumber || '',
+      CLRARCNumber: created.CLRARCNumber || clraRCNumber || '',
       Location: created.Location || location || '',
       Audit: created.Audit || 'false',
       CREATEDTIME: created.CREATEDTIME,
@@ -304,6 +313,9 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
       inchargeEmail,
       inchargeDesignation,
       industry,
+      sandERCNumber,
+      factoryRCNumber,
+      clraRCNumber,
       location,
       audit
     } = req.body;
@@ -364,6 +376,9 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
       InchargeEmail: inchargeEmail,
       InchargeDesignation: inchargeDesignation,
       Industry: industry,
+      SandERCNumber: sandERCNumber || '',
+      FactoryRCNumber: factoryRCNumber || '',
+      CLRARCNumber: clraRCNumber || '',
       Location: location || '',
       Audit: audit || 'false'
     };
@@ -391,6 +406,9 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
       InchargeEmail: updated.InchargeEmail || inchargeEmail,
       InchargeDesignation: updated.InchargeDesignation || inchargeDesignation,
       Industry: updated.Industry || industry,
+      SandERCNumber: updated.SandERCNumber || sandERCNumber || '',
+      FactoryRCNumber: updated.FactoryRCNumber || factoryRCNumber || '',
+      CLRARCNumber: updated.CLRARCNumber || clraRCNumber || '',
       Location: updated.Location || location || '',
       Audit: updated.Audit || audit || 'false',
       CREATEDTIME: updated.CREATEDTIME,
@@ -426,11 +444,14 @@ app.get('/sitemanagement', async (req, res) => {
     
     console.log('Executing data query...');
     const siteSelectFull =
-      'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, Location, CREATEDTIME, MODIFIEDTIME';
+      'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, SandERCNumber, FactoryRCNumber, CLRARCNumber, Location, CREATEDTIME, MODIFIEDTIME';
     const siteSelectBase =
       'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, Location, CREATEDTIME, MODIFIEDTIME';
+    const siteSelectWithRc =
+      'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, SandERCNumber, FactoryRCNumber, CLRARCNumber, Location, CREATEDTIME, MODIFIEDTIME';
     let rows;
     let hasContractorColumns = true;
+    let hasRcNumberColumns = true;
     try {
       rows = await zcql.executeZCQLQuery(
         `SELECT ${siteSelectFull} FROM Site ORDER BY ROWID DESC ${limitClause}`
@@ -438,11 +459,24 @@ app.get('/sitemanagement', async (req, res) => {
     } catch (queryErr) {
       const errMsg = String(queryErr?.message || queryErr || '');
       if (/invalid|unknown|no such|column/i.test(errMsg)) {
-        console.warn('Site list: contractor columns missing, using base SELECT:', errMsg);
+        console.warn('Site list: contractor columns missing, trying without contractor columns:', errMsg);
         hasContractorColumns = false;
-        rows = await zcql.executeZCQLQuery(
-          `SELECT ${siteSelectBase} FROM Site ORDER BY ROWID DESC ${limitClause}`
-        );
+        try {
+          rows = await zcql.executeZCQLQuery(
+            `SELECT ${siteSelectWithRc} FROM Site ORDER BY ROWID DESC ${limitClause}`
+          );
+        } catch (rcErr) {
+          const rcErrMsg = String(rcErr?.message || rcErr || '');
+          if (/invalid|unknown|no such|column/i.test(rcErrMsg)) {
+            console.warn('Site list: RC number columns missing, using base SELECT:', rcErrMsg);
+            hasRcNumberColumns = false;
+            rows = await zcql.executeZCQLQuery(
+              `SELECT ${siteSelectBase} FROM Site ORDER BY ROWID DESC ${limitClause}`
+            );
+          } else {
+            throw rcErr;
+          }
+        }
       } else {
         throw queryErr;
       }
@@ -468,6 +502,9 @@ app.get('/sitemanagement', async (req, res) => {
       inchargeEmail: r.Site.InchargeEmail,
       inchargeDesignation: r.Site.InchargeDesignation,
       industry: r.Site.Industry,
+      sandERCNumber: hasRcNumberColumns ? r.Site.SandERCNumber : '',
+      factoryRCNumber: hasRcNumberColumns ? r.Site.FactoryRCNumber : '',
+      clraRCNumber: hasRcNumberColumns ? r.Site.CLRARCNumber : '',
       location: r.Site.Location,
       audit: false, // Temporarily set to false since Audit column is commented out
       createdTime: r.Site.CREATEDTIME,

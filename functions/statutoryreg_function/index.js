@@ -2706,6 +2706,9 @@ app.put('/statutory/:id', async (req, res) => {
       if (sfaNorm === 'sent' && submittedDateRaw === undefined) {
         updateData.SubmittedDate = todayIsoDate();
       }
+      if (sfaNorm === 'sent' && status === undefined) {
+        updateData.Status = 'Pending';
+      }
     }
     if (remarks !== undefined) {
       updateData.Remarks =

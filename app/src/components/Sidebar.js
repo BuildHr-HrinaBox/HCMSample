@@ -22,6 +22,7 @@ const Sidebar = ({ isOpen, userEmail, userRole }) => {
     { path: '/rule-book/people', label: 'People', icon: '👥' },
     { path: '/rule-book/attendance', label: 'Attendance', icon: '📅' },
     { path: '/rule-book/leave', label: 'Leave', icon: '🏖' },
+    { path: '/rule-book/newleave', label: 'New Leave', icon: '🏖' },
     { path: '/rule-book/payroll', label: 'Payroll', icon: '💰' },
     { path: '/rule-book/clra', label: 'CLRA', icon: '📋' },
     { path: '/calendar-picker', label: 'Calendar', icon: '📆' },

@@ -196,3 +196,43 @@ export function ensureExcelJSDataRowsWithBorders(
     forceFullBox: true
   });
 }
+
+/** Remove values and borders from cells to the right of the table (template stray boxes). */
+export function clearExcelJSTrailingTableCells(
+  worksheet,
+  { dataStartRow, dataRowCount, afterCol, throughCol = null } = {}
+) {
+  if (!worksheet || !dataRowCount || dataRowCount < 1 || !afterCol) return;
+  const r0 = Math.max(1, dataStartRow);
+  const r1 = r0 + dataRowCount - 1;
+  const c0 = afterCol + 1;
+  const c1 = Math.max(c0, throughCol != null ? throughCol : afterCol + 40);
+  for (let r = r0; r <= r1; r += 1) {
+    for (let c = c0; c <= c1; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      cell.value = null;
+      cell.border = {};
+    }
+  }
+}
+
+/** Count contiguous template body rows that have borders or values in [colFrom, colTo]. */
+export function countExcelJSTemplateBodyRows(worksheet, dataStartRow, colFrom, colTo, maxScan = 120) {
+  if (!worksheet) return 1;
+  const r0 = Math.max(1, dataStartRow);
+  const c0 = Math.max(1, colFrom);
+  const c1 = Math.max(c0, colTo);
+  let rows = 0;
+  for (let r = r0; r < r0 + maxScan; r += 1) {
+    let hit = false;
+    for (let c = c0; c <= c1; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      const val = cell?.value;
+      if (val != null && String(val).trim() !== '') hit = true;
+      if (excelJSCellHasBorder(cell)) hit = true;
+    }
+    if (hit) rows += 1;
+    else if (rows > 0) break;
+  }
+  return Math.max(rows, 1);
+}

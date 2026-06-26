@@ -13,7 +13,7 @@ export const FORM_X_AP_TEMPLATE_MISMATCH_MESSAGE =
   'This row is Form X (Shops & Establishment — Register of Fines) but the template file is Form XXI (Contract Labour — Register of Fines). Upload the correct Form X template in Form Master.';
 
 /** Must not match the "name" inside "surname of workmen" (Form XIII false positive for Form XXI). */
-export const CLRA_WORKMEN_NAME_HEADER_RE = /\bname\s+of\s+(?:the\s+)?workmen\b/i;
+export const CLRA_WORKMEN_NAME_HEADER_RE = /\bname\s+of\s+(?:the\s+)?(?:workmen|wokmen)\b/i;
 
 export const REGISTER_OF_WORKMEN_SURNAME_HEADER_RE = /name\s+and\s+surname\s+of\s+workmen/i;
 
@@ -24,7 +24,26 @@ const FORM_XXI_COLLISION_ROMAN_RE =
   /form[\s._-]*(xiii|xiv|xv|xvi|xvii|xviii|xix|xx|xxii|xxiii|xxiv|xxv|xxvi|xxvii)(?![a-z])/i;
 
 const FORM_XX_COLLISION_ROMAN_RE =
-  /form[\s._-]*(xxi|xxii|xxiii|xxiv|xxv|xxvi|xxvii|xxviii|xxix|xxx)(?![a-z])/i;
+  /form[\s._-]*(xix|xxi|xxii|xxiii|xxiv|xxv|xxvi|xxvii|xxviii|xxix|xxx)(?![a-z])/i;
+
+function blobIndicatesFormXIXHint(blob) {
+  const parts = String(blob || '').toLowerCase();
+  if (/form[\s._-]*xxix(?![a-z])/i.test(parts)) return false;
+  return (
+    /form[\s._-]*xix(?![a-z])/i.test(parts) ||
+    /form[\s._-]*19(?!\d)/i.test(parts) ||
+    /(?:^|[\s._-])xix(?=[\s._\W-]|$)/i.test(parts)
+  );
+}
+
+export function blobIndicatesFormXXIXHint(blob) {
+  const parts = String(blob || '').toLowerCase();
+  return (
+    /form[\s._-]*xxix(?![a-z])/i.test(parts) ||
+    /form[\s._-]*29(?!\d)/i.test(parts) ||
+    /(?:^|[\s._-])xxix(?=[\s._\W-]|$)/i.test(parts)
+  );
+}
 
 export function matchesFormXXHint(blob) {
   const parts = String(blob || '').toLowerCase();
@@ -78,12 +97,18 @@ export function isFormXXAPRegisterOfDeductionsContext(
     .join(' ')
     .toLowerCase();
 
+  if (blobIndicatesFormXIXHint(parts)) return false;
+  if (blobIndicatesFormXXIXHint(parts)) return false;
+
   if (matchesFormXXHint(parts)) return true;
   return blobIndicatesRegisterOfDeductionsForDamage(parts, tableHeaders);
 }
 
 export function matchesFormXIIIHint(blob) {
   const parts = String(blob || '').toLowerCase();
+  if (/form[\s._-]*xxiii(?![a-z])/i.test(parts)) return false;
+  if (/(?:^|[\s._-])xxiii(?=[\s._\W-]|$)/i.test(parts)) return false;
+  if (matchesFormXIVHint(parts)) return false;
   return (
     /form[\s._-]*xiii(?![a-z])/i.test(parts) ||
     /form[\s._-]*13(?!\d)/i.test(parts) ||
@@ -91,8 +116,61 @@ export function matchesFormXIIIHint(blob) {
   );
 }
 
+/** CLRA Form XIV — Employment Card (Roman XIV; distinct from AP Form 14 child workers). */
+export function matchesFormXIVHint(blob) {
+  const parts = String(blob || '').toLowerCase();
+  if (/form[\s._-]*xxiv(?![a-z])/i.test(parts)) return false;
+  if (/(?:^|[\s._-])xxiv(?=[\s._\W-]|$)/i.test(parts)) return false;
+  return (
+    /form[\s._-]*xiv(?![a-z])/i.test(parts) ||
+    /(?:^|[\s._-])xiv(?=[\s._\W-]|$)/i.test(parts)
+  );
+}
+
+export function blobIndicatesEmploymentCard(blob, tableHeaders = null) {
+  const text = String(blob || '').toLowerCase();
+  if (/employment\s+card/i.test(text)) return true;
+  if (/see\s+rule\s+76/i.test(text)) return true;
+  if (/serial\s+number\s+in\s+the\s+register\s+of\s+workmen/i.test(text)) return true;
+  if (Array.isArray(tableHeaders) && tableHeaders.length > 0) {
+    const hdr = tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
+    if (/employment\s+card/i.test(hdr)) return true;
+    if (/serial\s+number\s+in\s+the\s+register/.test(hdr)) return true;
+  }
+  return false;
+}
+
+/** CLRA Form XIV — Employment Card (not Form XIII Register of Workmen). */
+export function isFormXIVEmploymentCardContext(
+  formHeader,
+  rowItem,
+  fileName,
+  sheetText = '',
+  tableHeaders = null
+) {
+  const parts = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    rowItem?.description,
+    rowItem?.Description,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference,
+    sheetText
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+
+  if (/form[\s._-]*xxiv(?![a-z])/i.test(parts)) return false;
+  if (matchesFormXIVHint(parts)) return true;
+  return blobIndicatesEmploymentCard(parts, tableHeaders);
+}
+
 export function blobIndicatesRegisterOfWorkmen(blob, tableHeaders = null) {
   const text = String(blob || '').toLowerCase();
+  if (matchesFormXIVHint(text) || blobIndicatesEmploymentCard(text, tableHeaders)) return false;
   if (/register\s+of\s+workmen/i.test(text)) return true;
   if (Array.isArray(tableHeaders) && tableHeaders.length > 0) {
     const hdr = tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
@@ -127,6 +205,14 @@ export function isFormXIIIRegisterOfWorkmenContext(
     .join(' ')
     .toLowerCase();
 
+  if (/form[\s._-]*xxiii(?![a-z])/i.test(parts)) return false;
+  if (/register\s+of\s+overtime|overtime\s+register/i.test(parts)) return false;
+  if (/register[\s._-]*of[\s._-]*wages[\s._-]*cum[\s._-]*muster/i.test(parts)) return false;
+  if (/form[\s._-]*xviii(?![a-z])/i.test(parts)) return false;
+  if (matchesFormXIVHint(parts)) return false;
+  if (isFormXIVEmploymentCardContext(formHeader, rowItem, fileName, sheetText, tableHeaders)) {
+    return false;
+  }
   if (matchesFormXIIIHint(parts)) return true;
   if (blobIndicatesRegisterOfWorkmen(parts, tableHeaders) && /contract\s+labou?r/i.test(parts)) {
     return true;
@@ -508,6 +594,168 @@ function getSheetMergedCellText(rows, merges, r, c) {
   return '';
 }
 
+function normStatutoryHeaderLabel(h) {
+  return String(h || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/** True when merged Excel headers produced duplicate / one mega-label for many columns. */
+export function statutoryTableHeadersLookMergedDuplicate(headers) {
+  const list = (Array.isArray(headers) ? headers : [])
+    .map((h) => String(h || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (list.length < 2) return false;
+  const norms = list.map(normStatutoryHeaderLabel);
+  const unique = new Set(norms);
+  if (unique.size <= 1) return true;
+  if (unique.size < Math.ceil(list.length * 0.6)) return true;
+  const longest = list.reduce((a, b) => (String(a).length >= String(b).length ? a : b), '');
+  if (String(longest).length > 48 && list.filter((h) => h === longest).length >= 2) return true;
+  return false;
+}
+
+function mergeMasterCol(merges, r, c) {
+  for (const m of merges || []) {
+    if (!m?.s || !m?.e) continue;
+    if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) return m.s.c;
+  }
+  return c;
+}
+
+function readMergeAwareHeaderLabels(rows, merges, rowIdx, startCol, maxCols) {
+  const labels = [];
+  let c = startCol;
+  while (c < maxCols) {
+    const master = mergeMasterCol(merges, rowIdx, c);
+    if (master !== c) {
+      c += 1;
+      continue;
+    }
+    const text = getSheetMergedCellText(rows, merges, rowIdx, c).replace(/\s+/g, ' ').trim();
+    if (!text) {
+      if (labels.length > 0) break;
+      c += 1;
+      continue;
+    }
+    let endCol = c;
+    for (const m of merges || []) {
+      if (m?.s?.r === rowIdx && m?.s?.c === c) {
+        endCol = m.e.c;
+        break;
+      }
+    }
+    labels.push(text);
+    c = endCol + 1;
+  }
+  return labels;
+}
+
+function scoreFormXXIClraHeaderLabelRow(rows, merges, rowIdx, startCol, maxCols) {
+  const labels = readMergeAwareHeaderLabels(rows, merges, rowIdx, startCol, maxCols);
+  if (labels.length < 3) return { score: -1, labels: [] };
+  if (statutoryTableHeadersLookMergedDuplicate(labels)) return { score: -1, labels: [] };
+  let score = labels.length * 12;
+  const joined = labels.map(normStatutoryHeaderLabel).join(' ');
+  if (/serial|sl no|sr no|s no/.test(joined)) score += 35;
+  if (/name\s+of\s+workman|name\s+of\s+workmen/.test(joined)) score += 35;
+  if (/father|husband/.test(joined)) score += 25;
+  if (/designat|nature\s+of\s+employ/.test(joined)) score += 25;
+  if (/act\/omission|fine\s+imposed|date\s+of\s+offence|show\s+cause/.test(joined)) score += 20;
+  for (const lab of labels) {
+    if (String(lab).length > 55) score -= 50;
+  }
+  return { score, labels };
+}
+
+function resolveFormXXIClraHeaderBand(rows, merges, anchorRow, startCol, maxCols) {
+  let best = { score: -1, labels: [], rowIdx: anchorRow };
+  for (let r = Math.max(0, anchorRow - 2); r <= anchorRow + 4; r += 1) {
+    const hit = scoreFormXXIClraHeaderLabelRow(rows, merges, r, startCol, maxCols);
+    if (hit.score > best.score) best = { ...hit, rowIdx: r };
+  }
+  return best;
+}
+
+/** Prefer UI/modal headers when template layout headers are merged duplicates. */
+export function pickFormXXIAPExportHeaders(uiHeaders, layoutHeaders) {
+  const ui = (Array.isArray(uiHeaders) ? uiHeaders : [])
+    .map((h) => String(h || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const layout = (Array.isArray(layoutHeaders) ? layoutHeaders : [])
+    .map((h) => String(h || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (ui.length >= 3 && !statutoryTableHeadersLookMergedDuplicate(ui)) return ui;
+  if (layout.length >= 3 && !statutoryTableHeadersLookMergedDuplicate(layout)) return layout;
+  return ui.length >= layout.length ? ui : layout;
+}
+
+export function exportFormXXAPRowValuesByHeaders(row, headers) {
+  const list = Array.isArray(headers) ? headers : [];
+  const normalize = (h) =>
+    String(h || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9 ]/gi, '')
+      .replace(/\s+/g, ' ');
+  return list.map((hdr, idx) => {
+    if (Array.isArray(row)) {
+      return row[idx] != null && String(row[idx]).trim() !== '' ? row[idx] : '';
+    }
+    if (!row || typeof row !== 'object') return '';
+    const direct = row[hdr];
+    if (direct != null && String(direct).trim() !== '') return direct;
+    const target = normalize(hdr);
+    if (!target) return '';
+    const key = Object.keys(row).find(
+      (k) => !String(k).startsWith('__') && normalize(k) === target
+    );
+    if (key && row[key] != null && String(row[key]).trim() !== '') return row[key];
+    return '';
+  });
+}
+
+function unmergeExcelJSRowsInRange(worksheet, startRow, endRow, colFrom, colTo) {
+  const merges = worksheet?.model?.merges;
+  if (!worksheet || !Array.isArray(merges) || merges.length === 0) return;
+  const toRemove = [];
+  for (const range of merges) {
+    const parts = String(range || '').split(':');
+    if (parts.length !== 2) continue;
+    const start = parts[0].match(/^([A-Z]+)(\d+)$/i);
+    const end = parts[1].match(/^([A-Z]+)(\d+)$/i);
+    if (!start || !end) continue;
+    const r1 = parseInt(start[2], 10);
+    const r2 = parseInt(end[2], 10);
+    const c1 = XLSX.utils.decode_col(start[1].toUpperCase()) + 1;
+    const c2 = XLSX.utils.decode_col(end[1].toUpperCase()) + 1;
+    const rowOverlap = r2 >= startRow && r1 <= endRow;
+    const colOverlap = c2 >= colFrom && c1 <= colTo;
+    if (rowOverlap && colOverlap) toRemove.push(range);
+  }
+  toRemove.forEach((range) => {
+    try {
+      worksheet.unMergeCells(range);
+    } catch (_) {
+      // ignore invalid merge ranges
+    }
+  });
+}
+
+function clearExcelJSWorksheetDataRange(worksheet, startRow, rowCount, colFrom, colTo) {
+  if (!worksheet || rowCount < 1) return;
+  unmergeExcelJSRowsInRange(worksheet, startRow, startRow + rowCount - 1, colFrom, colTo);
+  for (let r = startRow; r < startRow + rowCount; r += 1) {
+    for (let c = colFrom; c <= colTo; c += 1) {
+      worksheet.getCell(r, c).value = null;
+    }
+  }
+}
+
 /** Locate the fines register table on the correct AP workbook tab (SheetJS). */
 export function resolveFormXAPFinesTableLayout(workbook, hints = {}) {
   const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
@@ -660,6 +908,75 @@ function scoreFormXXIAPSheet(sheetName, sheetText, hintsBlob) {
   if (matchesFormXXIHint(hintsBlob) && matchesFormXXIHint(sheetLower)) score += 30;
 
   return score;
+}
+
+function extractClraSheetFormRomanToken(text) {
+  const parts = String(text || '').toLowerCase();
+  const formMatch = parts.match(
+    /form[\s._-]*(xxiii|xxii|xxi|xviii|xvii|xvi|xv|xiv|xiii)(?![a-z])/i
+  );
+  return formMatch ? String(formMatch[1] || '').toLowerCase() : '';
+}
+
+function scoreFormXIVSheet(sheetName, sheetText, blob) {
+  const sheetBlob = `${sheetName} ${sheetText}`.toLowerCase();
+  let score = 0;
+  const sheetToken = extractClraSheetFormRomanToken(sheetBlob);
+  if (sheetToken === 'xiv') score += 120;
+  if (sheetToken === 'xiii') score -= 220;
+  if (matchesFormXIVHint(blob)) score += 40;
+  if (blobIndicatesEmploymentCard(sheetBlob, null)) score += 90;
+  if (
+    /register\s+of\s+workmen\s+employed\s+by\s+contractor/i.test(sheetBlob) &&
+    !/employment\s+card/i.test(sheetBlob)
+  ) {
+    score -= 100;
+  }
+  if (/name\s+and\s+surname\s+of\s+workmen/i.test(sheetBlob) && /local\s+address/i.test(sheetBlob)) {
+    score -= 80;
+  }
+  return score;
+}
+
+/** Pick CLRA Form XIV Employment Card worksheet (not Form XIII Register of Workmen). */
+export function resolveFormXIVWorkbookSheetName(workbook, hints = {}) {
+  const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
+  if (names.length <= 1) return names[0] || null;
+
+  const blob = [
+    hints.fileName,
+    hints.formFileName,
+    hints.formName,
+    hints.item?.formName,
+    hints.item?.FormName,
+    hints.formHeaderTitle,
+    hints.formHeader?.title,
+    hints.formHeaderSubtitle,
+    hints.formHeader?.subtitle
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  if (!matchesFormXIVHint(blob) && !blobIndicatesEmploymentCard(blob, null)) return null;
+
+  let best = null;
+  let bestScore = -Infinity;
+  for (const name of names) {
+    const sheetText = buildSheetTextBlob(workbook, name);
+    const score = scoreFormXIVSheet(name, sheetText, blob);
+    if (score > bestScore) {
+      bestScore = score;
+      best = name;
+    }
+  }
+  if (bestScore > 0 && best) return best;
+
+  const xivSheet = names.find((n) => {
+    const sheetText = buildSheetTextBlob(workbook, n);
+    return blobIndicatesEmploymentCard(`${n} ${sheetText}`, null) || matchesFormXIVHint(`${n} ${sheetText}`);
+  });
+  return xivSheet || null;
 }
 
 /** Pick the CLRA Form XXI fines worksheet from a multi-tab AP workbook. */
@@ -821,18 +1138,26 @@ export function resolveFormXXIAPFinesTableLayout(workbook, hints = {}) {
       headerRowIndex = r + 1;
     }
 
-    const resolvedHeaders = [];
-    for (let c = startCol; c < maxCols; c += 1) {
-      let h = getSheetMergedCellText(rows, merges, headerRowIndex, c);
-      if (!h) h = getSheetMergedCellText(rows, merges, headerRowIndex + 1, c);
-      if (!h && headerRowIndex > 0) h = getSheetMergedCellText(rows, merges, headerRowIndex - 1, c);
-      h = String(h || '').replace(/\s+/g, ' ').trim();
-      if (!h) {
-        if (resolvedHeaders.length > 0) break;
-        continue;
+    const headerBand = resolveFormXXIClraHeaderBand(rows, merges, headerRowIndex, startCol, maxCols);
+    let resolvedHeaders =
+      headerBand.labels.length >= 3 ? headerBand.labels : [];
+    if (headerBand.rowIdx >= 0 && headerBand.labels.length >= 3) {
+      headerRowIndex = headerBand.rowIdx;
+    }
+    if (resolvedHeaders.length < 3) {
+      resolvedHeaders = [];
+      for (let c = startCol; c < maxCols; c += 1) {
+        let h = getSheetMergedCellText(rows, merges, headerRowIndex, c);
+        if (!h) h = getSheetMergedCellText(rows, merges, headerRowIndex + 1, c);
+        if (!h && headerRowIndex > 0) h = getSheetMergedCellText(rows, merges, headerRowIndex - 1, c);
+        h = String(h || '').replace(/\s+/g, ' ').trim();
+        if (!h) {
+          if (resolvedHeaders.length > 0) break;
+          continue;
+        }
+        if (/^\d+$/.test(h) && resolvedHeaders.length === 0) continue;
+        resolvedHeaders.push(h);
       }
-      if (/^\d+$/.test(h) && resolvedHeaders.length === 0) continue;
-      resolvedHeaders.push(h);
     }
     if (resolvedHeaders.length < 3) continue;
 
@@ -1075,18 +1400,26 @@ export function resolveFormXXAPDeductionsTableLayout(workbook, hints = {}) {
       headerRowIndex = r + 1;
     }
 
-    const resolvedHeaders = [];
-    for (let c = startCol; c < maxCols; c += 1) {
-      let h = getSheetMergedCellText(rows, merges, headerRowIndex, c);
-      if (!h) h = getSheetMergedCellText(rows, merges, headerRowIndex + 1, c);
-      if (!h && headerRowIndex > 0) h = getSheetMergedCellText(rows, merges, headerRowIndex - 1, c);
-      h = String(h || '').replace(/\s+/g, ' ').trim();
-      if (!h) {
-        if (resolvedHeaders.length > 0) break;
-        continue;
+    const headerBand = resolveFormXXIClraHeaderBand(rows, merges, headerRowIndex, startCol, maxCols);
+    let resolvedHeaders =
+      headerBand.labels.length >= 3 ? headerBand.labels : [];
+    if (headerBand.rowIdx >= 0 && headerBand.labels.length >= 3) {
+      headerRowIndex = headerBand.rowIdx;
+    }
+    if (resolvedHeaders.length < 3) {
+      resolvedHeaders = [];
+      for (let c = startCol; c < maxCols; c += 1) {
+        let h = getSheetMergedCellText(rows, merges, headerRowIndex, c);
+        if (!h) h = getSheetMergedCellText(rows, merges, headerRowIndex + 1, c);
+        if (!h && headerRowIndex > 0) h = getSheetMergedCellText(rows, merges, headerRowIndex - 1, c);
+        h = String(h || '').replace(/\s+/g, ' ').trim();
+        if (!h) {
+          if (resolvedHeaders.length > 0) break;
+          continue;
+        }
+        if (/^\d+$/.test(h) && resolvedHeaders.length === 0) continue;
+        resolvedHeaders.push(h);
       }
-      if (/^\d+$/.test(h) && resolvedHeaders.length === 0) continue;
-      resolvedHeaders.push(h);
     }
     if (resolvedHeaders.length < 3) continue;
 
@@ -1170,7 +1503,10 @@ function rowTextLooksLikeFormXXTableHeader(normalize, excelCellValueToString, wo
   if (!joined.trim()) return false;
   return (
     excelCellLooksLikeSerialHeader(parts[0]) ||
-    /name\s+of\s+workmen|name\s+of\s+workman|particulars\s+of\s+damage|father|husband|nature\s+of\s+employ|date\s+of\s+damage|amount\s+of\s+deduction|date\s+of\s+recovery|act\/omission|fine\s+imposed|show\s+cause|rate\s+of\s+wages|wage\s*period.*wages?\s+payable/.test(
+    /name\s+of\s+(?:the\s+)?workmen|name\s+of\s+(?:the\s+)?workman|name\s+of\s+(?:the\s+)?worker|name\s+of\s+(?:the\s+)?employee/.test(
+      joined
+    ) ||
+    /particulars\s+of\s+damage|father|husband|nature\s+of\s+employ|date\s+of\s+damage|amount\s+of\s+deduction|date\s+of\s+recovery|act\/omission|fine\s+imposed|show\s+cause|rate\s+of\s+wages|wage\s*period.*wages?\s+payable|total\s+wages/.test(
       joined
     )
   );
@@ -1181,16 +1517,18 @@ function locateFormXXColumnHeaderRow(worksheet, hintHeaderRow, startCol, normali
   let bestScore = -1;
   for (let r = Math.max(1, hintHeaderRow - 2); r <= hintHeaderRow + 5; r += 1) {
     let score = 0;
-    for (let c = startCol; c <= startCol + 8; c += 1) {
+    for (let c = startCol; c <= startCol + 14; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
       if (excelCellLooksLikeSerialHeader(raw)) score += 50;
     }
     const joined = [];
-    for (let c = startCol; c <= startCol + 8; c += 1) {
+    for (let c = startCol; c <= startCol + 14; c += 1) {
       joined.push(normalize(excelCellValueToString(worksheet.getCell(r, c)?.value)));
     }
     const text = joined.join(' ');
-    if (/name\s+of\s+workmen|name\s+of\s+workman/.test(text)) score += 40;
+    if (/name\s+of\s+workmen|name\s+of\s+workman|name\s+of\s+(?:the\s+)?worker|name\s+of\s+(?:the\s+)?employee/.test(text)) {
+      score += 40;
+    }
     if (/particulars\s+of\s+damage|date\s+of\s+damage|amount\s+of\s+deduction/.test(text)) score += 30;
     if (/act\/omission|fine\s+imposed|show\s+cause|rate\s+of\s+wages|wage\s*period.*wages?\s+payable/.test(text)) {
       score += 30;
@@ -1264,6 +1602,34 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
   };
 
   if (parsedHeaderRowIndex == null || parsedHeaderRowIndex < 0) {
+    let autoHeaderRow = 0;
+    let autoScore = -1;
+    for (let r = 1; r <= Math.min(worksheet.rowCount || 90, 90); r += 1) {
+      if (!rowTextLooksLikeFormXXTableHeader(normalize, excelCellValueToString, worksheet, r, 1, 12)) {
+        continue;
+      }
+      let score = 0;
+      for (let c = 1; c <= 12; c += 1) {
+        const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
+        if (excelCellLooksLikeSerialHeader(raw)) score += 50;
+      }
+      const joined = [];
+      for (let c = 1; c <= 12; c += 1) {
+        joined.push(normalize(excelCellValueToString(worksheet.getCell(r, c)?.value)));
+      }
+      const text = joined.join(' ');
+      if (/name\s+of\s+(?:the\s+)?worker|name\s+of\s+(?:the\s+)?employee/.test(text)) score += 40;
+      if (/rate\s+of\s+wages|fine\s+imposed|show\s+cause/.test(text)) score += 30;
+      if (score > autoScore) {
+        autoScore = score;
+        autoHeaderRow = r;
+      }
+    }
+    if (autoHeaderRow > 0) {
+      parsedHeaderRowIndex = autoHeaderRow - 1;
+    }
+  }
+  if (parsedHeaderRowIndex == null || parsedHeaderRowIndex < 0) {
     throw new Error('Could not locate Form XX header row.');
   }
 
@@ -1328,12 +1694,52 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
     headerFormData: headerValues,
     parsedFormHeader,
     headerRowEnd: columnHeaderRow,
-    maxScanCols: 12
+    maxScanCols: 24
   });
+
+  const sourceHeaders = Array.isArray(headersToUse) ? headersToUse.filter(Boolean) : [];
+  const headerNormKey = (h) => normalize(String(h || '').replace(/[^a-z0-9]/gi, ' '));
+  const templateHeaderCols = [];
+  let blankRun = 0;
+  let prevLabelNorm = '';
+  for (let c = startCol; c <= startCol + Math.max(hdrCount, sourceHeaders.length) + 20; c += 1) {
+    const label = excelCellValueToString(worksheet.getCell(columnHeaderRow, c)?.value).trim();
+    if (label) {
+      const labelNorm = headerNormKey(label);
+      if (labelNorm && labelNorm === prevLabelNorm && templateHeaderCols.length > 0) {
+        continue;
+      }
+      templateHeaderCols.push({ col: c, label });
+      prevLabelNorm = labelNorm;
+      blankRun = 0;
+    } else if (templateHeaderCols.length > 0) {
+      blankRun += 1;
+      if (blankRun >= 6) break;
+    }
+  }
+  const writableCols =
+    sourceHeaders.length > 0
+      ? sourceHeaders.map((label, idx) => ({
+          col: startCol + idx,
+          label: String(label || ''),
+        }))
+      : templateHeaderCols.length > 0
+        ? templateHeaderCols.map((entry, idx) => ({
+            col: entry.col ?? startCol + idx,
+            label: String(entry.label || ''),
+          }))
+        : sourceHeaders.map((label, idx) => ({ col: startCol + idx, label: String(label || '') }));
+
+  const rowValuesForExport = (row) => exportFormXXAPRowValuesByHeaders(row, sourceHeaders);
 
   const rowLooksMeaningful = (row) => {
     if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
-    if (row && typeof row === 'object') return Object.values(row).some((v) => String(v ?? '').trim() !== '');
+    if (row && typeof row === 'object') {
+      return Object.entries(row).some(([key, v]) => {
+        if (String(key || '').startsWith('__')) return false;
+        return v != null && String(v).trim() !== '';
+      });
+    }
     return false;
   };
 
@@ -1343,15 +1749,10 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
       : Array.isArray(mappedRowMatrix)
         ? mappedRowMatrix
         : [];
-  const sourceRows = sourcePrimary
-    .filter((row) => rowLooksMeaningful(row))
-    .map((row) => {
-      if (Array.isArray(row)) return row;
-      const hdrs = Array.isArray(headersToUse) ? headersToUse : Object.keys(row || {});
-      return hdrs.map((h) => row?.[h] ?? '');
-    });
+  const sourceRows = sourcePrimary.filter((row) => rowLooksMeaningful(row));
 
-  const tableColMax = startCol + hdrCount - 1;
+  const tableColMax =
+    writableCols.length > 0 ? writableCols[writableCols.length - 1].col : startCol + hdrCount - 1;
   const countTemplateBodyRows = () => {
     let rows = 0;
     for (let r = dataStartRow; r < dataStartRow + 120; r += 1) {
@@ -1370,6 +1771,13 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
   };
 
   if (sourceRows.length > 0) {
+    clearExcelJSWorksheetDataRange(
+      worksheet,
+      dataStartRow,
+      Math.max(sourceRows.length, countTemplateBodyRows()),
+      startCol,
+      tableColMax
+    );
     ensureExcelJSDataRowsWithBorders(worksheet, {
       dataStartRow,
       dataRowCount: sourceRows.length,
@@ -1382,11 +1790,13 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
 
   // Write only data cells — never clear header rows (preserves merged column headers).
   for (let i = 0; i < sourceRows.length; i += 1) {
-    const row = sourceRows[i] || [];
-    for (let j = 0; j < hdrCount; j += 1) {
-      const value = row[j];
+    const row = sourceRows[i];
+    const rowValues = rowValuesForExport(row);
+    for (let j = 0; j < writableCols.length; j += 1) {
+      const { col: targetCol } = writableCols[j];
+      const value = rowValues[j];
       if (value == null || value === '') continue;
-      const cell = worksheet.getCell(dataStartRow + i, startCol + j);
+      const cell = worksheet.getCell(dataStartRow + i, targetCol);
       if (
         j === 0 &&
         (typeof value === 'number' ||

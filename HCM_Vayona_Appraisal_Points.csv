@@ -1,0 +1,99 @@
+S.No,Category,Module / Feature,Description,Key Functionality,Business Value / Flow Phase
+1,Product Overview,HCM Vayona (VAYONA ENERGY),HR Compliance Management platform for Indian statutory and regulatory compliance,End-to-end compliance lifecycle management,Core product — manages full compliance from setup to audit
+2,Product Overview,Target Users,Compliance teams HR administrators site in-charges auditors management,Role-based access for different user types,Serves multi-stakeholder compliance operations
+3,Product Overview,Deployment,Cloud web application on Zoho Catalyst,React frontend + 50+ serverless backend functions,Scalable cloud-native architecture
+4,Technology,Frontend Stack,React 19 React Router Lucide icons ExcelJS XLSX JSZip jsPDF,Modern responsive UI with Excel/PDF export,User-friendly interface with document generation
+5,Technology,Backend Stack,Zoho Catalyst serverless functions Datastore Filestore,REST APIs for all modules,Secure cloud data and file storage
+6,Technology,Authentication,Zoho Catalyst Web SDK,Secure login and session management,Enterprise-grade user authentication
+7,Technology,HR Integration,Zoho People API integration,People Attendance Leave Payroll CLRA data fetch,Reduces manual data entry via autofill
+8,Dashboard,Main Dashboard,KPI overview for compliance operations,Active companies sites pending approvals approved returned counts,Management visibility at a glance
+9,Dashboard,HCM Dashboard,Unified shell for organization transactions and HR data,Integrated navigation for all HCM modules,Single workspace for daily operations
+10,Dashboard,Calendar View,Month-wise compliance deadline calendar,Upcoming due dates and monthly basis date derivation,Never miss compliance deadlines
+11,Organization Master,Company Details,Multi-company profile management,Store legal entity address contact information,Foundation for multi-entity compliance
+12,Organization Master,Site Management,Multi-site location management per company,State city industry Factory/CLRA/S&E registration numbers site in-charge assignment,Site-wise compliance scope and access control
+13,Organization Master,Certificate Management,Compliance certificate tracking,Upload track expiry and renewal of certificates,Certificate compliance monitoring
+14,Organization Master,Employee Data,Employee master data management,Employee records linked to statutory form autofill,Supports employee-centric statutory registers
+15,Library,Applicable Acts Library,Browse acts by state sector and category,Act descriptions with compliance requirements,Central repository of applicable labour laws
+16,Library,Acts Bulk,Bulk import of acts master data,Excel-based mass upload and update of acts,Efficient master data onboarding
+17,Library,Regulations,Regulation master and bulk import,State-wise and act-wise regulation mapping,Detailed rule-level compliance reference
+18,Library,Quiz Creation,Compliance awareness quiz module,Create training quizzes for staff awareness,Employee compliance training support
+19,Library,Rule Book Masters,Client Details Scoring Criteria Record Category States Unique ID,Supporting master data for audit and compliance scoring,Audit framework configuration
+20,Calendar,Calendar Picker,Visual calendar for compliance due dates,Month-wise deadline view and navigation,Operational deadline planning
+21,Calendar,Calendar Master (Bulk),Bulk upload of compliance calendar events,Excel import of due dates across acts and forms,Mass calendar setup
+22,Calendar,Calendar PDF Master,Generate printable compliance calendars,PDF export for planning and distribution,Offline compliance schedule sharing
+23,Transaction,Checklist,Operational compliance checklist,Track form submission proof upload approval status marks,Day-to-day compliance task tracking
+24,Transaction,Checklist Master,Master template for all compliance obligations,Configure Form Name Act State Sector Due Date Description Govt Department,Source of truth for compliance requirements
+25,Transaction,Checklist Bulk Import,Excel bulk import of checklist items,Drag-drop Excel upload with sector state act form details,Fast onboarding of compliance obligations
+26,Transaction,Link Form Files,Sync Excel templates from Form Master to Checklist,Automated template linking via syncFormFiles action,Connects forms to their Excel templates
+27,Transaction,Form Master,Upload and manage Excel statutory form templates,Templates matched by Act Form State Sector with multi-sheet support,Template-driven statutory form generation
+28,Transaction,Statutory (Main Transaction),Primary workspace for statutory form filling and submission,Month filter site filter draft save autofill approval workflow,Core operational module for monthly compliance
+29,Transaction,To-Do List,Task management for pending compliance items,Autofill template matching sector-specific tasks,Action-oriented pending work tracking
+30,Transaction,Factory Master,Factory-specific statutory form masters,Factory Act form configuration,Factory sector compliance support
+31,Transaction,S&E Master,Shops and Establishment form masters,S&E specific form configuration,Shops and Establishment compliance support
+32,Statutory Forms,Form 12 — Register of Adult Workers,Factory Act employee register,Autofill from Zoho People employee data,Automated worker register generation
+33,Statutory Forms,Form 15 Part 1 & 2 — Leave Register,Leave with wages register and payment details,Autofill from Zoho Leave and Payroll APIs,Automated leave and wage compliance
+34,Statutory Forms,Form 25 — Muster Roll,Daily attendance muster roll,P/A/WO codes from Zoho Attendance daily hours support,Automated attendance muster generation
+35,Statutory Forms,Form 25 AP — Andhra Pradesh Muster,AP-specific muster roll format,State-specific template and autofill logic,State-wise compliance accuracy
+36,Statutory Forms,Form 10 — Overtime Register,Overtime payment register,OT hours and payment dates from payroll,Automated overtime compliance
+37,Statutory Forms,Form 17-B / Form 27-C,Health register forms,Health register template with site header autofill,Health compliance documentation
+38,Statutory Forms,AP Forms (2 5 6 7 11 14 18 19 26A),Andhra Pradesh statutory forms suite,Change notice fitness humidity child workers accident wage slip etc,Complete AP state compliance coverage
+39,Statutory Forms,Form X AP — Register of Fines,Fines register under AP rules,Excel template with autofill and export,Fines compliance tracking
+40,Statutory Forms,Form XXII AP — Register of Employment,S&E daily employment register,P/A/L/H attendance codes from Zoho,Automated employment register
+41,Statutory Forms,Form XXVI AP — Appointment Letter,Appointment letter generation,Employee-specific letter fields from People data,Automated appointment documentation
+42,Statutory Forms,Tamil Nadu Form I,Register of Workmen under Permanent Status Act,Workmen register with statutory columns,TN-specific workmen compliance
+43,Statutory Forms,Tamil Nadu Form XVIII,Wages Muster Roll,CLRA/site header autofill wage columns,TN wages muster automation
+44,Statutory Forms,Tamil Nadu Form XXVI,Muster Roll,Template-styled Excel export with attendance data,TN muster roll automation
+45,Statutory Forms,CLRA Form XXIII,Register of Wages / Overtime,Contract labour wage and OT register,CLRA sector wage compliance
+46,Statutory Forms,Form U — Employee Register,S&E employee particulars register,Full employee column autofill from Zoho People,S&E employee register automation
+47,Statutory Forms,Form U Rule 34,Confidential character register,Separate variant detection and template validation,Confidential employee compliance
+48,Statutory Forms,Form Q / K / J,Working hours and employment registers,Hotel restaurant theatre specific registers,Sector-specific register support
+49,Statutory Forms,Form II,Maharashtra-specific registers,State-specific column layout and normalization,MH state compliance
+50,Statutory Forms,Form D,Remuneration and category-wise worker counts,Gender counts and wage components from payroll,Remuneration compliance reporting
+51,Statutory Forms,Form X,Leave register,Earned leave and other leave columns from Zoho Leave,Leave register automation
+52,Statutory Forms,Form Builder,Custom form creation module,Build custom statutory forms,Extensibility for new form requirements
+53,Statutory Workflow,Yet to Complete,Initial status — no work started,Default status for new month/row compliance item,Clear starting point tracking
+54,Statutory Workflow,Pending,Draft or form submitted awaiting approval,Triggered on draft save and send for approval,Review queue management
+55,Statutory Workflow,Approved,Reviewer approved the submission,Approval action records approved date,Finalized compliance record
+56,Statutory Workflow,Returned,Submission rejected needs rework,Return action sends back to site user,Quality control and correction loop
+57,Statutory Workflow,Draft Save,Save incomplete form progress,Grid data SampleData StatutoryData and draft Excel in Filestore,Resume work without data loss
+58,Statutory Workflow,Form File Upload,Upload final filled Excel form,Catalyst Filestore storage with download support,Official form submission record
+59,Statutory Workflow,Proof Submission,Upload supporting proof documents,PDF and image only separate from draft Excel,Evidence of compliance submission
+60,Statutory Workflow,Send for Approval,Submit item for reviewer approval,SendForApproval flag status change to Pending,Formal approval initiation
+61,Statutory Workflow,Excel Autofill Engine,Intelligent form-specific data mapping,Zoho People Attendance Leave Payroll mapped to correct Excel columns,Major time savings and error reduction
+62,Statutory Workflow,Template Style Preservation,Excel export maintains merged cells headers styling,ExcelJS template-based workbook generation,Professional statutory output matching legal format
+63,Form Fetch,People Module,Fetch employee master from Zoho People,Name ID designation department gender etc,Employee data for all registers
+64,Form Fetch,Attendance Module,Fetch daily attendance from Zoho,Present Absent hours worked overtime,Attendance muster autofill
+65,Form Fetch,Leave Module,Fetch leave balances and bookings,Earned leave booked leave other leave types,Leave register autofill
+66,Form Fetch,Payroll Module,Fetch wage and payment data,Basic DA HRA payment dates wage components,Wage and payment register autofill
+67,Form Fetch,CLRA Module,Contract labour specific data fetch,CLRA workforce and wage data,Contract labour compliance support
+68,Audit,Assessment Report,Compliance assessment scoring summary,Act-wise and site-wise assessment evaluation,Compliance quality measurement
+69,Audit,Compliance Records,Formal audit record management,Audit period client act record category marks obtained vs maximum,Structured audit documentation
+70,Audit,Audit Master,Audit template master data,Configure audit checklist templates,Standardized audit framework
+71,Audit,Audit Master Import,Bulk import of audit master data,Excel-based audit template onboarding,Fast audit setup
+72,Audit,Main Audit,Site-wise audit execution,Review compliance against acts scoring send for approval,On-ground compliance verification
+73,Audit,Audit Report,Generated audit report output,Exportable audit documentation,Client-ready audit deliverables
+74,Reports,Reports Page,Statutory and checklist submission summary,Completed pending returned counts with file download links,Submission status overview
+75,Reports,Main Report,Comprehensive month-wise compliance report,Filter by site month act status bulk ZIP download PDF export,Management compliance reporting
+76,Reports,Returned Report,Returned and rejected items tracking,Rework and resubmission tracking,Exception management
+77,Access Control,Admin User,Full system access,All modules all companies and sites,Complete platform administration
+78,Access Control,Site In-charge User,Site-scoped access,Assigned sites only hidden Company Details Acts Bulk Checklist Master,Delegated site-level compliance
+79,Access Control,Audit-only User,Limited audit and statutory access,Main Audit Statutory Audit Report per assigned sites,Focused auditor workflow
+80,Access Control,Site Scope Filtering,Data filtered by incharge email state industry,Automatic navigation and data restriction,Data security and role separation
+81,Integration,Excel Import/Export,Bulk data and form template handling,XLSX ExcelJS for import export with styling,Bulk operations and professional output
+82,Integration,PDF Generation,Compliance calendar and report PDFs,jsPDF and Calendar PDF Master,Printable compliance documents
+83,Integration,Data Caching,Optimized loading for large statutory forms,Prefetch background refresh localStorage cache,Performance optimization for large datasets
+84,Integration,Multi-site Multi-company,Support for organizations with many locations,Company-site hierarchy with per-site compliance,Enterprise-scale deployment
+85,Integration,State-wise Compliance,Indian states master with city combobox,State-specific forms acts and regulations,Pan-India compliance coverage
+86,Integration,Industry-wise Mapping,Factory CLRA Shops and Establishment sectors,Industry to act category automatic mapping,Correct act applicability per site
+87,Planned Modules,Training & LMS,Trainer Trainee Course Curriculum Learner Portal,Placeholder routes for future LMS features,Future compliance training expansion
+88,Planned Modules,Certification & Notifications,Certification Notifications Feedback Medical Fitness,Placeholder routes for future features,Roadmap for extended HCM capabilities
+89,End-to-End Flow,Phase 1 — Setup,Masters configuration,Company Site Acts Checklist Form Master Calendar setup,Foundation phase
+90,End-to-End Flow,Phase 2 — Operations,Monthly compliance execution,Statutory grid form fill autofill draft upload proof send for approval,Execution phase
+91,End-to-End Flow,Phase 3 — Review,Approval and audit,Approve or return main audit assessment scoring,Quality assurance phase
+92,End-to-End Flow,Phase 4 — Reporting,Management reporting,Dashboard main report returned report audit report,Visibility and accountability phase
+93,Key Achievement,Autofill Engine Development,Form-aware Zoho HR data mapping for 50+ statutory forms,Reduces manual entry from hours to minutes,Major productivity improvement
+94,Key Achievement,Multi-state Form Support,AP Tamil Nadu Maharashtra and central forms,State-specific templates headers and column logic,Nationwide compliance capability
+95,Key Achievement,Approval Workflow,Complete Yet to Complete → Pending → Approved/Returned cycle,Draft proof form file separate tracking,Controlled compliance submission process
+96,Key Achievement,Excel Template Engine,Preserves legal form formatting on export,Merged cells styling multi-sheet workbooks,Legally compliant form output
+97,Key Achievement,Role-based Access,Site in-charge and audit-only user scoping,Navigation and data filtering by role and site,Secure multi-user operations
+98,Key Achievement,Reporting Suite,Main report returned report dashboard KPIs,Month site act status filters bulk download,Management decision support

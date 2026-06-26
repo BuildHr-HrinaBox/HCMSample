@@ -29,6 +29,47 @@ export function buildSiteEstablishmentAddressOnly(site) {
   return [addr, city, state].filter(Boolean).join(', ').trim();
 }
 
+export function buildSiteLocationText(site) {
+  if (!site || typeof site !== 'object') return '';
+  return String(site.location ?? site.Location ?? '').trim();
+}
+
+function isClraIndustryLabel(industry) {
+  const s = String(industry || '').trim().toLowerCase();
+  return s === 'clra' || s.includes('clra') || s.includes('contract labour') || s.includes('contract labor');
+}
+
+function isShopsAndEstablishmentIndustryLabel(industry) {
+  const s = String(industry || '').trim().toLowerCase();
+  return (s.includes('shop') || s.includes('shops')) && s.includes('establishment');
+}
+
+function isFactoryIndustryLabel(industry) {
+  const s = String(industry || '').trim().toLowerCase();
+  if (!s || isClraIndustryLabel(industry) || isShopsAndEstablishmentIndustryLabel(industry)) {
+    return false;
+  }
+  return (
+    s.includes('factories act') ||
+    s.includes('factory act') ||
+    s.includes('factories') ||
+    s.includes('factory')
+  );
+}
+
+/** Site Management RC number — industry-specific field first, then first non-empty RC. */
+export function buildSiteRegistrationNumber(site) {
+  if (!site || typeof site !== 'object') return '';
+  const industry = String(site.industry ?? site.Industry ?? '').trim();
+  const sand = String(site.sandERCNumber ?? site.SandERCNumber ?? '').trim();
+  const factory = String(site.factoryRCNumber ?? site.FactoryRCNumber ?? '').trim();
+  const clra = String(site.clraRCNumber ?? site.CLRARCNumber ?? '').trim();
+  if (isClraIndustryLabel(industry) && clra) return clra;
+  if (isShopsAndEstablishmentIndustryLabel(industry) && sand) return sand;
+  if (isFactoryIndustryLabel(industry) && factory) return factory;
+  return clra || sand || factory || '';
+}
+
 export function buildCompanyNameAndAddress(company) {
   if (!company || typeof company !== 'object') return '';
   const name = String(company.companyName ?? company.CompanyName ?? '').trim();
@@ -86,7 +127,22 @@ export function isEstablishmentAddressHeaderLabel(label) {
 export function isPrincipalEmployerHeaderLabel(label) {
   const compact = normalizeStatutoryHeaderLabel(label);
   if (!compact) return false;
-  return /name\s+and\s+address\s+of\s+principal\s+employer/.test(compact);
+  return (
+    /name\s+and\s+address\s+of\s+principal\s+employer/.test(compact) ||
+    /^employer$/.test(compact)
+  );
+}
+
+export function isNatureLocationHeaderLabel(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact) return false;
+  return /nature\s+and\s+location\s+of\s+work/.test(compact);
+}
+
+export function isRegistrationNoHeaderLabel(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact) return false;
+  return /^registration\s+no/.test(compact);
 }
 
 export const STATUTORY_ESTABLISHMENT_NAME_HEADER_KEYS = new Set([
@@ -115,6 +171,20 @@ export const STATUTORY_PRINCIPAL_EMPLOYER_HEADER_KEYS = new Set([
   'statutory_principal_employer'
 ]);
 
+export const STATUTORY_NATURE_LOCATION_HEADER_KEYS = new Set([
+  'form_xv_nature_location_work',
+  'form_xvi_nature_location_work',
+  'form_xvii_nature_location_work',
+  'form_xviii_nature_location_work',
+  'form_xxiii_nature_location_work',
+  'form_xix_ap_nature_location'
+]);
+
+export const STATUTORY_REGISTRATION_HEADER_KEYS = new Set([
+  'statutory_registration_no',
+  'form12_header_registration'
+]);
+
 export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
   {
     match: /name\s+of\s+the\s+establishment(?!\s+already)/i,
@@ -139,6 +209,32 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     label: 'Name and address of Principal Employer:',
     key: 'statutory_principal_employer',
     kind: 'principal_employer'
+  },
+  {
+    match: /^employer\s*:?$/i,
+    label: 'Employer:',
+    key: 'statutory_principal_employer',
+    kind: 'principal_employer'
+  },
+  {
+    match: /name\s+and\s+address\s+of\s+contractor/i,
+    label: '1. Name and Address of Contractor.',
+    key: 'form_xxiii_contractor'
+  },
+  {
+    match: /nature\s+and\s+location\s+of\s+work/i,
+    label: '2. Nature and location of work.',
+    key: 'form_xxiii_nature_location_work'
+  },
+  {
+    match: /establishment\s+in\s*\/?\s*under\s+which\s+contract\s+is\s+carried\s+on/i,
+    label: '3. Name and address of establishment in/under which contract is carried on',
+    key: 'form_xxiii_establishment_contract_carried'
+  },
+  {
+    match: /^registration\s+no\.?/i,
+    label: 'Registration No.:',
+    key: 'statutory_registration_no'
   }
 ];
 
@@ -239,6 +335,15 @@ export function applySiteCompanyHeaderAutofill(
     STATUTORY_PRINCIPAL_EMPLOYER_HEADER_KEYS.forEach((key) => fillKey(key, principalEmployerText));
   }
 
+  const locationText = buildSiteLocationText(site);
+  const registrationText = buildSiteRegistrationNumber(site);
+  if (locationText) {
+    STATUTORY_NATURE_LOCATION_HEADER_KEYS.forEach((key) => fillKey(key, locationText));
+  }
+  if (registrationText) {
+    STATUTORY_REGISTRATION_HEADER_KEYS.forEach((key) => fillKey(key, registrationText));
+  }
+
   const fields = Array.isArray(formHeaderFields) ? formHeaderFields : [];
   for (const field of fields) {
     const key = field?.key;
@@ -247,6 +352,8 @@ export function applySiteCompanyHeaderAutofill(
     if (isEstablishmentNameHeaderLabel(field.label)) value = establishmentNameText;
     else if (isEstablishmentAddressHeaderLabel(field.label)) value = establishmentAddressText;
     else if (isPrincipalEmployerHeaderLabel(field.label)) value = principalEmployerText;
+    else if (isNatureLocationHeaderLabel(field.label)) value = locationText;
+    else if (isRegistrationNoHeaderLabel(field.label)) value = registrationText;
     fillKey(key, value);
   }
 
@@ -309,6 +416,31 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
       'form_xxiii_principal_employer'
     ]);
   }
+  if (isRegistrationNoHeaderLabel(label)) {
+    return tryKeys(['statutory_registration_no', 'form12_header_registration']);
+  }
+  if (/contractor/i.test(normalizeStatutoryHeaderLabel(label)) && !/principal/.test(normalizeStatutoryHeaderLabel(label))) {
+    return tryKeys(['form_xxiii_contractor', 'form_xviii_contractor', 'form_xvii_contractor', 'form_xvi_contractor']);
+  }
+  if (isNatureLocationHeaderLabel(label)) {
+    return tryKeys([
+      'form_xxiii_nature_location_work',
+      'form_xvii_nature_location_work',
+      'form_xviii_nature_location_work',
+      'form_xvi_nature_location_work',
+      'form_xv_nature_location_work',
+      'form_xix_ap_nature_location'
+    ]);
+  }
+  if (/establishment\s+in.*under\s+which\s+contract/i.test(normalizeStatutoryHeaderLabel(label))) {
+    return tryKeys([
+      'form_xxiii_establishment_contract_carried',
+      'form_xv_establishment_contract_carried',
+      'form_xviii_establishment_contract_carried',
+      'form_xvii_establishment_contract_carried',
+      'form_xvi_establishment_contract_carried'
+    ]);
+  }
   return String(field?.value ?? '').trim();
 }
 
@@ -335,7 +467,15 @@ export function formatStatutoryHeaderLabelValueExport(label, rawLabel, value) {
  */
 export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
   worksheet,
-  { headerFormData, parsedFormHeader, headerRowEnd, maxScanRows, maxScanCols } = {}
+  {
+    headerFormData,
+    parsedFormHeader,
+    headerRowEnd,
+    maxScanRows,
+    maxScanCols,
+    colRightBound,
+    writeMode = 'combined'
+  } = {}
 ) {
   if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
   const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
@@ -344,14 +484,48 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
 
   const normalize = normalizeStatutoryHeaderLabel;
   const rowEnd = Math.max(1, Number(headerRowEnd) || 35);
-  const maxRows = Math.max(rowEnd, Number(maxScanRows) || 120);
   const colLimit = Math.max(20, Number(maxScanCols) || 80);
+  const scanColMax =
+    Number(colRightBound) > 0 ? Math.min(colLimit, Number(colRightBound)) : colLimit;
+  const useCombined = writeMode === 'combined' || writeMode === 'both';
+  const useAdjacent = writeMode === 'adjacent' || writeMode === 'both';
 
   const writeCombinedOnLabelRow = (row, startCol, label, rawLabel, value) => {
     const text = formatStatutoryHeaderLabelValueExport(label, rawLabel || label, value);
     if (!String(text).trim()) return;
-    // Write into the label cell (merge master). Writing to the next column overwrites merged A:B cells.
-    worksheet.getCell(row, startCol).value = text;
+    const cell = worksheet.getCell(row, startCol);
+    cell.value = text;
+    cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'top' };
+  };
+
+  const writeAdjacentValue = (row, startCol, value) => {
+    const val = String(value ?? '').trim();
+    if (!val) return;
+    const adjMax =
+      Number(colRightBound) > 0
+        ? Math.min(startCol + 14, Number(colRightBound))
+        : startCol + 14;
+    for (let ac = startCol + 1; ac <= adjMax; ac += 1) {
+      const adj = excelCellValueToString(worksheet.getCell(row, ac)?.value).trim();
+      if (!adj || /^enter\b/i.test(adj)) {
+        worksheet.getCell(row, ac).value = val;
+        return;
+      }
+    }
+  };
+
+  const writeHeaderValue = (row, startCol, label, rawLabel, value) => {
+    const val = String(value ?? '').trim();
+    if (!val) return;
+    if (useCombined) writeCombinedOnLabelRow(row, startCol, label, rawLabel, val);
+    if (useAdjacent) writeAdjacentValue(row, startCol, val);
+  };
+
+  const cellLooksLikeCompletedExport = (raw) => {
+    const text = String(raw || '').trim();
+    if (!text || !/:/.test(text)) return false;
+    const parts = text.split(':');
+    return parts.length >= 2 && String(parts.slice(1).join(':') || '').trim().length >= 3;
   };
 
   const labelMatchesField = (raw, label) => {
@@ -362,9 +536,9 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
   };
 
   for (let r = 1; r < rowEnd; r += 1) {
-    for (let c = 1; c <= colLimit; c += 1) {
+    for (let c = 1; c <= scanColMax; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
-      if (!raw) continue;
+      if (!raw || cellLooksLikeCompletedExport(raw)) continue;
       let wrote = false;
 
       for (const field of fields) {
@@ -372,7 +546,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
         if (!label || !labelMatchesField(raw, label)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, field);
         if (val) {
-          writeCombinedOnLabelRow(r, c, label, raw, val);
+          writeHeaderValue(r, c, label, raw, val);
           wrote = true;
         }
         break;
@@ -382,7 +556,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
       for (const spec of specs) {
         if (!spec.match.test(raw)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, { key: spec.key, label: spec.label });
-        if (val) writeCombinedOnLabelRow(r, c, spec.label, raw, val);
+        if (val) writeHeaderValue(r, c, spec.label, raw, val);
         break;
       }
     }
@@ -390,7 +564,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
 
   // Repair pass: template cells that already contain only the value (no "Label :").
   for (let r = 1; r < rowEnd; r += 1) {
-    for (let c = 1; c <= colLimit; c += 1) {
+    for (let c = 1; c <= scanColMax; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
       if (!raw || /:/.test(raw)) continue;
       const rawNorm = normalize(raw);
@@ -399,6 +573,29 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
         if (!val || normalize(val) !== rawNorm) continue;
         writeCombinedOnLabelRow(r, c, field.label, field.label, val);
         break;
+      }
+    }
+  }
+}
+
+/** Remove accidental header values written outside the wage-register table box. */
+export function clearStatutoryHeaderCellsBeyondColumn(
+  worksheet,
+  { colFrom, colTo, rowFrom = 1, rowTo = 25 } = {}
+) {
+  if (!worksheet) return;
+  const c0 = Math.max(1, Number(colFrom) || 1);
+  const c1 = Math.max(c0, Number(colTo) || c0);
+  const r0 = Math.max(1, Number(rowFrom) || 1);
+  const r1 = Math.max(r0, Number(rowTo) || r0);
+  const spillRe =
+    /address\s+of\s+the\s+establishment|name\s+and\s+address\s+of\s+principal\s+employer|establishment\s+in.*under\s+which\s+contract|name\s+of\s+establishment\s*\/\s*shop|registration\s+no|name\s+and\s+address\s+of\s+contractor|nature\s+and\s+location\s+of\s+work/i;
+  for (let r = r0; r <= r1; r += 1) {
+    for (let c = c0; c <= c1; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      if (spillRe.test(raw)) {
+        worksheet.getCell(r, c).value = '';
       }
     }
   }

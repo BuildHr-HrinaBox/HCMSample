@@ -1,0 +1,31 @@
+S.No,Appraisal Point (Short),Category
+1,Developed HCM Vayona — full HR Compliance Management platform for Indian statutory compliance,Product
+2,Built end-to-end compliance flow: Setup → Form Fill → Approval → Audit → Reports,Product Flow
+3,Implemented 50+ Indian statutory forms (Factory CLRA Shops & Establishment AP TN MH),Statutory Forms
+4,Integrated Zoho People for autofill — People Attendance Leave Payroll CLRA data,Integration
+5,Built Excel autofill engine — maps HR data to correct form columns automatically,Technical
+6,Implemented approval workflow: Yet to Complete → Pending → Approved / Returned,Workflow
+7,Developed Form Master and Checklist Master with Excel template linking,Master Data
+8,Built multi-site multi-company support with site in-charge role-based access,Access Control
+9,Implemented Statutory transaction module with draft save proof upload and form file management,Core Module
+10,Developed Main Report and Returned Report with month/site/status filters and bulk download,Reporting
+11,Built Dashboard with KPIs — pending approvals approved returned active sites,Dashboard
+12,Implemented Calendar module for compliance deadline tracking,Calendar
+13,Developed Audit module — Main Audit Assessment Report Compliance scoring,Audit
+14,Preserved Excel template styling (merged cells headers) on statutory form export,Technical
+15,Supported state-specific forms — Andhra Pradesh Tamil Nadu Maharashtra formats,Statutory Forms
+16,Built Form 25 muster roll with daily P/A/WO attendance autofill from Zoho,Statutory Forms
+17,Built Form 15 leave register with Zoho Leave and Payroll autofill,Statutory Forms
+18,Built Form 12 worker register with Zoho People employee autofill,Statutory Forms
+19,Built Form XXII AP Register of Employment with daily attendance codes,Statutory Forms
+20,Built Form XVIII Tamil Nadu Wages Muster and Form XXVI Muster Roll,Statutory Forms
+21,Built Form X AP Register of Fines and Form XIX AP Wage Slip,Statutory Forms
+22,Implemented site-wise data filtering by state industry and incharge email,Access Control
+23,Developed Site Management with Factory RC CLRA RC S&E registration tracking,Organization
+24,Built Acts Bulk and Regulations Bulk Excel import for master data onboarding,Library
+25,Implemented Catalyst serverless backend with 50+ micro-functions,Backend
+26,React 19 frontend with modern sidebar navigation and responsive UI,Frontend
+27,ExcelJS and XLSX integration for professional statutory document generation,Technical
+28,PDF export for compliance calendars and audit reports,Reporting
+29,Data caching and prefetch for performance on large statutory forms,Performance
+30,Quiz creation module for compliance awareness training,Library

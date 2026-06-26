@@ -500,20 +500,6 @@ function findStatutoryMatchForReport(meta, formKey, statutoryRows, month, year, 
   return null;
 }
 
-function getDraftDateFromStatutoryRow(stRow) {
-  if (!stRow) return '';
-  return String(
-    stRow.SubmittedDate ?? stRow.submittedDate ?? stRow.DraftDate ?? stRow.draftDate ?? ''
-  ).trim();
-}
-
-function getApprovalDateFromStatutoryRow(stRow) {
-  if (!stRow) return '';
-  return String(
-    stRow.ApprovedDate ?? stRow.approvedDate ?? stRow.ApprovalDate ?? stRow.approvalDate ?? ''
-  ).trim();
-}
-
 function getStatutoryRowStatusRaw(stRow) {
   if (!stRow) return '';
   const direct =
@@ -540,6 +526,58 @@ function isStatutoryTransactionApproved(stRow) {
     .trim()
     .toLowerCase();
   return appr === 'approved' || appr === 'approve';
+}
+
+function statutorySendForApprovalIsSent(stRow) {
+  if (!stRow) return false;
+  return /^sent$/i.test(String(stRow.SendForApproval ?? stRow.sendForApproval ?? '').trim());
+}
+
+function getStatutoryRowTimestamp(stRow) {
+  if (!stRow) return '';
+  const mt = stRow.MODIFIEDTIME ?? stRow.modifiedTime ?? stRow.CREATEDTIME ?? stRow.createdTime;
+  return mt != null && String(mt).trim() !== '' ? String(mt).trim() : '';
+}
+
+function firstNonEmptyStatutoryDate(...candidates) {
+  for (const c of candidates) {
+    if (c != null && String(c).trim() !== '' && String(c).trim().toLowerCase() !== 'null') {
+      return String(c).trim();
+    }
+  }
+  return '';
+}
+
+/** Match Statutory.js `resolveStatutorySubmittedDateStored` + draft/modified-time fallback. */
+function getDraftDateFromStatutoryRow(stRow) {
+  if (!stRow) return '';
+  const direct = firstNonEmptyStatutoryDate(
+    stRow.SubmittedDate,
+    stRow.submittedDate,
+    stRow.DraftDate,
+    stRow.draftDate
+  );
+  if (direct) return direct;
+  if (statutorySendForApprovalIsSent(stRow) || hasStatutoryDraftFromRow(stRow)) {
+    return getStatutoryRowTimestamp(stRow);
+  }
+  return '';
+}
+
+/** Match Statutory.js `resolveStatutoryApprovedDateStored` with modified-time fallback when approved. */
+function getApprovalDateFromStatutoryRow(stRow) {
+  if (!stRow) return '';
+  const direct = firstNonEmptyStatutoryDate(
+    stRow.ApprovedDate,
+    stRow.approvedDate,
+    stRow.ApprovalDate,
+    stRow.approvalDate
+  );
+  if (direct) return direct;
+  if (isStatutoryTransactionApproved(stRow)) {
+    return getStatutoryRowTimestamp(stRow);
+  }
+  return '';
 }
 
 function pickBestStatutoryRow(matches) {
@@ -610,7 +648,9 @@ function buildStatutoryDraftRow(stRow) {
     submittedDate: getDraftDateFromStatutoryRow(stRow),
     draftDate: getDraftDateFromStatutoryRow(stRow),
     approvedDate: getApprovalDateFromStatutoryRow(stRow),
-    approvalDate: getApprovalDateFromStatutoryRow(stRow)
+    approvalDate: getApprovalDateFromStatutoryRow(stRow),
+    sendForApproval: String(stRow.SendForApproval || stRow.sendForApproval || '').trim(),
+    modifiedTime: getStatutoryRowTimestamp(stRow)
   };
 }
 
@@ -922,7 +962,9 @@ function buildEmptyFormRow(formKey, formName, act, description, sector, reportMo
     approval: '',
     statutoryStatus: '',
     hasStatutoryDraftStored: false,
+    submittedDate: '',
     draftDate: '',
+    approvedDate: '',
     approvalDate: ''
   };
 }

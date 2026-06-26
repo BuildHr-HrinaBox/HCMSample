@@ -23,6 +23,7 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
+    "postbuild": "node -e \"require('fs').copyFileSync('client-package.json','build/client-package.json')\"",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },

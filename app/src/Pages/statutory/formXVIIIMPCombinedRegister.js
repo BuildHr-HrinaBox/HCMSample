@@ -7,8 +7,101 @@ import {
   countExcelJSTemplateBodyRows,
   ensureExcelJSDataRowsWithBorders
 } from '../../utils/excelTableBorders';
-import { flattenPayrollEarningColumns } from '../../utils/payrollEarnings';
+import {
+  flattenPayrollEarningColumns,
+  mergePayrollRunEmployeePayload,
+  readPayrollScalar,
+} from '../../utils/payrollEarnings';
+import { sumLeaveRecordBookedAndBalance } from '../../utils/leaveMetrics';
+import { getCachedForm15PayrollTableRows, getLatestCachedPayrollTableRows, yieldToMain } from '../../utils/statutoryAutofillCache';
 import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
+import {
+  buildFormXIXMPPayrollRowResolver,
+  loadFormXIXMPPayrollRowsForAutofill,
+  resolveFormXIXMPPayrollRowForEmployee,
+  resolveFormXIXMPPayrollRowsForAutofill,
+} from './formXIXMPWageSlip';
+
+export const resolveFormXVIIIMPPayrollRowsForAutofill = resolveFormXIXMPPayrollRowsForAutofill;
+export const loadFormXVIIIMPPayrollRowsForAutofill = loadFormXIXMPPayrollRowsForAutofill;
+
+export function buildFormXVIIIMPPayrollRowResolver(payrollRows) {
+  return buildFormXIXMPPayrollRowResolver(payrollRows);
+}
+
+const mpPayrollRowNameCandidates = (row) => {
+  if (!row || typeof row !== 'object') return [];
+  const full = String(
+    row.employee_name || row.full_name || row.name || `${row.first_name || ''} ${row.last_name || ''}`
+  )
+    .trim()
+    .toLowerCase();
+  const out = full ? [full] : [];
+  const paren = full.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+  if (paren) {
+    out.push(paren[1].trim());
+    out.push(paren[2].trim());
+  }
+  return [...new Set(out.filter(Boolean))];
+};
+
+const mpFormRowNameCandidates = (row, headers) => {
+  if (!row || typeof row !== 'object') return [];
+  const list = Array.isArray(headers) ? headers : [];
+  const out = [];
+  list.forEach((header) => {
+    const s = mpCombinedRegisterHeaderNorm(header);
+    if (!s.includes('name')) return;
+    if (
+      !(
+        s.includes('workman') ||
+        s.includes('employee') ||
+        s.includes('worker') ||
+        s.includes('workmen')
+      )
+    ) {
+      return;
+    }
+    const raw = String(row[header] ?? '').trim().toLowerCase();
+    if (!raw) return;
+    out.push(raw);
+    const paren = raw.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+    if (paren) {
+      out.push(paren[1].trim());
+      out.push(paren[2].trim());
+    }
+  });
+  return [...new Set(out.filter(Boolean))];
+};
+
+/** Match pay-run payroll row — People employee, then grid name (same strategy as leave API). */
+export function resolveFormXVIIIMPPayrollRowForAutofillRow(emp, row, payrollRows, headers, resolver) {
+  const rows = Array.isArray(payrollRows) ? payrollRows : [];
+  if (rows.length === 0) return null;
+  const resolve =
+    typeof resolver === 'function' ? resolver : buildFormXVIIIMPPayrollRowResolver(rows);
+  const fromPeople = resolve(emp);
+  if (fromPeople && !fromPeople.fetch_error) return fromPeople;
+
+  const rowNames = mpFormRowNameCandidates(row, headers);
+  if (rowNames.length > 0) {
+    const hit = rows.find((pr) => {
+      if (!pr || pr.fetch_error) return false;
+      const payrollNames = mpPayrollRowNameCandidates(pr);
+      return rowNames.some((rowName) =>
+        payrollNames.some(
+          (payrollName) =>
+            payrollName === rowName ||
+            payrollName.includes(rowName) ||
+            rowName.includes(payrollName)
+        )
+      );
+    });
+    if (hit) return hit;
+  }
+
+  return resolveFormXIXMPPayrollRowForEmployee(emp, rows);
+}
 
 export function mpCombinedRegisterHeaderNorm(txt) {
   return String(txt || '')
@@ -411,14 +504,56 @@ export function isFormXVIIIMPEducationSkillHeader(header) {
 
 export function isFormXVIIIMPGrossWagesHeader(header) {
   const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (s.includes('net') || (s.includes('wage') && s.includes('rate'))) return false;
+  if (s.includes('net') || s.includes('overtime') || (s.includes('wage') && s.includes('rate'))) return false;
   if (s.includes('gross') && (s.includes('wage') || s.includes('earning'))) return true;
+  if (s.includes('total') && s.includes('gross')) return true;
   return s.includes('total') && s.includes('wage') && s.includes('earning');
 }
 
 export function isFormXVIIIMPNetPayableHeader(header) {
   const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   return s.includes('net') && (s.includes('payable') || s.includes('paid') || s.includes('amount'));
+}
+
+export function isFormXVIIIMPOtherAllowanceHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.includes('other') && s.includes('allowance');
+}
+
+export function isFormXVIIIMPWageRateHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (s.includes('overtime')) return false;
+  return (
+    (s.includes('wage') && (s.includes('rate') || s.includes('pay') || s.includes('piece'))) ||
+    (s.includes('piece') && s.includes('rate'))
+  );
+}
+
+export function isFormXVIIIMPDaysWorkedHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return (
+    (s.includes('total') && s.includes('day') && s.includes('work')) ||
+    s.includes('no of days worked') ||
+    (s.includes('days') && s.includes('worked'))
+  );
+}
+
+export function isFormXVIIIMPLeaveCategoryHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.includes('category') && s.includes('leave');
+}
+
+export function isFormXVIIIMPLeavesAvailedHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return (
+    (s.includes('leave') && (s.includes('avail') || s.includes('availed'))) ||
+    (s.includes('availed') && s.includes('day'))
+  );
+}
+
+export function isFormXVIIIMPLeaveBalanceHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.includes('total') && s.includes('balance') && s.includes('leave');
 }
 
 /** PF/ESIC/PT/LWF deduction amount columns — not EPF/UAN registration columns. */
@@ -442,8 +577,9 @@ export function isFormXVIIIMPPayrollDeductionHeader(header) {
 
 export function readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers = {}) {
   const flatFn = helpers.flattenPayrollEarningColumns || flattenPayrollEarningColumns;
+  const merged = mergePayrollRunEmployeePayload(payrollPayload);
   const flat =
-    payrollPayload && typeof flatFn === 'function' ? flatFn(payrollPayload) : payrollPayload || {};
+    merged && typeof flatFn === 'function' ? flatFn(merged) : merged || payrollPayload || {};
   const p = helpers.getPayrollPayloadObject
     ? helpers.getPayrollPayloadObject(flat)
     : flat;
@@ -502,7 +638,57 @@ export function readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers = {}) {
     });
     if (has) gross = sum;
   }
-  return { gross, net, flat, p };
+  const other_allowance =
+    flat.other_allowance ??
+    flat['other_allowance'] ??
+    p.other_allowance ??
+    p['other_allowance'] ??
+    readPayrollScalar(flat, ['other_allowance', 'Other Allowance', 'otherAllowance'], [/other_allowance/]) ??
+    readPayrollScalar(p, ['other_allowance', 'Other Allowance', 'otherAllowance'], [/other_allowance/]) ??
+    '';
+  const paid_days =
+    flat.paid_days ??
+    flat['paid_days'] ??
+    flat.paidDays ??
+    p.paid_days ??
+    p['paid_days'] ??
+    readPayrollScalar(
+      flat,
+      ['paid_days', 'Paid Days', 'paidDays', 'days_worked', 'Days Worked', 'no_of_days_worked'],
+      [/^paid_days$/, /paiddays/, /daysworked/, /days_present/, /noofdayspresent/]
+    ) ??
+    readPayrollScalar(
+      p,
+      ['paid_days', 'Paid Days', 'paidDays', 'days_worked', 'Days Worked', 'no_of_days_worked'],
+      [/^paid_days$/, /paiddays/, /daysworked/, /days_present/, /noofdayspresent/]
+    ) ??
+    '';
+  const grossResolved =
+    gross !== '' && gross != null
+      ? gross
+      : readPayrollScalar(
+          flat,
+          ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'monthly_gross_amount'],
+          [/^gross_pay$/, /^total_earnings$/]
+        ) ||
+        readPayrollScalar(
+          p,
+          ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'monthly_gross_amount'],
+          [/^gross_pay$/, /^total_earnings$/]
+        );
+  const netResolved =
+    net !== '' && net != null
+      ? net
+      : readPayrollScalar(flat, ['net_pay', 'Net Pay', 'netPay', 'monthly_salary'], [/^net_pay$/]) ||
+        readPayrollScalar(p, ['net_pay', 'Net Pay', 'netPay', 'monthly_salary'], [/^net_pay$/]);
+  return {
+    gross: grossResolved,
+    net: netResolved,
+    other_allowance,
+    paid_days,
+    flat,
+    p,
+  };
 }
 
 /** Map MP Combined Register payroll columns (gross, PF/ESIC/PT/LWF, net, UTR). */
@@ -519,9 +705,14 @@ export function resolveFormXVIIIMPTableHeaders(headers) {
       return s && testFn(s);
     }) || null;
   return {
-    grossWages: findHeader(
-      (s) => (s.includes('gross') || s.includes('total')) && (s.includes('wage') || s.includes('earning'))
-    ),
+    grossWages: findHeader((s) => {
+      if (s.includes('net') || s.includes('overtime') || (s.includes('wage') && s.includes('rate'))) {
+        return false;
+      }
+      if (s.includes('gross') && (s.includes('wage') || s.includes('earning'))) return true;
+      if (s.includes('total') && s.includes('gross')) return true;
+      return s.includes('total') && s.includes('wage') && s.includes('earning');
+    }),
     overtimeWages: findHeader((s) => s.includes('overtime') && s.includes('wage')),
     overtimeHours: findHeader((s) => s.includes('overtime') && s.includes('hour')),
     otherAllowances: findHeader((s) => s.includes('other') && s.includes('allowance')),
@@ -533,7 +724,25 @@ export function resolveFormXVIIIMPTableHeaders(headers) {
     advances: findHeader((s) => s.includes('advance') || s.includes('loan')),
     netPayable: findHeader((s) => s.includes('net') && (s.includes('payable') || s.includes('paid'))),
     bankUtr: findHeader((s) => s.includes('bank') && s.includes('utr')),
-    educationSkill: findHeader((s) => s.includes('education') && (s.includes('skill') || s.includes('skil')))
+    educationSkill: findHeader((s) => s.includes('education') && (s.includes('skill') || s.includes('skil'))),
+    wageRate: findHeader(
+      (s) =>
+        (s.includes('wage') && (s.includes('rate') || s.includes('pay') || s.includes('piece'))) ||
+        (s.includes('piece') && s.includes('rate'))
+    ),
+    daysWorked: findHeader(
+      (s) =>
+        (s.includes('total') && s.includes('day') && s.includes('work')) ||
+        s.includes('no of days worked') ||
+        (s.includes('days') && s.includes('worked'))
+    ),
+    leaveCategory: findHeader((s) => s.includes('category') && s.includes('leave')),
+    leavesAvailed: findHeader(
+      (s) =>
+        (s.includes('leave') && (s.includes('avail') || s.includes('availed'))) ||
+        (s.includes('availed') && s.includes('day'))
+    ),
+    totalBalanceLeaves: findHeader((s) => s.includes('total') && s.includes('balance') && s.includes('leave'))
   };
 }
 
@@ -554,7 +763,10 @@ export function applyFormXVIIIMPEmployeeToRow(row, emp, mpHeaders, helpers = {})
 export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, helpers = {}) {
   if (!row || !payrollPayload) return false;
   const sanitizeValue = helpers.sanitizeValue || ((v) => v);
-  const { gross, net, flat, p } = readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers);
+  const { gross, net, other_allowance, paid_days, flat, p } = readFormXVIIIMPPayrollGrossNet(
+    payrollPayload,
+    helpers
+  );
   const headers = Array.isArray(helpers.headers) ? helpers.headers : Object.keys(row || {});
   let hit = false;
 
@@ -567,11 +779,19 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
   headers.forEach((h) => {
     if (isFormXVIIIMPGrossWagesHeader(h)) writeAmount(h, gross);
     if (isFormXVIIIMPNetPayableHeader(h)) writeAmount(h, net);
+    if (isFormXVIIIMPOtherAllowanceHeader(h)) writeAmount(h, other_allowance);
+    if (isFormXVIIIMPWageRateHeader(h)) writeAmount(h, gross);
+    if (isFormXVIIIMPDaysWorkedHeader(h)) writeAmount(h, paid_days);
+    if (isFormXVIIIMPLeaveCategoryHeader(h)) writeAmount(h, paid_days);
   });
 
   if (mpHeaders) {
     writeAmount(mpHeaders.grossWages, gross);
     writeAmount(mpHeaders.netPayable, net);
+    writeAmount(mpHeaders.otherAllowances, other_allowance);
+    writeAmount(mpHeaders.wageRate, gross);
+    writeAmount(mpHeaders.daysWorked, paid_days);
+    writeAmount(mpHeaders.leaveCategory, paid_days);
   }
 
   const findEarningAmount = helpers.findEarningAmount;
@@ -584,11 +804,12 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
   const deductions = helpers.getDeductionsArray ? helpers.getDeductionsArray(p) : [];
   const ot =
     findEarningAmount(earnings, (t, n) => t === 'overtime' || t === 'ot' || n.includes('overtime')) || '';
-  const otherAllow =
+  const otherAllowFromLines =
     findEarningAmount(
       earnings,
       (t, n) => n.includes('other') && (n.includes('allowance') || n.includes('allowances'))
     ) || '';
+  const otherAllow = other_allowance !== '' && other_allowance != null ? other_allowance : otherAllowFromLines;
   const pf =
     findDeductionAmount(
       deductions,
@@ -634,6 +855,128 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
   set('pt', pt);
   set('lwf', lwf);
   set('netPayable', net);
+  set('wageRate', gross);
+  set('daysWorked', paid_days);
+  set('leaveCategory', paid_days);
+  return hit;
+}
+
+/** Apply pay-run payroll fields onto Form XVIII MP grid rows. */
+export function enrichFormXVIIIMPPayrollRows(mappedData, employees, headers, helpers = {}) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+  const {
+    payrollRows = [],
+    sanitizeValue = (v) => String(v ?? '').trim(),
+    resolvePayrollRow = null,
+    ...payrollHelpers
+  } = helpers;
+  const rows = Array.isArray(payrollRows) ? payrollRows : [];
+  if (rows.length === 0) return 0;
+  const resolver = buildFormXVIIIMPPayrollRowResolver(rows);
+  let hits = 0;
+  mappedData.forEach((row, rowIndex) => {
+    const empItem = employees[rowIndex];
+    const emp = empItem?.Employee || empItem?.employee || empItem;
+    const payrollRow =
+      typeof resolvePayrollRow === 'function'
+        ? resolvePayrollRow(emp, row, rowIndex)
+        : resolveFormXVIIIMPPayrollRowForAutofillRow(emp, row, rows, headers, resolver);
+    if (!payrollRow || payrollRow.fetch_error) return;
+    if (
+      applyFormXVIIIMPPayrollToRow(row, payrollRow, mpHeaders, {
+        sanitizeValue,
+        headers,
+        ...payrollHelpers,
+      })
+    ) {
+      hits += 1;
+    }
+  });
+  return hits;
+}
+
+/** True when saved/download rows have employee names and at least one data cell. */
+export function formXVIIIMPDownloadHasSubstantiveRows(mappedData, headers) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return false;
+  const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+  const payrollHeaders = [
+    mpHeaders.grossWages,
+    mpHeaders.netPayable,
+    mpHeaders.wageRate,
+    mpHeaders.otherAllowances,
+    mpHeaders.daysWorked,
+    mpHeaders.leavesAvailed,
+    mpHeaders.totalBalanceLeaves,
+  ].filter(Boolean);
+  return mappedData.some((row) => {
+    if (!row || typeof row !== 'object') return false;
+    const hasName = Object.entries(row).some(([key, value]) => {
+      const s = mpCombinedRegisterHeaderNorm(key);
+      return (
+        s.includes('name') &&
+        (s.includes('workman') || s.includes('employee') || s.includes('worker')) &&
+        String(value ?? '').trim()
+      );
+    });
+    if (!hasName) return false;
+    if (payrollHeaders.some((header) => String(row[header] ?? '').trim())) return true;
+    return Object.values(row).some((value) => String(value ?? '').trim());
+  });
+}
+
+/** True when any row is missing gross/net/wage-rate/other-allowance values. */
+export function formXVIIIMPRowsNeedPayrollEnrich(mappedData, headers) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return false;
+  const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+  const targets = [
+    mpHeaders.grossWages,
+    mpHeaders.netPayable,
+    mpHeaders.wageRate,
+    mpHeaders.otherAllowances,
+  ].filter(Boolean);
+  if (targets.length === 0) return false;
+  return mappedData.some((row) =>
+    targets.every((header) => !String(row?.[header] ?? '').trim())
+  );
+}
+
+/** Fast download enrich — Payroll table session cache (sync); use loadFormXVIIIMPPayrollRowsForAutofill for real-time. */
+export function enrichFormXVIIIMPPayrollRowsFromCache(
+  mappedData,
+  employees,
+  headers,
+  monthCandidates,
+  helpers = {}
+) {
+  const cached = getCachedForm15PayrollTableRows(monthCandidates);
+  const latestCached = cached?.rows?.length > 0 ? cached : getLatestCachedPayrollTableRows();
+  const payrollRows = resolveFormXVIIIMPPayrollRowsForAutofill(
+    latestCached?.rows?.length > 0 ? latestCached.rows.map((row) => flattenPayrollEarningColumns(row)) : null,
+    monthCandidates
+  );
+  if (payrollRows.length === 0) return 0;
+  return enrichFormXVIIIMPPayrollRows(mappedData, employees, headers, {
+    ...helpers,
+    payrollRows,
+  });
+}
+
+/** Apply leave API booked/balance totals to Form XVIII MP leave columns. */
+export function applyFormXVIIIMPLeaveToRow(row, leaveRecord, mpHeaders, { leaveTypeLabels = {}, sanitizeValue = (v) => v } = {}) {
+  if (!row || !leaveRecord || !mpHeaders) return false;
+  const { booked, balance, categoryLabels } = sumLeaveRecordBookedAndBalance(leaveRecord, leaveTypeLabels);
+  let hit = false;
+  const write = (header, val) => {
+    if (!header || val === '' || val == null) return;
+    row[header] = sanitizeValue(val);
+    hit = true;
+  };
+  write(mpHeaders.leavesAvailed, booked);
+  write(mpHeaders.totalBalanceLeaves, balance);
+  if (mpHeaders.leaveCategory && categoryLabels.length > 0 && !String(row[mpHeaders.leaveCategory] ?? '').trim()) {
+    write(mpHeaders.leaveCategory, categoryLabels.join(', '));
+  }
   return hit;
 }
 
@@ -831,33 +1174,65 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
     return excelCellValueToString(worksheet.getCell(tl.r, tl.c)?.value).trim();
   };
 
-  const maxScanRows = Math.max(120, worksheet.rowCount + 10);
-  const maxScanCols = Math.max(60, worksheet.columnCount + 5);
-  const jsonData = [];
-  for (let r = 1; r <= maxScanRows; r += 1) {
-    const row = [];
-    for (let c = 1; c <= maxScanCols; c += 1) {
-      row.push(getMergedAwareCellText(r, c));
-    }
-    jsonData.push(row);
-  }
-  const getMergedAwareCellText0 = (r0, c0) => getMergedAwareCellText(r0 + 1, c0 + 1);
+  const trimmedHeaders = Array.isArray(headersToUse)
+    ? headersToUse.filter((h) => String(h || '').trim())
+    : [];
+  const layoutKnown =
+    trimmedHeaders.length >= 4 &&
+    Array.isArray(headerExcelCols) &&
+    headerExcelCols.length === trimmedHeaders.length &&
+    Number(parsedHeaderRowIndex) >= 0 &&
+    Number(parsedDataStartIndex) >= 0;
 
-  let mpLayout = rebuildFormXVIIIMPCombinedRegisterTableHeadersFromSheet({
-    headerRowIndex: parsedHeaderRowIndex ?? -1,
-    getMergedAwareCellText: getMergedAwareCellText0,
-    jsonData,
-    effectiveSheetCols: maxScanCols,
-    forceCombinedRegister: true
-  });
-  if (!mpLayout?.headers?.length) {
+  let mpLayout;
+  if (layoutKnown) {
     mpLayout = {
-      headers: Array.isArray(headersToUse) ? headersToUse.filter((h) => String(h || '').trim()) : [],
-      excelCols: Array.isArray(headerExcelCols) ? headerExcelCols : null,
-      headerRowIndex: parsedHeaderRowIndex ?? -1,
-      dataStartIndex: parsedDataStartIndex ?? -1,
-      tableStartCol: 0
+      headers: trimmedHeaders,
+      excelCols: headerExcelCols,
+      headerRowIndex: parsedHeaderRowIndex,
+      dataStartIndex: parsedDataStartIndex,
+      tableStartCol: Math.max(0, Number(headerExcelCols[0]) || 0)
     };
+  } else {
+    const maxScanRows = Math.max(
+      (Number(parsedDataStartIndex) >= 0 ? Number(parsedDataStartIndex) + 25 : 0),
+      (Number(parsedHeaderRowIndex) >= 0 ? Number(parsedHeaderRowIndex) + 15 : 0),
+      45,
+      worksheet.rowCount + 5
+    );
+    const maxScanCols = Math.max(
+      Array.isArray(headerExcelCols) && headerExcelCols.length > 0
+        ? Math.max(...headerExcelCols.map((c) => Number(c) || 0)) + 3
+        : 0,
+      45,
+      worksheet.columnCount + 3
+    );
+    const jsonData = [];
+    for (let r = 1; r <= maxScanRows; r += 1) {
+      const row = [];
+      for (let c = 1; c <= maxScanCols; c += 1) {
+        row.push(getMergedAwareCellText(r, c));
+      }
+      jsonData.push(row);
+    }
+    const getMergedAwareCellText0 = (r0, c0) => getMergedAwareCellText(r0 + 1, c0 + 1);
+
+    mpLayout = rebuildFormXVIIIMPCombinedRegisterTableHeadersFromSheet({
+      headerRowIndex: parsedHeaderRowIndex ?? -1,
+      getMergedAwareCellText: getMergedAwareCellText0,
+      jsonData,
+      effectiveSheetCols: maxScanCols,
+      forceCombinedRegister: true
+    });
+    if (!mpLayout?.headers?.length) {
+      mpLayout = {
+        headers: trimmedHeaders,
+        excelCols: Array.isArray(headerExcelCols) ? headerExcelCols : null,
+        headerRowIndex: parsedHeaderRowIndex ?? -1,
+        dataStartIndex: parsedDataStartIndex ?? -1,
+        tableStartCol: 0
+      };
+    }
   }
 
   const effectiveHeaders = mpLayout.headers;
@@ -953,20 +1328,23 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
   });
 
   for (let i = 0; i < sourcePrimary.length; i += 1) {
+    if (i > 0 && i % 20 === 0) {
+      await yieldToMain();
+    }
     const row = sourcePrimary[i];
     if (!rowLooksMeaningful(row)) continue;
     const excelRow = startRow + i;
-    for (let wc = 0; wc < fieldCols.length; wc += 1) {
-      worksheet.getCell(excelRow, fieldCols[wc]).value = '';
-    }
     for (let j = 0; j < effectiveHeaders.length; j += 1) {
       const header = effectiveHeaders[j];
       let value = Array.isArray(row) ? row[j] : getRowValueForHeader(row, header, j, effectiveHeaders);
-      if (value == null || value === '') continue;
       const targetCol = fieldCols[j];
       if (!targetCol || targetCol < 1) continue;
       const tl = getMergeTopLeft(excelRow, targetCol);
       const cell = worksheet.getCell(tl.r, tl.c);
+      if (value == null || value === '') {
+        cell.value = '';
+        continue;
+      }
       if (
         typeof value === 'number' ||
         (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim()))
@@ -996,6 +1374,7 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
     });
   }
 
+  await yieldToMain();
   const out = await workbook.xlsx.writeBuffer();
   const outName =
     formFileName ||

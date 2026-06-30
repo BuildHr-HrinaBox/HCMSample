@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useLocation } from 'react-router-dom';
 import './People.css';
 import { getPayrollOrganizationId } from '../utils/payrollOrgId';
 import {
@@ -8,9 +7,10 @@ import {
 } from '../utils/payrollEarnings';
 
 const API_BASE = '/server/payroll_function';
-const EMPLOYEE_BATCH_SIZE = 200;
+const EMPLOYEE_BATCH_SIZE = 25;
 const DETAIL_BATCH_SIZE = 1;
 const DETAIL_DELAY_MS = 800;
+const PAYROLL_FETCH_BATCH_DELAY_MS = 300;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -19,6 +19,29 @@ const getDefaultPayrollMonth = () => {
   const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
+
+async function loadPayrollTableSnapshot(payrollMonth) {
+  const attempts = [
+    `${API_BASE}/payroll?${new URLSearchParams({ payroll_month: payrollMonth })}`,
+    `${API_BASE}?${new URLSearchParams({ payroll_table: '1', payroll_month: payrollMonth })}`,
+  ];
+  for (let i = 0; i < attempts.length; i += 1) {
+    try {
+      const res = await fetch(attempts[i], { cache: 'no-store' });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json?.success && Array.isArray(json.data?.records) && json.data.records.length > 0) {
+        return {
+          records: json.data.records.map((row) => flattenPayrollEarningColumns(row)),
+          meta: json.data.meta || null,
+          payrollMonth: json.data.payrollMonth || payrollMonth,
+        };
+      }
+    } catch (_) {
+      /* try next URL */
+    }
+  }
+  return null;
+}
 
 async function fetchPayrollJson(qs) {
   const res = await fetch(`${API_BASE}?${qs.toString()}`);
@@ -32,6 +55,11 @@ async function fetchPayrollJson(qs) {
     );
   }
   if (!res.ok) {
+    if (res.status === 408) {
+      throw new Error(
+        'Request timed out (HTTP 408). Payroll is fetched in small batches — wait for progress to finish, or try again. Use Load salary breakdown separately for Basic/HRA detail.'
+      );
+    }
     throw new Error(json.error || json.message || `Request failed (HTTP ${res.status})`);
   }
   if (!json.success || json.data === undefined) {
@@ -81,7 +109,6 @@ async function savePayrollSnapshot({
  * Zoho Payroll pay-run data — month-wise employee summary from processed pay runs.
  */
 const Payroll = ({ userRole, userEmail }) => {
-  const location = useLocation();
   const [payrollMonth, setPayrollMonth] = useState(getDefaultPayrollMonth);
   const [data, setData] = useState(null);
   const [runMeta, setRunMeta] = useState(null);
@@ -177,6 +204,18 @@ const Payroll = ({ userRole, userEmail }) => {
           );
         }
       } else {
+        const tableSnapshot = await loadPayrollTableSnapshot(payrollMonth);
+        if (tableSnapshot?.records?.length > 0) {
+          setData(tableSnapshot.records);
+          setRunMeta(tableSnapshot.meta);
+          setSaveMessage(
+            `Loaded ${tableSnapshot.records.length} record(s) from Payroll table for ${formatMonthLabel(
+              tableSnapshot.payrollMonth || payrollMonth
+            )}. Click Fetch Data again to refresh from Zoho.`
+          );
+          return;
+        }
+
         const merged = [];
         let offset = 0;
         let total = null;
@@ -190,7 +229,7 @@ const Payroll = ({ userRole, userEmail }) => {
             payroll_run_type: 'regular',
             employee_offset: String(offset),
             employee_limit: String(EMPLOYEE_BATCH_SIZE),
-            include_earnings_detail: '1',
+            include_earnings_detail: '0',
           });
           const json = await fetchPayrollJson(qs);
           const batch = (Array.isArray(json.data) ? json.data : []).map((row) =>
@@ -208,7 +247,7 @@ const Payroll = ({ userRole, userEmail }) => {
             json.meta?.has_more === true ||
             (json.meta?.has_more !== false && batch.length >= EMPLOYEE_BATCH_SIZE);
           setProgress(
-            `Loading ${payrollMonth} payroll (Basic, HRA, allowances)… ${loaded} / ${displayTotal} · saving to Payroll table…`
+            `Loading ${payrollMonth} payroll (gross pay, net pay)… ${loaded} / ${displayTotal} · saving to Payroll table…`
           );
           setData([...merged]);
           setRunMeta(meta);
@@ -218,7 +257,7 @@ const Payroll = ({ userRole, userEmail }) => {
             organizationId,
             runMeta: meta,
             records: merged,
-            hasBreakdown: true,
+            hasBreakdown: false,
             totalExpected: displayTotal,
             breakdownComplete: !hasMore || batch.length === 0,
           });
@@ -229,6 +268,7 @@ const Payroll = ({ userRole, userEmail }) => {
 
           if (!hasMore || batch.length === 0) break;
           offset += batch.length;
+          await sleep(PAYROLL_FETCH_BATCH_DELAY_MS);
         }
       }
     } catch (err) {
@@ -242,10 +282,6 @@ const Payroll = ({ userRole, userEmail }) => {
       setProgress('');
     }
   }, [payrollMonth]);
-
-  useEffect(() => {
-    fetchData('list');
-  }, [fetchData, location.pathname]);
 
   const records = (() => {
     let raw = [];

@@ -173,6 +173,92 @@ function pickAmountByPatterns(row, patterns) {
   return '';
 }
 
+function pickTextScalar(row, keys) {
+  if (!row || typeof row !== 'object') return '';
+  const sources = [row, normalizePayrollEmployee(row)];
+  const wanted = keys.map((key) => normalizeKey(key));
+  for (const source of sources) {
+    for (const [rawKey, value] of Object.entries(source)) {
+      const normKey = normalizeKey(rawKey);
+      if (!wanted.includes(normKey)) continue;
+      if (value == null || typeof value === 'object') continue;
+      const text = String(value).trim();
+      if (text !== '') return text;
+    }
+  }
+  return '';
+}
+
+function pickTextByPatterns(row, patterns) {
+  const sources = [row, normalizePayrollEmployee(row)];
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    for (const [rawKey, value] of Object.entries(source)) {
+      if (value == null || value === '') continue;
+      if (Array.isArray(value) || (typeof value === 'object' && value !== null)) continue;
+      const normKey = normalizeKey(rawKey);
+      const label = String(rawKey).trim().toLowerCase();
+      for (let i = 0; i < patterns.length; i += 1) {
+        if (patterns[i].test(normKey) || patterns[i].test(label)) {
+          const text = String(value).trim();
+          if (text !== '') return text;
+        }
+      }
+    }
+  }
+  return '';
+}
+
+/** Read a numeric payroll field by explicit keys and/or key-name regex patterns. */
+export function readPayrollScalar(row, keys = [], patterns = []) {
+  if (!row || row.fetch_error) return '';
+  const fromKeys = keys.length > 0 ? pickScalarAmount(row, keys) : '';
+  if (fromKeys !== '') return fromKeys;
+  if (patterns.length > 0) {
+    const fromPatterns = pickAmountByPatterns(row, patterns);
+    if (fromPatterns !== '') return fromPatterns;
+  }
+  return '';
+}
+
+/** Read a text payroll field by explicit keys and/or key-name regex patterns. */
+export function readPayrollTextScalar(row, keys = [], patterns = []) {
+  if (!row || row.fetch_error) return '';
+  const fromKeys = keys.length > 0 ? pickTextScalar(row, keys) : '';
+  if (fromKeys !== '') return fromKeys;
+  if (patterns.length > 0) {
+    const fromPatterns = pickTextByPatterns(row, patterns);
+    if (fromPatterns !== '') return fromPatterns;
+  }
+  return '';
+}
+
+/** Net pay from explicit net_pay fields only (no gross/total fallbacks). */
+export function readStrictPayrollNetPay(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const amount = readPayrollScalar(flat, ['net_pay', 'Net Pay', 'netPay', 'netWages'], [/^net_pay$/, /^netwages$/]);
+  if (amount === '') return '';
+  const n = toNumber(amount);
+  return Number.isFinite(n) && n > 0 ? n : '';
+}
+
+/** Net pay for statutory autofill — net_pay with monthly_salary / net salary fallbacks, not gross. */
+export function readPayrollNetPayForStatutory(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const strict = readStrictPayrollNetPay(payrollRow);
+  if (strict !== '') return strict;
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const amount = readPayrollScalar(
+    flat,
+    ['monthly_salary', 'MonthlySalary', 'monthly_net_pay', 'net_salary', 'netSalary'],
+    [/^monthly_salary$/, /^net_salary$/, /^monthly_net_pay$/]
+  );
+  if (amount === '') return '';
+  const n = toNumber(amount);
+  return Number.isFinite(n) && n > 0 ? n : '';
+}
+
 function findEarningAmount(earnings, matcher) {
   const hit = earnings.find((item) => matcher(payrollEarningType(item), payrollEarningName(item)));
   if (!hit) return '';
@@ -331,6 +417,42 @@ export function payrollRowHasNetPay(payrollRow) {
     const n = Number(String(value ?? '').replace(/,/g, '').trim());
     return Number.isFinite(n) && n > 0;
   });
+}
+
+/** True when a payroll row has gross_pay / total_earnings (Form XIV wage rate, Form Q, etc.). */
+export function payrollRowHasGrossPayAmount(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return false;
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const amount = readPayrollScalar(
+    flat,
+    ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'monthly_gross_amount'],
+    [/^gross_pay$/, /^total_earnings$/]
+  );
+  if (amount !== '') {
+    const n = Number(String(amount).replace(/,/g, '').trim());
+    return Number.isFinite(n) && n > 0;
+  }
+  if (flat !== payrollRow) {
+    const top = readPayrollScalar(
+      payrollRow,
+      ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'monthly_gross_amount'],
+      [/^gross_pay$/, /^total_earnings$/]
+    );
+    if (top !== '') {
+      const n = Number(String(top).replace(/,/g, '').trim());
+      return Number.isFinite(n) && n > 0;
+    }
+  }
+  return false;
+}
+
+/** Payroll table rows with usable gross_pay — for Form XIV Employment Card and similar. */
+export function filterPayrollRowsWithGrossPay(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  return rows
+    .filter((row) => row && typeof row === 'object' && row.fetch_error !== true)
+    .map((row) => flattenPayrollEarningColumns(row))
+    .filter(payrollRowHasGrossPayAmount);
 }
 
 export function flattenPayrollEarningColumns(row) {

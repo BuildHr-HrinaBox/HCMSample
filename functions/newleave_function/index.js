@@ -6,6 +6,10 @@ const { IncomingMessage, ServerResponse } = require('http');
 /** Zoho bookedAndBalance returns at most 30 per call (docs); .in DC accepts up to 100. */
 const ZOHO_LEAVE_PAGE_SIZE = 100;
 const ZOHO_LEAVE_MAX_PAGES = 200;
+/** Zoho locks the API ~5 min when per-minute threshold is exceeded (error 7209). */
+const ZOHO_LEAVE_PAGE_DELAY_MS_DEFAULT = 800;
+const ZOHO_RATE_LIMIT_MAX_RETRIES = 0;
+const ZOHO_RATE_LIMIT_RETRY_BASE_MS = 10000;
 
 /**
  * Catalyst function to fetch Zoho People Leave data (newleave_function).
@@ -47,6 +51,20 @@ function readQueryParam(req, name) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isZohoRateLimitError(message) {
+  const m = String(message || '').toLowerCase();
+  return m.includes('7209') || m.includes('threshold limit');
+}
+
+function rateLimitRetryDelayMs(attempt) {
+  const base = Math.max(
+    5000,
+    parseInt(process.env.ZOHO_RATE_LIMIT_RETRY_BASE_MS || String(ZOHO_RATE_LIMIT_RETRY_BASE_MS), 10) ||
+      ZOHO_RATE_LIMIT_RETRY_BASE_MS
+  );
+  return base * 2 ** attempt;
 }
 
 function formatZohoApiError(data, fallback) {
@@ -160,9 +178,9 @@ module.exports = async (req, res) => {
 const DEFAULT_ZOHO_CLIENT_ID = '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
 const DEFAULT_ZOHO_CLIENT_SECRET = 'b6d3935145d59974934b981d6291b40af69a3ab150';
 const DEFAULT_LEAVE_ACCESS_TOKEN =
-  '1000.13dc6b2e2a5ed58c5d1fe4de19b710b8.86c72fcd249d44df9109c81a4f0485a7';
+  '1000.b8f921ad4553e09fc04d8ed388ab369d.139ef4c52ffcc6d157c5abe64b4e5142';
 const DEFAULT_LEAVE_REFRESH_TOKEN =
-  '1000.94f211f0d871f22b5642b5f3ed184080.6aef8d814be0e69c9d3c3da5e9c63999';
+  '1000.bc23b3f7af644c7c6a64aab55a90c821.848fbc4360776dfa560ec43bd92f75a7';
 
 async function getAccessToken() {
   // 1) Short-lived access_token (ZOHOPEOPLE.leave.ALL)
@@ -423,6 +441,37 @@ function toRecordsMap(raw, leaveRecords) {
 }
 
 async function fetchLeavePage({ accessToken, fromDate, toDate, unit, startIndex = 0, limit = ZOHO_LEAVE_PAGE_SIZE }) {
+  const maxRetries = Math.max(
+    0,
+    parseInt(process.env.ZOHO_RATE_LIMIT_MAX_RETRIES || String(ZOHO_RATE_LIMIT_MAX_RETRIES), 10) ||
+      ZOHO_RATE_LIMIT_MAX_RETRIES
+  );
+
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    try {
+      return await fetchLeavePageOnce({ accessToken, fromDate, toDate, unit, startIndex, limit });
+    } catch (error) {
+      const msg = error.message || '';
+      if (!isZohoRateLimitError(msg) || attempt >= maxRetries) {
+        if (isZohoRateLimitError(msg)) {
+          throw new Error(
+            'Zoho People API rate limit exceeded (error 7209). Zoho locks this API for about 5 minutes when too many requests are sent. Please wait a few minutes, avoid refreshing repeatedly, and try again.'
+          );
+        }
+        throw error;
+      }
+      const waitMs = rateLimitRetryDelayMs(attempt);
+      console.warn(
+        `newleave_function: rate limit at startIndex=${startIndex}, retry ${attempt + 1}/${maxRetries} in ${waitMs}ms`
+      );
+      await sleep(waitMs);
+    }
+  }
+
+  throw new Error('Zoho People API rate limit exceeded after retries.');
+}
+
+async function fetchLeavePageOnce({ accessToken, fromDate, toDate, unit, startIndex = 0, limit = ZOHO_LEAVE_PAGE_SIZE }) {
   const base = process.env.ZOHO_PEOPLE_BASE_URL || 'https://people.zoho.in/people/api';
   const endpoint = `${base}/v2/leavetracker/reports/bookedAndBalance`;
 
@@ -516,7 +565,11 @@ async function fetchLeavePage({ accessToken, fromDate, toDate, unit, startIndex 
 
 async function fetchAllLeaveData({ accessToken, fromDate, toDate, unit }) {
   const pageSize = clampLeavePageSize(process.env.ZOHO_LEAVE_PAGE_SIZE || String(ZOHO_LEAVE_PAGE_SIZE));
-  const delayMs = Math.max(0, parseInt(process.env.ZOHO_LEAVE_PAGE_DELAY_MS || '300', 10) || 300);
+  const delayMs = Math.max(
+    0,
+    parseInt(process.env.ZOHO_LEAVE_PAGE_DELAY_MS || String(ZOHO_LEAVE_PAGE_DELAY_MS_DEFAULT), 10) ||
+      ZOHO_LEAVE_PAGE_DELAY_MS_DEFAULT
+  );
   const pages = [];
   let startIndex = 0;
   let firstPageKey = '';

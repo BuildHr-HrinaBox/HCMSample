@@ -312,8 +312,10 @@ async function handlePayrollFetch(req, res) {
       );
       const employeeLimitRaw = readQueryParam(req, 'employee_limit');
       const employeeLimit = employeeLimitRaw
-        ? Math.max(1, Math.min(200, parseInt(employeeLimitRaw, 10) || 1))
-        : 200;
+        ? Math.max(1, Math.min(50, parseInt(employeeLimitRaw, 10) || 1))
+        : includeEarningsDetail
+          ? 15
+          : 50;
       const runType = readQueryParam(req, 'payroll_run_type') || 'regular';
       const includeEarningsDetail = readQueryParam(req, 'include_earnings_detail') !== '0';
 
@@ -809,6 +811,27 @@ async function fetchAllPayrollRunPages({ accessToken, organizationId }) {
   return collected;
 }
 
+let cachedPayrollRunsList = null;
+let cachedPayrollRunsOrgId = '';
+let cachedPayrollRunsTs = 0;
+const PAYROLL_RUNS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function fetchAllPayrollRunPagesCached({ accessToken, organizationId }) {
+  const org = String(organizationId || '').trim();
+  if (
+    cachedPayrollRunsList &&
+    cachedPayrollRunsOrgId === org &&
+    Date.now() - cachedPayrollRunsTs < PAYROLL_RUNS_CACHE_TTL_MS
+  ) {
+    return cachedPayrollRunsList;
+  }
+  const runs = await fetchAllPayrollRunPages({ accessToken, organizationId });
+  cachedPayrollRunsList = runs;
+  cachedPayrollRunsOrgId = org;
+  cachedPayrollRunsTs = Date.now();
+  return runs;
+}
+
 async function fetchPayrollRunById({ accessToken, organizationId, payrollRunId }) {
   const base = getApiBase();
   const { data } = await payrollAxiosGet(
@@ -958,11 +981,11 @@ async function fetchPayrollMonthEmployeeBatch({
   year,
   month,
   offset = 0,
-  limit = 200,
+  limit = 50,
   runType = 'regular',
   includeEarningsDetail = true,
 }) {
-  const runs = await fetchAllPayrollRunPages({ accessToken, organizationId });
+  const runs = await fetchAllPayrollRunPagesCached({ accessToken, organizationId });
   const run = findPayrollRunForMonth(runs, year, month, runType);
   if (!run) {
     throw new Error(
@@ -971,7 +994,7 @@ async function fetchPayrollMonthEmployeeBatch({
   }
 
   const payrollRunId = String(run.payroll_run_id || '').trim();
-  const perPage = Math.min(200, Math.max(1, limit));
+  const perPage = Math.min(50, Math.max(1, limit));
   const page = Math.floor(offset / perPage) + 1;
   const pageBatch = await fetchPayrollRunEmployeesPage({
     accessToken,
@@ -1011,7 +1034,14 @@ async function fetchPayrollMonthEmployeeBatch({
     );
   });
 
-  const flattenedRows = includeEarningsDetail
+  const maxDetailRows = Math.max(
+    1,
+    parseInt(process.env.PAYROLL_MONTH_DETAIL_LIMIT || '12', 10) || 12
+  );
+  const shouldEnrichDetail =
+    includeEarningsDetail && rows.length > 0 && rows.length <= maxDetailRows;
+
+  const flattenedRows = shouldEnrichDetail
     ? await enrichPayrollRunRowsWithEmployeeDetail({
         accessToken,
         organizationId,
@@ -1186,7 +1216,22 @@ async function handlePayrollGet(req, res) {
   const payrollTableLatest = readQueryParam(req, 'payroll_table_latest') === '1';
   const payrollTable = readQueryParam(req, 'payroll_table') === '1' || payrollTableLatest;
   const payrollMonth = readQueryParam(req, 'payroll_month') || readQueryParam(req, 'payrollMonth');
-  if (payrollTable && (payrollMonth || payrollTableLatest)) {
+  const employeeId = readQueryParam(req, 'employee_id');
+  const allSalaries = readQueryParam(req, 'all_salaries') === '1';
+  const listEmployees = readQueryParam(req, 'list_employees') === '1';
+  const payrollMonthData = readQueryParam(req, 'payroll_month_data') === '1';
+  const payrunEmployeeDetail = readQueryParam(req, 'payrun_employee_detail') === '1';
+  const tableMonthOnly =
+    payrollMonth &&
+    /^\d{4}-\d{2}$/.test(String(payrollMonth).trim()) &&
+    !employeeId &&
+    !allSalaries &&
+    !listEmployees &&
+    !payrollMonthData &&
+    !payrunEmployeeDetail &&
+    !payrollTableLatest;
+
+  if ((payrollTable && (payrollMonth || payrollTableLatest)) || tableMonthOnly) {
     try {
       await handlePayrollTableGet(req, res);
     } catch (err) {

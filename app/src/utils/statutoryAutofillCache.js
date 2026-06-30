@@ -460,10 +460,38 @@ export function getCachedPayrollBulkRows() {
   return readPayrollBulkCacheRaw();
 }
 
-/** During statutory autofill, use cache only — never await full all_salaries download. */
+/** Most recent Payroll table snapshot held in session (any month). */
+export function getLatestCachedPayrollTableRows() {
+  let best = null;
+  form15PayrollTableByMonth.forEach((entry, month) => {
+    if (
+      !entry ||
+      !Array.isArray(entry.rows) ||
+      entry.rows.length === 0 ||
+      Date.now() - entry.ts >= FORM15_PAYROLL_TABLE_TTL_MS
+    ) {
+      return;
+    }
+    if (!best || entry.ts > best.ts) {
+      best = {
+        payrollMonth: month,
+        rows: entry.rows,
+        meta: entry.meta || null,
+        payDate: entry.payDate || '',
+        ts: entry.ts,
+        source: 'cache',
+      };
+    }
+  });
+  return best;
+}
+
+/** Session cache of Payroll table rows — prefer table snapshots over legacy all_salaries bulk. */
 export function getPayrollBulkRowsForAutofill() {
-  const cached = readPayrollBulkCacheRaw();
-  return Array.isArray(cached) && cached.length > 0 ? cached : null;
+  const tableCached = getLatestCachedPayrollTableRows();
+  if (tableCached?.rows?.length > 0) return tableCached.rows;
+  const bulk = readPayrollBulkCacheRaw();
+  return Array.isArray(bulk) && bulk.length > 0 ? bulk : null;
 }
 
 /** Let the browser paint and process scroll/input before heavy autofill work continues. */

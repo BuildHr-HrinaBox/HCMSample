@@ -96,11 +96,13 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
   const [data, setData] = useState(null);
   const [meta, setMeta] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [loadStatus, setLoadStatus] = useState('');
   const [error, setError] = useState('');
 
   const fetchData = async () => {
     setLoading(true);
     setError('');
+    setLoadStatus('');
     setData(null);
     setMeta(null);
     try {
@@ -110,6 +112,14 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
         unit: 'Day',
         fetchAll: true,
         apiBase,
+        useCache: true,
+        onProgress: ({ pages, total, status }) => {
+          if (status === 'cached') {
+            setLoadStatus(`Loaded ${total} employees from cache`);
+            return;
+          }
+          setLoadStatus(`Loading page ${pages} (${total} employees so far)...`);
+        },
       });
       if (!result.success) {
         throw new Error('Invalid response');
@@ -272,7 +282,10 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
 
       {loading && (
         <div className="leave-loading">
-          Loading leave data...
+          {loadStatus || 'Loading leave data...'}
+          <div style={{ fontSize: 13, marginTop: 8, color: '#6b7280' }}>
+            Fetching in small batches to respect Zoho API limits. Please do not click Fetch again.
+          </div>
         </div>
       )}
 

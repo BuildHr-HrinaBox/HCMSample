@@ -1,0 +1,1260 @@
+import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
+import {
+  FORM_XIX_AP_FIELD_GROUPS,
+  FORM_XIX_AP_TEMPLATE_SPECS,
+  applyFormXIXAPAutofillFromSiteAndPayroll,
+  formXIXAPHeaderNorm,
+  formatWorkmanNameAndGuardian,
+  isFormXIXAPWageSlipContext,
+  matchesFormXIXHint,
+  resolveFormXIXAPHeaderFieldLayout as resolveFormXIXAPHeaderFieldLayoutInner,
+  writeFormXIXAPFieldsToExcelJsWorksheet,
+} from './formXIXAPWageSlip';
+import {
+  flattenPayrollEarningColumns,
+  getEarningsArray,
+  readPayrollForm15WageAmounts,
+  readPayrollScalar,
+  filterPayrollRowsWithGrossPay,
+} from '../../utils/payrollEarnings';
+import {
+  cacheForm15PayrollTableRows,
+  getCachedForm15PayrollTableRows,
+  getLatestCachedPayrollTableRows,
+} from '../../utils/statutoryAutofillCache';
+import { fetchPayrollTableRowsForMonths } from '../../utils/payrollTable';
+
+/** MP CLRA Form XIX — Wage Slip: site header fields + tabular wage particulars + per-employee ZIP. */
+
+export const FORM_XIX_MP_WAGE_TABLE_HEADERS = [
+  "Name and Father's/Husband's Name of the workman",
+  '1. No. of days worked',
+  '2. No. of units worked in case of piece-rate Workers',
+  '3. Rate of daily wages/piece-rate',
+  '4. Amount of overtime wages',
+  '5. Gross wages payable',
+  '6. Deductions, if any',
+  '7. Net amount of wages paid',
+];
+
+/** Header/footer only — wage particulars render in the employee table below. */
+export const FORM_XIX_MP_FIELD_GROUPS = [
+  { id: 'header', title: 'Wage slip — workman & contractor' },
+  { id: 'footer', title: 'Certification' },
+];
+
+const FORM_XIX_MP_HEADER_SPECS = FORM_XIX_AP_TEMPLATE_SPECS.filter((spec) => spec.group !== 'wages');
+
+const FORM_XIX_MP_WAGE_SPECS = FORM_XIX_AP_TEMPLATE_SPECS.filter((spec) => spec.group === 'wages');
+
+const FORM_XIX_MP_WAGE_KEY_BY_HEADER = new Map(
+  FORM_XIX_MP_WAGE_SPECS.map((spec) => [spec.label.replace(/\s*:+\s*$/, ''), spec.key])
+);
+
+/** MP stacked template — values align in column E beside labels in column B. */
+export const FORM_XIX_MP_STACKED_VALUE_COL = 5;
+
+/** Tamil Nadu Form XIX — fixed text for rate column (not from payroll). */
+export const FORM_XIX_TN_RATE_DEFAULT = 'Monthly Wages';
+
+const formXIXMPContextParts = (formHeader, rowItem, fileName, sheetText = '') =>
+  [
+    rowItem?.formName,
+    rowItem?.FormName,
+    rowItem?.description,
+    rowItem?.Description,
+    rowItem?.act,
+    rowItem?.Act,
+    rowItem?.siteState,
+    rowItem?.SiteState,
+    rowItem?.state,
+    rowItem?.State,
+    rowItem?.formFileName,
+    rowItem?.FormFileName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    sheetText,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+
+export function isFormXIXTamilNaduWageSlipContext(formHeader, rowItem, fileName, sheetText = '') {
+  if (!isFormXIXAPWageSlipContext(formHeader, rowItem, fileName, sheetText)) return false;
+  const parts = formXIXMPContextParts(formHeader, rowItem, fileName, sheetText);
+  return /tamil[\s._-]*nadu|tamilnadu|form[\s._-]*xix[\s._-]*tamil|form_xix[_\s-]*tamil/.test(parts);
+}
+
+export function isFormXIXMPWageSlipContext(formHeader, rowItem, fileName, sheetText = '') {
+  if (!isFormXIXAPWageSlipContext(formHeader, rowItem, fileName, sheetText)) return false;
+  if (isFormXIXTamilNaduWageSlipContext(formHeader, rowItem, fileName, sheetText)) return true;
+  const parts = formXIXMPContextParts(formHeader, rowItem, fileName, sheetText);
+  return (
+    /madhya\s+pradesh/.test(parts) ||
+    /form[\s._-]*xix[\s._-]*mp/.test(parts) ||
+    (/\bmp\b/.test(parts) && matchesFormXIXHint(parts))
+  );
+}
+
+export function isFormXIXMPHeaderFieldLayoutFormHeader(formHeader) {
+  return !!formHeader?.formXIXMPTableLayout;
+}
+
+export function isFormXIXMPTableLayoutFormHeader(formHeader) {
+  return !!formHeader?.formXIXMPTableLayout;
+}
+
+export function resolveFormXIXMPWageTableHeaders(tableHeaders) {
+  const list = Array.isArray(tableHeaders) ? tableHeaders.filter(Boolean) : [];
+  if (list.length >= FORM_XIX_MP_WAGE_TABLE_HEADERS.length - 1) return list;
+  return [...FORM_XIX_MP_WAGE_TABLE_HEADERS];
+}
+
+const normHeader = (h) => formXIXAPHeaderNorm(String(h || '').replace(/^\d+[\.\)]\s*/, ''));
+
+export function isFormXIXMPWorkmanNameHeader(h) {
+  const s = normHeader(h);
+  return (s.includes('workman') || s.includes('workmen')) && (s.includes('name') || s.includes('father') || s.includes('husband'));
+}
+
+export function isFormXIXMPDaysWorkedHeader(h) {
+  return /days\s+worked/.test(normHeader(h));
+}
+
+export function isFormXIXMPUnitsWorkedHeader(h) {
+  return /units\s+worked/.test(normHeader(h));
+}
+
+export function isFormXIXMPRateHeader(h) {
+  const s = normHeader(h);
+  return s.includes('rate') && (s.includes('wage') || s.includes('piece'));
+}
+
+export function isFormXIXMPOvertimeHeader(h) {
+  return /overtime/.test(normHeader(h));
+}
+
+export function isFormXIXMPGrossHeader(h) {
+  return /gross\s+wages/.test(normHeader(h));
+}
+
+export function isFormXIXMPDeductionsHeader(h) {
+  return /deduction/.test(normHeader(h));
+}
+
+export function isFormXIXMPNetHeader(h) {
+  return /net\s+amount/.test(normHeader(h));
+}
+
+/** Wage/payroll columns must come from Payroll table — workman name from People FirstName/LastName/Father_s_Name. */
+export function isFormXIXMPSkipPeopleAutofillHeader(h) {
+  return (
+    isFormXIXMPWorkmanNameHeader(h) ||
+    isFormXIXMPDaysWorkedHeader(h) ||
+    isFormXIXMPUnitsWorkedHeader(h) ||
+    isFormXIXMPRateHeader(h) ||
+    isFormXIXMPOvertimeHeader(h) ||
+    isFormXIXMPGrossHeader(h) ||
+    isFormXIXMPDeductionsHeader(h) ||
+    isFormXIXMPNetHeader(h)
+  );
+}
+
+const normPayrollEmployeeCode = (value) => String(value || '').trim().replace(/^0+/, '') || '0';
+
+const normPersonName = (value) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+
+const payrollEmployeeCodes = (row) =>
+  [
+    row?.employee_id,
+    row?.employee_number,
+    row?.employee_code,
+    row?.employee_no,
+    row?.emp_id,
+    row?.EmployeeID,
+    row?.['Employee ID'],
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+
+const payrollRowIdentityKey = (row) => {
+  if (!row || typeof row !== 'object') return '';
+  const codes = payrollEmployeeCodes(row);
+  if (codes.length > 0) return `id:${normPayrollEmployeeCode(codes[0])}`;
+  const name = normPersonName(row.employee_name || row.full_name || row.name || '');
+  return name ? `name:${name}` : '';
+};
+
+const employeePeopleCodes = (emp) =>
+  [
+    emp?.Zoho_ID,
+    emp?.['Zoho_ID'],
+    emp?.ZohoID,
+    emp?.EmployeeID,
+    emp?.['EmployeeID'],
+    emp?.['Employee ID'],
+    emp?.employee_number,
+    emp?.['employee_number'],
+    emp?.Employee_Number,
+    emp?.['Employee Number'],
+    emp?.EmployeeCode,
+    emp?.['Employee Code'],
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+
+/** Match Payroll table row to Zoho People employee (employee_id / employee_number / name). */
+export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
+  if (!emp || !Array.isArray(payrollRows) || payrollRows.length === 0) return null;
+  const peopleCodes = employeePeopleCodes(emp);
+  const normPeopleCodes = new Set(peopleCodes.map(normPayrollEmployeeCode));
+  let hit =
+    payrollRows.find((row) => {
+      if (!row || row.fetch_error) return false;
+      return payrollEmployeeCodes(row).some((code) => {
+        const raw = String(code || '').trim();
+        if (!raw) return false;
+        return peopleCodes.includes(raw) || normPeopleCodes.has(normPayrollEmployeeCode(raw));
+      });
+    }) || null;
+  if (hit) return hit;
+
+  const email = String(emp.EmailID || emp.Email || emp.email || emp['Email ID'] || '')
+    .trim()
+    .toLowerCase();
+  if (email) {
+    hit =
+      payrollRows.find(
+        (row) =>
+          !row?.fetch_error &&
+          String(row.work_mail || row.email || row.work_email || '')
+            .trim()
+            .toLowerCase() === email
+      ) || null;
+    if (hit) return hit;
+  }
+
+  const fn = String(emp.FirstName || emp['FirstName'] || '').trim().toLowerCase();
+  const ln = String(emp.LastName || emp['LastName'] || '').trim().toLowerCase();
+  const combo = normPersonName(`${fn} ${ln}`);
+  const comboInitial = fn && ln ? normPersonName(`${fn} ${ln.charAt(0)}`) : '';
+  const displayName = normPersonName(
+    emp.DisplayName ||
+      emp['Display Name'] ||
+      emp.displayName ||
+      emp.EmployeeName ||
+      emp['Employee Name'] ||
+      ''
+  );
+  const nameCandidates = [combo, comboInitial, displayName].filter(Boolean);
+  if (nameCandidates.length > 0) {
+    hit =
+      payrollRows.find((row) => {
+        if (!row || row.fetch_error) return false;
+        const payrollName = normPersonName(row.employee_name || row.full_name || row.name || '');
+        if (!payrollName) return false;
+        const rfn = String(row.first_name || row.firstName || '').trim().toLowerCase();
+        const rln = String(row.last_name || row.lastName || '').trim().toLowerCase();
+        const rcombo = normPersonName(`${rfn} ${rln}`);
+        const rcomboInitial = rfn && rln ? normPersonName(`${rfn} ${rln.charAt(0)}`) : '';
+        return nameCandidates.some(
+          (candidate) =>
+            payrollName === candidate ||
+            rcombo === candidate ||
+            rcomboInitial === candidate ||
+            (candidate.length > 3 && payrollName.includes(candidate)) ||
+            (payrollName.length > 3 && candidate.includes(payrollName))
+        );
+      }) || null;
+    if (hit) return hit;
+  }
+
+  const firstOnly = String(
+    emp.FirstName || emp['FirstName'] || emp.First_Name || emp['First Name'] || emp.firstName || ''
+  )
+    .trim()
+    .toLowerCase();
+  if (firstOnly) {
+    hit =
+      payrollRows.find((row) => {
+        if (!row || row.fetch_error) return false;
+        const rfn = String(row.first_name || row.firstName || '').trim().toLowerCase();
+        if (rfn && rfn === firstOnly) return true;
+        const payrollName = String(row.employee_name || row.full_name || row.name || '')
+          .trim()
+          .toLowerCase();
+        if (!payrollName) return false;
+        return (
+          payrollName === firstOnly ||
+          payrollName.startsWith(`${firstOnly} `) ||
+          payrollName.split(/\s+/)[0] === firstOnly
+        );
+      }) || null;
+    if (hit) return hit;
+  }
+
+  const workmanLine = String(formatWorkmanNameAndGuardian(emp) || '')
+    .split(/\r?\n/)[0]
+    .trim()
+    .toLowerCase();
+  if (workmanLine) {
+    hit =
+      payrollRows.find((row) => {
+        if (!row || row.fetch_error) return false;
+        const payrollName = String(row.employee_name || row.full_name || row.name || '')
+          .trim()
+          .toLowerCase();
+        return payrollName === workmanLine || payrollName.includes(workmanLine) || workmanLine.includes(payrollName);
+      }) || null;
+  }
+  return hit;
+}
+
+export function getFormXIXMPRowValueForHeader(row, header) {
+  if (!row || typeof row !== 'object') return '';
+  if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
+  const target = normHeader(header);
+  const key = Object.keys(row).find((k) => {
+    const n = normHeader(k);
+    return n === target || n.includes(target) || target.includes(n);
+  });
+  return key ? row[key] : '';
+}
+
+export function rowHasMeaningfulFormXIXMPExportData(row, headers) {
+  if (!row || typeof row !== 'object') return false;
+  const hdrs = resolveFormXIXMPWageTableHeaders(headers);
+  return hdrs.some((header) => String(getFormXIXMPRowValueForHeader(row, header) ?? '').trim() !== '');
+}
+
+const pickPayrollScalar = (payrollRow, keys, patterns = []) => {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  return readPayrollScalar(payrollRow, keys, patterns);
+};
+
+const pickPayrollField = (flatRow, payrollRow, keys, patterns = []) => {
+  const primary = pickPayrollScalar(flatRow, keys, patterns);
+  if (primary !== '') return primary;
+  if (payrollRow && payrollRow !== flatRow) {
+    return pickPayrollScalar(payrollRow, keys, patterns);
+  }
+  return '';
+};
+
+export function payrollRowHasFormXIXMPPayRunFields(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return false;
+  if (payrollRowLooksLikeBulkSalaryNotPayRun(payrollRow)) return false;
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const days = pickPayrollField(
+    flat,
+    payrollRow,
+    [
+      'paid_days',
+      'Paid Days',
+      'days_worked',
+      'Days Worked',
+      'paidDays',
+      'no_of_days_worked',
+      'no_of_days_present',
+      'present_days',
+    ],
+    [/^paid_days$/, /paiddays/, /daysworked/, /days_present/, /noofdayspresent/, /present_days/]
+  );
+  const gross = pickPayrollField(
+    flat,
+    payrollRow,
+    ['gross_pay', 'Gross Pay', 'grossPay'],
+    [/^gross_pay$/, /^total_earnings$/]
+  );
+  const net = pickPayrollField(flat, payrollRow, ['net_pay', 'Net Pay', 'netPay'], [/^net_pay$/]);
+  const paymentStatus = String(
+    pickPayrollField(
+      flat,
+      payrollRow,
+      ['payment_status', 'Payment Status', 'paymentStatus'],
+      [/payment_status/]
+    ) || ''
+  )
+    .trim()
+    .toLowerCase();
+  if (days !== '' && (gross !== '' || net !== '')) return true;
+  return gross !== '' && net !== '' && (paymentStatus === 'paid' || paymentStatus === 'partially_paid');
+}
+
+/** Salary-template rows from list_employees — not processed pay-run amounts. */
+export function payrollRowLooksLikeBulkSalaryNotPayRun(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return false;
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const days = pickPayrollField(
+    flat,
+    payrollRow,
+    ['paid_days', 'Paid Days', 'days_worked', 'Days Worked', 'paidDays'],
+    [/^paid_days$/, /paiddays/, /daysworked/, /days_present/]
+  );
+  if (days !== '') return false;
+  const monthlySalary = readPayrollScalar(flat, ['monthly_salary', 'MonthlySalary', 'monthly_gross_amount']);
+  if (monthlySalary !== '') return true;
+  const paymentStatus = String(
+    pickPayrollField(
+      flat,
+      payrollRow,
+      ['payment_status', 'Payment Status', 'paymentStatus'],
+      [/payment_status/]
+    ) || ''
+  )
+    .trim()
+    .toLowerCase();
+  if (paymentStatus === 'paid' || paymentStatus === 'partially_paid') return false;
+  const gross = pickPayrollField(
+    flat,
+    payrollRow,
+    ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings'],
+    [/^gross_pay$/, /^total_earnings$/]
+  );
+  const net = pickPayrollField(flat, payrollRow, ['net_pay', 'Net Pay', 'netPay'], [/^net_pay$/]);
+  return gross !== '' || net !== '';
+}
+
+const flattenFormXIXMPPayrollRows = (rows) =>
+  (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && typeof row === 'object' && row.fetch_error !== true)
+    .map((row) => flattenPayrollEarningColumns(row));
+
+export function filterFormXIXMPEligiblePayrollRows(rows) {
+  const flat = flattenFormXIXMPPayrollRows(rows);
+  if (flat.length === 0) return [];
+  const withoutBulk = flat.filter((row) => !payrollRowLooksLikeBulkSalaryNotPayRun(row));
+  if (payrollRowsLookLikeFormXIXMPPayRunTable(withoutBulk)) return withoutBulk;
+  if (payrollRowsLookLikeFormXIXMPPayRunTable(flat)) return flat;
+  return [];
+}
+
+/** Pay-run / Payroll-table rows only — never all_salaries bulk. */
+export function resolveFormXIXMPPayrollRowsForAutofill(statutoryPayrollRows, monthCandidates = []) {
+  const fromStatutory = filterFormXIXMPEligiblePayrollRows(statutoryPayrollRows);
+  if (fromStatutory.length > 0) return fromStatutory;
+
+  const fromGross = filterPayrollRowsWithGrossPay(statutoryPayrollRows);
+  if (fromGross.length > 0) return fromGross;
+
+  const cached = getCachedForm15PayrollTableRows(monthCandidates);
+  if (cached?.rows?.length > 0) {
+    const fromCache = filterFormXIXMPEligiblePayrollRows(cached.rows);
+    if (fromCache.length > 0) return fromCache;
+    const fromCacheGross = filterPayrollRowsWithGrossPay(cached.rows);
+    if (fromCacheGross.length > 0) return fromCacheGross;
+  }
+
+  const latestCached = getLatestCachedPayrollTableRows();
+  if (latestCached?.rows?.length > 0) {
+    const fromLatest = filterFormXIXMPEligiblePayrollRows(latestCached.rows);
+    if (fromLatest.length > 0) return fromLatest;
+    const fromLatestGross = filterPayrollRowsWithGrossPay(latestCached.rows);
+    if (fromLatestGross.length > 0) return fromLatestGross;
+  }
+  return [];
+}
+
+/** Load pay-run rows from Catalyst Payroll table — real-time API, then stored table cache. */
+export async function loadFormXIXMPPayrollRowsForAutofill(monthCandidates = [], options = {}) {
+  const months = Array.isArray(monthCandidates) ? monthCandidates : [];
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 45000;
+  const tableLoad = await fetchPayrollTableRowsForMonths(months, {
+    timeoutMs,
+    force: Boolean(options.force),
+  });
+  if (Array.isArray(tableLoad.rows) && tableLoad.rows.length > 0) {
+    const payrollMonth = tableLoad.payrollMonth || months[0] || '';
+    cacheForm15PayrollTableRows(payrollMonth, tableLoad.rows, tableLoad.meta || null);
+    const eligible = filterFormXIXMPEligiblePayrollRows(tableLoad.rows);
+    if (eligible.length > 0) return eligible;
+    const withGross = filterPayrollRowsWithGrossPay(tableLoad.rows);
+    if (withGross.length > 0) return withGross;
+  }
+  return resolveFormXIXMPPayrollRowsForAutofill(tableLoad?.rows, months);
+}
+
+/** One payroll row per employee — avoids reusing the same pay-run row for many People records. */
+export function buildFormXIXMPPayrollRowResolver(payrollRows) {
+  const rows = Array.isArray(payrollRows) ? payrollRows : [];
+  const usedKeys = new Set();
+  return (emp) => {
+    const available = rows.filter((row) => {
+      const key = payrollRowIdentityKey(row);
+      return !key || !usedKeys.has(key);
+    });
+    const hit = resolveFormXIXMPPayrollRowForEmployee(emp, available.length > 0 ? available : rows);
+    const hitKey = payrollRowIdentityKey(hit);
+    if (hit && hitKey) usedKeys.add(hitKey);
+    return hit;
+  };
+}
+
+export function payrollRowsLookLikeFormXIXMPPayRunTable(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  return rows.some((row) => payrollRowHasFormXIXMPPayRunFields(row));
+}
+
+const payrollLineAmount = (item) => {
+  if (!item || typeof item !== 'object') return NaN;
+  const raw = item.amount ?? item.value ?? item.employee_contribution ?? item.employer_contribution ?? '';
+  const n = Number(String(raw).replace(/,/g, '').trim());
+  return Number.isFinite(n) ? n : NaN;
+};
+
+const sumPayrollDeductionLines = (payrollRow) => {
+  const items = payrollRow?.deductions ?? payrollRow?.Deductions;
+  if (!Array.isArray(items) || items.length === 0) return '';
+  let sum = 0;
+  let any = false;
+  items.forEach((item) => {
+    const n = payrollLineAmount(item);
+    if (Number.isFinite(n)) {
+      sum += n;
+      any = true;
+    }
+  });
+  return any ? Math.round(sum * 100) / 100 : '';
+};
+
+/** Basic for the pay period from earnings lines (not gross / paid_days). */
+const pickPeriodBasicFromEarnings = (payrollRow) => {
+  const earnings = getEarningsArray(payrollRow);
+  for (let i = 0; i < earnings.length; i += 1) {
+    const item = earnings[i];
+    const name = String(item?.name ?? item?.salary_component_name ?? item?.component_name ?? '')
+      .trim()
+      .toLowerCase();
+    const type = String(item?.type ?? item?.earning_type ?? item?.salary_component_type ?? '')
+      .trim()
+      .toLowerCase();
+    const isBasic =
+      type === 'basic' ||
+      type === 'earned_basic' ||
+      name === 'basic' ||
+      name === 'earned basic' ||
+      name === 'basic pay' ||
+      name === 'basic earnings' ||
+      name === 'basic wage';
+    if (!isBasic) continue;
+    const n = payrollLineAmount(item);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return '';
+};
+
+/** Daily basic wage rate — must not be gross_pay ÷ paid_days. */
+const resolveFormXIXMPDailyWageRate = (flatRow, payrollRow) => {
+  const explicit = pickPayrollField(
+    flatRow,
+    payrollRow,
+    ['daily_wage_rate', 'daily_rate', 'rate_of_daily_wages', 'normal_rate_of_pay', 'Normal Rate of Pay'],
+    [/daily_wage_rate/, /daily_rate/, /rate_of_daily_wages/, /normal_rate_of_pay/]
+  );
+  if (explicit !== '') return explicit;
+
+  const days = pickPayrollField(
+    flatRow,
+    payrollRow,
+    ['paid_days', 'Paid Days', 'days_worked', 'Days Worked', 'paidDays', 'no_of_days_worked'],
+    [/^paid_days$/, /paiddays/, /daysworked/, /days_present/, /noofdayspresent/, /no_of_days_present/]
+  );
+  if (days === '' || Number(days) <= 0) return '';
+  const daysNum = Number(days);
+
+  const gross = pickPayrollField(
+    flatRow,
+    payrollRow,
+    ['gross_pay', 'Gross Pay', 'grossPay'],
+    [/^gross_pay$/, /^total_earnings$/]
+  );
+  const grossNum = gross !== '' ? Number(gross) : NaN;
+  const avgGrossPerDay =
+    Number.isFinite(grossNum) && grossNum > 0 ? Math.round((grossNum / daysNum) * 100) / 100 : NaN;
+
+  let periodBasic = pickPeriodBasicFromEarnings(payrollRow);
+  if (periodBasic === '') {
+    const { basic } = readPayrollForm15WageAmounts(payrollRow);
+    if (basic !== '') periodBasic = Number(basic);
+  }
+  if (periodBasic === '') {
+    periodBasic = pickPayrollField(
+      flatRow,
+      payrollRow,
+      ['basic', 'Basic', 'basic_pay', 'Basic_Pay', 'basic_earnings', 'Basic Earnings', 'earned_basic', 'Earned Basic'],
+      [/^basic$/, /^earned_basic$/, /^basic_pay$/]
+    );
+  }
+
+  if (periodBasic === '') return '';
+
+  const basicNum = Number(periodBasic);
+  const dailyBasic = Math.round((basicNum / daysNum) * 100) / 100;
+
+  // Reject mis-tagged values that are really gross ÷ days (not contractual daily rate).
+  if (Number.isFinite(avgGrossPerDay) && Math.abs(dailyBasic - avgGrossPerDay) < 0.05) {
+    if (basicNum >= grossNum * 0.98) return '';
+  }
+
+  return dailyBasic;
+};
+
+export function resolveFormXIXMPPayrollFields(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) {
+    return {
+      daysWorked: '',
+      unitsWorked: '',
+      rate: '',
+      overtimeWages: '',
+      grossWages: '',
+      deductions: '',
+      netWages: '',
+    };
+  }
+  const row = flattenPayrollEarningColumns(payrollRow);
+  let deductions = pickPayrollField(
+    row,
+    payrollRow,
+    ['total_deductions', 'Total Deductions', 'totalDeductions', 'total_employee_deductions', 'total_deduction'],
+    [/^total_deductions?$/, /^total_employee_deductions$/]
+  );
+  if (deductions === '') deductions = sumPayrollDeductionLines(payrollRow);
+  if (deductions === '') {
+    const gross = pickPayrollField(
+      row,
+      payrollRow,
+      ['gross_pay', 'Gross Pay', 'grossPay'],
+      [/^gross_pay$/, /^total_earnings$/]
+    );
+    const net = pickPayrollField(row, payrollRow, ['net_pay', 'Net Pay', 'netPay'], [/^net_pay$/]);
+    if (gross !== '' && net !== '') {
+      const diff = Number(gross) - Number(net);
+      if (Number.isFinite(diff) && diff >= 0) deductions = Math.round(diff * 100) / 100;
+    }
+  }
+
+  return {
+    daysWorked: pickPayrollField(
+      row,
+      payrollRow,
+      ['paid_days', 'Paid Days', 'days_worked', 'Days Worked', 'paidDays', 'no_of_days_worked'],
+      [/^paid_days$/, /paiddays/, /daysworked/, /days_present/, /noofdayspresent/, /no_of_days_present/]
+    ),
+    unitsWorked: pickPayrollField(row, payrollRow, ['units_worked', 'Units Worked', 'piece_units'], [/units_worked/]),
+    rate: resolveFormXIXMPDailyWageRate(row, payrollRow),
+    overtimeWages: pickPayrollField(
+      row,
+      payrollRow,
+      ['overtime', 'Overtime', 'overtime_wages', 'overtimeWages', 'ot'],
+      [/overtime/]
+    ),
+    grossWages: pickPayrollField(
+      row,
+      payrollRow,
+      ['gross_pay', 'Gross Pay', 'grossPay'],
+      [/^gross_pay$/, /^total_earnings$/]
+    ),
+    deductions,
+    netWages: pickPayrollField(row, payrollRow, ['net_pay', 'Net Pay', 'netPay', 'net_wages'], [/^net_pay$/]),
+  };
+}
+
+export function enrichFormXIXTamilNaduStaticFieldRows(mappedData, headers) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  const hdrs = resolveFormXIXMPWageTableHeaders(headers);
+  const rateHdrs = hdrs.filter(isFormXIXMPRateHeader);
+  if (rateHdrs.length === 0) return 0;
+  let hits = 0;
+  mappedData.forEach((row) => {
+    if (!row || typeof row !== 'object') return;
+    const rateKeys = new Set(rateHdrs);
+    Object.keys(row).forEach((key) => {
+      if (String(key).startsWith('__')) return;
+      if (isFormXIXMPRateHeader(key)) rateKeys.add(key);
+    });
+    rateKeys.forEach((header) => {
+      row[header] = FORM_XIX_TN_RATE_DEFAULT;
+    });
+    if (rateKeys.size > 0) hits += 1;
+  });
+  return hits;
+}
+
+export function applyFormXIXMPEmployeeToRow(row, emp, headers, helpers = {}) {
+  const hdrs = resolveFormXIXMPWageTableHeaders(headers);
+  const out = row && typeof row === 'object' ? { ...row } : {};
+  const {
+    sanitizeValue = (v) => String(v ?? '').trim(),
+    payrollRow = null,
+    useMonthlyWageRateDefault = false,
+  } = helpers;
+  const hasPayroll = payrollRow && !payrollRow.fetch_error;
+  const payroll = resolveFormXIXMPPayrollFields(hasPayroll ? payrollRow : null);
+  const wageValue = (value, current = '') => {
+    if (hasPayroll) return value !== '' ? sanitizeValue(value) : '';
+    return value !== '' ? sanitizeValue(value) : String(current ?? '').trim();
+  };
+
+  hdrs.forEach((header) => {
+    if (isFormXIXMPWorkmanNameHeader(header)) {
+      out[header] = sanitizeValue(formatWorkmanNameAndGuardian(emp));
+      return;
+    }
+    if (isFormXIXMPDaysWorkedHeader(header)) {
+      out[header] = wageValue(payroll.daysWorked, out[header]);
+      return;
+    }
+    if (isFormXIXMPUnitsWorkedHeader(header)) {
+      out[header] = wageValue(payroll.unitsWorked, out[header]);
+      return;
+    }
+    if (isFormXIXMPRateHeader(header)) {
+      if (useMonthlyWageRateDefault) {
+        out[header] = sanitizeValue(FORM_XIX_TN_RATE_DEFAULT);
+        return;
+      }
+      out[header] = wageValue(payroll.rate, out[header]);
+      return;
+    }
+    if (isFormXIXMPOvertimeHeader(header)) {
+      out[header] = wageValue(payroll.overtimeWages, out[header]);
+      return;
+    }
+    if (isFormXIXMPGrossHeader(header)) {
+      out[header] = wageValue(payroll.grossWages, out[header]);
+      return;
+    }
+    if (isFormXIXMPDeductionsHeader(header)) {
+      out[header] = wageValue(payroll.deductions, out[header]);
+      return;
+    }
+    if (isFormXIXMPNetHeader(header)) {
+      out[header] = wageValue(payroll.netWages, out[header]);
+    }
+  });
+  return out;
+}
+
+/** Push Payroll table values into header form keys (form_xix_ap_days_worked, gross, net, etc.). */
+export function applyFormXIXMPPayrollToHeaderData(headerData, payrollRow) {
+  return applyFormXIXAPAutofillFromSiteAndPayroll(headerData, {
+    payroll: resolveFormXIXMPPayrollFields(payrollRow),
+  });
+}
+
+/** Apply Payroll table fields onto mapped grid rows. */
+export function enrichFormXIXMPPayrollRows(mappedData, employees, headers, helpers = {}) {
+  const hdrs = resolveFormXIXMPWageTableHeaders(headers);
+  const {
+    resolvePayrollRow = null,
+    sanitizeValue = (v) => String(v ?? '').trim(),
+    overwrite = true,
+  } = helpers;
+  if (
+    !Array.isArray(mappedData) ||
+    mappedData.length === 0 ||
+    typeof resolvePayrollRow !== 'function'
+  ) {
+    return 0;
+  }
+  let hits = 0;
+  mappedData.forEach((row, rowIndex) => {
+    const empItem = employees[rowIndex];
+    const emp = empItem?.Employee || empItem?.employee || empItem;
+    const payrollRow = resolvePayrollRow(emp, row, rowIndex);
+    if (!payrollRow || payrollRow.fetch_error) return;
+    const merged = applyFormXIXMPEmployeeToRow(row, emp, hdrs, { sanitizeValue, payrollRow });
+    if (!overwrite) {
+      hdrs.forEach((header) => {
+        if (String(row[header] ?? '').trim() !== '' && String(merged[header] ?? '').trim() !== '') {
+          merged[header] = row[header];
+        }
+      });
+    }
+    Object.assign(row, merged);
+    hits += 1;
+  });
+  return hits;
+}
+
+export function mapFormXIXMPRowsFromEmployees(employees, headers, helpers = {}) {
+  const hdrs = resolveFormXIXMPWageTableHeaders(headers);
+  const list = Array.isArray(employees) ? employees : [];
+  const { resolvePayrollRow = null, ...rest } = helpers;
+  return list.map((empItem, rowIndex) => {
+    const emp = empItem?.Employee || empItem?.employee || empItem;
+    const payrollRow = typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, rowIndex) : null;
+    return applyFormXIXMPEmployeeToRow({}, emp, hdrs, {
+      ...rest,
+      payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
+    });
+  });
+}
+
+export function overlayFormXIXMPUserEditsOntoRows(mappedRows, tableRows, headers) {
+  const hdrs = resolveFormXIXMPWageTableHeaders(headers);
+  const savedRows = Array.isArray(tableRows) ? tableRows : [];
+  return (Array.isArray(mappedRows) ? mappedRows : []).map((row, index) => {
+    const saved = savedRows[index];
+    if (!saved || typeof saved !== 'object' || !rowHasMeaningfulFormXIXMPExportData(saved, hdrs)) {
+      return row;
+    }
+    const merged = { ...row };
+    hdrs.forEach((header) => {
+      const value = getFormXIXMPRowValueForHeader(saved, header);
+      if (String(value ?? '').trim() !== '') merged[header] = saved[header] ?? value;
+    });
+    return merged;
+  });
+}
+
+export function resolveFormXIXMPExportRows(mappedData, headers, employeesOverride = null, helpers = {}) {
+  const hdrs = resolveFormXIXMPWageTableHeaders(headers);
+  const tableRows = Array.isArray(mappedData) ? mappedData : [];
+  const employees = Array.isArray(employeesOverride) ? employeesOverride : [];
+  const {
+    sanitizeValue = (v) => String(v ?? '').trim(),
+    resolvePayrollRow = null,
+  } = helpers;
+  if (employees.length > 0) {
+    const mapHelpers = { sanitizeValue };
+    if (typeof resolvePayrollRow === 'function') {
+      mapHelpers.resolvePayrollRow = resolvePayrollRow;
+    }
+    const fromEmployees = mapFormXIXMPRowsFromEmployees(employees, hdrs, mapHelpers);
+    return overlayFormXIXMPUserEditsOntoRows(fromEmployees, tableRows, hdrs);
+  }
+  return tableRows;
+}
+
+const isNarrativeBlob = (raw) => {
+  const n = formXIXAPHeaderNorm(raw);
+  if (!n) return false;
+  return (
+    /^form\s*xix\b/i.test(n) ||
+    /wage\s+slip/i.test(n) ||
+    /wage\s+particulars/i.test(n) ||
+    /contract\s+labou?r/i.test(n) ||
+    n.length > 160
+  );
+};
+
+const isWageLabelBlob = (raw) => {
+  const n = formXIXAPHeaderNorm(raw).replace(/^\d+[\.\)]\s*/, '');
+  return (
+    isFormXIXMPDaysWorkedHeader(n) ||
+    isFormXIXMPUnitsWorkedHeader(n) ||
+    isFormXIXMPRateHeader(n) ||
+    isFormXIXMPOvertimeHeader(n) ||
+    isFormXIXMPGrossHeader(n) ||
+    isFormXIXMPDeductionsHeader(n) ||
+    isFormXIXMPNetHeader(n)
+  );
+};
+
+const buildTemplateField = (spec, coords = {}) => ({
+  label: spec.label,
+  value: spec.group === 'wages' ? '' : coords.value || '',
+  key: spec.key,
+  group: spec.group || 'header',
+  fieldType: spec.fieldType || 'text',
+  labelRow: coords.labelRow ?? null,
+  labelCol: coords.labelCol ?? null,
+  valueCol: coords.valueCol ?? null,
+  valueRow: coords.valueRow ?? null,
+});
+
+const findMPStackedLabelCell = (
+  getMergedAwareCellText,
+  matchRe,
+  effectiveSheetCols,
+  maxRows = 120,
+  usedRows = null
+) => {
+  const maxC = Math.max(20, effectiveSheetCols || 0);
+  const skipRows = usedRows instanceof Set ? usedRows : null;
+  for (let r = 0; r < maxRows; r += 1) {
+    if (skipRows?.has(r)) continue;
+    for (let c = 0; c < Math.min(maxC, 8); c += 1) {
+      const raw = String(getMergedAwareCellText(r, c) || '').trim();
+      if (!raw || isNarrativeBlob(raw)) continue;
+      const norm = formXIXAPHeaderNorm(raw);
+      if (!matchRe.test(norm) && !matchRe.test(raw)) continue;
+      if (isWageLabelBlob(raw) && !/^\s*\d+[\.\)]/.test(raw)) continue;
+      const value = String(getMergedAwareCellText(r, FORM_XIX_MP_STACKED_VALUE_COL - 1) || '').trim();
+      return {
+        labelRow: r,
+        labelCol: c,
+        valueCol: FORM_XIX_MP_STACKED_VALUE_COL - 1,
+        valueRow: r,
+        value: isNarrativeBlob(value) || isWageLabelBlob(value) ? '' : value,
+      };
+    }
+  }
+  return null;
+};
+
+const buildFormXIXMPWageFieldsFromSheet = (getMergedAwareCellText, effectiveSheetCols) => {
+  const usedRows = new Set();
+  return FORM_XIX_MP_WAGE_SPECS.map((spec) => {
+    const coords =
+      typeof getMergedAwareCellText === 'function' && spec.match
+        ? findMPStackedLabelCell(getMergedAwareCellText, spec.match, effectiveSheetCols, 120, usedRows) || {}
+        : {};
+    if (coords.labelRow != null) usedRows.add(coords.labelRow);
+    return buildTemplateField(spec, coords);
+  });
+};
+
+export function buildFormXIXMPHeaderFields(getMergedAwareCellText = null, effectiveSheetCols = 20) {
+  return FORM_XIX_MP_HEADER_SPECS.map((spec) => {
+    let coords = {};
+    if (typeof getMergedAwareCellText === 'function' && spec.match) {
+      coords = findMPStackedLabelCell(getMergedAwareCellText, spec.match, effectiveSheetCols) || {};
+    }
+    return buildTemplateField(spec, coords);
+  });
+}
+
+export function resolveFormXIXMPHeaderFieldLayout(parsed, workbook, hints = {}) {
+  const formHeader = hints.formHeader || parsed?.formHeader || null;
+  const item = hints.item || null;
+  const fileName = hints.fileName || hints.formFileName || '';
+  const sheetText = hints.sheetText || '';
+  if (!isFormXIXMPWageSlipContext(formHeader, item, fileName, sheetText)) return null;
+
+  const accessor = buildFormXIXMPWorkbookAccessor(workbook, hints);
+  const getMergedAwareCellText = accessor?.getMergedAwareCellText ?? null;
+  const effectiveSheetCols = accessor?.effectiveSheetCols ?? 20;
+  const headerFields = buildFormXIXMPHeaderFields(getMergedAwareCellText, effectiveSheetCols);
+  const wageFields = buildFormXIXMPWageFieldsFromSheet(getMergedAwareCellText, effectiveSheetCols);
+
+  return {
+    formHeader: {
+      title: formHeader?.title || 'Form XIX – Wage Slip',
+      subtitle: formHeader?.subtitle || 'Wage Slip (Contract Labour)',
+      reference: formHeader?.reference || '',
+      formXIXAPHeaderFieldLayout: true,
+      formXIXMPTableLayout: true,
+      textRows: [],
+      fields: [...headerFields, ...wageFields],
+    },
+    headers: resolveFormXIXMPWageTableHeaders(parsed?.headers || hints.tableHeaders || null),
+    tableData: [],
+    headerRowIndex: -1,
+    dataStartIndex: 0,
+    tableStartCol: 0,
+    sheetName: accessor?.sheetName || hints.preferredSheetName || null,
+  };
+}
+
+function buildFormXIXMPWorkbookAccessor(workbook, hints = {}) {
+  if (!workbook?.SheetNames?.length) return null;
+  const sheetName =
+    hints.preferredSheetName && workbook.Sheets?.[hints.preferredSheetName]
+      ? hints.preferredSheetName
+      : workbook.SheetNames[0];
+  const worksheet = sheetName ? workbook.Sheets[sheetName] : null;
+  if (!worksheet) return null;
+
+  const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1:A1');
+  const maxSheetCols = range.e && typeof range.e.c === 'number' ? range.e.c + 1 : 0;
+  const merges = worksheet['!merges'] || [];
+  let mergeMaxCol = 0;
+  merges.forEach((m) => {
+    if (m?.e && typeof m.e.c === 'number') mergeMaxCol = Math.max(mergeMaxCol, m.e.c + 1);
+  });
+  const effectiveSheetCols = Math.max(maxSheetCols, mergeMaxCol, 20);
+  const getRawCellText = (r, c) => {
+    if (r < 0 || c < 0) return '';
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const cell = worksheet[ref];
+    if (!cell || cell.v == null) return '';
+    return String(cell.v).trim();
+  };
+  const getMergedAwareCellText = (r, c) => {
+    const direct = getRawCellText(r, c);
+    if (direct) return direct;
+    for (let i = 0; i < merges.length; i += 1) {
+      const m = merges[i];
+      if (!m?.s || !m?.e) continue;
+      if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) {
+        const topLeft = getRawCellText(m.s.r, m.s.c);
+        if (topLeft) return topLeft;
+      }
+    }
+    return '';
+  };
+  return { getMergedAwareCellText, effectiveSheetCols, sheetName };
+}
+
+const formXIXMPExcelCellValueToString = (val) => {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'object') {
+    if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+    if (val.text != null) return String(val.text);
+    if (val.result != null) return String(val.result);
+  }
+  return '';
+};
+
+export function resolveFormXIXMPWageFieldPositions(worksheet, parsedFormHeader) {
+  if (!worksheet) return [];
+  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  const positions = [];
+  const maxScanRows = Math.max(120, worksheet.rowCount + 10);
+  const maxScanCols = 12;
+
+  const pushFromField = (field, tableHeader) => {
+    if (field.labelRow == null) return;
+    const row = (field.valueRow ?? field.labelRow) + 1;
+    const col = field.valueCol != null ? field.valueCol + 1 : FORM_XIX_MP_STACKED_VALUE_COL;
+    positions.push({ key: field.key, tableHeader, row, col });
+  };
+
+  fields.forEach((field) => {
+    if (field.group === 'wages') {
+      const tableHeader =
+        FORM_XIX_MP_WAGE_TABLE_HEADERS.find((h) => FORM_XIX_MP_WAGE_KEY_BY_HEADER.get(h.replace(/\s*:+\s*$/, '')) === field.key) ||
+        field.label;
+      pushFromField(field, tableHeader);
+    }
+  });
+
+  if (positions.length >= FORM_XIX_MP_WAGE_SPECS.length) return positions;
+
+  FORM_XIX_MP_WAGE_SPECS.forEach((spec) => {
+    if (positions.some((p) => p.key === spec.key)) return;
+    for (let r = 1; r <= maxScanRows; r += 1) {
+      for (let c = 1; c <= maxScanCols; c += 1) {
+        const raw = formXIXMPExcelCellValueToString(worksheet.getCell(r, c)?.value);
+        const norm = formXIXAPHeaderNorm(raw);
+        if (!spec.match.test(norm) && !spec.match.test(raw)) continue;
+        const tableHeader =
+          FORM_XIX_MP_WAGE_TABLE_HEADERS.find(
+            (h) => FORM_XIX_MP_WAGE_KEY_BY_HEADER.get(h.replace(/\s*:+\s*$/, '')) === spec.key
+          ) || spec.label;
+        positions.push({ key: spec.key, tableHeader, row: r, col: FORM_XIX_MP_STACKED_VALUE_COL });
+        return;
+      }
+    }
+  });
+
+  return positions;
+}
+
+export function resolveFormXIXMPWorkmanHeaderField(parsedFormHeader) {
+  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  return fields.find((f) => f.key === 'form_xix_ap_workman') || null;
+}
+
+function buildEmployeeHeaderFormData(headerFormData, employeeRow, parsedFormHeader) {
+  const base = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
+  if (!employeeRow || typeof employeeRow !== 'object') return base;
+  const workmanHeader = FORM_XIX_MP_WAGE_TABLE_HEADERS.find(isFormXIXMPWorkmanNameHeader);
+  const workmanValue = workmanHeader ? getFormXIXMPRowValueForHeader(employeeRow, workmanHeader) : '';
+  if (workmanValue) base.form_xix_ap_workman = workmanValue;
+
+  const wagePositions = FORM_XIX_MP_WAGE_SPECS;
+  wagePositions.forEach((spec) => {
+    const tableHeader =
+      FORM_XIX_MP_WAGE_TABLE_HEADERS.find(
+        (h) => FORM_XIX_MP_WAGE_KEY_BY_HEADER.get(h.replace(/\s*:+\s*$/, '')) === spec.key
+      ) || spec.label;
+    const value = getFormXIXMPRowValueForHeader(employeeRow, tableHeader);
+    if (String(value ?? '').trim() !== '') base[spec.key] = value;
+  });
+  return base;
+}
+
+export async function buildFormXIXMPWorkbookWithTemplateStyles({
+  templateArrayBuffer,
+  mappedData,
+  headersToUse,
+  parsedFormHeader,
+  formFileName,
+  headerFormData,
+  sheetNameHint,
+}) {
+  if (!templateArrayBuffer) {
+    throw new Error('Original form template buffer is required for Form XIX MP export.');
+  }
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateArrayBuffer);
+  const sheetCandidates = Array.isArray(workbook.worksheets) ? workbook.worksheets : [];
+  const preferred = String(sheetNameHint || '').trim();
+  const worksheet =
+    (preferred && sheetCandidates.find((ws) => String(ws?.name || '').trim() === preferred)) ||
+    sheetCandidates[0] ||
+    null;
+  if (!worksheet) throw new Error('Template worksheet not found.');
+
+  const hdrs = resolveFormXIXMPWageTableHeaders(headersToUse);
+  const sourceRows = (Array.isArray(mappedData) ? mappedData : []).filter((row) =>
+    rowHasMeaningfulFormXIXMPExportData(row, hdrs)
+  );
+  const employeeRow = sourceRows.length === 1 ? sourceRows[0] : sourceRows[0] || null;
+  const mergedHeaderData = sanitizeFormXIXMPHeaderFormData(
+    buildEmployeeHeaderFormData(headerFormData, employeeRow, parsedFormHeader)
+  );
+
+  writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, mergedHeaderData, parsedFormHeader, {
+    excelCellValueToString: formXIXMPExcelCellValueToString,
+  });
+
+  const out = await workbook.xlsx.writeBuffer();
+  const fileName =
+    formFileName ||
+    parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+    `Form_XIX_MP_${Date.now()}.xlsx`;
+  const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  return { blob, fileName };
+}
+
+const formXIXMPSanitizeExportText = (value) =>
+  String(value ?? '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    .trim();
+
+function sanitizeFormXIXMPHeaderFormData(headerFormData) {
+  if (!headerFormData || typeof headerFormData !== 'object') return {};
+  const out = {};
+  Object.entries(headerFormData).forEach(([key, value]) => {
+    if (value == null) return;
+    out[key] = formXIXMPSanitizeExportText(value);
+  });
+  return out;
+}
+
+export function resolveFormXIXMPEmployeeDownloadBaseName(row, headers, fallbackIndex = 0) {
+  const hdrs = resolveFormXIXMPWageTableHeaders(headers);
+  const workmanHeader = hdrs.find(isFormXIXMPWorkmanNameHeader);
+  const raw = workmanHeader ? String(getFormXIXMPRowValueForHeader(row, workmanHeader) || '').trim() : '';
+  const firstLine = raw.split(/\r?\n/)[0] || raw;
+  const slug = firstLine
+    .replace(/[^\w\s.-]/g, '')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 48);
+  return slug || `Employee_${fallbackIndex + 1}`;
+}
+
+export function allocateUniqueFormXIXMPDownloadFileName(baseName, usedNames) {
+  const root = String(baseName || 'Employee').trim() || 'Employee';
+  const count = usedNames.get(root) || 0;
+  usedNames.set(root, count + 1);
+  const suffix = count > 0 ? `_${count + 1}` : '';
+  return `Form_XIX_MP_${root}${suffix}.xlsx`;
+}
+
+export function triggerFormXIXMPZipDownload(blob, fileName) {
+  if (!blob || !fileName) return;
+  const downloadUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = downloadUrl;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(downloadUrl);
+}
+
+export async function buildFormXIXMPPerEmployeeDownload({
+  templateArrayBuffer,
+  mappedData,
+  headersToUse,
+  parsedFormHeader,
+  formFileName,
+  headerFormData,
+  sheetNameHint,
+  employeesOverride = null,
+  resolvePayrollRow = null,
+}) {
+  if (!templateArrayBuffer) {
+    throw new Error('Original form template buffer is required for Form XIX MP export.');
+  }
+
+  const hdrs = resolveFormXIXMPWageTableHeaders(headersToUse);
+  const employees = Array.isArray(employeesOverride) ? employeesOverride : [];
+  const tableRows = Array.isArray(mappedData) ? mappedData : [];
+  const exportHelpers = {
+    sanitizeValue: (v) => String(v ?? '').trim(),
+    resolvePayrollRow: typeof resolvePayrollRow === 'function' ? resolvePayrollRow : null,
+  };
+  const fromEmployees =
+    employees.length > 0
+      ? resolveFormXIXMPExportRows(tableRows, hdrs, employees, exportHelpers)
+      : [];
+  const fromTable = tableRows.filter((row) => rowHasMeaningfulFormXIXMPExportData(row, hdrs));
+  let exportRows = (fromEmployees.length > fromTable.length ? fromEmployees : fromTable).filter((row) =>
+    rowHasMeaningfulFormXIXMPExportData(row, hdrs)
+  );
+  if (exportRows.length === 0 && employees.length > 0) {
+    exportRows = mapFormXIXMPRowsFromEmployees(employees, hdrs, exportHelpers);
+  }
+  if (employees.length > exportRows.length) {
+    exportRows = mapFormXIXMPRowsFromEmployees(employees, hdrs, exportHelpers);
+  }
+  const baseHeaderData = sanitizeFormXIXMPHeaderFormData(headerFormData);
+  const workbookArgs = {
+    templateArrayBuffer,
+    headersToUse: hdrs,
+    parsedFormHeader,
+    formFileName,
+    sheetNameHint,
+  };
+
+  if (exportRows.length <= 1 && employees.length <= 1) {
+    const rows = exportRows.length === 1 ? exportRows : [];
+    return buildFormXIXMPWorkbookWithTemplateStyles({
+      ...workbookArgs,
+      mappedData: rows,
+      headerFormData: baseHeaderData,
+    });
+  }
+
+  const zip = new JSZip();
+  const usedNames = new Map();
+  for (let i = 0; i < exportRows.length; i += 1) {
+    const mergedHeaderData = sanitizeFormXIXMPHeaderFormData(
+      buildEmployeeHeaderFormData(baseHeaderData, exportRows[i], parsedFormHeader)
+    );
+    const { blob } = await buildFormXIXMPWorkbookWithTemplateStyles({
+      ...workbookArgs,
+      mappedData: [exportRows[i]],
+      headerFormData: mergedHeaderData,
+    });
+    const xlsxBytes = new Uint8Array(await blob.arrayBuffer());
+    const baseName = resolveFormXIXMPEmployeeDownloadBaseName(exportRows[i], hdrs, i);
+    zip.file(allocateUniqueFormXIXMPDownloadFileName(baseName, usedNames), xlsxBytes);
+    if (i > 0 && i % 15 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_XIX_MP')
+    .replace(/\.xlsx?$/i, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return {
+    blob: await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' }),
+    fileName: `${zipBase}_Employees.zip`,
+  };
+}
+
+export { applyFormXIXAPAutofillFromSiteAndPayroll as applyFormXIXMPAutofillFromSiteAndPayroll };
+
+export function resolveFormXIXHeaderFieldLayout(parsed, workbook, hints = {}) {
+  return (
+    resolveFormXIXMPHeaderFieldLayout(parsed, workbook, hints) ||
+    resolveFormXIXAPHeaderFieldLayoutInner(parsed, workbook, hints)
+  );
+}

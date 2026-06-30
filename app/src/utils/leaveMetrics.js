@@ -219,3 +219,57 @@ export function findLeaveRecordForFormRow(lookup, row, employeeIdHeader, employe
 
   return null;
 }
+
+/** Sum booked (availed) and balance across all leave types on one Zoho leave row. */
+export function sumLeaveRecordBookedAndBalance(leaveRecord, leaveTypeLabels = {}) {
+  if (!leaveRecord || typeof leaveRecord !== 'object') {
+    return { booked: '', balance: '', categoryLabels: [] };
+  }
+  let bookedTotal = 0;
+  let balanceTotal = 0;
+  let hasBooked = false;
+  let hasBalance = false;
+  const categoryLabels = [];
+  const skipKeys = new Set([
+    's.no',
+    'sno',
+    'employeeid',
+    'employee_id',
+    'employee',
+    'employeename',
+    'employeename',
+    'zoho.id',
+    'zohoid',
+    'zoho_id',
+  ]);
+
+  Object.entries(leaveRecord).forEach(([key, value]) => {
+    const kl = String(key || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (skipKeys.has(kl.replace(/\s+/g, '')) || skipKeys.has(kl)) return;
+    const label = String(leaveTypeLabels?.[key] || key || '').trim();
+    const obj = parseLeaveCellObject(value) ?? (value && typeof value === 'object' ? value : null);
+    if (!obj || typeof obj !== 'object') return;
+    const bookRaw = obj.paidBooked ?? obj.booked ?? obj.Booked;
+    const balRaw = obj.paidBalance ?? obj.balance ?? obj.Balance;
+    const bookNum = Number(String(bookRaw ?? '').trim());
+    const balNum = Number(String(balRaw ?? '').trim());
+    if (Number.isFinite(bookNum) && bookNum !== 0) {
+      bookedTotal += bookNum;
+      hasBooked = true;
+    }
+    if (Number.isFinite(balNum)) {
+      balanceTotal += balNum;
+      hasBalance = true;
+    }
+    if (label && !/legacy/i.test(label)) categoryLabels.push(label);
+  });
+
+  return {
+    booked: hasBooked ? String(bookedTotal) : '',
+    balance: hasBalance ? String(balanceTotal) : '',
+    categoryLabels: [...new Set(categoryLabels)],
+  };
+}

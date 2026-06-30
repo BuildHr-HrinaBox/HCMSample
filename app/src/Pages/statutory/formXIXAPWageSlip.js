@@ -392,25 +392,29 @@ export function resolveFormXIXWorkbookSheetName(workbook, hints = {}) {
   return pickWorkbookSheet(workbook, hints);
 }
 
-const formatWorkmanNameAndGuardian = (emp = {}) => {
+export const formatWorkmanNameAndGuardian = (emp = {}) => {
   const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || emp['First Name'] || '').trim();
   const ln = String(emp.LastName || emp['LastName'] || emp.lastName || emp['Last Name'] || '').trim();
   const name =
-    emp.Name ||
-    emp['Name'] ||
-    emp.EmployeeName ||
-    emp['Employee Name'] ||
-    (fn && ln ? `${fn} ${ln}` : fn || ln || '');
-  const guardian =
-    emp.FatherName ||
-    emp['Father Name'] ||
-    emp.Father_SpouseName ||
-    emp['Father/Husband Name'] ||
-    emp.SpouseName ||
-    emp['Spouse Name'] ||
-    emp.HusbandName ||
-    emp['Husband Name'] ||
-    '';
+    (fn && ln ? `${fn} ${ln}` : fn || ln || '') ||
+    String(emp.Name || emp['Name'] || emp.EmployeeName || emp['Employee Name'] || '').trim();
+  const guardian = String(
+    emp.Father_s_Name ||
+      emp['Father_s_Name'] ||
+      emp.Father_Name ||
+      emp['Father_Name'] ||
+      emp.FatherName ||
+      emp['Father Name'] ||
+      emp.Father_SpouseName ||
+      emp['Father/Husband Name'] ||
+      emp.Spouse_Name ||
+      emp['Spouse_Name'] ||
+      emp.SpouseName ||
+      emp['Spouse Name'] ||
+      emp.HusbandName ||
+      emp['Husband Name'] ||
+      ''
+  ).trim();
   if (name && guardian) return `${name}\n${guardian}`;
   return name || guardian || '';
 };

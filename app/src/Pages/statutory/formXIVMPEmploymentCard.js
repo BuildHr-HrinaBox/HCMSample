@@ -2,6 +2,10 @@ import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import {
+  mergePayrollRunEmployeePayload,
+  readPayrollScalar,
+} from '../../utils/payrollEarnings';
+import {
   blobIndicatesEmploymentCard,
   isFormXIVEmploymentCardContext,
   matchesFormXIVHint,
@@ -42,7 +46,7 @@ export function headersIndicateFormXIVMPTable(tableHeaders) {
     .join('\n');
   return (
     /name\s+of\s+the\s+workman/.test(joined) &&
-    /serial\s+number\s+in\s+the\s+register/.test(joined) &&
+    /serial\s+(?:no\.?|number)\s+in\s+the\s+register/.test(joined) &&
     (/nature\s+of\s+employ/.test(joined) || /designat/.test(joined))
   );
 }
@@ -61,7 +65,7 @@ export function isFormXIVMPWorkmanNameHeader(h) {
 
 export function isFormXIVMPSerialNumberHeader(h) {
   const s = formXIVMPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
-  return /serial\s+number\s+in\s+the\s+register/.test(s);
+  return /serial\s+(?:no\.?|number)\s+in\s+the\s+register/.test(s);
 }
 
 export function isFormXIVMPNatureDesignationHeader(h) {
@@ -75,7 +79,11 @@ export function isFormXIVMPNatureDesignationHeader(h) {
 
 export function isFormXIVMPWageRateHeader(h) {
   const s = formXIVMPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
-  return /wage\s*['']?\s*rate/.test(s) || (/wage/.test(s) && /piece/.test(s));
+  return (
+    /wage\s*[''']?\s*rate/.test(s) ||
+    (/wage/.test(s) && /piece/.test(s)) ||
+    (/wage/.test(s) && /particular/.test(s) && !/period/.test(s))
+  );
 }
 
 export function isFormXIVMPWagePeriodHeader(h) {
@@ -109,7 +117,7 @@ export const FORM_XIV_MP_HEADER_SPECS = [
     label: 'Name and address of contractor',
     group: 'header',
     fieldType: 'textarea',
-    match: /name\s+and\s+address\s+of\s+contractor/i,
+    match: /name\s+and\s+address\s+(?:of|if)\s+contractor/i,
   },
   {
     key: 'form_xiv_mp_establishment',
@@ -341,7 +349,16 @@ const setHeaderField = (headerData, key, value) => {
   return out;
 };
 
-export function applyFormXIVMPAutofillFromSite(headerData, siteContext = {}) {
+export function isFormXIVPlaceholderCell(text) {
+  const s = String(text ?? '').trim();
+  if (!s) return true;
+  if (/^[\s._\-…·]+$/u.test(s)) return true;
+  if (/[.…_-]{4,}$/u.test(s) && s.replace(/[.…_\-\s]+/gu, '').length < 4) return true;
+  return false;
+}
+
+export function applyFormXIVMPAutofillFromSite(headerData, siteContext = {}, options = {}) {
+  const { onlyEmpty = false } = options;
   const {
     contractorText = '',
     establishmentText = '',
@@ -349,10 +366,14 @@ export function applyFormXIVMPAutofillFromSite(headerData, siteContext = {}) {
     principalEmployerText = '',
   } = siteContext;
   let out = { ...(headerData || {}) };
-  out = setHeaderField(out, 'form_xiv_mp_contractor', contractorText);
-  out = setHeaderField(out, 'form_xiv_mp_establishment', establishmentText);
-  out = setHeaderField(out, 'form_xiv_mp_nature_location', natureLocationText);
-  out = setHeaderField(out, 'form_xiv_mp_principal_employer', principalEmployerText);
+  const assign = (key, value) => {
+    if (onlyEmpty && String(out[key] ?? '').trim()) return;
+    out = setHeaderField(out, key, value);
+  };
+  assign('form_xiv_mp_contractor', contractorText);
+  assign('form_xiv_mp_establishment', establishmentText);
+  assign('form_xiv_mp_nature_location', natureLocationText);
+  assign('form_xiv_mp_principal_employer', principalEmployerText);
   return out;
 }
 
@@ -393,16 +414,31 @@ export function resolveFormXIVMPDesignation(emp = {}) {
   ).trim();
 }
 
+export function readFormXIVMPPayrollGrossPay(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = mergePayrollRunEmployeePayload(payrollRow);
+  const gross = readPayrollScalar(
+    flat,
+    ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings'],
+    [/^gross_pay$/, /^total_earnings$/]
+  );
+  if (gross !== '') return gross;
+  if (payrollRow !== flat) {
+    return readPayrollScalar(
+      payrollRow,
+      ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings'],
+      [/^gross_pay$/, /^total_earnings$/]
+    );
+  }
+  return '';
+}
+
 export function resolveFormXIVMPWageRate(emp = {}, payrollRow = null) {
-  const fromPayroll =
-    payrollRow?.basic_pay ??
-    payrollRow?.Basic_Pay ??
-    payrollRow?.gross_pay ??
-    payrollRow?.monthly_salary ??
-    '';
-  if (fromPayroll != null && String(fromPayroll).trim() !== '') {
+  const fromPayroll = readFormXIVMPPayrollGrossPay(payrollRow);
+  if (fromPayroll !== '') {
     const n = Number(String(fromPayroll).replace(/,/g, '').trim());
     if (Number.isFinite(n) && n > 0) return String(n);
+    return String(fromPayroll).trim();
   }
   const fromEmp = emp.MonthlySalary || emp['Monthly Salary'] || emp.BasicSalary || emp['Basic Salary'] || '';
   if (fromEmp != null && String(fromEmp).trim() !== '') return String(fromEmp).trim();
@@ -499,6 +535,35 @@ export function applyFormXIVMPEmployeeToRow(row, emp, headers, helpers = {}) {
   return out;
 }
 
+/** Fill wage rate from pay-run gross_pay when rows were mapped without payroll. */
+export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpers = {}) {
+  const hdrs = resolveFormXIVMPTableHeaders(headers);
+  const wageRateHeader = hdrs.find(isFormXIVMPWageRateHeader);
+  if (!wageRateHeader) return 0;
+  const {
+    resolvePayrollRow = null,
+    sanitizeValue = (v) => String(v ?? '').trim(),
+    overwrite = false,
+  } = helpers;
+  if (!Array.isArray(mappedData) || mappedData.length === 0 || typeof resolvePayrollRow !== 'function') {
+    return 0;
+  }
+  let hits = 0;
+  mappedData.forEach((row, rowIndex) => {
+    if (!overwrite && String(row?.[wageRateHeader] ?? '').trim()) return;
+    const empItem = employees[rowIndex];
+    const emp = empItem?.Employee || empItem?.employee || empItem;
+    const payrollRow = resolvePayrollRow(emp, row, rowIndex);
+    if (!payrollRow || payrollRow.fetch_error) return;
+    const rate = resolveFormXIVMPWageRate(emp, payrollRow);
+    if (rate) {
+      row[wageRateHeader] = sanitizeValue(rate);
+      hits += 1;
+    }
+  });
+  return hits;
+}
+
 /** One employment card per employee — vertical numbered workman fields (Rule 76). */
 export const FORM_XIV_MP_WORKMAN_FIELD_SPECS = [
   {
@@ -508,7 +573,7 @@ export const FORM_XIV_MP_WORKMAN_FIELD_SPECS = [
   },
   {
     label: 'Serial number in the register of workmen employed',
-    match: /serial\s+number\s+in\s+the\s+register/i,
+    match: /serial\s+(?:no\.?|number)\s+in\s+the\s+register/i,
     rowTest: isFormXIVMPSerialNumberHeader,
   },
   {
@@ -626,7 +691,7 @@ const resolveFormXIVMPWorkmanValueColumn = (worksheet, maxScanRow = 45) => {
   for (let r = 1; r <= maxScanRow; r += 1) {
     for (let c = 1; c <= 6; c += 1) {
       const cellStr = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
-      if (!cellStr || !/name\s+and\s+address\s+of\s+contractor/i.test(cellStr)) continue;
+      if (!cellStr || !/name\s+and\s+address\s+(?:of|if)\s+contractor/i.test(cellStr)) continue;
       for (let vc = FORM_XIV_MP_DEFAULT_VALUE_COL; vc <= 10; vc += 1) {
         const v = formXIVMPExcelCellValueToString(worksheet.getCell(r, vc)?.value).trim();
         if (v && !/^[_\s.-]+$/.test(v) && !/name\s+and\s+address/i.test(v)) return vc;
@@ -652,33 +717,34 @@ const clearFormXIVMPWorkmanValueBand = (worksheet, fromRow = 12, toRow = 35, val
 
 export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData = {}, parsedFormHeader = null) {
   if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
-  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : buildFormXIVMPHeaderFields();
+  const defaultValueCol = resolveFormXIVMPWorkmanValueColumn(worksheet);
+  const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
   const writeAt = (row, col, value) => {
     const text = String(value ?? '').trim();
     if (!text || row < 1 || col < 1) return;
     worksheet.getCell(row, col).value = text;
   };
-  fields.forEach((field) => {
-    const val = headerFormData[field.key];
+  /** Karnataka / MP templates place values in column D beside the label row (not col B). */
+  const writeHeaderBesideLabel = (excelRow, value) => {
+    if (excelRow < 1) return;
+    writeAt(excelRow, defaultValueCol, value);
+  };
+
+  FORM_XIV_MP_HEADER_SPECS.forEach((spec) => {
+    const val = headerFormData[spec.key];
     if (val == null || String(val).trim() === '') return;
-    if (field.labelRow != null && field.valueCol != null) {
-      writeAt((field.valueRow ?? field.labelRow) + 1, field.valueCol + 1, val);
+
+    const parsedField = parsedFields.find((f) => f.key === spec.key);
+    if (parsedField?.labelRow != null) {
+      writeHeaderBesideLabel(parsedField.labelRow + 1, val);
       return;
     }
-    const spec = FORM_XIV_MP_HEADER_SPECS.find((s) => s.key === field.key);
-    if (!spec?.match) return;
+
     for (let r = 1; r <= 40; r += 1) {
       for (let c = 1; c <= 14; c += 1) {
         const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
         if (!raw || (!spec.match.test(raw) && !spec.match.test(formXIVMPHeaderNorm(raw)))) continue;
-        for (let nc = c + 1; nc <= Math.min(c + 12, 16); nc += 1) {
-          const nt = formXIVMPExcelCellValueToString(worksheet.getCell(r, nc)?.value).trim();
-          if (!nt) {
-            writeAt(r, nc, val);
-            return;
-          }
-        }
-        writeAt(r + 1, c, val);
+        writeHeaderBesideLabel(r, val);
         return;
       }
     }
@@ -702,11 +768,19 @@ export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers) {
         if (!looksLikeFormXIVMPWorkmanLabelCell(cellStr, spec, ordinal || si + 1)) continue;
         const headerKey = hdrs.find((h) => spec.rowTest(h)) || hdrs[si];
         let targetCol = valueCol;
-        for (let vc = c + 1; vc <= Math.min(c + 8, 14); vc += 1) {
-          const nt = formXIVMPExcelCellValueToString(worksheet.getCell(r, vc)?.value).trim();
-          if (!nt || /^[_\s.-]+$/.test(nt)) {
-            targetCol = vc;
-            break;
+        if (ordinal) {
+          targetCol = valueCol;
+        } else {
+          for (let vc = c + 1; vc <= Math.min(c + 8, 14); vc += 1) {
+            const nt = formXIVMPExcelCellValueToString(worksheet.getCell(r, vc)?.value).trim();
+            if (isFormXIVPlaceholderCell(nt)) {
+              targetCol = Math.max(vc, valueCol);
+              break;
+            }
+            if (!nt) {
+              targetCol = vc;
+              break;
+            }
           }
         }
         positions.push({ headerKey, row: r, col: targetCol });

@@ -8,6 +8,29 @@ export function normalizeStatutoryHeaderLabel(label) {
     .trim();
 }
 
+/** Canonical key for matching template Excel labels to header field labels (ignores "the", numbering). */
+export function statutoryHeaderLabelMatchKey(label) {
+  const compact = normalizeStatutoryHeaderLabel(label)
+    .replace(/^\d+\s+/, '')
+    .replace(/\bthe\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!compact) return '';
+  if (/name\s+and\s+address\s+of\s+contractor/.test(compact) && !/principal/.test(compact)) {
+    return 'statutory_contractor';
+  }
+  if (/(?:name|nature)\s+and\s+location\s+of\s+work/.test(compact)) {
+    return 'statutory_nature_location';
+  }
+  if (/establishment\s+in.*under\s+which\s+contract/.test(compact)) {
+    return 'statutory_establishment_contract';
+  }
+  if (/name\s+and\s+address\s+of\s+principal\s+employer/.test(compact)) {
+    return 'statutory_principal_employer';
+  }
+  return compact;
+}
+
 export function buildSiteEstablishmentNameAndAddress(site) {
   if (!site || typeof site !== 'object') return '';
   const name = String(site.siteName ?? site.SiteName ?? '').trim();
@@ -32,6 +55,66 @@ export function buildSiteEstablishmentAddressOnly(site) {
 export function buildSiteLocationText(site) {
   if (!site || typeof site !== 'object') return '';
   return String(site.location ?? site.Location ?? '').trim();
+}
+
+/** Site Management contractor fields → combined name and address line. */
+export function buildSiteContractorNameAndAddress(site) {
+  if (!site || typeof site !== 'object') return '';
+  const name = String(site.contractorName ?? site.ContractorName ?? '').trim();
+  const addr = String(site.contractorAddress ?? site.ContractorAddress ?? '').trim();
+  const city = String(site.contractorCity ?? site.ContractorCity ?? '').trim();
+  const state = String(site.contractorState ?? site.ContractorState ?? '').trim();
+  const parts = [];
+  if (name) parts.push(name);
+  const addrLine = [addr, city, state].filter(Boolean).join(', ');
+  if (addrLine) parts.push(addrLine);
+  return parts.join(', ').trim();
+}
+
+/**
+ * Form XXIII MP overtime register — header mapping from Site Management:
+ * - Contractor field ← contractor name and address
+ * - Nature/location of work ← site Location
+ */
+export function applyFormXXIIIMPHeaderFieldsFromSite(
+  headerData,
+  site,
+  { formHeaderFields = [], isPlaceholder = () => false } = {}
+) {
+  if (!headerData || typeof headerData !== 'object' || !site) return headerData;
+  const locationText = buildSiteLocationText(site);
+  const contractorText = buildSiteContractorNameAndAddress(site);
+  const out = { ...headerData };
+  let changed = false;
+
+  const setValue = (key, value, force = false) => {
+    if (!key || !value) return;
+    const cur = Object.prototype.hasOwnProperty.call(out, key) ? String(out[key] ?? '').trim() : '';
+    if (!force && cur && !isPlaceholder(cur)) return;
+    if (force && cur === value) return;
+    out[key] = value;
+    changed = true;
+  };
+
+  setValue('form_xxiii_contractor', contractorText, true);
+  setValue('form_xxiii_nature_location_work', locationText, true);
+
+  const fields = Array.isArray(formHeaderFields) ? formHeaderFields : [];
+  for (const field of fields) {
+    const key = field?.key;
+    if (!key) continue;
+    const labelNorm = normalizeStatutoryHeaderLabel(field.label);
+    if (
+      /name\s+and\s+address\s+of\s+contractor/.test(labelNorm) &&
+      !/principal/.test(labelNorm)
+    ) {
+      setValue(key, contractorText, true);
+    } else if (/nature\s+and\s+location\s+of\s+work/.test(labelNorm) || /name\s+and\s+location\s+of\s+work/.test(labelNorm)) {
+      setValue(key, locationText, true);
+    }
+  }
+
+  return changed ? out : headerData;
 }
 
 function isClraIndustryLabel(industry) {
@@ -129,6 +212,8 @@ export function isPrincipalEmployerHeaderLabel(label) {
   if (!compact) return false;
   return (
     /name\s+and\s+address\s+of\s+principal\s+employer/.test(compact) ||
+    /name\s+address\s+of\s+the\s+employer/.test(compact) ||
+    /name\s+and\s+address\s+of\s+the\s+employer/.test(compact) ||
     /^employer$/.test(compact)
   );
 }
@@ -136,7 +221,7 @@ export function isPrincipalEmployerHeaderLabel(label) {
 export function isNatureLocationHeaderLabel(label) {
   const compact = normalizeStatutoryHeaderLabel(label);
   if (!compact) return false;
-  return /nature\s+and\s+location\s+of\s+work/.test(compact);
+  return /(?:name|nature)\s+and\s+location\s+of\s+work/.test(compact);
 }
 
 export function isRegistrationNoHeaderLabel(label) {
@@ -168,6 +253,7 @@ export const STATUTORY_PRINCIPAL_EMPLOYER_HEADER_KEYS = new Set([
   'form_xvii_principal_employer',
   'form_xviii_principal_employer',
   'form_xxiii_principal_employer',
+  'form_q_ka_employer',
   'statutory_principal_employer'
 ]);
 
@@ -217,12 +303,12 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     kind: 'principal_employer'
   },
   {
-    match: /name\s+and\s+address\s+of\s+contractor/i,
+    match: /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i,
     label: '1. Name and Address of Contractor.',
     key: 'form_xxiii_contractor'
   },
   {
-    match: /nature\s+and\s+location\s+of\s+work/i,
+    match: /(?:name|nature)\s+and\s+location\s+of\s+work/i,
     label: '2. Nature and location of work.',
     key: 'form_xxiii_nature_location_work'
   },
@@ -407,6 +493,7 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   }
   if (isPrincipalEmployerHeaderLabel(label)) {
     return tryKeys([
+      'form_q_ka_employer',
       'statutory_principal_employer',
       'form25_principal_employer',
       'form_xv_principal_employer',
@@ -420,7 +507,11 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
     return tryKeys(['statutory_registration_no', 'form12_header_registration']);
   }
   if (/contractor/i.test(normalizeStatutoryHeaderLabel(label)) && !/principal/.test(normalizeStatutoryHeaderLabel(label))) {
-    return tryKeys(['form_xxiii_contractor', 'form_xviii_contractor', 'form_xvii_contractor', 'form_xvi_contractor']);
+    const contractorVal = tryKeys(['form_xxiii_contractor', 'form_xviii_contractor', 'form_xvii_contractor', 'form_xvi_contractor']);
+    if (contractorVal) return contractorVal;
+    if (/name\s+and\s+address\s+of\s+contractor/.test(normalizeStatutoryHeaderLabel(label))) {
+      return tryKeys(['form_xxiii_contractor']);
+    }
   }
   if (isNatureLocationHeaderLabel(label)) {
     return tryKeys([
@@ -493,9 +584,29 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
   const writeCombinedOnLabelRow = (row, startCol, label, rawLabel, value) => {
     const text = formatStatutoryHeaderLabelValueExport(label, rawLabel || label, value);
     if (!String(text).trim()) return;
+    const mergeEndCol =
+      Number(colRightBound) > startCol
+        ? Number(colRightBound)
+        : Math.min(startCol + 11, scanColMax);
+    if (mergeEndCol > startCol) {
+      try {
+        worksheet.mergeCells(row, startCol, row, mergeEndCol);
+      } catch (_) {
+        // Template may already define merges — still write into the anchor cell.
+      }
+    }
     const cell = worksheet.getCell(row, startCol);
     cell.value = text;
-    cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'top' };
+    cell.alignment = {
+      ...(cell.alignment || {}),
+      wrapText: false,
+      vertical: 'middle',
+      horizontal: 'left'
+    };
+    const wsRow = worksheet.getRow(row);
+    if (wsRow) {
+      wsRow.height = Math.min(Math.max(wsRow.height || 18, 15), 22);
+    }
   };
 
   const writeAdjacentValue = (row, startCol, value) => {
@@ -521,15 +632,22 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
     if (useAdjacent) writeAdjacentValue(row, startCol, val);
   };
 
-  const cellLooksLikeCompletedExport = (raw) => {
+  const cellLooksLikeCompletedExport = (raw, newVal) => {
     const text = String(raw || '').trim();
     if (!text || !/:/.test(text)) return false;
     const parts = text.split(':');
-    return parts.length >= 2 && String(parts.slice(1).join(':') || '').trim().length >= 3;
+    const existingVal = String(parts.slice(1).join(':') || '').trim();
+    const nextVal = String(newVal ?? '').trim();
+    if (nextVal && existingVal !== nextVal) return false;
+    return parts.length >= 2 && existingVal.length >= 3;
   };
 
   const labelMatchesField = (raw, label) => {
-    const rawNorm = normalize(String(raw).replace(/:+$/, ''));
+    const rawLabelOnly = String(raw).split(':')[0].trim();
+    const rawKey = statutoryHeaderLabelMatchKey(rawLabelOnly);
+    const labelKey = statutoryHeaderLabelMatchKey(label);
+    if (rawKey && labelKey && rawKey === labelKey) return true;
+    const rawNorm = normalize(String(rawLabelOnly).replace(/:+$/, ''));
     const labelNorm = normalize(String(label).replace(/:+$/, ''));
     if (!rawNorm || !labelNorm) return false;
     return rawNorm === labelNorm || rawNorm.includes(labelNorm) || labelNorm.includes(rawNorm);
@@ -538,13 +656,14 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
   for (let r = 1; r < rowEnd; r += 1) {
     for (let c = 1; c <= scanColMax; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
-      if (!raw || cellLooksLikeCompletedExport(raw)) continue;
+      if (!raw) continue;
       let wrote = false;
 
       for (const field of fields) {
         const label = String(field?.label || '').trim();
         if (!label || !labelMatchesField(raw, label)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, field);
+        if (cellLooksLikeCompletedExport(raw, val) && !val) continue;
         if (val) {
           writeHeaderValue(r, c, label, raw, val);
           wrote = true;
@@ -554,24 +673,32 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
       if (wrote) continue;
 
       for (const spec of specs) {
-        if (!spec.match.test(raw)) continue;
+        if (!spec.match.test(raw.split(':')[0])) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, { key: spec.key, label: spec.label });
+        if (cellLooksLikeCompletedExport(raw, val) && !val) continue;
         if (val) writeHeaderValue(r, c, spec.label, raw, val);
         break;
       }
     }
   }
 
-  // Repair pass: template cells that already contain only the value (no "Label :").
+  // Repair pass: label-only template cells (no "Label : value" yet).
   for (let r = 1; r < rowEnd; r += 1) {
     for (let c = 1; c <= scanColMax; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
-      if (!raw || /:/.test(raw)) continue;
-      const rawNorm = normalize(raw);
+      if (!raw || (/:/.test(raw) && cellLooksLikeCompletedExport(raw))) continue;
       for (const field of fields) {
+        const label = String(field?.label || '').trim();
+        if (!label || !labelMatchesField(raw, label)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, field);
-        if (!val || normalize(val) !== rawNorm) continue;
-        writeCombinedOnLabelRow(r, c, field.label, field.label, val);
+        if (val) writeCombinedOnLabelRow(r, c, label, raw, val);
+        break;
+      }
+      if (/:/.test(raw)) continue;
+      for (const spec of specs) {
+        if (!spec.match.test(raw)) continue;
+        const val = resolveHeaderFieldExportValue(headerFormData, { key: spec.key, label: spec.label });
+        if (val) writeCombinedOnLabelRow(r, c, spec.label, raw, val);
         break;
       }
     }

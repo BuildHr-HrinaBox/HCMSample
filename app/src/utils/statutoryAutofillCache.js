@@ -721,6 +721,76 @@ export function prefetchLeaveData(options = {}) {
   return fetchLeaveData({ fromDate, toDate, unit }).catch(() => null);
 }
 
+const APPROVED_LEAVE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function approvedLeaveCacheKey(fromDate, toDate) {
+  return `${fromDate}|${toDate}`;
+}
+
+/** @type {Map<string, { ts: number, data: object }>} */
+let approvedLeaveMemory = new Map();
+/** @type {Map<string, Promise<object>>} */
+let approvedLeaveInflight = new Map();
+
+function readApprovedLeaveCacheRaw(fromDate, toDate) {
+  const key = approvedLeaveCacheKey(fromDate, toDate);
+  const entry = approvedLeaveMemory.get(key);
+  if (entry && Date.now() - entry.ts < APPROVED_LEAVE_CACHE_TTL_MS) return entry.data;
+  return null;
+}
+
+export function getCachedApprovedLeaveData(fromDate, toDate) {
+  return readApprovedLeaveCacheRaw(fromDate, toDate);
+}
+
+function writeApprovedLeaveCache(fromDate, toDate, data) {
+  const key = approvedLeaveCacheKey(fromDate, toDate);
+  approvedLeaveMemory.set(key, { ts: Date.now(), data });
+}
+
+export function fetchApprovedLeaveData(options = {}) {
+  const { force = false } = options;
+  const { fromDate, toDate } = {
+    ...(options.fromDate && options.toDate ? { fromDate: options.fromDate, toDate: options.toDate } : {}),
+  };
+  if (!fromDate || !toDate) {
+    return Promise.reject(new Error('fromDate and toDate are required for approved leave fetch'));
+  }
+  const cached = readApprovedLeaveCacheRaw(fromDate, toDate);
+  if (!force && cached) return Promise.resolve(cached);
+
+  const inflightKey = approvedLeaveCacheKey(fromDate, toDate);
+  if (!force && approvedLeaveInflight.has(inflightKey)) {
+    return approvedLeaveInflight.get(inflightKey);
+  }
+
+  const timeoutMs = Math.max(30000, parseInt(options.timeoutMs, 10) || 120000);
+  const url = `/server/approve_leave_function?from=${encodeURIComponent(fromDate)}&to=${encodeURIComponent(toDate)}&fetch_all=1`;
+  const task = fetchJsonWithTimeout(url, { cache: 'no-store' }, timeoutMs)
+    .then(({ resp, json: result }) => {
+      if (!resp.ok) {
+        throw new Error(result.error || result.message || 'Failed to load approved leave data');
+      }
+      writeApprovedLeaveCache(fromDate, toDate, result);
+      return result;
+    })
+    .finally(() => {
+      approvedLeaveInflight.delete(inflightKey);
+    });
+
+  approvedLeaveInflight.set(inflightKey, task);
+  return task;
+}
+
+export function prefetchApprovedLeaveData(options = {}) {
+  const { fromDate, toDate } = options;
+  if (!fromDate || !toDate) return Promise.resolve(null);
+  if (readApprovedLeaveCacheRaw(fromDate, toDate)) {
+    return Promise.resolve(readApprovedLeaveCacheRaw(fromDate, toDate));
+  }
+  return fetchApprovedLeaveData({ fromDate, toDate }).catch(() => null);
+}
+
 let payrollBulkMemory = null;
 let payrollBulkMemoryTs = 0;
 let payrollBulkInflight = null;

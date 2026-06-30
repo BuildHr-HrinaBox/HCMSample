@@ -53,7 +53,7 @@ function getKarnatakaRowValueForHeader(row, header) {
 function resolveKarnatakaExportCellValue(row, header) {
   const value = getKarnatakaRowValueForHeader(row, header);
   if (value !== '') return value;
-  if (isFormXIXKAUnitsHeader(header)) return FORM_XIX_KA_UNITS_DEFAULT;
+  if (isFormXIXKARateHeader(header)) return FORM_XIX_KA_RATE_DEFAULT;
   return '';
 }
 
@@ -78,8 +78,8 @@ export const FORM_XIX_KA_ALL_TABLE_HEADERS = [
   ...FORM_XIX_KA_FOOTER_HEADERS,
 ];
 
-/** Karnataka Form XIX — fixed text for piece-rate / wage type column (not from payroll). */
-export const FORM_XIX_KA_UNITS_DEFAULT = 'Monthly Wages';
+/** Karnataka Form XIX — fixed text for rate column (not from payroll). */
+export const FORM_XIX_KA_RATE_DEFAULT = 'Monthly Wages';
 
 export const FORM_XIX_KA_FIELD_GROUPS = [
   { id: 'header', title: 'Wage slip — contractor & workman' },
@@ -849,11 +849,11 @@ export function applyFormXIXKarnatakaEmployeeToRow(row, emp, headers, helpers = 
       return;
     }
     if (isFormXIXKARateHeader(header)) {
-      out[header] = '';
+      out[header] = sanitizeValue(FORM_XIX_KA_RATE_DEFAULT);
       return;
     }
     if (isFormXIXKAUnitsHeader(header)) {
-      out[header] = sanitizeValue(FORM_XIX_KA_UNITS_DEFAULT);
+      out[header] = '';
       return;
     }
     if (isFormXIXKAOvertimeDatesHeader(header)) {
@@ -878,8 +878,8 @@ export function applyFormXIXKarnatakaEmployeeToRow(row, emp, headers, helpers = 
   });
   Object.keys(out).forEach((key) => {
     if (String(key).startsWith('__')) return;
-    if (isFormXIXKARateHeader(key)) out[key] = '';
-    if (isFormXIXKAUnitsHeader(key)) out[key] = sanitizeValue(FORM_XIX_KA_UNITS_DEFAULT);
+    if (isFormXIXKARateHeader(key)) out[key] = sanitizeValue(FORM_XIX_KA_RATE_DEFAULT);
+    if (isFormXIXKAUnitsHeader(key)) out[key] = '';
   });
   out.__employeeLookupName = sanitizeValue(formatWorkmanNameAndGuardian(emp).split(/\r?\n/)[0]);
   return out;
@@ -903,28 +903,21 @@ export function mapFormXIXKarnatakaRowsFromEmployees(employees, headers, helpers
 export function enrichFormXIXKarnatakaStaticFieldRows(mappedData, headers) {
   if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
   const hdrs = resolveFormXIXKarnatakaWageTableHeaders(headers);
-  const unitsHdrs = hdrs.filter(isFormXIXKAUnitsHeader);
   const rateHdrs = hdrs.filter(isFormXIXKARateHeader);
-  if (unitsHdrs.length === 0 && rateHdrs.length === 0) return 0;
+  if (rateHdrs.length === 0) return 0;
   let hits = 0;
   mappedData.forEach((row) => {
     if (!row || typeof row !== 'object') return;
-    rateHdrs.forEach((header) => {
-      row[header] = '';
-    });
+    const rateKeys = new Set(rateHdrs);
     Object.keys(row).forEach((key) => {
       if (String(key).startsWith('__')) return;
-      if (isFormXIXKARateHeader(key)) row[key] = '';
+      if (isFormXIXKARateHeader(key)) rateKeys.add(key);
+      if (isFormXIXKAUnitsHeader(key)) row[key] = '';
     });
-    const unitsKeys = new Set(unitsHdrs);
-    Object.keys(row).forEach((key) => {
-      if (String(key).startsWith('__')) return;
-      if (isFormXIXKAUnitsHeader(key)) unitsKeys.add(key);
+    rateKeys.forEach((header) => {
+      row[header] = FORM_XIX_KA_RATE_DEFAULT;
     });
-    unitsKeys.forEach((header) => {
-      row[header] = FORM_XIX_KA_UNITS_DEFAULT;
-    });
-    if (unitsKeys.size > 0) hits += 1;
+    if (rateKeys.size > 0) hits += 1;
   });
   return hits;
 }

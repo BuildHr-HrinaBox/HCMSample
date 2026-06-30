@@ -1,5 +1,13 @@
 /** Karnataka Form F — Register of Leave with Wages (Rule 8): header fields + PART I earned leave table. */
 
+import { flattenPayrollEarningColumns, readPayrollScalar } from '../../utils/payrollEarnings';
+import {
+  buildLeaveRecordLookupMap,
+  findLeaveRecordForFormRow,
+  getForm15EarnedLeavePeriodMetrics,
+} from '../../utils/leaveMetrics';
+import { resolveFormXIXMPPayrollRowForEmployee } from './formXIXMPWageSlip';
+
 export function formFKarnatakaHeaderNorm(txt) {
   return String(txt || '')
     .replace(/\r?\n/g, ' ')
@@ -80,10 +88,32 @@ export function headersIndicateFormFKarnatakaPartITable(tableHeaders) {
 }
 
 export function resolveFormFKarnatakaTableHeaders(tableHeaders) {
-  if (headersIndicateFormFKarnatakaPartITable(tableHeaders)) {
-    return [...tableHeaders];
-  }
+  // Always use unique canonical keys — Excel sub-headers repeat bare "From"/"To" and break row storage.
   return [...FORM_F_KARNATAKA_PART_I_HEADERS];
+}
+
+/** Remap a grid row from parsed Excel headers (possibly duplicate "From"/"To") to canonical Form F keys. */
+export function remapFormFKarnatakaRowToCanonicalHeaders(row, priorHeaders) {
+  if (!row || typeof row !== 'object') return row;
+  const canon = FORM_F_KARNATAKA_PART_I_HEADERS;
+  const prior = Array.isArray(priorHeaders) ? priorHeaders : [];
+  const out = { ...row };
+  canon.forEach((key, idx) => {
+    let val = row[key];
+    if ((val == null || String(val).trim() === '') && prior[idx] != null) {
+      const priorKey = prior[idx];
+      if (priorKey && priorKey !== key && row[priorKey] != null && String(row[priorKey]).trim() !== '') {
+        val = row[priorKey];
+      }
+    }
+    out[key] = val != null ? val : '';
+  });
+  return out;
+}
+
+export function remapFormFKarnatakaRowsToCanonicalHeaders(rows, priorHeaders) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => remapFormFKarnatakaRowToCanonicalHeaders(row, priorHeaders));
 }
 
 const normalizeCell = (txt) =>
@@ -268,16 +298,18 @@ export function rebuildFormFKarnatakaPartIHeaders({
     if (!line) continue;
     if (/part\s*[-–]?\s*ii/i.test(formFKarnatakaHeaderNorm(line))) break;
     const rowData = {};
-    rebuiltHeaders.forEach((header, idx) => {
+    FORM_F_KARNATAKA_PART_I_HEADERS.forEach((header, idx) => {
       rowData[header] = cells[idx] || '';
     });
     const hasData = Object.values(rowData).some((v) => String(v ?? '').trim() !== '');
     if (hasData) newTableData.push(rowData);
   }
 
+  const canonicalHeaders = [...FORM_F_KARNATAKA_PART_I_HEADERS];
+
   return {
-    headers: rebuiltHeaders,
-    expandedHeaders: rebuiltHeaders,
+    headers: canonicalHeaders,
+    expandedHeaders: canonicalHeaders,
     subColumnsData: {},
     headerRowIndex: newHeaderRowIndex >= 0 ? newHeaderRowIndex : headerRowIndex,
     startIndex: newStartIndex,
@@ -306,4 +338,624 @@ export function isFormFKarnatakaLeaveAvailedHeader(header) {
 export function isFormFKarnatakaLeaveBalanceHeader(header) {
   const s = formFKarnatakaHeaderNorm(header);
   return s.includes('balance') && s.includes('return') && s.includes('leave');
+}
+
+export function isFormFKarnatakaLeaveAtCreditHeader(header) {
+  const s = formFKarnatakaHeaderNorm(header);
+  return s.includes('leave') && s.includes('credit');
+}
+
+export function isFormFKarnatakaDaysWorkedFromHeader(header) {
+  const s = formFKarnatakaHeaderNorm(header);
+  return s.includes('days worked') && s.includes('from');
+}
+
+export function isFormFKarnatakaDaysWorkedToHeader(header) {
+  const s = formFKarnatakaHeaderNorm(header);
+  return s.includes('days worked') && s.includes('to') && !s.includes('from');
+}
+
+/** Leave at credit = Leave earned during the Period − approved LeaveCount (0 when no leave availed). */
+export function computeFormFKarnatakaLeaveAtCredit(earnedDuring, leaveCount) {
+  const earned = Number(String(earnedDuring ?? '').replace(/,/g, '').trim());
+  if (!Number.isFinite(earned)) return '';
+  const countRaw = leaveCount == null || leaveCount === '' ? '0' : leaveCount;
+  const count = Number(String(countRaw).replace(/,/g, '').trim());
+  const availed = Number.isFinite(count) ? count : 0;
+  const credit = Math.round((earned - availed) * 100) / 100;
+  return String(credit);
+}
+
+export function applyFormFKarnatakaMonthDatesToRow(row, fromDate, toDate, { overwrite = true } = {}) {
+  if (!row) return 0;
+  const canon = FORM_F_KARNATAKA_PART_I_HEADERS;
+  let applied = 0;
+  const setByIndex = (idx, value) => {
+    if (value == null || value === '') return;
+    const key = canon[idx];
+    if (!key) return;
+    if (!overwrite && String(row[key] ?? '').trim() !== '') return;
+    row[key] = String(value);
+    applied += 1;
+  };
+  setByIndex(0, String(fromDate || '').trim());
+  setByIndex(1, String(toDate || '').trim());
+  return applied;
+}
+
+export function applyFormFKarnatakaEarnedLeaveToRow(
+  row,
+  leaveRecord,
+  leaveTypeLabels,
+  approvedRecord,
+  { overwrite = true } = {}
+) {
+  if (!row) return 0;
+  const canon = FORM_F_KARNATAKA_PART_I_HEADERS;
+  let applied = 0;
+
+  const setByIndex = (idx, value) => {
+    if (value == null || value === '') return;
+    const key = canon[idx];
+    if (!key) return;
+    if (!overwrite && String(row[key] ?? '').trim() !== '') return;
+    row[key] = String(value);
+    applied += 1;
+  };
+
+  let earnedDuring = String(row[canon[3]] ?? '').trim();
+  if (leaveRecord) {
+    const { periodBalance } = getForm15EarnedLeavePeriodMetrics(leaveRecord, leaveTypeLabels);
+    if (periodBalance !== '') {
+      earnedDuring = periodBalance;
+      setByIndex(3, earnedDuring);
+    }
+  }
+
+  if (earnedDuring) {
+    const leaveCount = approvedRecord
+      ? parseApprovedLeaveDaysCount(approvedRecord.Days ?? approvedRecord.days)
+      : '';
+    const credit = computeFormFKarnatakaLeaveAtCredit(earnedDuring, leaveCount !== '' ? leaveCount : '0');
+    if (credit !== '') setByIndex(4, credit);
+  }
+
+  return applied;
+}
+
+export function applyFormFKarnatakaLeaveEarnedAutofill(
+  mappedData,
+  employeesForMapping,
+  leaveRecords,
+  leaveTypeLabels,
+  tableHeaders,
+  options = {}
+) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+
+  const priorHeaders = Array.isArray(tableHeaders) ? tableHeaders : [];
+  const canonicalHeaders = resolveFormFKarnatakaTableHeaders(tableHeaders);
+  const leaveLookup = buildLeaveRecordLookupMap(leaveRecords);
+  const approvedLeaveRecords = Array.isArray(options.approvedLeaveRecords)
+    ? options.approvedLeaveRecords
+    : [];
+  const approvedLookup =
+    approvedLeaveRecords.length > 0 ? buildApprovedLeaveLookupMap(approvedLeaveRecords) : null;
+  const { employeeNameHeader, employeeIdHeader } = options.resolveEmployeeHeaders
+    ? options.resolveEmployeeHeaders(canonicalHeaders)
+    : { employeeNameHeader: '', employeeIdHeader: '' };
+
+  const { fromDate = '', toDate = '' } = options;
+
+  let hits = 0;
+  mappedData.forEach((row, index) => {
+    const normalizedRow = remapFormFKarnatakaRowToCanonicalHeaders(row, priorHeaders);
+    Object.assign(row, normalizedRow);
+
+    if (fromDate && toDate) {
+      applyFormFKarnatakaMonthDatesToRow(row, fromDate, toDate, {
+        overwrite: options.overwrite !== false,
+      });
+    }
+
+    const empItem = employeesForMapping[index];
+    const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+    const leaveRecord = findLeaveRecordForFormRow(
+      leaveLookup,
+      row,
+      employeeIdHeader,
+      employeeNameHeader
+    );
+    let approvedRecord = null;
+    if (approvedLookup) {
+      approvedRecord = findApprovedLeaveForEmployee(
+        approvedLookup,
+        emp,
+        row,
+        employeeIdHeader,
+        employeeNameHeader,
+        {
+          approvedRecords: approvedLeaveRecords,
+          collectEmployeeNameCandidates: options.collectEmployeeNameCandidates,
+          collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
+        }
+      );
+    }
+
+    const applied = applyFormFKarnatakaEarnedLeaveToRow(
+      row,
+      leaveRecord,
+      leaveTypeLabels,
+      approvedRecord,
+      { overwrite: options.overwrite !== false }
+    );
+    if (applied > 0 || (fromDate && toDate)) hits += 1;
+  });
+  return hits;
+}
+
+function parseJsonMaybe(val) {
+  if (val == null) return null;
+  if (typeof val === 'object') return val;
+  const s = String(val).trim();
+  if (!s.startsWith('{') && !s.startsWith('[')) return null;
+  try {
+    return JSON.parse(s);
+  } catch (_) {
+    return null;
+  }
+}
+
+/** Sum LeaveCount values from Zoho approved-leave `Days` field (object keyed by date). */
+export function parseApprovedLeaveDaysCount(daysField) {
+  const obj = parseJsonMaybe(daysField);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return '';
+  }
+  let total = 0;
+  let hasCount = false;
+  Object.values(obj).forEach((entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    const raw = entry.LeaveCount ?? entry.leaveCount ?? entry.count;
+    if (raw == null || raw === '') return;
+    const n = Number(raw);
+    if (Number.isFinite(n)) {
+      total += n;
+      hasCount = true;
+    }
+  });
+  return hasCount ? String(total) : '';
+}
+
+function isZohoLeaveDateString(value) {
+  return /^\d{1,2}-[A-Za-z]{3}-\d{4}$/i.test(String(value || '').trim());
+}
+
+/** Earliest / latest date keys from approved-leave `Days` JSON (e.g. "18-May-2026"). */
+function extractLeaveDatesFromDaysField(daysField) {
+  const obj = parseJsonMaybe(daysField);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return { from: '', to: '' };
+  }
+  const dateKeys = Object.keys(obj)
+    .map((k) => String(k || '').trim())
+    .filter((k) => isZohoLeaveDateString(k));
+  if (dateKeys.length === 0) return { from: '', to: '' };
+
+  const toTime = (key) => {
+    const m = key.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/i);
+    if (!m) return 0;
+    const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    const mon = months.indexOf(m[2].toLowerCase());
+    if (mon < 0) return 0;
+    return new Date(parseInt(m[3], 10), mon, parseInt(m[1], 10)).getTime();
+  };
+
+  dateKeys.sort((a, b) => toTime(a) - toTime(b));
+  return { from: dateKeys[0], to: dateKeys[dateKeys.length - 1] };
+}
+
+export function normalizeApprovedLeaveRecord(record) {
+  if (!record || typeof record !== 'object') {
+    return { from: '', to: '', daysCount: '', wagesPaidDate: '' };
+  }
+  const daysField = record.Days ?? record.days;
+  let from = String(record.From ?? record.from ?? '').trim();
+  let to = String(record.To ?? record.to ?? '').trim();
+
+  if (!isZohoLeaveDateString(from) || !isZohoLeaveDateString(to)) {
+    const fromDays = extractLeaveDatesFromDaysField(daysField);
+    if (!isZohoLeaveDateString(from) && fromDays.from) from = fromDays.from;
+    if (!isZohoLeaveDateString(to) && fromDays.to) to = fromDays.to;
+  }
+
+  const daysCount = parseApprovedLeaveDaysCount(daysField);
+  let wagesPaidDate = from;
+  if (from && to) {
+    wagesPaidDate = from === to ? from : `${from} to ${to}`;
+  } else if (!from && to) {
+    wagesPaidDate = to;
+  }
+  return { from, to, daysCount, wagesPaidDate };
+}
+
+/** Canonical storage key for Form F grid column index (avoids duplicate "From"/"To" display labels). */
+export function getFormFKarnatakaStorageHeader(colIndex, fallbackHeader = '') {
+  const key = FORM_F_KARNATAKA_PART_I_HEADERS[colIndex];
+  if (key) return key;
+  return String(fallbackHeader || '').trim();
+}
+
+/** Read cell value using canonical key first, then legacy duplicate short headers. */
+export function readFormFKarnatakaRowCell(row, colIndex, displayHeader) {
+  if (!row || typeof row !== 'object') return '';
+  const storageKey = getFormFKarnatakaStorageHeader(colIndex, displayHeader);
+  const primary = row[storageKey];
+  if (primary != null && String(primary).trim() !== '') return primary;
+  const legacy = row[displayHeader];
+  if (legacy != null && String(legacy).trim() !== '') return legacy;
+  return '';
+}
+
+export function collectApprovedLeaveIdentityKeys(record) {
+  const names = new Set();
+  const ids = new Set();
+  if (!record || typeof record !== 'object') {
+    return { names: [], ids: [] };
+  }
+  const employee = record.Employee ?? record.employee;
+  if (typeof employee === 'string' && employee.trim()) {
+    names.add(employee.trim().toLowerCase());
+  } else if (employee && typeof employee === 'object') {
+    const n = employee.name ?? employee.Name;
+    if (n) names.add(String(n).trim().toLowerCase());
+    const id = employee.id ?? employee.ID ?? employee.erecno;
+    if (id) ids.add(String(id).trim().toLowerCase());
+  }
+  ['Employee Name', 'EmployeeName', 'employeeName'].forEach((k) => {
+    const v = record[k];
+    if (v) names.add(String(v).trim().toLowerCase());
+  });
+  ['Employee.ID', 'EmployeeID', 'employeeId', 'Employee Id', 'Zoho.ID', 'recordId'].forEach((k) => {
+    const v = record[k];
+    if (v != null && String(v).trim()) ids.add(String(v).trim().toLowerCase());
+  });
+  return { names: [...names], ids: [...ids] };
+}
+
+export function buildApprovedLeaveLookupMap(records) {
+  const map = new Map();
+  const add = (key, record) => {
+    const k = String(key || '').trim().toLowerCase();
+    if (!k || map.has(k)) return;
+    map.set(k, record);
+  };
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    const { names, ids } = collectApprovedLeaveIdentityKeys(record);
+    names.forEach((n) => add(n, record));
+    ids.forEach((id) => add(id, record));
+  });
+  return map;
+}
+
+export function resolveFormFKarnatakaApprovedLeaveHeaders(tableHeaders) {
+  const headers = Array.isArray(tableHeaders) ? tableHeaders : [];
+  const canonical = FORM_F_KARNATAKA_PART_I_HEADERS;
+
+  const byCanonicalIndex = (canonicalIdx) => {
+    const canonicalName = canonical[canonicalIdx];
+    const exact = headers.find(
+      (h) => formFKarnatakaHeaderNorm(h) === formFKarnatakaHeaderNorm(canonicalName)
+    );
+    if (exact) return exact;
+    if (headers[canonicalIdx] != null && String(headers[canonicalIdx]).trim() !== '') {
+      return headers[canonicalIdx];
+    }
+    return canonicalName;
+  };
+
+  if (headers.length >= 8) {
+    return {
+      leaveAvailedFrom: byCanonicalIndex(5),
+      leaveAvailedTo: byCanonicalIndex(6),
+      leaveAvailedDays: byCanonicalIndex(7),
+      wagesPaidDate: byCanonicalIndex(9),
+      columnIndices: { from: 5, to: 6, days: 7, wages: 9 },
+    };
+  }
+
+  const pick = (...candidates) => {
+    for (const cand of candidates) {
+      const want = formFKarnatakaHeaderNorm(cand);
+      const exact = headers.find((h) => formFKarnatakaHeaderNorm(h) === want);
+      if (exact) return exact;
+    }
+    for (const cand of candidates) {
+      const want = formFKarnatakaHeaderNorm(cand);
+      const partial = headers.find((h) => {
+        const n = formFKarnatakaHeaderNorm(h);
+        return n.includes(want) || want.includes(n);
+      });
+      if (partial) return partial;
+    }
+    return '';
+  };
+
+  return {
+    leaveAvailedFrom: pick('Leave availed From'),
+    leaveAvailedTo: pick('Leave availed To'),
+    leaveAvailedDays: pick('Leave availed No. of days', 'No. of days'),
+    wagesPaidDate: pick('Date on which wages for leave paid'),
+    columnIndices: null,
+  };
+}
+
+export function findApprovedLeaveForFormRow(lookup, row, employeeIdHeader, employeeNameHeader) {
+  if (!lookup || typeof lookup.get !== 'function') return null;
+  const tryKeys = [];
+  if (employeeNameHeader && row?.[employeeNameHeader]) {
+    tryKeys.push(String(row[employeeNameHeader]).trim().toLowerCase());
+  }
+  if (employeeIdHeader && row?.[employeeIdHeader]) {
+    tryKeys.push(String(row[employeeIdHeader]).trim().toLowerCase());
+  }
+  for (const key of tryKeys) {
+    if (lookup.has(key)) return lookup.get(key);
+  }
+  for (const key of tryKeys) {
+    for (const [mapKey, record] of lookup.entries()) {
+      if (mapKey.includes(key) || key.includes(mapKey)) return record;
+    }
+  }
+  return null;
+}
+
+export function findApprovedLeaveForEmployee(
+  lookup,
+  emp,
+  row,
+  employeeIdHeader,
+  employeeNameHeader,
+  options = {}
+) {
+  const approvedRecords = Array.isArray(options.approvedRecords) ? options.approvedRecords : null;
+  const nameCandidates = new Set();
+  const idCandidates = new Set();
+
+  const addName = (value) => {
+    const n = String(value || '').trim().toLowerCase();
+    if (n) nameCandidates.add(n);
+  };
+  const addId = (value) => {
+    const id = String(value || '').trim().toLowerCase();
+    if (id) idCandidates.add(id);
+  };
+
+  if (typeof options.collectEmployeeNameCandidates === 'function') {
+    options.collectEmployeeNameCandidates(emp).forEach(addName);
+  }
+  if (typeof options.collectEmployeeIdCandidates === 'function') {
+    options.collectEmployeeIdCandidates(emp, row).forEach(addId);
+  }
+
+  if (employeeNameHeader && row?.[employeeNameHeader]) addName(row[employeeNameHeader]);
+  if (employeeIdHeader && row?.[employeeIdHeader]) addId(row[employeeIdHeader]);
+  if (row?.__employeeLookupName) addName(row.__employeeLookupName);
+  if (row?.__employeeLookupId) addId(row.__employeeLookupId);
+
+  if (emp && typeof emp === 'object') {
+    addName(emp.Employee_Name || emp['Employee Name'] || emp.employeeName || emp.name || emp.Name);
+    addId(
+      emp.Zoho_ID ||
+        emp['Zoho_ID'] ||
+        emp.ZohoID ||
+        emp['ZohoID'] ||
+        emp.Employee_ID ||
+        emp['Employee ID'] ||
+        emp.employeeId
+    );
+    const first = String(emp.FirstName || emp['FirstName'] || emp.firstName || '').trim();
+    const last = String(emp.LastName || emp['LastName'] || emp.lastName || '').trim();
+    if (first && last) addName(`${first} ${last}`);
+    if (first) addName(first);
+  }
+
+  const tryLookup = (key) => {
+    const k = String(key || '').trim().toLowerCase();
+    if (!k) return null;
+    if (lookup?.has?.(k)) return lookup.get(k);
+    if (!lookup || typeof lookup.entries !== 'function') return null;
+    for (const [mapKey, record] of lookup.entries()) {
+      if (mapKey === k || mapKey.includes(k) || k.includes(mapKey)) return record;
+    }
+    return null;
+  };
+
+  for (const key of idCandidates) {
+    const hit = tryLookup(key);
+    if (hit) return hit;
+  }
+  for (const key of nameCandidates) {
+    const hit = tryLookup(key);
+    if (hit) return hit;
+  }
+
+  if (approvedRecords) {
+    for (const record of approvedRecords) {
+      const { names, ids } = collectApprovedLeaveIdentityKeys(record);
+      if (ids.some((id) => idCandidates.has(id))) return record;
+      if (names.some((name) => nameCandidates.has(name))) return record;
+      for (const name of names) {
+        for (const cand of nameCandidates) {
+          if (name && cand && (name.includes(cand) || cand.includes(name))) return record;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+export function applyFormFKarnatakaApprovedLeaveToRow(
+  row,
+  approvedRecord,
+  headers,
+  tableHeaders,
+  { overwrite = true } = {}
+) {
+  if (!row || !approvedRecord) return 0;
+  const metrics = normalizeApprovedLeaveRecord(approvedRecord);
+  const canon = FORM_F_KARNATAKA_PART_I_HEADERS;
+  let applied = 0;
+
+  const setByIndex = (idx, value) => {
+    if (value == null || value === '') return;
+    const key = canon[idx];
+    if (!key) return;
+    if (!overwrite && String(row[key] ?? '').trim() !== '') return;
+    row[key] = String(value);
+    applied += 1;
+  };
+
+  setByIndex(5, metrics.from);
+  setByIndex(6, metrics.to);
+  setByIndex(7, metrics.daysCount);
+  setByIndex(9, metrics.wagesPaidDate);
+
+  const earnedDuring = String(row[canon[3]] ?? '').trim();
+  if (earnedDuring) {
+    setByIndex(4, computeFormFKarnatakaLeaveAtCredit(earnedDuring, metrics.daysCount || '0'));
+  }
+  return applied;
+}
+
+export function isFormFKarnatakaTotalDaysWorkedHeader(header) {
+  const s = formFKarnatakaHeaderNorm(header);
+  return s === 'total days worked' || (s.includes('total') && s.includes('days') && s.includes('worked'));
+}
+
+/** Total days worked (PART I col 3) ← Payroll `paid_days`. */
+export function resolveFormFKarnatakaPayrollPaidDays(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const keys = ['paid_days', 'Paid Days', 'days_worked', 'Days Worked', 'paidDays', 'no_of_days_worked'];
+  const patterns = [/^paid_days$/, /paiddays/, /daysworked/, /days_present/, /noofdayspresent/, /no_of_days_present/];
+  const fromFlat = readPayrollScalar(flat, keys, patterns);
+  if (fromFlat !== '') return String(fromFlat);
+  if (payrollRow !== flat) {
+    const fromRow = readPayrollScalar(payrollRow, keys, patterns);
+    if (fromRow !== '') return String(fromRow);
+  }
+  return '';
+}
+
+export function applyFormFKarnatakaPayrollToRow(row, payrollRow, { overwrite = true } = {}) {
+  if (!row || !payrollRow || payrollRow.fetch_error) return 0;
+  const paidDays = resolveFormFKarnatakaPayrollPaidDays(payrollRow);
+  if (paidDays === '') return 0;
+  const key = FORM_F_KARNATAKA_PART_I_HEADERS[2];
+  if (!key) return 0;
+  if (!overwrite && String(row[key] ?? '').trim() !== '') return 0;
+  row[key] = String(paidDays);
+  return 1;
+}
+
+export function applyFormFKarnatakaPayrollAutofill(
+  mappedData,
+  employeesForMapping,
+  payrollRows,
+  tableHeaders,
+  options = {}
+) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  if (!Array.isArray(payrollRows) || payrollRows.length === 0) return 0;
+
+  const priorHeaders = Array.isArray(tableHeaders) ? tableHeaders : [];
+  const resolvePayrollRow =
+    typeof options.resolvePayrollRow === 'function'
+      ? options.resolvePayrollRow
+      : (emp) => resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows);
+
+  let hits = 0;
+  mappedData.forEach((row, index) => {
+    const normalizedRow = remapFormFKarnatakaRowToCanonicalHeaders(row, priorHeaders);
+    Object.assign(row, normalizedRow);
+
+    const empItem = employeesForMapping[index];
+    const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+    const payrollRow = resolvePayrollRow(emp, row);
+    if (!payrollRow || payrollRow.fetch_error) return;
+    const applied = applyFormFKarnatakaPayrollToRow(row, payrollRow, {
+      overwrite: options.overwrite !== false,
+    });
+    if (applied > 0) hits += 1;
+  });
+  return hits;
+}
+
+export function applyFormFKarnatakaApprovedLeaveAutofill(
+  mappedData,
+  employeesForMapping,
+  tableHeaders,
+  approvedLeaveRecords,
+  options = {}
+) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  if (!Array.isArray(approvedLeaveRecords) || approvedLeaveRecords.length === 0) return 0;
+
+  const canonicalHeaders = resolveFormFKarnatakaTableHeaders(tableHeaders);
+  const priorHeaders = Array.isArray(tableHeaders) ? tableHeaders : [];
+
+  const lookup = buildApprovedLeaveLookupMap(approvedLeaveRecords);
+  const { employeeNameHeader, employeeIdHeader } = options.resolveEmployeeHeaders
+    ? options.resolveEmployeeHeaders(canonicalHeaders)
+    : { employeeNameHeader: '', employeeIdHeader: '' };
+
+  let hits = 0;
+  mappedData.forEach((row, index) => {
+    const normalizedRow = remapFormFKarnatakaRowToCanonicalHeaders(row, priorHeaders);
+    Object.assign(row, normalizedRow);
+
+    const empItem = employeesForMapping[index];
+    const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+    const approvedRecord = findApprovedLeaveForEmployee(
+      lookup,
+      emp,
+      row,
+      employeeIdHeader,
+      employeeNameHeader,
+      {
+        approvedRecords: approvedLeaveRecords,
+        collectEmployeeNameCandidates: options.collectEmployeeNameCandidates,
+        collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
+      }
+    );
+    if (!approvedRecord) return;
+    const applied = applyFormFKarnatakaApprovedLeaveToRow(
+      row,
+      approvedRecord,
+      null,
+      canonicalHeaders,
+      { overwrite: options.overwrite !== false }
+    );
+    if (applied > 0) hits += 1;
+  });
+  return hits;
+}
+
+export function extractApprovedLeaveRecordsFromApiResult(result) {
+  if (!result || typeof result !== 'object') {
+    return { records: [], meta: null };
+  }
+  if (Array.isArray(result.leaveRecords) && result.leaveRecords.length > 0) {
+    return { records: result.leaveRecords, meta: result.meta || null };
+  }
+  if (result.records && typeof result.records === 'object' && !Array.isArray(result.records)) {
+    const records = Object.entries(result.records).map(([id, row]) => ({
+      recordId: String(id),
+      ...(row && typeof row === 'object' ? row : {}),
+    }));
+    return { records, meta: result.meta || null };
+  }
+  return { records: [], meta: result.meta || null };
 }

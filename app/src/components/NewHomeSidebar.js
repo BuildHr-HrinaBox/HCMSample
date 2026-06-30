@@ -127,6 +127,7 @@ const navigationItems = [
       { label: 'Attendance', path: '/rule-book/attendance' },
       { label: 'Leave', path: '/rule-book/leave' },
       { label: 'New Leave', path: '/rule-book/newleave' },
+      { label: 'Approved Leaves', path: '/rule-book/approved-leaves' },
       { label: 'Payroll', path: '/rule-book/payroll' },
       { label: 'CLRA', path: '/rule-book/clra' },
     ],

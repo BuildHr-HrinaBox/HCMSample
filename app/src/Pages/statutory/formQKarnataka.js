@@ -197,8 +197,9 @@ export function headersIndicateFormQKarnatakaTable(tableHeaders) {
 }
 
 export function resolveFormQKarnatakaTableHeaders(tableHeaders) {
-  if (headersIndicateFormQKarnatakaTable(tableHeaders)) {
-    return [...tableHeaders];
+  const headers = Array.isArray(tableHeaders) ? tableHeaders : [];
+  if (headersIndicateFormQKarnatakaTable(headers)) {
+    return [...headers];
   }
   return [...FORM_Q_KARNATAKA_CANONICAL_TABLE_HEADERS];
 }
@@ -410,14 +411,10 @@ const pickEmployeeValue = (emp, keys) => {
 };
 
 const pickPayrollValue = (flat, payrollRow, keys, patterns = []) => {
-  for (const key of keys) {
-    const v = readPayrollScalar(flat, key) ?? readPayrollScalar(payrollRow, key);
-    if (v != null && String(v).trim() !== '') return String(v).trim();
-  }
-  for (const pattern of patterns) {
-    for (const [k, v] of Object.entries(flat || {})) {
-      if (pattern.test(String(k)) && v != null && String(v).trim() !== '') return String(v).trim();
-    }
+  const fromFlat = readPayrollScalar(flat, keys, patterns);
+  if (fromFlat !== '') return fromFlat;
+  if (payrollRow && payrollRow !== flat) {
+    return readPayrollScalar(payrollRow, keys, patterns);
   }
   return '';
 };
@@ -537,14 +534,16 @@ export function mapFormQKarnatakaRowsFromEmployees(employees, headers, helpers =
     sanitizeValue = (v) => String(v ?? '').trim(),
     formatStatutoryDateDisplay = (v) => String(v || '').trim(),
     resolvePayrollRow = null,
+    rowIndexOffset = 0,
   } = helpers;
   return list.map((empItem, rowIndex) => {
     const emp = empItem?.Employee || empItem?.employee || empItem;
+    const globalRowIndex = rowIndexOffset + rowIndex;
     const payrollRow =
-      typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, rowIndex) : null;
+      typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, globalRowIndex) : null;
     return applyFormQKarnatakaEmployeeToRow({}, emp, hdrs, {
       sanitizeValue,
-      rowIndex,
+      rowIndex: globalRowIndex,
       formatStatutoryDateDisplay,
       payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
     });

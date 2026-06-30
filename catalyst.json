@@ -50,7 +50,8 @@
       "payroll_function",
       "settings_function",
       "importdata_function",
-      "clra_function"
+      "clra_function",
+      "approve_leave_function"
     ],
     "ignore": [],
     "source": "functions"

@@ -13,6 +13,7 @@ export function statutoryHeaderLabelMatchKey(label) {
   const compact = normalizeStatutoryHeaderLabel(label)
     .replace(/^\d+\s+/, '')
     .replace(/\bthe\b/g, ' ')
+    .replace(/\s*&\s*/g, ' and ')
     .replace(/\s+/g, ' ')
     .trim();
   if (!compact) return '';
@@ -27,6 +28,9 @@ export function statutoryHeaderLabelMatchKey(label) {
   }
   if (/name\s+and\s+address\s+of\s+principal\s+employer/.test(compact)) {
     return 'statutory_principal_employer';
+  }
+  if (/for\s+the\s+period\s+from/.test(compact)) {
+    return 'statutory_period_from';
   }
   return compact;
 }
@@ -214,8 +218,15 @@ export function isPrincipalEmployerHeaderLabel(label) {
     /name\s+and\s+address\s+of\s+principal\s+employer/.test(compact) ||
     /name\s+address\s+of\s+the\s+employer/.test(compact) ||
     /name\s+and\s+address\s+of\s+the\s+employer/.test(compact) ||
+    /name\s+and\s+address\s+of\s+employer/.test(compact) ||
     /^employer$/.test(compact)
   );
+}
+
+export function isMonthYearHeaderLabel(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact) return false;
+  return /^month\s+year$/.test(compact) || /^month\s*\/\s*year$/.test(compact);
 }
 
 export function isNatureLocationHeaderLabel(label) {
@@ -254,8 +265,11 @@ export const STATUTORY_PRINCIPAL_EMPLOYER_HEADER_KEYS = new Set([
   'form_xviii_principal_employer',
   'form_xxiii_principal_employer',
   'form_q_ka_employer',
+  'form_t_employer',
   'statutory_principal_employer'
 ]);
+
+export const STATUTORY_MONTH_YEAR_HEADER_KEYS = new Set(['form_t_month_year', 'form_xviii_month_year']);
 
 export const STATUTORY_NATURE_LOCATION_HEADER_KEYS = new Set([
   'form_xv_nature_location_work',
@@ -275,6 +289,12 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
   {
     match: /name\s+of\s+the\s+establishment(?!\s+already)/i,
     label: 'Name of the Establishment:',
+    key: 'statutory_establishment_name',
+    kind: 'establishment_name'
+  },
+  {
+    match: /^name\s+of\s+establishment(?!.*principal)(?!.*employer)/i,
+    label: 'Name of Establishment',
     key: 'statutory_establishment_name',
     kind: 'establishment_name'
   },
@@ -321,6 +341,28 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     match: /^registration\s+no\.?/i,
     label: 'Registration No.:',
     key: 'statutory_registration_no'
+  },
+  {
+    match: /^month\s*\/\s*year$/i,
+    label: 'Month / Year',
+    key: 'form_t_month_year'
+  },
+  {
+    match: /name\s+and\s+address\s+of\s+the\s+establishment/i,
+    label: 'Name and address of the Establishment',
+    key: 'form_t_establishment_name_address',
+    kind: 'establishment_name'
+  },
+  {
+    match: /name\s+and\s+address\s+of\s+employer/i,
+    label: 'Name and Address of employer',
+    key: 'form_t_employer',
+    kind: 'principal_employer'
+  },
+  {
+    match: /for\s+the\s+period\s+from/i,
+    label: 'For the period From',
+    key: 'form_d_gj_period'
   }
 ];
 
@@ -493,6 +535,7 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   }
   if (isPrincipalEmployerHeaderLabel(label)) {
     return tryKeys([
+      'form_t_employer',
       'form_q_ka_employer',
       'statutory_principal_employer',
       'form25_principal_employer',
@@ -502,6 +545,12 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
       'form_xviii_principal_employer',
       'form_xxiii_principal_employer'
     ]);
+  }
+  if (isMonthYearHeaderLabel(label)) {
+    return tryKeys(['form_t_month_year', 'form_xviii_month_year']);
+  }
+  if (/for\s+the\s+period\s+from/i.test(normalizeStatutoryHeaderLabel(label))) {
+    return tryKeys(['form_d_gj_period', 'statutory_period_from']);
   }
   if (isRegistrationNoHeaderLabel(label)) {
     return tryKeys(['statutory_registration_no', 'form12_header_registration']);
@@ -653,7 +702,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
     return rawNorm === labelNorm || rawNorm.includes(labelNorm) || labelNorm.includes(rawNorm);
   };
 
-  for (let r = 1; r < rowEnd; r += 1) {
+  for (let r = 1; r <= rowEnd; r += 1) {
     for (let c = 1; c <= scanColMax; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
       if (!raw) continue;
@@ -683,7 +732,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
   }
 
   // Repair pass: label-only template cells (no "Label : value" yet).
-  for (let r = 1; r < rowEnd; r += 1) {
+  for (let r = 1; r <= rowEnd; r += 1) {
     for (let c = 1; c <= scanColMax; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
       if (!raw || (/:/.test(raw) && cellLooksLikeCompletedExport(raw))) continue;

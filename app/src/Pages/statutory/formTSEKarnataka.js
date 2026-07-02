@@ -6,9 +6,255 @@ import {
   ensureExcelJSDataRowsWithBorders,
 } from '../../utils/excelTableBorders';
 import { yieldToMain } from '../../utils/statutoryAutofillCache';
-import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
+import {
+  excelCellValueToString,
+  writeStatutoryHeaderFieldsToExcelJsWorksheet,
+} from '../../utils/statutorySiteCompanyHeaders';
 
 /** Karnataka Form T — Combined Muster Roll cum Register of Wages (attendance day grid). */
+
+export const FORM_T_KARNATAKA_HEADER_SPECS = [
+  {
+    key: 'form_t_month_year',
+    label: 'Month / Year',
+    match: /^month\s*\/\s*year$/i,
+  },
+  {
+    key: 'form_t_establishment_name_address',
+    label: 'Name and address of the Establishment',
+    match: /name\s+and\s+address\s+of\s+the\s+establishment/i,
+  },
+  {
+    key: 'form_t_employer',
+    label: 'Name and Address of employer',
+    match: /name\s+and\s+address\s+of\s+employer/i,
+  },
+];
+
+const formTSEHeaderNorm = (txt) =>
+  String(txt || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, '');
+
+function resolveFormTHeaderExportValue(headerFormData, spec, parsedFields = []) {
+  if (!headerFormData || typeof headerFormData !== 'object') return '';
+  const tryKeys = (keys) => {
+    for (const k of keys) {
+      const v = headerFormData[k];
+      if (v != null && String(v).trim() !== '') return String(v).trim();
+    }
+    return '';
+  };
+  if (spec.key === 'form_t_month_year') {
+    const direct = tryKeys(['form_t_month_year', 'form_xviii_month_year', 'form_b_header_for_the_month_of']);
+    if (direct) return direct;
+  } else if (spec.key === 'form_t_establishment_name_address') {
+    const direct = tryKeys([
+      'form_t_establishment_name_address',
+      'statutory_establishment_name',
+      'statutory_establishment_name_shop',
+      'form_q_establishment',
+      'form_f_establishment_name_address',
+      'form_h_establishment_name_address',
+      'form25_establishment',
+    ]);
+    if (direct) return direct;
+  } else if (spec.key === 'form_t_employer') {
+    const direct = tryKeys([
+      'form_t_employer',
+      'form_q_ka_employer',
+      'statutory_principal_employer',
+      'form25_principal_employer',
+      'form_xviii_principal_employer',
+    ]);
+    if (direct) return direct;
+  } else {
+    const direct = tryKeys([spec.key]);
+    if (direct) return direct;
+  }
+  for (const field of parsedFields) {
+    if (!field?.key) continue;
+    if (!formTLabelMatchesSpec(field.label, spec)) continue;
+    const v = headerFormData[field.key];
+    if (v != null && String(v).trim() !== '') return String(v).trim();
+  }
+  return '';
+}
+
+function formTLabelMatchesSpec(raw, spec) {
+  const labelOnly = String(raw || '').split(':')[0].trim();
+  if (!labelOnly) return false;
+  if (spec.match.test(labelOnly)) return true;
+  const norm = formTSEHeaderNorm(labelOnly);
+  if (spec.key === 'form_t_month_year') return /^month\s+year$/.test(norm);
+  if (spec.key === 'form_t_establishment_name_address') {
+    return /name\s+and\s+address\s+of\s+the\s+establishment/.test(norm);
+  }
+  if (spec.key === 'form_t_employer') {
+    return /name\s+and\s+address\s+of\s+employer/.test(norm);
+  }
+  return false;
+}
+
+function buildFormTSEMergeTopLeftResolver(worksheet) {
+  const cache = new Map();
+  return (r, c) => {
+    const key = `${r}:${c}`;
+    if (cache.has(key)) return cache.get(key);
+    let topLeft = { r, c };
+    const merges = worksheet.model?.merges;
+    if (Array.isArray(merges)) {
+      for (let mi = 0; mi < merges.length; mi += 1) {
+        const parts = String(merges[mi] || '').split(':');
+        if (parts.length !== 2) continue;
+        const tl = worksheet.getCell(parts[0]);
+        const br = worksheet.getCell(parts[1]);
+        if (!tl || !br) continue;
+        if (r >= tl.row && r <= br.row && c >= tl.col && c <= br.col) {
+          topLeft = { r: tl.row, c: tl.col };
+          break;
+        }
+      }
+    }
+    cache.set(key, topLeft);
+    return topLeft;
+  };
+}
+
+export function applyFormTSEKarnatakaAutofillFromSite(headerData, context = {}, options = {}) {
+  const { onlyEmpty = false } = options;
+  const { monthYearText = '', establishmentText = '', employerText = '' } = context;
+  const out = { ...(headerData || {}) };
+  const assign = (key, value) => {
+    if (!key || value == null || String(value).trim() === '') return;
+    if (onlyEmpty && String(out[key] ?? '').trim()) return;
+    out[key] = String(value).trim();
+  };
+  assign('form_t_month_year', monthYearText);
+  assign('form_t_establishment_name_address', establishmentText);
+  assign('form_t_employer', employerText);
+  return out;
+}
+
+/** Merge modal / parsed header values into Form T keys before Excel export. */
+export function prepareFormTSEDownloadHeaderData(headerFormData, parsedFormHeader = null, siteContext = {}) {
+  const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  let out = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
+
+  const copyFieldValue = (spec) => {
+    const val = resolveFormTHeaderExportValue(out, spec, parsedFields);
+    if (val) out[spec.key] = val;
+  };
+  FORM_T_KARNATAKA_HEADER_SPECS.forEach(copyFieldValue);
+
+  for (const field of parsedFields) {
+    if (!field?.key) continue;
+    const v = out[field.key];
+    if (v == null || String(v).trim() === '') continue;
+    for (const spec of FORM_T_KARNATAKA_HEADER_SPECS) {
+      if (formTLabelMatchesSpec(field.label, spec)) {
+        if (!String(out[spec.key] ?? '').trim()) out[spec.key] = String(v).trim();
+      }
+    }
+  }
+
+  return applyFormTSEKarnatakaAutofillFromSite(out, siteContext, { onlyEmpty: false });
+}
+
+function fieldLabelMatchesCell(label, cellText) {
+  const labelText = String(label || '').trim().replace(/:+$/, '');
+  const cellStr = String(cellText || '').split(':')[0].trim().replace(/:+$/, '');
+  if (!labelText || !cellStr) return false;
+  if (cellStr === labelText || cellStr.startsWith(labelText) || labelText.startsWith(cellStr)) {
+    return true;
+  }
+  const labelNorm = formTSEHeaderNorm(labelText);
+  const cellNorm = formTSEHeaderNorm(cellStr);
+  return labelNorm === cellNorm || labelNorm.includes(cellNorm) || cellNorm.includes(labelNorm);
+}
+
+const FORM_T_KARNATAKA_VALUE_COL = 2;
+const FORM_T_KARNATAKA_FALLBACK_ROWS = [9, 10, 11];
+
+function readFormTSEMergedCellText(worksheet, getMergeTopLeft, row, col) {
+  const tl = getMergeTopLeft(row, col);
+  return excelCellValueToString(worksheet.getCell(tl.r, tl.c)?.value).trim();
+}
+
+/** Write Form T header values into column B beside labels in column A (Karnataka template rows 9–11). */
+export function writeFormTSEHeaderFieldsToWorksheet(worksheet, headerFormData = {}, parsedFormHeader = null) {
+  if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
+  const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  const getMergeTopLeft = buildFormTSEMergeTopLeftResolver(worksheet);
+
+  const writeAt = (row, col, value) => {
+    const text = String(value ?? '').trim();
+    if (!text || row < 1 || col < 1) return;
+    const valueTl = getMergeTopLeft(row, col);
+    const labelTl = getMergeTopLeft(row, 1);
+    if (valueTl.r === labelTl.r && valueTl.c === labelTl.c && col > 1) {
+      const existing = readFormTSEMergedCellText(worksheet, getMergeTopLeft, row, 1);
+      const labelOnly = existing.split(':')[0].trim();
+      worksheet.getCell(valueTl.r, valueTl.c).value = labelOnly ? `${labelOnly} : ${text}` : text;
+      return;
+    }
+    worksheet.getCell(valueTl.r, valueTl.c).value = text;
+    if (valueTl.r !== row || valueTl.c !== col) {
+      try {
+        worksheet.getCell(row, col).value = text;
+      } catch (_) {
+        // ignore write to non-master merge cell
+      }
+    }
+  };
+
+  const resolveValueCol = (parsedField, labelCol1Based = 1) => {
+    if (parsedField?.valueCol != null && Number(parsedField.valueCol) >= 0) {
+      return Number(parsedField.valueCol) + 1;
+    }
+    return Math.max(labelCol1Based + 1, FORM_T_KARNATAKA_VALUE_COL);
+  };
+
+  FORM_T_KARNATAKA_HEADER_SPECS.forEach((spec, specIndex) => {
+    const val = resolveFormTHeaderExportValue(headerFormData, spec, parsedFields);
+    if (!val) return;
+
+    const parsedField = parsedFields.find(
+      (field) => field?.key === spec.key || formTLabelMatchesSpec(field?.label, spec)
+    );
+    if (parsedField?.labelRow != null) {
+      const valueRow =
+        parsedField.valueRow != null ? Number(parsedField.valueRow) + 1 : Number(parsedField.labelRow) + 1;
+      const labelCol1Based =
+        parsedField.labelCol != null ? Number(parsedField.labelCol) + 1 : FORM_T_KARNATAKA_VALUE_COL - 1;
+      writeAt(valueRow, resolveValueCol(parsedField, labelCol1Based), val);
+      return;
+    }
+
+    for (let r = 1; r <= 25; r += 1) {
+      for (let c = 1; c <= 8; c += 1) {
+        const tl = getMergeTopLeft(r, c);
+        if (tl.r !== r || tl.c !== c) continue;
+        const raw = readFormTSEMergedCellText(worksheet, getMergeTopLeft, r, c);
+        if (!raw) continue;
+        const rawLabel = raw.split(':')[0].trim();
+        if (!formTLabelMatchesSpec(rawLabel, spec) && !fieldLabelMatchesCell(spec.label, rawLabel)) {
+          continue;
+        }
+        writeAt(r, resolveValueCol(parsedField, c), val);
+        return;
+      }
+    }
+
+    const fallbackRow = FORM_T_KARNATAKA_FALLBACK_ROWS[specIndex];
+    if (fallbackRow) {
+      writeAt(fallbackRow, FORM_T_KARNATAKA_VALUE_COL, val);
+    }
+  });
+}
 
 function normCell(txt) {
   return String(txt || '').replace(/\s+/g, ' ').trim();
@@ -511,6 +757,7 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   parsedTableStartCol = 0,
   parsedFormHeader,
   headerFormData = {},
+  headerSiteContext = {},
   formFileName,
   currentItem = null,
   sheetNameHint = '',
@@ -629,13 +876,6 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
           ? headerRowIndex + 3
           : 14;
 
-  writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
-    headerFormData: headerFormData && typeof headerFormData === 'object' ? headerFormData : {},
-    parsedFormHeader,
-    headerRowEnd: Math.max(1, startRow - 1),
-    maxScanCols: 80,
-  });
-
   const normalize = (txt) =>
     String(txt || '')
       .replace(/\r?\n/g, ' ')
@@ -749,6 +989,21 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
       throughCol: tableColMax + 30,
     });
   }
+
+  const headerValues = prepareFormTSEDownloadHeaderData(
+    headerFormData && typeof headerFormData === 'object' ? headerFormData : {},
+    parsedFormHeader,
+    headerSiteContext && typeof headerSiteContext === 'object' ? headerSiteContext : {}
+  );
+  const headerScanEnd = Math.max(25, startRow > 0 ? startRow - 1 : 25);
+  writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
+    headerFormData: headerValues,
+    parsedFormHeader,
+    headerRowEnd: headerScanEnd,
+    maxScanCols: 80,
+    writeMode: 'both',
+  });
+  writeFormTSEHeaderFieldsToWorksheet(worksheet, headerValues, parsedFormHeader);
 
   await yieldToMain();
   const out = await workbook.xlsx.writeBuffer();

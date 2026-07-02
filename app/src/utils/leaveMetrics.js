@@ -207,13 +207,37 @@ export function findLeaveRecordForFormRow(lookup, row, employeeIdHeader, employe
 
   const nameCandidates = [
     rowName,
-    String(row.__employeeLookupName || '').trim().toLowerCase(),
+    String(row.__employeeLookupName || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\([^)]*\)/g, ' ')
+      .replace(/[^a-z0-9\s]/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
   ].filter(Boolean);
 
   for (const name of nameCandidates) {
     if (lookup.byName.has(name)) return lookup.byName.get(name);
+    const nameParts = name.split(' ');
     for (const [leaveName, record] of lookup.byName) {
-      if (leaveName.includes(name) || name.includes(leaveName)) return record;
+      if (leaveName === name) return record;
+      const leaveParts = leaveName.split(' ');
+      if (
+        nameParts.length === 1 &&
+        leaveParts.length >= 2 &&
+        nameParts[0].length >= 4 &&
+        nameParts[0] === leaveParts[0]
+      ) {
+        return record;
+      }
+      if (
+        leaveParts.length === 1 &&
+        nameParts.length >= 2 &&
+        leaveParts[0].length >= 4 &&
+        leaveParts[0] === nameParts[0]
+      ) {
+        return record;
+      }
     }
   }
 

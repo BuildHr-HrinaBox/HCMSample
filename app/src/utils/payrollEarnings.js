@@ -103,6 +103,52 @@ export function normalizePayrollEmployee(row) {
   return row;
 }
 
+function payrollComponentType(item) {
+  return normalizeKey(
+    item?.type ??
+      item?.deduction_type ??
+      item?.tax_type ??
+      item?.benefit_type ??
+      item?.salary_component_type ??
+      item?.component_type ??
+      ''
+  );
+}
+
+function payrollComponentName(item) {
+  return String(
+    item?.name ??
+      item?.deduction_name ??
+      item?.tax_name ??
+      item?.benefit_name ??
+      item?.component_name ??
+      item?.label ??
+      item?.display_name ??
+      ''
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function pushPayrollLineItemsFromCandidate(candidate, collected) {
+  if (Array.isArray(candidate)) {
+    collected.push(...candidate);
+    return;
+  }
+  if (typeof candidate === 'string') {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) collected.push(...parsed);
+    } catch (_) {
+      /* ignore */
+    }
+    return;
+  }
+  if (candidate && typeof candidate === 'object') {
+    collected.push(...objectMapToEarnings(candidate));
+  }
+}
+
 export function getEarningsArray(row) {
   if (!row || typeof row !== 'object') return [];
   const employee = normalizePayrollEmployee(row);
@@ -131,6 +177,72 @@ export function getEarningsArray(row) {
     row.employee_payroll?.earnings,
   ].forEach((candidate) => pushEarningsFromCandidate(candidate, collected));
   return collected;
+}
+
+export function getDeductionsArray(row) {
+  if (!row || typeof row !== 'object') return [];
+  const employee = normalizePayrollEmployee(row);
+  const payrollEmployee =
+    row.payroll_employee && typeof row.payroll_employee === 'object' ? row.payroll_employee : null;
+  const collected = [];
+  [
+    row.deductions,
+    row.deduction,
+    row.employee_deductions,
+    row.deduction_components,
+    row.deduction_details,
+    row.statutory_deductions,
+    employee.deductions,
+    payrollEmployee?.deductions,
+    row.employee_salary_details?.deductions,
+    row.salary?.deductions,
+    row.salary_details?.deductions,
+    row.pay_structure?.deductions,
+    row.employee_salary?.deductions,
+  ].forEach((candidate) => pushPayrollLineItemsFromCandidate(candidate, collected));
+  return collected;
+}
+
+export function getTaxesArray(row) {
+  if (!row || typeof row !== 'object') return [];
+  const employee = normalizePayrollEmployee(row);
+  const payrollEmployee =
+    row.payroll_employee && typeof row.payroll_employee === 'object' ? row.payroll_employee : null;
+  const collected = [];
+  [
+    row.taxes,
+    row.tax,
+    row.employee_taxes,
+    employee.taxes,
+    payrollEmployee?.taxes,
+    row.employee_salary_details?.taxes,
+    row.salary?.taxes,
+    row.salary_details?.taxes,
+    row.pay_structure?.taxes,
+    row.employee_salary?.taxes,
+  ].forEach((candidate) => pushPayrollLineItemsFromCandidate(candidate, collected));
+  return collected;
+}
+
+function findPayrollComponentAmount(items, matcher) {
+  const list = Array.isArray(items) ? items : [];
+  const hit = list.find((item) => matcher(payrollComponentType(item), payrollComponentName(item)));
+  if (!hit) return '';
+  const amount = getPayrollLineAmount(hit);
+  return Number.isFinite(amount) ? amount : '';
+}
+
+function indexPayrollLineItems(items, componentColumns) {
+  const list = Array.isArray(items) ? items : [];
+  list.forEach((item) => {
+    const type = payrollComponentType(item);
+    const name = payrollComponentName(item);
+    const amount = getPayrollLineAmount(item);
+    if (!Number.isFinite(amount)) return;
+    if (type) componentColumns[type] = amount;
+    const nameKey = normalizeKey(name);
+    if (nameKey) componentColumns[nameKey] = amount;
+  });
 }
 
 function pickScalarAmount(row, keys) {
@@ -459,15 +571,21 @@ export function flattenPayrollEarningColumns(row) {
   if (!row || typeof row !== 'object') return row;
   const employee = normalizePayrollEmployee(row);
   const earnings = getEarningsArray(row);
+  const deductions = getDeductionsArray(row);
+  const taxes = getTaxesArray(row);
   const componentColumns = {};
   earnings.forEach((item) => {
     const name = payrollEarningName(item);
-    if (!name) return;
+    const type = payrollEarningType(item);
+    if (!name && !type) return;
     const amount = getPayrollLineAmount(item);
     if (!Number.isFinite(amount)) return;
     const key = normalizeKey(name);
     if (key) componentColumns[key] = amount;
+    if (type) componentColumns[type] = amount;
   });
+  indexPayrollLineItems(deductions, componentColumns);
+  indexPayrollLineItems(taxes, componentColumns);
 
   const earned_basic = coalesceAmount(
     pickBasicAmount(earnings),
@@ -571,6 +689,43 @@ export function flattenPayrollEarningColumns(row) {
       ]),
       pickAmountByPatterns(row, [/^total_deductions?$/, /^total_employee_deductions$/])
     ),
+    total_benefits: coalesceAmount(
+      pickScalarAmount(row, ['total_benefits', 'Total Benefits', 'totalBenefits']),
+      pickAmountByPatterns(row, [/^total_benefits$/])
+    ),
+    total_taxes: coalesceAmount(
+      pickScalarAmount(row, ['total_taxes', 'Total Taxes', 'totalTaxes']),
+      pickAmountByPatterns(row, [/^total_taxes$/])
+    ),
+    epf_contribution: coalesceAmount(
+      componentColumns.epf_contribution,
+      pickScalarAmount(row, ['epf_contribution', 'EPF Contribution', 'epf', 'EPF']),
+      pickAmountByPatterns(row, [/^epf_contribution$/, /^epf$/]),
+      findPayrollComponentAmount(
+        deductions,
+        (type, name) =>
+          type === 'epf_contribution' ||
+          type === 'epf' ||
+          type === 'pf' ||
+          name.includes('epf contribution') ||
+          name.includes('provident fund') ||
+          (name.includes('epf') && !name.includes('employer'))
+      )
+    ),
+    professional_tax: coalesceAmount(
+      componentColumns.professional_tax,
+      pickScalarAmount(row, ['professional_tax', 'Professional Tax', 'pt', 'PT']),
+      pickAmountByPatterns(row, [/^professional_tax$/, /^pt$/]),
+      findPayrollComponentAmount(
+        taxes,
+        (type, name) => type === 'professional_tax' || type === 'pt' || name.includes('professional tax')
+      ),
+      findPayrollComponentAmount(
+        deductions,
+        (type, name) => type === 'professional_tax' || name.includes('professional tax')
+      )
+    ),
+    payment_mode: pickTextScalar(row, ['payment_mode', 'Payment Mode', 'paymentMode'], [/^payment_mode$/]),
   };
 }
 
@@ -639,6 +794,8 @@ export const PAYROLL_PREFERRED_COLUMNS = [
   'total_taxes',
   'total_donations',
   'payment_mode',
+  'epf_contribution',
+  'professional_tax',
 ];
 
 const ALWAYS_SHOW_COLUMNS = new Set([

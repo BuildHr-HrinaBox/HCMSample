@@ -29,6 +29,9 @@ function getKarnatakaRowValueForHeader(row, header) {
   if (direct !== '') return direct;
 
   const headerMatchers = [
+    isFormXIXKASexIdentificationHeader,
+    isFormXIXKATokenHeader,
+    isFormXIXKAWorkmanNameHeader,
     isFormXIXKADaysWorkedHeader,
     isFormXIXKARateHeader,
     isFormXIXKAUnitsHeader,
@@ -60,6 +63,18 @@ function resolveKarnatakaExportCellValue(row, header) {
 /** Karnataka CLRA Form XIX — tabular wage slip (Rule 78). */
 
 export const FORM_XIX_KA_WAGE_TABLE_HEADERS = [
+  'Sex and identification marks',
+  'Token/Ticket No.',
+  "Name and Father's/Husband's Name of the workman",
+  'No. of days worked',
+  'Rate of daily wages/piece - rate',
+  'No. of units worked in case of piece rate',
+  'Dates on which overtime worked',
+  'Overtime hours and amount of overtime wages',
+];
+
+/** Excel template table band — identity fields sit in the header area, not these columns. */
+export const FORM_XIX_KA_EXCEL_WAGE_HEADERS = [
   'No. of days worked',
   'Rate of daily wages/piece - rate',
   'No. of units worked in case of piece rate',
@@ -82,9 +97,10 @@ export const FORM_XIX_KA_ALL_TABLE_HEADERS = [
 export const FORM_XIX_KA_RATE_DEFAULT = 'Monthly Wages';
 
 export const FORM_XIX_KA_FIELD_GROUPS = [
-  { id: 'header', title: 'Wage slip — contractor & workman' },
+  { id: 'header', title: 'Wage slip — contractor details' },
 ];
 
+/** Site-level header fields — workman identity columns render in the employee table below. */
 export const FORM_XIX_KA_HEADER_SPECS = [
   {
     key: 'form_xix_ka_contractor',
@@ -116,32 +132,30 @@ export const FORM_XIX_KA_HEADER_SPECS = [
     match: /name\s+and\s+address\s+of\s+principal\s+employer/i,
   },
   {
-    key: 'form_xix_ka_sex_identification',
-    label: 'Sex and identification marks',
-    group: 'header',
-    fieldType: 'text',
-    match: /sex\s+and\s+identification\s+marks?/i,
-  },
-  {
-    key: 'form_xix_ka_token',
-    label: 'Token/Ticket No.',
-    group: 'header',
-    fieldType: 'text',
-    match: /token\/?\s*ticket\s+no\.?/i,
-  },
-  {
-    key: 'form_xix_ka_workman',
-    label: "Name and Father's/Husband's Name of the workman",
-    group: 'header',
-    fieldType: 'textarea',
-    match: /name\s+and\s+father.*husband.*workman|father.*husband.*name\s+of\s+the\s+workman/i,
-  },
-  {
     key: 'form_xix_ka_period_ending',
     label: 'For the week/Fortnight/Month ending',
     group: 'header',
     fieldType: 'text',
     match: /week.*fortnight.*month\s+ending|fortnight.*month\s+ending/i,
+  },
+];
+
+/** Per-employee fields written to the Excel template header area on export. */
+const FORM_XIX_KA_EMPLOYEE_HEADER_SPECS = [
+  {
+    key: 'form_xix_ka_sex_identification',
+    label: 'Sex and identification marks',
+    match: /sex\s+and\s+identification\s+marks?/i,
+  },
+  {
+    key: 'form_xix_ka_token',
+    label: 'Token/Ticket No.',
+    match: /token\/?\s*ticket\s+no\.?/i,
+  },
+  {
+    key: 'form_xix_ka_workman',
+    label: "Name and Father's/Husband's Name of the workman",
+    match: /name\s+and\s+father.*husband.*workman|father.*husband.*name\s+of\s+the\s+workman/i,
   },
 ];
 
@@ -208,18 +222,44 @@ function headerMatchesKarnatakaFooter(a, b) {
 
 export function resolveFormXIXKarnatakaWageTableHeaders(tableHeaders) {
   const list = Array.isArray(tableHeaders) ? tableHeaders.filter(Boolean) : [];
+  const hasIdentityCols =
+    list.some(isFormXIXKASexIdentificationHeader) &&
+    list.some(isFormXIXKATokenHeader) &&
+    list.some(isFormXIXKAWorkmanNameHeader);
   if (list.length >= FORM_XIX_KA_ALL_TABLE_HEADERS.length) return list;
-  if (list.length >= FORM_XIX_KA_WAGE_TABLE_HEADERS.length) {
-    const extras = FORM_XIX_KA_FOOTER_HEADERS.filter(
-      (footerHeader) => !list.some((h) => headerMatchesKarnatakaFooter(h, footerHeader))
-    );
-    return [...list, ...extras];
+  if (!hasIdentityCols || list.length < FORM_XIX_KA_WAGE_TABLE_HEADERS.length) {
+    return [...FORM_XIX_KA_ALL_TABLE_HEADERS];
   }
-  return [...FORM_XIX_KA_ALL_TABLE_HEADERS];
+  const extras = FORM_XIX_KA_FOOTER_HEADERS.filter(
+    (footerHeader) => !list.some((h) => headerMatchesKarnatakaFooter(h, footerHeader))
+  );
+  return extras.length > 0 ? [...list, ...extras] : list;
 }
 
 export function isFormXIXKADaysWorkedHeader(h) {
   return /days\s+worked/.test(normHeader(h));
+}
+
+export function isFormXIXKASexIdentificationHeader(h) {
+  const s = normHeader(h);
+  return s.includes('sex') && s.includes('identification');
+}
+
+export function isFormXIXKATokenHeader(h) {
+  return /token\/?\s*ticket/.test(normHeader(h));
+}
+
+export function isFormXIXKAWorkmanNameHeader(h) {
+  const s = normHeader(h);
+  return (s.includes('workman') || s.includes('workmen')) && (s.includes('name') || s.includes('father') || s.includes('husband'));
+}
+
+export function isFormXIXKAIdentityTableHeader(h) {
+  return (
+    isFormXIXKASexIdentificationHeader(h) ||
+    isFormXIXKATokenHeader(h) ||
+    isFormXIXKAWorkmanNameHeader(h)
+  );
 }
 
 export function isFormXIXKARateHeader(h) {
@@ -242,6 +282,9 @@ export function isFormXIXKAOvertimeAmountHeader(h) {
 
 export function isFormXIXKASkipPeopleAutofillHeader(h) {
   return (
+    isFormXIXKASexIdentificationHeader(h) ||
+    isFormXIXKATokenHeader(h) ||
+    isFormXIXKAWorkmanNameHeader(h) ||
     isFormXIXKADaysWorkedHeader(h) ||
     isFormXIXKARateHeader(h) ||
     isFormXIXKAUnitsHeader(h) ||
@@ -268,6 +311,9 @@ const isNarrativeBlob = (raw) => {
 const isTableHeaderBlob = (raw) => {
   const n = normHeader(raw);
   return (
+    isFormXIXKASexIdentificationHeader(n) ||
+    isFormXIXKATokenHeader(n) ||
+    isFormXIXKAWorkmanNameHeader(n) ||
     isFormXIXKADaysWorkedHeader(n) ||
     isFormXIXKARateHeader(n) ||
     isFormXIXKAUnitsHeader(n) ||
@@ -365,13 +411,20 @@ function buildWorkbookAccessor(workbook, hints = {}) {
 }
 
 function resolveKarnatakaTableLayout(getMergedAwareCellText, effectiveSheetCols) {
-  const hdrs = FORM_XIX_KA_WAGE_TABLE_HEADERS;
+  const wageHdrs = FORM_XIX_KA_EXCEL_WAGE_HEADERS;
+  const uiHdrs = FORM_XIX_KA_WAGE_TABLE_HEADERS;
   const maxC = Math.max(20, effectiveSheetCols || 0);
   for (let r = 0; r < 60; r += 1) {
     for (let c = 0; c < maxC; c += 1) {
       const raw = String(getMergedAwareCellText(r, c) || '').trim();
       if (!isFormXIXKADaysWorkedHeader(raw)) continue;
-      const matched = hdrs.map((header, i) => ({ header, col: c + i }));
+      const matched = uiHdrs.map((header) => {
+        if (isFormXIXKAIdentityTableHeader(header)) {
+          return { header, col: c - 1 };
+        }
+        const wageIdx = wageHdrs.findIndex((h) => normHeader(h) === normHeader(header));
+        return { header, col: c + (wageIdx >= 0 ? wageIdx : 0) };
+      });
       let dataStartIndex = r + 1;
       for (let dr = r + 1; dr <= r + 4; dr += 1) {
         const firstCell = String(getMergedAwareCellText(dr, c) || '').trim();
@@ -388,7 +441,12 @@ function resolveKarnatakaTableLayout(getMergedAwareCellText, effectiveSheetCols)
       };
     }
   }
-  return { headerRowIndex: 12, dataStartIndex: 14, tableStartCol: 0, columns: hdrs.map((header, i) => ({ header, col: i })) };
+  return {
+    headerRowIndex: 12,
+    dataStartIndex: 14,
+    tableStartCol: 0,
+    columns: uiHdrs.map((header, i) => ({ header, col: i })),
+  };
 }
 
 function resolveKarnatakaFooterLayout(getMergedAwareCellText, effectiveSheetCols, dataStartIndex = 14) {
@@ -504,8 +562,6 @@ export function applyFormXIXKarnatakaAutofillFromSite(headerData, siteContext = 
     natureLocationText = '',
     principalEmployerText = '',
     periodEndingText = '',
-    workmanText = '',
-    tokenText = '',
   } = siteContext;
   let out = { ...(headerData || {}) };
   const assign = (key, value) => {
@@ -517,8 +573,6 @@ export function applyFormXIXKarnatakaAutofillFromSite(headerData, siteContext = 
   assign('form_xix_ka_nature_location', natureLocationText);
   assign('form_xix_ka_principal_employer', principalEmployerText);
   assign('form_xix_ka_period_ending', periodEndingText);
-  assign('form_xix_ka_workman', workmanText);
-  assign('form_xix_ka_token', tokenText);
   return out;
 }
 
@@ -533,6 +587,20 @@ export function resolveFormXIXKAEmployeeToken(emp = {}) {
       emp['Employee Code'] ||
       ''
   ).trim();
+}
+
+export function formatFormXIXKASexAndIdentificationMarks(emp = {}) {
+  const sex = String(emp.Sex || emp.Gender || emp['Gender'] || emp['Sex'] || '').trim();
+  const marks = String(
+    emp.Identification_Marks ||
+      emp['Identification Marks'] ||
+      emp.IdentificationMarks ||
+      emp.identification_marks ||
+      emp['Identification_marks'] ||
+      ''
+  ).trim();
+  if (sex && marks) return `${sex}\n${marks}`;
+  return sex || marks;
 }
 
 const pickKarnatakaPayrollValue = (flat, payrollRow, keys, patterns = []) => {
@@ -611,13 +679,22 @@ const pickDeductionsFromPayrollRow = (flat, payrollRow) => {
   return deductions !== '' ? String(deductions) : '';
 };
 
-const pickNetPayFromPayrollRow = (flat, payrollRow) =>
-  pickKarnatakaPayrollValue(
+const pickNetPayFromPayrollRow = (flat, payrollRow) => {
+  let net = pickKarnatakaPayrollValue(
     flat,
     payrollRow,
     ['net_pay', 'Net Pay', 'netPay', 'net_wages', 'Net Wages', 'monthly_salary'],
     [/^net_pay$/, /^net_wages$/]
   );
+  if (net !== '') return net;
+  const gross = pickGrossPayFromPayrollRow(flat, payrollRow);
+  const deductions = pickDeductionsFromPayrollRow(flat, payrollRow);
+  if (gross !== '' && deductions !== '') {
+    const diff = Number(String(gross).replace(/,/g, '')) - Number(String(deductions).replace(/,/g, ''));
+    if (Number.isFinite(diff)) return String(Math.round(diff * 100) / 100);
+  }
+  return '';
+};
 
 const formatKarnatakaOvertimeHoursAndAmount = (hours, amount) => {
   const h = String(hours ?? '').trim();
@@ -844,6 +921,18 @@ export function applyFormXIXKarnatakaEmployeeToRow(row, emp, headers, helpers = 
   };
 
   headerList.forEach((header) => {
+    if (isFormXIXKASexIdentificationHeader(header)) {
+      out[header] = sanitizeValue(formatFormXIXKASexAndIdentificationMarks(emp));
+      return;
+    }
+    if (isFormXIXKATokenHeader(header)) {
+      out[header] = sanitizeValue(resolveFormXIXKAEmployeeToken(emp));
+      return;
+    }
+    if (isFormXIXKAWorkmanNameHeader(header)) {
+      out[header] = sanitizeValue(formatWorkmanNameAndGuardian(emp));
+      return;
+    }
     if (isFormXIXKADaysWorkedHeader(header)) {
       out[header] = wageValue(payroll.daysWorked, out[header]);
       return;
@@ -1020,13 +1109,32 @@ export function writeFormXIXKarnatakaHeaderFieldsToWorksheet(worksheet, headerFo
       }
     }
   });
+  FORM_XIX_KA_EMPLOYEE_HEADER_SPECS.forEach((spec) => {
+    const val = headerFormData[spec.key];
+    if (val == null || String(val).trim() === '') return;
+    const parsedField = parsedFields.find((f) => f.key === spec.key);
+    if (parsedField?.labelRow != null) {
+      writeAt(parsedField.labelRow + 1, FORM_XIX_KA_DEFAULT_VALUE_COL, val);
+      return;
+    }
+    for (let r = 1; r <= 40; r += 1) {
+      for (let c = 1; c <= 14; c += 1) {
+        const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+        if (!raw || (!spec.match.test(raw) && !spec.match.test(formXIXAPHeaderNorm(raw)))) continue;
+        writeAt(r, FORM_XIX_KA_DEFAULT_VALUE_COL, val);
+        return;
+      }
+    }
+  });
 }
 
 function resolveTableColumns(parsedFormHeader) {
-  const fromHeader = Array.isArray(parsedFormHeader?.tableColumns) ? parsedFormHeader.tableColumns : [];
-  if (fromHeader.length >= FORM_XIX_KA_WAGE_TABLE_HEADERS.length) return fromHeader;
+  const fromHeader = Array.isArray(parsedFormHeader?.tableColumns)
+    ? parsedFormHeader.tableColumns.filter((h) => h && !isFormXIXKAIdentityTableHeader(h))
+    : [];
+  if (fromHeader.length >= FORM_XIX_KA_EXCEL_WAGE_HEADERS.length) return fromHeader;
   const startCol = Number(parsedFormHeader?.tableStartCol ?? 0);
-  return FORM_XIX_KA_WAGE_TABLE_HEADERS.map((header, i) => ({ header, col: startCol + i }));
+  return FORM_XIX_KA_EXCEL_WAGE_HEADERS.map((header, i) => ({ header, col: startCol + i }));
 }
 
 function resolveKarnatakaTableColumnsFromWorksheet(worksheet, parsedFormHeader) {
@@ -1035,11 +1143,12 @@ function resolveKarnatakaTableColumnsFromWorksheet(worksheet, parsedFormHeader) 
 
   const maxR = 45;
   const maxC = 20;
+  const wageHdrs = FORM_XIX_KA_EXCEL_WAGE_HEADERS;
   for (let r = 1; r <= maxR; r += 1) {
     for (let c = 1; c <= maxC; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
       if (!isFormXIXKADaysWorkedHeader(raw)) continue;
-      return FORM_XIX_KA_WAGE_TABLE_HEADERS.map((header, i) => ({
+      return wageHdrs.map((header, i) => ({
         header,
         col: c - 1 + i,
         headerRow: r,
@@ -1050,15 +1159,11 @@ function resolveKarnatakaTableColumnsFromWorksheet(worksheet, parsedFormHeader) 
 }
 
 function resolveKarnatakaDataRowFromWorksheet(worksheet, parsedFormHeader, columns) {
-  const parsedRow = Number(parsedFormHeader?.dataStartIndex);
-  if (Number.isFinite(parsedRow) && parsedRow >= 0) {
-    return parsedRow + 1;
-  }
   const daysCol = columns.find((col) => isFormXIXKADaysWorkedHeader(col.header));
-  const col1 = daysCol ? Number(daysCol.col) + 1 : 1;
   const headerRow = Number(daysCol?.headerRow ?? 0);
-  if (headerRow > 0) {
-    for (let r = headerRow + 1; r <= headerRow + 4; r += 1) {
+  if (worksheet && headerRow > 0) {
+    const col1 = Number(daysCol.col) + 1;
+    for (let r = headerRow + 1; r <= headerRow + 5; r += 1) {
       const marker = excelCellValueToString(worksheet.getCell(r, col1)?.value).trim();
       if (/^[1-5]$/.test(marker) || /^\d+$/.test(marker)) {
         return r + 1;
@@ -1066,7 +1171,32 @@ function resolveKarnatakaDataRowFromWorksheet(worksheet, parsedFormHeader, colum
     }
     return headerRow + 2;
   }
+  const parsedRow = Number(parsedFormHeader?.dataStartIndex);
+  if (Number.isFinite(parsedRow) && parsedRow >= 0) {
+    return parsedRow + 1;
+  }
   return 17;
+}
+
+function resolveKarnatakaFooterColumnsFromWorksheet(worksheet, parsedFormHeader, columns, dataRow) {
+  const parsedFooter = resolveFooterColumns(parsedFormHeader);
+  if (!worksheet) return parsedFooter;
+
+  const footerHdrs = FORM_XIX_KA_FOOTER_HEADERS;
+  const headerRow = Number(columns.find((col) => isFormXIXKADaysWorkedHeader(col.header))?.headerRow ?? 0);
+  const scanFrom = Math.max(headerRow, dataRow - 1);
+  for (let r = scanFrom; r <= scanFrom + 10; r += 1) {
+    const matched = [];
+    for (let c = 1; c <= 20; c += 1) {
+      const cell = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!cell) continue;
+      if (isFormXIXKAGrossHeader(cell)) matched.push({ header: footerHdrs[0], col: c - 1, labelRow: r - 1, valueRow: r + 1 });
+      else if (isFormXIXKADeductionsHeader(cell)) matched.push({ header: footerHdrs[1], col: c - 1, labelRow: r - 1, valueRow: r + 1 });
+      else if (isFormXIXKANetHeader(cell)) matched.push({ header: footerHdrs[2], col: c - 1, labelRow: r - 1, valueRow: r + 1 });
+    }
+    if (matched.length >= 2) return matched;
+  }
+  return parsedFooter;
 }
 
 function resolveFooterColumns(parsedFormHeader) {
@@ -1079,20 +1209,82 @@ function resolveFooterColumns(parsedFormHeader) {
   }));
 }
 
+/** Resolve where footer amounts are written in the Excel template (beside or below labels). */
+function buildKarnatakaFooterValuePositions(parsedFormHeader, worksheet, tableColumns, dataRow) {
+  const footerColumns =
+    Array.isArray(parsedFormHeader?.footerColumns) && parsedFormHeader.footerColumns.length >= 2
+      ? parsedFormHeader.footerColumns
+      : worksheet
+        ? resolveKarnatakaFooterColumnsFromWorksheet(worksheet, parsedFormHeader, tableColumns, dataRow)
+        : resolveFooterColumns(parsedFormHeader);
+
+  const footerValueRow0 =
+    parsedFormHeader?.footerValueRow != null
+      ? Number(parsedFormHeader.footerValueRow)
+      : footerColumns[0]?.labelRow != null
+        ? Number(footerColumns[0].labelRow) + 1
+        : Number(parsedFormHeader?.footerRowIndex ?? 18) + 1;
+
+  const positions = [];
+  const seen = new Set();
+
+  const pushPos = (header, row, col) => {
+    if (!header || row == null || col == null || row < 1 || col < 1) return;
+    const cellRef = formXIXKAToCellRef(row, col);
+    const key = `${header}|${cellRef}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    positions.push({ header, row, col, cellRef });
+  };
+
+  footerColumns.forEach(({ header, col, labelRow }) => {
+    const col0 = Number(col);
+    const labelRow0 = labelRow != null ? Number(labelRow) : Number(parsedFormHeader?.footerRowIndex ?? 18);
+    const labelExcelRow = labelRow0 + 1;
+    const belowExcelRow = footerValueRow0 + 1;
+
+    // Karnataka template: amount typically in the cell to the right of the label (same row).
+    pushPos(header, labelExcelRow, col0 + 2);
+    // Fallback: amount below the label in the same column.
+    pushPos(header, belowExcelRow, col0 + 1);
+  });
+
+  return positions;
+}
+
+export function applyFormXIXKarnatakaFooterFieldsToRow(row, payrollRow, headers) {
+  if (!row || typeof row !== 'object' || !payrollRow || payrollRow.fetch_error) return row;
+  const payroll = resolveFormXIXKarnatakaPayrollFields(payrollRow);
+  const out = { ...row };
+  const hdrs = resolveFormXIXKarnatakaWageTableHeaders(headers);
+  const footerValues = [payroll.grossWages, payroll.deductions, payroll.netWages];
+  FORM_XIX_KA_FOOTER_HEADERS.forEach((footerHeader, index) => {
+    const value = String(footerValues[index] ?? '').trim();
+    if (!value) return;
+    out[footerHeader] = value;
+    hdrs.forEach((header) => {
+      if (headerMatchesKarnatakaFooter(header, footerHeader)) {
+        out[header] = value;
+      }
+    });
+  });
+  return out;
+}
+
 export function writeFormXIXKarnatakaFooterRowToWorksheet(worksheet, row, parsedFormHeader) {
   if (!worksheet || !row || typeof row !== 'object') return;
-  const footerColumns = resolveFooterColumns(parsedFormHeader);
-  const fallbackValueRow = Number(parsedFormHeader?.footerValueRow ?? parsedFormHeader?.footerRowIndex ?? 18) + 1;
-  footerColumns.forEach(({ header, col, labelRow, valueRow }) => {
+  const tableColumns = resolveKarnatakaTableColumnsFromWorksheet(worksheet, parsedFormHeader);
+  const dataRow = resolveKarnatakaDataRowFromWorksheet(worksheet, parsedFormHeader, tableColumns);
+  const footerPositions = buildKarnatakaFooterValuePositions(
+    parsedFormHeader,
+    worksheet,
+    tableColumns,
+    dataRow
+  );
+  footerPositions.forEach(({ header, row: writeRow, col: writeCol }) => {
     const value = resolveKarnatakaExportCellValue(row, header);
     if (value === '') return;
-    const writeRow =
-      valueRow != null
-        ? Number(valueRow) + 1
-        : labelRow != null
-          ? Number(labelRow) + 2
-          : fallbackValueRow + 1;
-    worksheet.getCell(writeRow, Number(col) + 1).value = value;
+    worksheet.getCell(writeRow, writeCol).value = value;
   });
 }
 
@@ -1113,10 +1305,19 @@ export function writeFormXIXKarnatakaTableRowToWorksheet(worksheet, row, parsedF
 
 function buildEmployeeHeaderFormData(headerFormData, employeeRow, emp) {
   const base = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
-  const workman = formatWorkmanNameAndGuardian(emp);
+  const hdrs = FORM_XIX_KA_WAGE_TABLE_HEADERS;
+  const workmanHdr = hdrs.find(isFormXIXKAWorkmanNameHeader);
+  const tokenHdr = hdrs.find(isFormXIXKATokenHeader);
+  const sexHdr = hdrs.find(isFormXIXKASexIdentificationHeader);
+  const workmanFromRow = workmanHdr ? getKarnatakaRowValueForHeader(employeeRow, workmanHdr) : '';
+  const tokenFromRow = tokenHdr ? getKarnatakaRowValueForHeader(employeeRow, tokenHdr) : '';
+  const sexFromRow = sexHdr ? getKarnatakaRowValueForHeader(employeeRow, sexHdr) : '';
+  const workman = workmanFromRow || formatWorkmanNameAndGuardian(emp);
   if (workman) base.form_xix_ka_workman = workman;
-  const token = resolveFormXIXKAEmployeeToken(emp);
+  const token = tokenFromRow || resolveFormXIXKAEmployeeToken(emp);
   if (token) base.form_xix_ka_token = token;
+  const sexIdentification = sexFromRow || formatFormXIXKASexAndIdentificationMarks(emp);
+  if (sexIdentification) base.form_xix_ka_sex_identification = sexIdentification;
   return base;
 }
 
@@ -1143,13 +1344,19 @@ export async function buildFormXIXKarnatakaWorkbookWithTemplateStyles({
   const employees = Array.isArray(employeesOverride) ? employeesOverride : [];
   const employeeRow = exportRows[0] || null;
   const emp = employees[0]?.Employee || employees[0]?.employee || employees[0] || null;
-  const mergedHeader = buildEmployeeHeaderFormData(headerFormData, employeeRow, emp);
+  const payrollRow =
+    typeof resolvePayrollRow === 'function' && emp ? resolvePayrollRow(emp) : null;
+  let rowToWrite = employeeRow;
+  if (employeeRow && payrollRow && !payrollRow.fetch_error) {
+    rowToWrite = applyFormXIXKarnatakaFooterFieldsToRow(employeeRow, payrollRow, hdrs);
+  }
+  const mergedHeader = buildEmployeeHeaderFormData(headerFormData, rowToWrite, emp);
 
   writeFormXIXKarnatakaHeaderFieldsToWorksheet(worksheet, mergedHeader, parsedFormHeader);
-  if (employeeRow) {
+  if (rowToWrite) {
     writeFormXIXKarnatakaTableRowToWorksheet(
       worksheet,
-      employeeRow,
+      rowToWrite,
       { ...parsedFormHeader, dataStartIndex: parsedFormHeader?.dataStartIndex },
       parsedFormHeader?.dataStartIndex
     );
@@ -1172,6 +1379,240 @@ function resolveEmployeeDownloadBaseName(row, fallbackIndex = 0) {
     .replace(/^_|_$/g, '')
     .slice(0, 48);
   return slug || `Employee_${fallbackIndex + 1}`;
+}
+
+const formXIXKASanitizeExportText = (value) =>
+  String(value ?? '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    .trim();
+
+const formXIXKAEscapeXml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const formXIXKAColToLetter = (col) => {
+  let result = '';
+  let n = col;
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    result = String.fromCharCode(65 + rem) + result;
+    n = Math.floor((n - 1) / 26);
+  }
+  return result;
+};
+
+const formXIXKAToCellRef = (row, col) => `${formXIXKAColToLetter(col)}${row}`;
+
+const formXIXKAUpsertInlineStrCell = (sheetXml, cellRef, value) => {
+  const text = formXIXKAEscapeXml(formXIXKASanitizeExportText(value));
+  const cellXml = text
+    ? `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`
+    : `<c r="${cellRef}"/>`;
+  const cellRe = new RegExp(`<c\\s+r="${cellRef}"[^>]*(?:/>|>[\\s\\S]*?</c>)`, 'i');
+  if (cellRe.test(sheetXml)) {
+    return sheetXml.replace(cellRe, cellXml);
+  }
+  const rowNum = cellRef.replace(/^[A-Z]+/i, '');
+  const rowRe = new RegExp(`(<row\\s+r="${rowNum}"[^>]*>)([\\s\\S]*?)(</row>)`, 'i');
+  if (!rowRe.test(sheetXml)) return sheetXml;
+  return sheetXml.replace(rowRe, `$1$2${cellXml}$3`);
+};
+
+const resolveFormXIXKAWorksheetEntry = (zipFiles) =>
+  Object.keys(zipFiles)
+    .filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0] || null;
+
+function resolveFormXIXKarnatakaFastExportPositions(worksheet, parsedFormHeader) {
+  const employeeHeaderPositions = [];
+  const seenHeaderKeys = new Set();
+  const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+
+  const pushEmployeeHeader = (key, row, col) => {
+    if (!key || row == null || col == null || seenHeaderKeys.has(key)) return;
+    seenHeaderKeys.add(key);
+    employeeHeaderPositions.push({ key, row, col, cellRef: formXIXKAToCellRef(row, col) });
+  };
+
+  FORM_XIX_KA_EMPLOYEE_HEADER_SPECS.forEach((spec) => {
+    const parsedField = parsedFields.find((f) => f.key === spec.key);
+    if (parsedField?.labelRow != null) {
+      pushEmployeeHeader(
+        spec.key,
+        (parsedField.valueRow ?? parsedField.labelRow) + 1,
+        parsedField.valueCol != null ? parsedField.valueCol + 1 : FORM_XIX_KA_DEFAULT_VALUE_COL
+      );
+      return;
+    }
+    if (!worksheet) return;
+    for (let r = 1; r <= 40; r += 1) {
+      for (let c = 1; c <= 14; c += 1) {
+        const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+        if (!raw || (!spec.match.test(raw) && !spec.match.test(formXIXAPHeaderNorm(raw)))) continue;
+        pushEmployeeHeader(spec.key, r, FORM_XIX_KA_DEFAULT_VALUE_COL);
+        return;
+      }
+    }
+  });
+
+  const tableColumns = worksheet
+    ? resolveKarnatakaTableColumnsFromWorksheet(worksheet, parsedFormHeader)
+    : resolveTableColumns(parsedFormHeader);
+  const dataRow = worksheet
+    ? resolveKarnatakaDataRowFromWorksheet(worksheet, parsedFormHeader, tableColumns)
+    : Number(parsedFormHeader?.dataStartIndex ?? 14) + 1;
+  const tablePositions = tableColumns.map(({ header, col }) => ({
+    header,
+    row: dataRow,
+    col: Number(col) + 1,
+    cellRef: formXIXKAToCellRef(dataRow, Number(col) + 1),
+  }));
+
+  const footerPositions = buildKarnatakaFooterValuePositions(
+    parsedFormHeader,
+    worksheet,
+    tableColumns,
+    dataRow
+  );
+
+  return { employeeHeaderPositions, tablePositions, footerPositions };
+}
+
+const clearFormXIXKarnatakaPerEmployeeValueCells = (worksheet, positions) => {
+  if (!worksheet || !positions) return;
+  const all = [
+    ...(positions.employeeHeaderPositions || []),
+    ...(positions.tablePositions || []),
+    ...(positions.footerPositions || []),
+  ];
+  all.forEach((pos) => {
+    if (pos?.row != null && pos?.col != null) {
+      worksheet.getCell(pos.row, pos.col).value = '';
+    }
+  });
+};
+
+const patchFormXIXKarnatakaFastSheetXml = (baseSheetXml, mergedHeaderData, exportRow, positions) => {
+  let sheetXml = baseSheetXml;
+  (positions.employeeHeaderPositions || []).forEach((pos) => {
+    const value = mergedHeaderData?.[pos.key];
+    if (value != null && String(value).trim() !== '') {
+      sheetXml = formXIXKAUpsertInlineStrCell(sheetXml, pos.cellRef, value);
+    }
+  });
+  (positions.tablePositions || []).forEach((pos) => {
+    const value = resolveKarnatakaExportCellValue(exportRow, pos.header);
+    if (value !== '') {
+      sheetXml = formXIXKAUpsertInlineStrCell(sheetXml, pos.cellRef, value);
+    }
+  });
+  (positions.footerPositions || []).forEach((pos) => {
+    const value = resolveKarnatakaExportCellValue(exportRow, pos.header);
+    if (value !== '') {
+      sheetXml = formXIXKAUpsertInlineStrCell(sheetXml, pos.cellRef, value);
+    }
+  });
+  return sheetXml;
+};
+
+const buildFormXIXKarnatakaFastXlsxBytes = async (fastTemplate, mergedHeaderData, exportRow) => {
+  const { sheetEntry, baseSheetXml, staticFiles, positions } = fastTemplate;
+  const sheetXml = patchFormXIXKarnatakaFastSheetXml(baseSheetXml, mergedHeaderData, exportRow, positions);
+  const entryZip = new JSZip();
+  Object.entries(staticFiles).forEach(([path, data]) => {
+    entryZip.file(path, data);
+  });
+  entryZip.file(sheetEntry, sheetXml);
+  return entryZip.generateAsync({ type: 'uint8array', compression: 'STORE' });
+};
+
+export function canUseFormXIXKarnatakaFastExport(parsedFormHeader) {
+  return !!parsedFormHeader?.formXIXKarnatakaTableLayout;
+}
+
+async function prepareFormXIXKarnatakaFastZipTemplate({
+  templateArrayBuffer,
+  parsedFormHeader,
+  headerFormData,
+}) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateArrayBuffer);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) throw new Error('Template worksheet not found.');
+
+  const staticHeaderData = { ...(headerFormData || {}) };
+  FORM_XIX_KA_EMPLOYEE_HEADER_SPECS.forEach((spec) => {
+    delete staticHeaderData[spec.key];
+  });
+  writeFormXIXKarnatakaHeaderFieldsToWorksheet(worksheet, staticHeaderData, parsedFormHeader);
+
+  const positions = resolveFormXIXKarnatakaFastExportPositions(worksheet, parsedFormHeader);
+  clearFormXIXKarnatakaPerEmployeeValueCells(worksheet, positions);
+
+  const preparedBuffer = await workbook.xlsx.writeBuffer();
+  const templateZip = await JSZip.loadAsync(preparedBuffer);
+  const sheetEntry = resolveFormXIXKAWorksheetEntry(templateZip.files);
+  if (!sheetEntry) throw new Error('Template worksheet XML not found.');
+  const baseSheetXml = await templateZip.file(sheetEntry).async('string');
+  const staticFiles = {};
+  await Promise.all(
+    Object.keys(templateZip.files).map(async (path) => {
+      const file = templateZip.files[path];
+      if (!file || file.dir || path === sheetEntry) return;
+      staticFiles[path] = await file.async('uint8array');
+    })
+  );
+  return { sheetEntry, baseSheetXml, staticFiles, positions };
+}
+
+const FORM_XIX_KA_FAST_ZIP_BATCH = 12;
+
+async function buildFormXIXKarnatakaFastZipDownload({
+  exportRows,
+  fastTemplate,
+  baseHeaderData,
+  parsedFormHeader,
+  formFileName,
+  employees = [],
+}) {
+  const zip = new JSZip();
+  const usedNames = new Map();
+  for (let i = 0; i < exportRows.length; i += FORM_XIX_KA_FAST_ZIP_BATCH) {
+    const batch = exportRows.slice(i, i + FORM_XIX_KA_FAST_ZIP_BATCH);
+    const batchBytes = await Promise.all(
+      batch.map(async (exportRow, batchIndex) => {
+        const index = i + batchIndex;
+        const emp = employees[index]?.Employee || employees[index]?.employee || employees[index] || null;
+        const mergedHeaderData = buildEmployeeHeaderFormData(baseHeaderData, exportRow, emp);
+        const xlsxBytes = await buildFormXIXKarnatakaFastXlsxBytes(
+          fastTemplate,
+          mergedHeaderData,
+          exportRow
+        );
+        return { xlsxBytes, exportRow, index };
+      })
+    );
+    batchBytes.forEach(({ xlsxBytes, exportRow, index }) => {
+      const baseName = resolveEmployeeDownloadBaseName(exportRow, index);
+      const count = usedNames.get(baseName) || 0;
+      usedNames.set(baseName, count + 1);
+      const suffix = count > 0 ? `_${count + 1}` : '';
+      zip.file(`Form_XIX_Karnataka_${baseName}${suffix}.xlsx`, xlsxBytes);
+    });
+    if (i > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_XIX_Karnataka')
+    .replace(/\.xlsx?$/i, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return {
+    blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
+    fileName: `${zipBase}_Employees.zip`,
+  };
 }
 
 export function resolveFormXIXKarnatakaExportRows(mappedData, headers, employeesOverride = null, helpers = {}) {
@@ -1237,7 +1678,9 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
       : [];
   const fromTable = tableRows.filter((row) => rowHasMeaningfulFormXIXKarnatakaExportData(row, hdrs));
   let exportRows;
-  if (employees.length > 0) {
+  if (fromTable.length > 0) {
+    exportRows = fromTable.map((row) => ({ ...row }));
+  } else if (employees.length > 0) {
     exportRows =
       fromEmployees.length > 0
         ? fromEmployees
@@ -1246,12 +1689,64 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
       exportRows = mapFormXIXKarnatakaRowsFromEmployees(employees, hdrs, exportHelpers);
     }
     exportRows = overlayFormXIXKarnatakaUserEditsOntoRows(exportRows, tableRows, hdrs);
-  } else if (fromTable.length > 0) {
-    exportRows = fromTable.map((row) => ({ ...row }));
   } else {
     exportRows = [];
   }
   enrichFormXIXKarnatakaStaticFieldRows(exportRows, hdrs);
+
+  const gridHasPayrollValues =
+    fromTable.length > 0 &&
+    fromTable.some((row) => {
+      const daysHdr = hdrs.find(isFormXIXKADaysWorkedHeader);
+      const grossHdr = hdrs.find(isFormXIXKAGrossHeader);
+      return (
+        (daysHdr && getKarnatakaRowValueForHeader(row, daysHdr) !== '') ||
+        (grossHdr && getKarnatakaRowValueForHeader(row, grossHdr) !== '')
+      );
+    });
+
+  if (
+    exportRows.length > 0 &&
+    typeof resolvePayrollRow === 'function' &&
+    employees.length > 0 &&
+    !gridHasPayrollValues
+  ) {
+    exportRows = exportRows.map((exportRow, index) => {
+      const emp = employees[index]?.Employee || employees[index]?.employee || employees[index] || null;
+      const payrollRow = resolvePayrollRow(emp);
+      let merged = applyFormXIXKarnatakaEmployeeToRow(exportRow, emp, hdrs, {
+        sanitizeValue: exportHelpers.sanitizeValue,
+        payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
+        resolvePayrollFields: resolveFormXIXKarnatakaPayrollFields,
+      });
+      if (payrollRow && !payrollRow.fetch_error) {
+        merged = applyFormXIXKarnatakaFooterFieldsToRow(merged, payrollRow, hdrs);
+      }
+      return merged;
+    });
+    enrichFormXIXKarnatakaPayrollRows(exportRows, employees, hdrs, {
+      sanitizeValue: exportHelpers.sanitizeValue,
+      overwrite: false,
+      resolvePayrollRow: (emp) => resolvePayrollRow(emp),
+      resolvePayrollFields: resolveFormXIXKarnatakaPayrollFields,
+    });
+  } else if (
+    exportRows.length > 0 &&
+    typeof resolvePayrollRow === 'function' &&
+    employees.length > 0 &&
+    gridHasPayrollValues
+  ) {
+    const grossHdr = hdrs.find(isFormXIXKAGrossHeader);
+    exportRows = exportRows.map((exportRow, index) => {
+      if (grossHdr && getKarnatakaRowValueForHeader(exportRow, grossHdr) !== '') {
+        return exportRow;
+      }
+      const emp = employees[index]?.Employee || employees[index]?.employee || employees[index] || null;
+      const payrollRow = resolvePayrollRow(emp);
+      if (!payrollRow || payrollRow.fetch_error) return exportRow;
+      return applyFormXIXKarnatakaFooterFieldsToRow(exportRow, payrollRow, hdrs);
+    });
+  }
 
   const baseHeaderData = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
   const workbookArgs = {
@@ -1269,6 +1764,31 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
       mappedData: [],
       employeesOverride: employees,
     });
+  }
+
+  if (exportRows.length > 1 && canUseFormXIXKarnatakaFastExport(parsedFormHeader)) {
+    try {
+      const fastTemplate = await prepareFormXIXKarnatakaFastZipTemplate({
+        templateArrayBuffer,
+        parsedFormHeader,
+        headerFormData: baseHeaderData,
+      });
+      const hasPatchTargets =
+        fastTemplate.positions.employeeHeaderPositions.length > 0 ||
+        fastTemplate.positions.tablePositions.length > 0;
+      if (hasPatchTargets) {
+        return buildFormXIXKarnatakaFastZipDownload({
+          exportRows,
+          fastTemplate,
+          baseHeaderData,
+          parsedFormHeader,
+          formFileName,
+          employees,
+        });
+      }
+    } catch (fastZipErr) {
+      console.warn('Form XIX Karnataka fast ZIP export failed, using standard export:', fastZipErr);
+    }
   }
 
   const zip = new JSZip();

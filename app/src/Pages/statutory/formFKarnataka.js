@@ -98,12 +98,31 @@ export function remapFormFKarnatakaRowToCanonicalHeaders(row, priorHeaders) {
   const canon = FORM_F_KARNATAKA_PART_I_HEADERS;
   const prior = Array.isArray(priorHeaders) ? priorHeaders : [];
   const out = { ...row };
+  const daysWorkedFrom = String(row[canon[0]] ?? row['Days worked From'] ?? '').trim();
+  const daysWorkedTo = String(row[canon[1]] ?? row['Days worked To'] ?? '').trim();
   canon.forEach((key, idx) => {
     let val = row[key];
     if ((val == null || String(val).trim() === '') && prior[idx] != null) {
       const priorKey = prior[idx];
-      if (priorKey && priorKey !== key && row[priorKey] != null && String(row[priorKey]).trim() !== '') {
+      const priorNorm = formFKarnatakaHeaderNorm(priorKey);
+      const isLeaveAvailedIdx = idx >= 5 && idx <= 7;
+      const priorIsDaysWorked =
+        priorNorm.includes('days worked') ||
+        (isLeaveAvailedIdx && (priorNorm === 'from' || priorNorm === 'to'));
+      if (
+        priorKey &&
+        priorKey !== key &&
+        !priorIsDaysWorked &&
+        row[priorKey] != null &&
+        String(row[priorKey]).trim() !== ''
+      ) {
         val = row[priorKey];
+      }
+    }
+    if (isFormFKarnatakaLeaveAvailedColumnIndex(idx) && val != null) {
+      const text = String(val).trim();
+      if (text && (text === daysWorkedFrom || text === daysWorkedTo)) {
+        val = '';
       }
     }
     out[key] = val != null ? val : '';
@@ -476,6 +495,8 @@ export function applyFormFKarnatakaLeaveEarnedAutofill(
         employeeNameHeader,
         {
           approvedRecords: approvedLeaveRecords,
+          monthFrom: options.monthFrom || fromDate,
+          monthTo: options.monthTo || toDate,
           collectEmployeeNameCandidates: options.collectEmployeeNameCandidates,
           collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
         }
@@ -597,6 +618,102 @@ export function readFormFKarnatakaRowCell(row, colIndex, displayHeader) {
   return '';
 }
 
+export function isFormFKarnatakaLeaveAvailedColumnIndex(colIndex) {
+  return colIndex === 5 || colIndex === 6 || colIndex === 7;
+}
+
+/** StatutoryData overlay must not overwrite API-filled leave availed cells (row-index keys are unreliable). */
+export function isFormFKarnatakaLeaveAutofillOverlaySkipHeader(header) {
+  const n = formFKarnatakaHeaderNorm(header);
+  if (!n) return false;
+  if (isFormFKarnatakaLeaveAvailedHeader(header)) return true;
+  if (isFormFKarnatakaLeaveBalanceHeader(header)) return true;
+  if (n.includes('wages') && n.includes('leave') && n.includes('paid')) return true;
+  if (n === 'from' || n === 'to') return true;
+  if (/no\.?\s*of\s+days/.test(n) && !n.includes('days worked')) return true;
+  return false;
+}
+
+function zohoLeaveDateToTime(dateStr) {
+  const m = String(dateStr || '').match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/i);
+  if (!m) return 0;
+  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const mon = months.indexOf(m[2].toLowerCase());
+  if (mon < 0) return 0;
+  return new Date(parseInt(m[3], 10), mon, parseInt(m[1], 10)).getTime();
+}
+
+/** True only when approved leave has availed days overlapping the statutory month. */
+export function approvedLeaveRecordIsAvailedInMonth(record, monthFrom, monthTo) {
+  if (!record || typeof record !== 'object') return false;
+  const status = String(
+    record.ApprovalStatus ?? record.approvalStatus ?? record.Status ?? record.status ?? 'APPROVED'
+  )
+    .trim()
+    .toUpperCase();
+  if (status && status !== 'APPROVED') return false;
+
+  const metrics = normalizeApprovedLeaveRecord(record);
+  const days = Number(String(metrics.daysCount || '').replace(/,/g, ''));
+  if (!Number.isFinite(days) || days <= 0) return false;
+
+  const rangeStart = zohoLeaveDateToTime(monthFrom);
+  const rangeEnd = zohoLeaveDateToTime(monthTo);
+  if (!rangeStart || !rangeEnd) return true;
+
+  const leaveStart = zohoLeaveDateToTime(metrics.from);
+  const leaveEnd = zohoLeaveDateToTime(metrics.to || metrics.from);
+  if (!leaveStart) return false;
+  const end = leaveEnd || leaveStart;
+  return leaveStart <= rangeEnd && end >= rangeStart;
+}
+
+export function filterApprovedLeaveRecordsForMonth(records, monthFrom, monthTo) {
+  return (Array.isArray(records) ? records : []).filter((record) =>
+    approvedLeaveRecordIsAvailedInMonth(record, monthFrom, monthTo)
+  );
+}
+
+export function normalizePersonNameKey(name) {
+  return String(name || '')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/[^a-z0-9\s]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/** Strict person-name match — avoids Satheesh ↔ Sathishkumar substring false positives. */
+export function personNamesMatch(candidate, recordName) {
+  const a = normalizePersonNameKey(candidate);
+  const b = normalizePersonNameKey(recordName);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const aParts = a.split(' ');
+  const bParts = b.split(' ');
+  if (aParts.length === 1 && bParts.length >= 2 && aParts[0].length >= 4 && aParts[0] === bParts[0]) {
+    return true;
+  }
+  if (bParts.length === 1 && aParts.length >= 2 && bParts[0].length >= 4 && bParts[0] === aParts[0]) {
+    return true;
+  }
+  return false;
+}
+
+export function getApprovedLeaveRecordUniqueKey(record) {
+  if (!record || typeof record !== 'object') return '';
+  const id = String(
+    record.recordId || record['Zoho.ID'] || record.ZohoID || record.id || ''
+  )
+    .trim()
+    .toLowerCase();
+  if (id) return id;
+  const { names } = collectApprovedLeaveIdentityKeys(record);
+  const from = String(record.From ?? record.from ?? '').trim();
+  const to = String(record.To ?? record.to ?? '').trim();
+  return `${names[0] || 'unknown'}|${from}|${to}`;
+}
+
 export function collectApprovedLeaveIdentityKeys(record) {
   const names = new Set();
   const ids = new Set();
@@ -605,22 +722,22 @@ export function collectApprovedLeaveIdentityKeys(record) {
   }
   const employee = record.Employee ?? record.employee;
   if (typeof employee === 'string' && employee.trim()) {
-    names.add(employee.trim().toLowerCase());
+    names.add(normalizePersonNameKey(employee));
   } else if (employee && typeof employee === 'object') {
     const n = employee.name ?? employee.Name;
-    if (n) names.add(String(n).trim().toLowerCase());
+    if (n) names.add(normalizePersonNameKey(n));
     const id = employee.id ?? employee.ID ?? employee.erecno;
     if (id) ids.add(String(id).trim().toLowerCase());
   }
   ['Employee Name', 'EmployeeName', 'employeeName'].forEach((k) => {
     const v = record[k];
-    if (v) names.add(String(v).trim().toLowerCase());
+    if (v) names.add(normalizePersonNameKey(v));
   });
-  ['Employee.ID', 'EmployeeID', 'employeeId', 'Employee Id', 'Zoho.ID', 'recordId'].forEach((k) => {
+  ['Employee.ID', 'EmployeeID', 'employeeId', 'Employee Id', 'erecno', 'Erecno'].forEach((k) => {
     const v = record[k];
     if (v != null && String(v).trim()) ids.add(String(v).trim().toLowerCase());
   });
-  return { names: [...names], ids: [...ids] };
+  return { names: [...names].filter(Boolean), ids: [...ids].filter(Boolean) };
 }
 
 export function buildApprovedLeaveLookupMap(records) {
@@ -634,6 +751,8 @@ export function buildApprovedLeaveLookupMap(records) {
     const { names, ids } = collectApprovedLeaveIdentityKeys(record);
     names.forEach((n) => add(n, record));
     ids.forEach((id) => add(id, record));
+    const uniqueKey = getApprovedLeaveRecordUniqueKey(record);
+    if (uniqueKey) add(uniqueKey, record);
   });
   return map;
 }
@@ -694,41 +813,30 @@ export function findApprovedLeaveForFormRow(lookup, row, employeeIdHeader, emplo
   if (!lookup || typeof lookup.get !== 'function') return null;
   const tryKeys = [];
   if (employeeNameHeader && row?.[employeeNameHeader]) {
-    tryKeys.push(String(row[employeeNameHeader]).trim().toLowerCase());
+    tryKeys.push(normalizePersonNameKey(row[employeeNameHeader]));
   }
   if (employeeIdHeader && row?.[employeeIdHeader]) {
     tryKeys.push(String(row[employeeIdHeader]).trim().toLowerCase());
   }
   for (const key of tryKeys) {
-    if (lookup.has(key)) return lookup.get(key);
-  }
-  for (const key of tryKeys) {
-    for (const [mapKey, record] of lookup.entries()) {
-      if (mapKey.includes(key) || key.includes(mapKey)) return record;
-    }
+    if (key && lookup.has(key)) return lookup.get(key);
   }
   return null;
 }
 
-export function findApprovedLeaveForEmployee(
-  lookup,
-  emp,
-  row,
-  employeeIdHeader,
-  employeeNameHeader,
-  options = {}
-) {
-  const approvedRecords = Array.isArray(options.approvedRecords) ? options.approvedRecords : null;
+function collectEmployeeIdentityCandidates(emp, row, employeeIdHeader, employeeNameHeader, options = {}) {
   const nameCandidates = new Set();
   const idCandidates = new Set();
 
   const addName = (value) => {
-    const n = String(value || '').trim().toLowerCase();
+    const n = normalizePersonNameKey(value);
     if (n) nameCandidates.add(n);
   };
   const addId = (value) => {
     const id = String(value || '').trim().toLowerCase();
-    if (id) idCandidates.add(id);
+    if (!id || id.length < 4) return;
+    if (/^\d{1,3}$/.test(id)) return;
+    idCandidates.add(id);
   };
 
   if (typeof options.collectEmployeeNameCandidates === 'function') {
@@ -750,6 +858,9 @@ export function findApprovedLeaveForEmployee(
         emp['Zoho_ID'] ||
         emp.ZohoID ||
         emp['ZohoID'] ||
+        emp.erecno ||
+        emp.Erecno ||
+        emp['Erecno'] ||
         emp.Employee_ID ||
         emp['Employee ID'] ||
         emp.employeeId
@@ -760,40 +871,91 @@ export function findApprovedLeaveForEmployee(
     if (first) addName(first);
   }
 
-  const tryLookup = (key) => {
-    const k = String(key || '').trim().toLowerCase();
-    if (!k) return null;
-    if (lookup?.has?.(k)) return lookup.get(k);
-    if (!lookup || typeof lookup.entries !== 'function') return null;
-    for (const [mapKey, record] of lookup.entries()) {
-      if (mapKey === k || mapKey.includes(k) || k.includes(mapKey)) return record;
+  return { nameCandidates, idCandidates };
+}
+
+function approvedLeaveRecordMatchesEmployee(record, nameCandidates, idCandidates) {
+  const { names, ids } = collectApprovedLeaveIdentityKeys(record);
+  if (ids.some((id) => idCandidates.has(id))) return true;
+  for (const recordName of names) {
+    for (const cand of nameCandidates) {
+      if (personNamesMatch(cand, recordName)) return true;
+    }
+  }
+  return false;
+}
+
+export function findApprovedLeaveForEmployee(
+  lookup,
+  emp,
+  row,
+  employeeIdHeader,
+  employeeNameHeader,
+  options = {}
+) {
+  const approvedRecords = Array.isArray(options.approvedRecords) ? options.approvedRecords : [];
+  const usedRecordKeys =
+    options.usedRecordKeys instanceof Set ? options.usedRecordKeys : new Set();
+  const { nameCandidates, idCandidates } = collectEmployeeIdentityCandidates(
+    emp,
+    row,
+    employeeIdHeader,
+    employeeNameHeader,
+    options
+  );
+
+  if (nameCandidates.size === 0 && idCandidates.size === 0) return null;
+
+  const isAvailable = (record) => {
+    const key = getApprovedLeaveRecordUniqueKey(record);
+    return key && !usedRecordKeys.has(key);
+  };
+
+  const pickFrom = (records) => {
+    const monthFrom = options.monthFrom || '';
+    const monthTo = options.monthTo || '';
+    for (const record of records) {
+      if (!record || !isAvailable(record)) continue;
+      if (monthFrom && monthTo && !approvedLeaveRecordIsAvailedInMonth(record, monthFrom, monthTo)) {
+        continue;
+      }
+      if (approvedLeaveRecordMatchesEmployee(record, nameCandidates, idCandidates)) {
+        return record;
+      }
     }
     return null;
   };
 
-  for (const key of idCandidates) {
-    const hit = tryLookup(key);
-    if (hit) return hit;
-  }
-  for (const key of nameCandidates) {
-    const hit = tryLookup(key);
-    if (hit) return hit;
-  }
+    // Exact map lookup by id / normalized name (no substring matching).
+  if (lookup && typeof lookup.get === 'function') {
+    const monthFrom = options.monthFrom || '';
+    const monthTo = options.monthTo || '';
+    const lookupHitValid = (hit) =>
+      hit &&
+      isAvailable(hit) &&
+      (!monthFrom || !monthTo || approvedLeaveRecordIsAvailedInMonth(hit, monthFrom, monthTo)) &&
+      approvedLeaveRecordMatchesEmployee(hit, nameCandidates, idCandidates);
 
-  if (approvedRecords) {
-    for (const record of approvedRecords) {
-      const { names, ids } = collectApprovedLeaveIdentityKeys(record);
-      if (ids.some((id) => idCandidates.has(id))) return record;
-      if (names.some((name) => nameCandidates.has(name))) return record;
-      for (const name of names) {
-        for (const cand of nameCandidates) {
-          if (name && cand && (name.includes(cand) || cand.includes(name))) return record;
-        }
-      }
+    for (const id of idCandidates) {
+      const hit = lookup.get(id);
+      if (lookupHitValid(hit)) return hit;
+    }
+    for (const name of nameCandidates) {
+      const hit = lookup.get(name);
+      if (lookupHitValid(hit)) return hit;
     }
   }
 
-  return null;
+  return pickFrom(approvedRecords);
+}
+
+export function clearFormFKarnatakaApprovedLeaveOnRow(row) {
+  if (!row) return;
+  const canon = FORM_F_KARNATAKA_PART_I_HEADERS;
+  [5, 6, 7, 9].forEach((idx) => {
+    const key = canon[idx];
+    if (key) row[key] = '';
+  });
 }
 
 export function applyFormFKarnatakaApprovedLeaveToRow(
@@ -801,10 +963,14 @@ export function applyFormFKarnatakaApprovedLeaveToRow(
   approvedRecord,
   headers,
   tableHeaders,
-  { overwrite = true } = {}
+  { overwrite = true, monthFrom = '', monthTo = '' } = {}
 ) {
   if (!row || !approvedRecord) return 0;
+  if (monthFrom && monthTo && !approvedLeaveRecordIsAvailedInMonth(approvedRecord, monthFrom, monthTo)) {
+    return 0;
+  }
   const metrics = normalizeApprovedLeaveRecord(approvedRecord);
+  if (!metrics.daysCount || Number(metrics.daysCount) <= 0) return 0;
   const canon = FORM_F_KARNATAKA_PART_I_HEADERS;
   let applied = 0;
 
@@ -910,7 +1076,10 @@ export function applyFormFKarnatakaApprovedLeaveAutofill(
   const { employeeNameHeader, employeeIdHeader } = options.resolveEmployeeHeaders
     ? options.resolveEmployeeHeaders(canonicalHeaders)
     : { employeeNameHeader: '', employeeIdHeader: '' };
+  const monthFrom = options.monthFrom || '';
+  const monthTo = options.monthTo || '';
 
+  const usedRecordKeys = new Set();
   let hits = 0;
   mappedData.forEach((row, index) => {
     const normalizedRow = remapFormFKarnatakaRowToCanonicalHeaders(row, priorHeaders);
@@ -926,19 +1095,28 @@ export function applyFormFKarnatakaApprovedLeaveAutofill(
       employeeNameHeader,
       {
         approvedRecords: approvedLeaveRecords,
+        usedRecordKeys,
+        monthFrom,
+        monthTo,
         collectEmployeeNameCandidates: options.collectEmployeeNameCandidates,
         collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
       }
     );
-    if (!approvedRecord) return;
+    if (!approvedRecord) {
+      if (options.overwrite !== false) clearFormFKarnatakaApprovedLeaveOnRow(row);
+      return;
+    }
+    const recordKey = getApprovedLeaveRecordUniqueKey(approvedRecord);
+    if (recordKey) usedRecordKeys.add(recordKey);
     const applied = applyFormFKarnatakaApprovedLeaveToRow(
       row,
       approvedRecord,
       null,
       canonicalHeaders,
-      { overwrite: options.overwrite !== false }
+      { overwrite: options.overwrite !== false, monthFrom, monthTo }
     );
     if (applied > 0) hits += 1;
+    else if (options.overwrite !== false) clearFormFKarnatakaApprovedLeaveOnRow(row);
   });
   return hits;
 }

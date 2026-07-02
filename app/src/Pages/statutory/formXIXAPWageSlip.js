@@ -94,7 +94,7 @@ export const FORM_XIX_AP_TEMPLATE_SPECS = [
     key: 'form_xix_ap_days_worked',
     label: '1. No. of days worked',
     group: 'wages',
-    match: /no\.?\s*of\s+days\s+worked|^\s*1[\.\)]\s+.*days\s+worked/i
+    match: /(?:no|number)\.?\s*of\s+days\s+worked|days\s+worked|^\s*1[\.\)]\s+.*days\s+worked/i
   },
   {
     key: 'form_xix_ap_units_worked',
@@ -106,7 +106,7 @@ export const FORM_XIX_AP_TEMPLATE_SPECS = [
     key: 'form_xix_ap_rate',
     label: '3. Rate of daily wages/piece-rate',
     group: 'wages',
-    match: /rate\s+of\s+daily\s+wages|piece.?rate|^\s*3[\.\)]\s+.*rate/i
+    match: /rate\s+of\s+(?:daily\s+)?wages|piece[\s-]?rate|daily\s+wages[\s/]*piece|^\s*3[\.\)]\s+.*rate/i
   },
   {
     key: 'form_xix_ap_overtime',

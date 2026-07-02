@@ -121,7 +121,7 @@ export function isFormXIXMPWorkmanNameHeader(h) {
 }
 
 export function isFormXIXMPDaysWorkedHeader(h) {
-  return /days\s+worked/.test(normHeader(h));
+  return /(?:no|number)\.?\s*of\s+days\s+worked|days\s+worked/.test(normHeader(h));
 }
 
 export function isFormXIXMPUnitsWorkedHeader(h) {
@@ -593,17 +593,27 @@ const resolveFormXIXMPDailyWageRate = (flatRow, payrollRow) => {
     );
   }
 
-  if (periodBasic === '') return '';
+  if (periodBasic !== '') {
+    const basicNum = Number(periodBasic);
+    const dailyBasic = Math.round((basicNum / daysNum) * 100) / 100;
 
-  const basicNum = Number(periodBasic);
-  const dailyBasic = Math.round((basicNum / daysNum) * 100) / 100;
-
-  // Reject mis-tagged values that are really gross ÷ days (not contractual daily rate).
-  if (Number.isFinite(avgGrossPerDay) && Math.abs(dailyBasic - avgGrossPerDay) < 0.05) {
-    if (basicNum >= grossNum * 0.98) return '';
+    // Reject mis-tagged values that are really gross ÷ days (not contractual daily rate).
+    if (Number.isFinite(avgGrossPerDay) && Math.abs(dailyBasic - avgGrossPerDay) < 0.05) {
+      if (basicNum >= grossNum * 0.98) {
+        /* fall through to gross/days below */
+      } else {
+        return dailyBasic;
+      }
+    } else {
+      return dailyBasic;
+    }
   }
 
-  return dailyBasic;
+  if (Number.isFinite(grossNum) && grossNum > 0 && daysNum > 0) {
+    return Math.round((grossNum / daysNum) * 100) / 100;
+  }
+
+  return '';
 };
 
 export function resolveFormXIXMPPayrollFields(payrollRow) {
@@ -887,7 +897,6 @@ const findMPStackedLabelCell = (
       if (!raw || isNarrativeBlob(raw)) continue;
       const norm = formXIXAPHeaderNorm(raw);
       if (!matchRe.test(norm) && !matchRe.test(raw)) continue;
-      if (isWageLabelBlob(raw) && !/^\s*\d+[\.\)]/.test(raw)) continue;
       const value = String(getMergedAwareCellText(r, FORM_XIX_MP_STACKED_VALUE_COL - 1) || '').trim();
       return {
         labelRow: r,
@@ -1007,6 +1016,279 @@ const formXIXMPExcelCellValueToString = (val) => {
   return '';
 };
 
+const formXIXMPSanitizeExportText = (value) =>
+  String(value ?? '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    .trim();
+
+/** Site / period headers — written once in fast export template (not per employee). */
+const FORM_XIX_MP_STATIC_HEADER_KEYS = new Set([
+  'form_xix_ap_contractor',
+  'form_xix_ap_nature_location',
+  'form_xix_ap_period_ending',
+  'form_xix_ap_initials',
+]);
+
+const formXIXMPEscapeXml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const formXIXMPColToLetter = (col) => {
+  let result = '';
+  let n = col;
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    result = String.fromCharCode(65 + rem) + result;
+    n = Math.floor((n - 1) / 26);
+  }
+  return result;
+};
+
+const formXIXMPToCellRef = (row, col) => `${formXIXMPColToLetter(col)}${row}`;
+
+const formXIXMPUpsertInlineStrCell = (sheetXml, cellRef, value) => {
+  const text = formXIXMPEscapeXml(String(value ?? '').trim());
+  const cellXml = text
+    ? `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`
+    : `<c r="${cellRef}"/>`;
+  const cellRe = new RegExp(`<c\\s+r="${cellRef}"[^>]*(?:/>|>[\\s\\S]*?</c>)`, 'i');
+  if (cellRe.test(sheetXml)) {
+    return sheetXml.replace(cellRe, cellXml);
+  }
+  const rowNum = cellRef.replace(/^[A-Z]+/i, '');
+  const rowRe = new RegExp(`(<row\\s+r="${rowNum}"[^>]*>)([\\s\\S]*?)(</row>)`, 'i');
+  if (!rowRe.test(sheetXml)) return sheetXml;
+  return sheetXml.replace(rowRe, `$1$2${cellXml}$3`);
+};
+
+const resolveFormXIXMPWorksheetEntry = (zipFiles) =>
+  Object.keys(zipFiles)
+    .filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0] || null;
+
+const pickStaticFormXIXMPHeaderData = (headerFormData) => {
+  const out = {};
+  if (!headerFormData || typeof headerFormData !== 'object') return out;
+  Object.entries(headerFormData).forEach(([key, value]) => {
+    if (!FORM_XIX_MP_STATIC_HEADER_KEYS.has(key)) return;
+    const text = formXIXMPSanitizeExportText(value);
+    if (text) out[key] = text;
+  });
+  return out;
+};
+
+export function canUseFormXIXMPFastExport(parsedFormHeader) {
+  if (!parsedFormHeader?.formXIXMPTableLayout) return false;
+  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  const positioned = fields.filter((field) => field?.key && field.labelRow != null).length;
+  return positioned >= 4;
+}
+
+export function headerFormDataHasFormXIXMPWageValues(headerFormData) {
+  if (!headerFormData || typeof headerFormData !== 'object') return false;
+  return ['form_xix_ap_gross', 'form_xix_ap_net', 'form_xix_ap_days_worked', 'form_xix_ap_workman'].some(
+    (key) => String(headerFormData[key] ?? '').trim() !== ''
+  );
+}
+
+const resolveFormXIXMPFastExportCellPositions = (parsedFormHeader, worksheet = null) => {
+  const positions = [];
+  const seenRefs = new Set();
+  const seenKeys = new Set();
+
+  const pushPos = (key, row, col) => {
+    if (!key || row == null || col == null) return;
+    if (seenKeys.has(key)) return;
+    const cellRef = formXIXMPToCellRef(row, col);
+    if (seenRefs.has(cellRef)) return;
+    seenKeys.add(key);
+    seenRefs.add(cellRef);
+    positions.push({ key, row, col, cellRef });
+  };
+
+  if (worksheet) {
+    resolveFormXIXMPWageFieldPositions(worksheet, parsedFormHeader).forEach((pos) => {
+      if (!pos?.key || FORM_XIX_MP_STATIC_HEADER_KEYS.has(pos.key)) return;
+      pushPos(pos.key, pos.row, pos.col);
+    });
+    const workmanField = resolveFormXIXMPWorkmanHeaderField(parsedFormHeader);
+    if (workmanField?.labelRow != null) {
+      const row = (workmanField.valueRow ?? workmanField.labelRow) + 1;
+      const col =
+        workmanField.valueCol != null ? workmanField.valueCol + 1 : FORM_XIX_MP_STACKED_VALUE_COL;
+      pushPos('form_xix_ap_workman', row, col);
+    }
+  }
+
+  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  fields.forEach((field) => {
+    if (!field?.key || FORM_XIX_MP_STATIC_HEADER_KEYS.has(field.key)) return;
+    if (seenKeys.has(field.key)) return;
+    if (field.labelRow == null) return;
+    const row = (field.valueRow ?? field.labelRow) + 1;
+    const col = field.valueCol != null ? field.valueCol + 1 : FORM_XIX_MP_STACKED_VALUE_COL;
+    pushPos(field.key, row, col);
+  });
+
+  if (worksheet) {
+    const maxScanRows = Math.max(120, worksheet.rowCount + 10);
+    const maxScanCols = 12;
+    FORM_XIX_MP_WAGE_SPECS.forEach((spec) => {
+      if (seenKeys.has(spec.key)) return;
+      for (let r = 1; r <= maxScanRows; r += 1) {
+        for (let c = 1; c <= maxScanCols; c += 1) {
+          const raw = formXIXMPExcelCellValueToString(worksheet.getCell(r, c)?.value);
+          const norm = formXIXAPHeaderNorm(raw);
+          if (!spec.match.test(norm) && !spec.match.test(raw)) continue;
+          pushPos(spec.key, r, FORM_XIX_MP_STACKED_VALUE_COL);
+          return;
+        }
+      }
+    });
+    if (!seenKeys.has('form_xix_ap_workman')) {
+      for (let r = 1; r <= maxScanRows; r += 1) {
+        for (let c = 1; c <= maxScanCols; c += 1) {
+          const raw = formXIXMPExcelCellValueToString(worksheet.getCell(r, c)?.value);
+          const norm = formXIXAPHeaderNorm(raw);
+          if (!/name\s+and\s+father.*workman|father.*husband.*workman/i.test(norm)) continue;
+          pushPos('form_xix_ap_workman', r, FORM_XIX_MP_STACKED_VALUE_COL);
+          break;
+        }
+        if (seenKeys.has('form_xix_ap_workman')) break;
+      }
+    }
+  }
+
+  return positions;
+};
+
+const clearFormXIXMPPerEmployeeValueCells = (worksheet, positions) => {
+  if (!worksheet || !Array.isArray(positions)) return;
+  positions.forEach((pos) => {
+    worksheet.getCell(pos.row, pos.col).value = '';
+  });
+};
+
+const patchFormXIXMPFastSheetXml = (baseSheetXml, mergedHeaderData, positions) => {
+  let sheetXml = baseSheetXml;
+  positions.forEach((pos) => {
+    const value = mergedHeaderData?.[pos.key];
+    sheetXml = formXIXMPUpsertInlineStrCell(sheetXml, pos.cellRef, formXIXMPSanitizeExportText(value));
+  });
+  return sheetXml;
+};
+
+const buildFormXIXMPFastXlsxBytes = async (fastTemplate, mergedHeaderData) => {
+  const { sheetEntry, baseSheetXml, staticFiles, positions } = fastTemplate;
+  const sheetXml = patchFormXIXMPFastSheetXml(baseSheetXml, mergedHeaderData, positions);
+  const entryZip = new JSZip();
+  Object.entries(staticFiles).forEach(([path, data]) => {
+    entryZip.file(path, data);
+  });
+  entryZip.file(sheetEntry, sheetXml);
+  return entryZip.generateAsync({ type: 'uint8array', compression: 'STORE' });
+};
+
+export async function prepareFormXIXMPFastExportTemplate({
+  templateArrayBuffer,
+  parsedFormHeader,
+  headerFormData,
+  sheetNameHint,
+}) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateArrayBuffer);
+  const sheetCandidates = Array.isArray(workbook.worksheets) ? workbook.worksheets : [];
+  const preferred = String(sheetNameHint || '').trim();
+  const worksheet =
+    (preferred && sheetCandidates.find((ws) => String(ws?.name || '').trim() === preferred)) ||
+    sheetCandidates[0] ||
+    null;
+  if (!worksheet) throw new Error('Template worksheet not found.');
+
+  const positions = resolveFormXIXMPFastExportCellPositions(parsedFormHeader, worksheet);
+  clearFormXIXMPPerEmployeeValueCells(worksheet, positions);
+
+  const staticHeaderData = pickStaticFormXIXMPHeaderData(headerFormData);
+  if (Object.keys(staticHeaderData).length > 0) {
+    writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, staticHeaderData, parsedFormHeader, {
+      excelCellValueToString: formXIXMPExcelCellValueToString,
+    });
+  }
+
+  const preparedBuffer = await workbook.xlsx.writeBuffer();
+  const templateZip = await JSZip.loadAsync(preparedBuffer);
+  const sheetEntry = resolveFormXIXMPWorksheetEntry(templateZip.files);
+  if (!sheetEntry) throw new Error('Template worksheet XML not found.');
+  const baseSheetXml = await templateZip.file(sheetEntry).async('string');
+  const staticFiles = {};
+  await Promise.all(
+    Object.keys(templateZip.files).map(async (path) => {
+      const file = templateZip.files[path];
+      if (!file || file.dir || path === sheetEntry) return;
+      staticFiles[path] = await file.async('uint8array');
+    })
+  );
+  return { sheetEntry, baseSheetXml, staticFiles, positions };
+};
+
+const buildFormXIXMPFastZipDownload = async ({
+  exportRows,
+  fastTemplate,
+  baseHeaderData,
+  parsedFormHeader,
+  hdrs,
+  formFileName,
+  employees = [],
+  resolvePayrollRow = null,
+}) => {
+  const rowsForZip = Array.isArray(exportRows) && exportRows.length > 0 ? exportRows : [null];
+  const zip = new JSZip();
+  const usedNames = new Map();
+  for (let i = 0; i < rowsForZip.length; i += 1) {
+    const empItem = resolveFormXIXMPDownloadEmployeeForRow(rowsForZip[i], employees, i);
+    const payrollRow =
+      typeof resolvePayrollRow === 'function' && empItem ? resolvePayrollRow(empItem) : null;
+    const mergedHeaderData = sanitizeFormXIXMPHeaderFormData(
+      buildEmployeeHeaderFormData(baseHeaderData, rowsForZip[i], parsedFormHeader, payrollRow)
+    );
+    const xlsxBytes = await buildFormXIXMPFastXlsxBytes(fastTemplate, mergedHeaderData);
+    const baseName = resolveFormXIXMPEmployeeDownloadBaseName(rowsForZip[i], hdrs, i);
+    zip.file(allocateUniqueFormXIXMPDownloadFileName(baseName, usedNames), xlsxBytes);
+    if (i > 0 && i % 25 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_XIX_MP')
+    .replace(/\.xlsx?$/i, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return {
+    blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
+    fileName: `${zipBase}_Employees.zip`,
+  };
+};
+
+const resolveFormXIXMPDownloadExportRows = (mappedData, headers, employees, helpers = {}) => {
+  const hdrs = resolveFormXIXMPWageTableHeaders(headers);
+  const tableRows = Array.isArray(mappedData) ? mappedData : [];
+  const fromTable = tableRows.filter((row) => rowHasMeaningfulFormXIXMPExportData(row, hdrs));
+  if (fromTable.length > 0) return fromTable;
+
+  const fromEmployees =
+    employees.length > 0 ? resolveFormXIXMPExportRows(tableRows, hdrs, employees, helpers) : [];
+  const meaningfulFromEmployees = fromEmployees.filter((row) =>
+    rowHasMeaningfulFormXIXMPExportData(row, hdrs)
+  );
+  if (meaningfulFromEmployees.length > 0) return meaningfulFromEmployees;
+
+  if (employees.length > 0) {
+    return mapFormXIXMPRowsFromEmployees(employees, hdrs, helpers);
+  }
+  return [];
+};
+
 export function resolveFormXIXMPWageFieldPositions(worksheet, parsedFormHeader) {
   if (!worksheet) return [];
   const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
@@ -1057,24 +1339,67 @@ export function resolveFormXIXMPWorkmanHeaderField(parsedFormHeader) {
   return fields.find((f) => f.key === 'form_xix_ap_workman') || null;
 }
 
-function buildEmployeeHeaderFormData(headerFormData, employeeRow, parsedFormHeader) {
+function buildEmployeeHeaderFormData(headerFormData, employeeRow, parsedFormHeader, payrollRow = null) {
   const base = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
-  if (!employeeRow || typeof employeeRow !== 'object') return base;
-  const workmanHeader = FORM_XIX_MP_WAGE_TABLE_HEADERS.find(isFormXIXMPWorkmanNameHeader);
-  const workmanValue = workmanHeader ? getFormXIXMPRowValueForHeader(employeeRow, workmanHeader) : '';
-  if (workmanValue) base.form_xix_ap_workman = workmanValue;
+  if (employeeRow && typeof employeeRow === 'object') {
+    const workmanHeader = FORM_XIX_MP_WAGE_TABLE_HEADERS.find(isFormXIXMPWorkmanNameHeader);
+    const workmanValue = workmanHeader ? getFormXIXMPRowValueForHeader(employeeRow, workmanHeader) : '';
+    if (workmanValue) base.form_xix_ap_workman = workmanValue;
 
-  const wagePositions = FORM_XIX_MP_WAGE_SPECS;
-  wagePositions.forEach((spec) => {
-    const tableHeader =
-      FORM_XIX_MP_WAGE_TABLE_HEADERS.find(
-        (h) => FORM_XIX_MP_WAGE_KEY_BY_HEADER.get(h.replace(/\s*:+\s*$/, '')) === spec.key
-      ) || spec.label;
-    const value = getFormXIXMPRowValueForHeader(employeeRow, tableHeader);
-    if (String(value ?? '').trim() !== '') base[spec.key] = value;
-  });
+    FORM_XIX_MP_WAGE_SPECS.forEach((spec) => {
+      const tableHeader =
+        FORM_XIX_MP_WAGE_TABLE_HEADERS.find(
+          (h) => FORM_XIX_MP_WAGE_KEY_BY_HEADER.get(h.replace(/\s*:+\s*$/, '')) === spec.key
+        ) || spec.label;
+      const value = getFormXIXMPRowValueForHeader(employeeRow, tableHeader);
+      if (String(value ?? '').trim() !== '') base[spec.key] = value;
+    });
+  }
+
+  if (payrollRow && !payrollRow.fetch_error) {
+    const fromPayroll = applyFormXIXMPPayrollToHeaderData({}, payrollRow);
+    FORM_XIX_MP_WAGE_SPECS.forEach((spec) => {
+      const payrollVal = String(fromPayroll[spec.key] ?? '').trim();
+      if (payrollVal && String(base[spec.key] ?? '').trim() === '') {
+        base[spec.key] = payrollVal;
+      }
+    });
+  }
+
   return base;
 }
+
+const unwrapFormXIXMPEmployeeItem = (empItem) =>
+  empItem?.Employee || empItem?.employee || empItem || null;
+
+const resolveFormXIXMPDownloadEmployeeForRow = (row, employees, index) => {
+  const list = Array.isArray(employees) ? employees : [];
+  if (list.length === 0) return null;
+  const lookupId = String(row?.__employeeLookupId ?? '').trim();
+  if (lookupId) {
+    const hit = list.find((empItem) => {
+      const emp = unwrapFormXIXMPEmployeeItem(empItem);
+      if (!emp || typeof emp !== 'object') return false;
+      const codes = [emp.EmployeeID, emp['EmployeeID'], emp.Zoho_ID, emp['Zoho_ID']]
+        .map((value) => String(value ?? '').trim())
+        .filter(Boolean);
+      return codes.some((code) => code === lookupId);
+    });
+    if (hit) return hit;
+  }
+  return list[index] ?? list[0] ?? null;
+};
+
+const enrichFormXIXMPExportRowForDownload = (row, empItem, hdrs, helpers = {}) => {
+  const emp = unwrapFormXIXMPEmployeeItem(empItem);
+  if (!emp || typeof emp !== 'object') return row && typeof row === 'object' ? { ...row } : {};
+  const { resolvePayrollRow, sanitizeValue = (v) => String(v ?? '').trim() } = helpers;
+  const payrollRow = typeof resolvePayrollRow === 'function' ? resolvePayrollRow(empItem) : null;
+  return applyFormXIXMPEmployeeToRow(row && typeof row === 'object' ? { ...row } : {}, emp, hdrs, {
+    sanitizeValue,
+    payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
+  });
+};
 
 export async function buildFormXIXMPWorkbookWithTemplateStyles({
   templateArrayBuffer,
@@ -1119,11 +1444,6 @@ export async function buildFormXIXMPWorkbookWithTemplateStyles({
   const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   return { blob, fileName };
 }
-
-const formXIXMPSanitizeExportText = (value) =>
-  String(value ?? '')
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
-    .trim();
 
 function sanitizeFormXIXMPHeaderFormData(headerFormData) {
   if (!headerFormData || typeof headerFormData !== 'object') return {};
@@ -1186,25 +1506,24 @@ export async function buildFormXIXMPPerEmployeeDownload({
 
   const hdrs = resolveFormXIXMPWageTableHeaders(headersToUse);
   const employees = Array.isArray(employeesOverride) ? employeesOverride : [];
-  const tableRows = Array.isArray(mappedData) ? mappedData : [];
   const exportHelpers = {
     sanitizeValue: (v) => String(v ?? '').trim(),
     resolvePayrollRow: typeof resolvePayrollRow === 'function' ? resolvePayrollRow : null,
   };
-  const fromEmployees =
-    employees.length > 0
-      ? resolveFormXIXMPExportRows(tableRows, hdrs, employees, exportHelpers)
-      : [];
-  const fromTable = tableRows.filter((row) => rowHasMeaningfulFormXIXMPExportData(row, hdrs));
-  let exportRows = (fromEmployees.length > fromTable.length ? fromEmployees : fromTable).filter((row) =>
-    rowHasMeaningfulFormXIXMPExportData(row, hdrs)
+  let exportRows = resolveFormXIXMPDownloadExportRows(
+    mappedData,
+    hdrs,
+    employees,
+    exportHelpers
+  ).filter((row) => rowHasMeaningfulFormXIXMPExportData(row, hdrs));
+  exportRows = exportRows.map((row, index) =>
+    enrichFormXIXMPExportRowForDownload(
+      row,
+      resolveFormXIXMPDownloadEmployeeForRow(row, employees, index),
+      hdrs,
+      exportHelpers
+    )
   );
-  if (exportRows.length === 0 && employees.length > 0) {
-    exportRows = mapFormXIXMPRowsFromEmployees(employees, hdrs, exportHelpers);
-  }
-  if (employees.length > exportRows.length) {
-    exportRows = mapFormXIXMPRowsFromEmployees(employees, hdrs, exportHelpers);
-  }
   const baseHeaderData = sanitizeFormXIXMPHeaderFormData(headerFormData);
   const workbookArgs = {
     templateArrayBuffer,
@@ -1214,28 +1533,48 @@ export async function buildFormXIXMPPerEmployeeDownload({
     sheetNameHint,
   };
 
-  if (exportRows.length <= 1 && employees.length <= 1) {
-    const rows = exportRows.length === 1 ? exportRows : [];
-    return buildFormXIXMPWorkbookWithTemplateStyles({
-      ...workbookArgs,
-      mappedData: rows,
+  const rowsForZip = exportRows.length > 0 ? exportRows : [null];
+
+  const useFastExport = canUseFormXIXMPFastExport(parsedFormHeader);
+  if (useFastExport) {
+    const fastTemplate = await prepareFormXIXMPFastExportTemplate({
+      templateArrayBuffer,
+      parsedFormHeader,
       headerFormData: baseHeaderData,
+      sheetNameHint,
+    });
+
+    return buildFormXIXMPFastZipDownload({
+      exportRows: rowsForZip,
+      fastTemplate,
+      baseHeaderData,
+      parsedFormHeader,
+      hdrs,
+      formFileName,
+      employees,
+      resolvePayrollRow: exportHelpers.resolvePayrollRow,
     });
   }
 
   const zip = new JSZip();
   const usedNames = new Map();
-  for (let i = 0; i < exportRows.length; i += 1) {
+  for (let i = 0; i < rowsForZip.length; i += 1) {
+    const empItem = resolveFormXIXMPDownloadEmployeeForRow(rowsForZip[i], employees, i);
+    const payrollRow =
+      typeof exportHelpers.resolvePayrollRow === 'function' && empItem
+        ? exportHelpers.resolvePayrollRow(empItem)
+        : null;
     const mergedHeaderData = sanitizeFormXIXMPHeaderFormData(
-      buildEmployeeHeaderFormData(baseHeaderData, exportRows[i], parsedFormHeader)
+      buildEmployeeHeaderFormData(baseHeaderData, rowsForZip[i], parsedFormHeader, payrollRow)
     );
+    const mappedRow = rowsForZip[i] && typeof rowsForZip[i] === 'object' ? [rowsForZip[i]] : [];
     const { blob } = await buildFormXIXMPWorkbookWithTemplateStyles({
       ...workbookArgs,
-      mappedData: [exportRows[i]],
+      mappedData: mappedRow,
       headerFormData: mergedHeaderData,
     });
     const xlsxBytes = new Uint8Array(await blob.arrayBuffer());
-    const baseName = resolveFormXIXMPEmployeeDownloadBaseName(exportRows[i], hdrs, i);
+    const baseName = resolveFormXIXMPEmployeeDownloadBaseName(rowsForZip[i], hdrs, i);
     zip.file(allocateUniqueFormXIXMPDownloadFileName(baseName, usedNames), xlsxBytes);
     if (i > 0 && i % 15 === 0) {
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1245,7 +1584,7 @@ export async function buildFormXIXMPPerEmployeeDownload({
     .replace(/\.xlsx?$/i, '')
     .replace(/[^a-zA-Z0-9._-]+/g, '_');
   return {
-    blob: await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' }),
+    blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
     fileName: `${zipBase}_Employees.zip`,
   };
 }

@@ -1356,6 +1356,12 @@ export function resolveFormXXAPDeductionsTableLayout(workbook, hints = {}) {
     if (/show\s+cause|fine\s+imposed|nature\s*&\s*date\s+of\s+offence/.test(combinedText) && !/damage/.test(combinedText)) {
       score -= 45;
     }
+    if (/surname/.test(combinedText) && /\bgender\b/.test(combinedText) && /date\s+of\s+birth|nationality|education/.test(combinedText)) {
+      score -= 120;
+    }
+    if (/employees?\s*\/\s*workme|worker\s+code/.test(combinedText) && /surname/.test(combinedText)) {
+      score -= 100;
+    }
     if (/s\.?\s*no|serial|sl\.?\s*no/.test(combinedText)) score += 15;
     score += cells.length * 2;
 

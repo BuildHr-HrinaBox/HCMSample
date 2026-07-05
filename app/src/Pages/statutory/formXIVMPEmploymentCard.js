@@ -192,18 +192,18 @@ export const FORM_XIV_MP_FIELD_GROUPS = [
 export const FORM_XIV_MP_HEADER_SPECS = [
   {
     key: 'form_xiv_mp_contractor',
-    label: 'Name and address of contractor',
+    label: 'Name and Address of the Contractor',
     group: 'header',
     fieldType: 'textarea',
-    match: /name\s+and\s+address\s+(?:of|if)\s+contractor/i,
+    match: /name\s+and\s+address\s+(?:of|if)\s+(?:the\s+)?contractor/i,
   },
   {
     key: 'form_xiv_mp_establishment',
-    label: 'Name and address of establishment in/under which contract is carried on',
+    label: 'Name and Address of the Establishment in/under which Contract is carried on:',
     group: 'header',
     fieldType: 'textarea',
     match:
-      /name\s+and\s+address\s+of\s+establishment[\s\S]{0,80}?contract\s+is\s+carried\s+on|establishment\s+in\s*\/\s*under\s+which\s+contract/i,
+      /name\s+and\s+address\s+of\s+(?:the\s+)?establishment[\s\S]{0,80}?contract\s+is\s+carried\s+on|establishment\s+in\s*\/\s*under\s+which(?:\s+contract)?/i,
   },
   {
     key: 'form_xiv_mp_nature_location',
@@ -214,10 +214,10 @@ export const FORM_XIV_MP_HEADER_SPECS = [
   },
   {
     key: 'form_xiv_mp_principal_employer',
-    label: 'Name and address of principal employer',
+    label: 'Name and address of Principal Employer',
     group: 'header',
     fieldType: 'textarea',
-    match: /name\s+and\s+address\s+of\s+principal\s+employer/i,
+    match: /name\s+and\s+address\s+of\s+(?:the\s+)?principal\s+employer/i,
   },
 ];
 
@@ -268,7 +268,8 @@ const readValueBelowOrBesideLabel = (
 ) => {
   const maxC = Math.max(20, effectiveSheetCols || 0);
   const readBelow = () => {
-    for (let r = labelRow + 1; r <= Math.min(labelRow + 8, labelRow + 12); r += 1) {
+    const startRow = preferBelow ? labelRow + 2 : labelRow + 1;
+    for (let r = startRow; r <= Math.min(labelRow + 12, labelRow + 14); r += 1) {
       const v = String(getMergedAwareCellText(r, labelCol) || '').trim();
       if (!v || isFormXIVPlaceholderCell(v)) {
         return { value: '', valueCol: labelCol, valueRow: r };
@@ -1086,6 +1087,140 @@ const FORM_XIV_GJ_DEFAULT_VALUE_COL = 2;
 const FORM_XIV_MP_STACKED_VALUE_COL = 5;
 const FORM_XIV_MP_STACKED_VALUE_COL_TO = 12;
 
+const excelColLettersToNumber = (letters) => {
+  let n = 0;
+  for (const ch of String(letters || '').toUpperCase()) {
+    n = n * 26 + (ch.charCodeAt(0) - 64);
+  }
+  return n;
+};
+
+const parseExcelJsMergeRanges = (worksheet) => {
+  const raw = worksheet?.model?.merges;
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  return raw
+    .map((range) => {
+      const parts = String(range || '').split(':');
+      if (parts.length !== 2) return null;
+      const parseRef = (ref) => {
+        const m = String(ref).match(/^([A-Z]+)(\d+)$/i);
+        if (!m) return null;
+        return { col: excelColLettersToNumber(m[1]), row: Number(m[2]) };
+      };
+      const start = parseRef(parts[0]);
+      const end = parseRef(parts[1]);
+      if (!start || !end) return null;
+      return {
+        top: Math.min(start.row, end.row),
+        left: Math.min(start.col, end.col),
+        bottom: Math.max(start.row, end.row),
+        right: Math.max(start.col, end.col),
+      };
+    })
+    .filter(Boolean);
+};
+
+const resolveGJMergeTopLeft = (worksheet, row, col) => {
+  if (!worksheet || row < 1 || col < 1) return { row, col };
+  const ranges = parseExcelJsMergeRanges(worksheet);
+  for (let i = 0; i < ranges.length; i += 1) {
+    const m = ranges[i];
+    if (row >= m.top && row <= m.bottom && col >= m.left && col <= m.right) {
+      return { row: m.top, col: m.left };
+    }
+  }
+  return { row, col };
+};
+
+const findGJWorkmanValueMergeOnRow = (worksheet, row, labelCol) => {
+  const ranges = parseExcelJsMergeRanges(worksheet);
+  let best = null;
+  ranges.forEach((m) => {
+    if (row < m.top || row > m.bottom) return;
+    if (m.left <= labelCol) return;
+    if (m.right - m.left < 1) return;
+    if (!best || m.left < best.col) best = { row, col: m.left };
+  });
+  if (best) return best;
+  const col = findFormXIVValueColumnBesideLabel(
+    worksheet,
+    row,
+    labelCol,
+    FORM_XIV_GJ_DEFAULT_VALUE_COL,
+    FORM_XIV_GJ_WORKMAN_FIELD_SPECS
+  );
+  return { row, col: Math.min(Math.max(col, FORM_XIV_GJ_DEFAULT_VALUE_COL), 12) };
+};
+
+const resolveGJWorkmanValueBounds = (worksheet, row, labelCol) => {
+  if (!worksheet || row < 1) {
+    return { top: row, bottom: row, left: FORM_XIV_GJ_DEFAULT_VALUE_COL, right: 6 };
+  }
+  const { col: valueCol } = findGJWorkmanValueMergeOnRow(worksheet, row, labelCol ?? 1);
+  const topLeft = resolveGJMergeTopLeft(worksheet, row, valueCol);
+  const ranges = parseExcelJsMergeRanges(worksheet);
+  const merge = ranges.find(
+    (m) =>
+      topLeft.row >= m.top &&
+      topLeft.row <= m.bottom &&
+      topLeft.col >= m.left &&
+      topLeft.col <= m.right
+  );
+  if (merge) {
+    return { top: merge.top, bottom: merge.bottom, left: merge.left, right: merge.right };
+  }
+
+  const left = Math.max(topLeft.col, FORM_XIV_GJ_DEFAULT_VALUE_COL);
+  let right = left;
+  for (let c = left + 1; c <= 12; c += 1) {
+    const cellStr = formXIVMPExcelCellValueToString(worksheet.getCell(row, c)?.value).trim();
+    if (!cellStr || isFormXIVPlaceholderCell(cellStr) || /^[_\s.-]+$/.test(cellStr)) {
+      right = c;
+      continue;
+    }
+    if (cellStr.length <= 4 && /^[_\-.…\s]+$/u.test(cellStr)) {
+      right = c;
+      continue;
+    }
+    break;
+  }
+  if (right === left && (labelCol == null || labelCol <= 1)) {
+    right = 6;
+  }
+  return { top: row, bottom: row, left, right };
+};
+
+const normalizeFormXIVGJWorkmanValueBorders = (worksheet, bounds) => {
+  if (!worksheet || !bounds) return;
+  for (let r = bounds.top; r <= bounds.bottom; r += 1) {
+    for (let c = bounds.left; c <= bounds.right; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      const existing = cell.border || {};
+      const onTop = r === bounds.top;
+      const onBottom = r === bounds.bottom;
+      const onLeft = c === bounds.left;
+      const onRight = c === bounds.right;
+      const nextBorder = {};
+      if (onTop && existing.top) nextBorder.top = existing.top;
+      if (onBottom && existing.bottom) nextBorder.bottom = existing.bottom;
+      if (onLeft && existing.left) nextBorder.left = existing.left;
+      if (onRight && existing.right) nextBorder.right = existing.right;
+      cell.border = nextBorder;
+    }
+  }
+};
+
+const clearFormXIVGJWorkmanValueBand = (worksheet, row, labelCol) => {
+  if (!worksheet || row < 1) return;
+  const bounds = resolveGJWorkmanValueBounds(worksheet, row, labelCol);
+  for (let r = bounds.top; r <= bounds.bottom; r += 1) {
+    for (let c = bounds.left; c <= bounds.right; c += 1) {
+      worksheet.getCell(r, c).value = '';
+    }
+  }
+  normalizeFormXIVGJWorkmanValueBorders(worksheet, bounds);
+};
+
 const isFormXIVLabelContinuationCell = (cellStr, workmanSpecs = null) => {
   const s = normalizeFormXIVMPLabelText(cellStr);
   if (!s) return false;
@@ -1137,9 +1272,12 @@ const detectFormXIVStackedWorkmanLayout = (worksheet, maxScanRow = 45) => {
   return true;
 };
 
-const setFormXIVMPWorkmanCellValue = (worksheet, row, col, value) => {
+const setFormXIVMPWorkmanCellValue = (worksheet, row, col, value, options = {}) => {
+  const { variant = 'mp', inBox = false } = options;
+  const writePos =
+    variant === 'gj' ? resolveGJMergeTopLeft(worksheet, row, col) : { row, col };
   const text = String(value ?? '').trim();
-  const cell = worksheet.getCell(row, col);
+  const cell = worksheet.getCell(writePos.row, writePos.col);
   if (!text) {
     cell.value = '';
     return;
@@ -1148,11 +1286,13 @@ const setFormXIVMPWorkmanCellValue = (worksheet, row, col, value) => {
   const asNum = Number(normalized);
   cell.value =
     Number.isFinite(asNum) && /^-?\d+(\.\d+)?$/.test(normalized) ? asNum : text;
+  const isGjBox = variant === 'gj' && inBox;
+  const isGjWorkman = variant === 'gj' && !inBox;
   cell.alignment = {
     ...(cell.alignment || {}),
     horizontal: 'left',
-    vertical: 'top',
-    wrapText: String(cell.value).length > 36 || String(cell.value).includes('\n'),
+    vertical: isGjWorkman ? 'middle' : 'top',
+    wrapText: isGjBox || String(cell.value).length > 36 || String(cell.value).includes('\n'),
     shrinkToFit: false,
   };
 };
@@ -1258,53 +1398,236 @@ const clearFormXIVMPStackedWorkmanValueBand = (
   }
 };
 
-const detectFormXIVGJBoxedHeaderLayout = (worksheet) => {
-  if (!worksheet) return false;
-  let contractorAt = null;
-  let establishmentAt = null;
-  for (let r = 1; r <= 25; r += 1) {
-    for (let c = 1; c <= 12; c += 1) {
-      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
-      if (!raw) continue;
-      if (/name\s+and\s+address\s+(?:of|if)\s+contractor/i.test(raw)) contractorAt = { r, c };
-      if (/establishment[\s\S]{0,60}?contract\s+is\s+carried/i.test(raw)) establishmentAt = { r, c };
+const isGJHeaderLabelContinuation = (raw) => {
+  const n = formXIVMPHeaderNorm(raw);
+  if (!n || n.length > 120) return false;
+  if (isFormXIVHeaderLabelBlob(raw)) return true;
+  if (/contract\s+is\s+carried/.test(n)) return true;
+  if (/in\s*\/\s*under\s+which/.test(n)) return true;
+  if (/^of\s+(?:the\s+)?(?:contractor|establishment|principal)/.test(n)) return true;
+  if (/^the\s+establishment\b/.test(n)) return true;
+  return FORM_XIV_MP_HEADER_SPECS.some(
+    (spec) => spec.match.test(raw) || spec.match.test(n)
+  );
+};
+
+const matchesFormXIVHeaderSpecLabel = (spec, raw) => {
+  const text = String(raw || '').trim();
+  if (!text || !spec?.match) return false;
+  const n = formXIVMPHeaderNorm(text);
+  return spec.match.test(text) || spec.match.test(n);
+};
+
+const resolveFormXIVGJHeaderHalfBounds = (labelCol) => {
+  const isRightHalf = labelCol >= 6;
+  return {
+    isRightHalf,
+    halfStart: isRightHalf ? 7 : 1,
+    halfEnd: isRightHalf ? 12 : 6,
+  };
+};
+
+const cellHasVisibleBorder = (border, side) => !!border?.[side]?.style;
+
+/** GJ template: heading row, spacer row, bordered value box from labelRow + 2 downward. */
+const resolveFormXIVGJHeaderBoxArea = (worksheet, labelRow, labelCol) => {
+  const { halfStart, halfEnd } = resolveFormXIVGJHeaderHalfBounds(labelCol);
+  const minBoxRow = labelRow + 2;
+  const ranges = parseExcelJsMergeRanges(worksheet);
+
+  let bestMerge = null;
+  ranges.forEach((m) => {
+    if (m.top < minBoxRow) return;
+    if (m.top > labelRow + 16) return;
+    if (m.bottom - m.top < 1) return;
+    const overlapLeft = Math.max(m.left, halfStart);
+    const overlapRight = Math.min(m.right, halfEnd);
+    if (overlapRight - overlapLeft < 1) return;
+    if (!bestMerge || m.top < bestMerge.top || (m.top === bestMerge.top && m.left < bestMerge.left)) {
+      bestMerge = m;
+    }
+  });
+
+  if (bestMerge) {
+    return {
+      valueRow: bestMerge.top,
+      valueCol: Math.max(bestMerge.left, halfStart),
+      top: bestMerge.top,
+      bottom: bestMerge.bottom,
+      left: Math.max(bestMerge.left, halfStart),
+      right: Math.min(bestMerge.right, halfEnd),
+    };
+  }
+
+  for (let r = minBoxRow; r <= labelRow + 14; r += 1) {
+    for (let c = halfStart; c <= halfEnd; c += 1) {
+      const b = worksheet.getCell(r, c)?.border || {};
+      if (!cellHasVisibleBorder(b, 'top') && !cellHasVisibleBorder(b, 'left')) continue;
+      let bottom = r;
+      let right = c;
+      for (let br = r; br <= r + 12; br += 1) {
+        const bb = worksheet.getCell(br, c)?.border || {};
+        if (cellHasVisibleBorder(bb, 'left') || cellHasVisibleBorder(bb, 'right')) bottom = br;
+        else if (br > r + 1) break;
+      }
+      for (let bc = c; bc <= halfEnd; bc += 1) {
+        const bb = worksheet.getCell(r, bc)?.border || {};
+        if (cellHasVisibleBorder(bb, 'top') || cellHasVisibleBorder(bb, 'bottom')) right = bc;
+        else if (bc > c + 1) break;
+      }
+      return {
+        valueRow: r,
+        valueCol: c,
+        top: r,
+        bottom,
+        left: c,
+        right,
+      };
     }
   }
-  if (!contractorAt) return false;
-  const beside = formXIVMPExcelCellValueToString(
-    worksheet.getCell(contractorAt.r, contractorAt.c + 1)?.value
-  ).trim();
-  const below = formXIVMPExcelCellValueToString(
-    worksheet.getCell(contractorAt.r + 1, contractorAt.c)?.value
-  ).trim();
-  if (establishmentAt && establishmentAt.r === contractorAt.r && establishmentAt.c > contractorAt.c) {
-    return true;
-  }
-  if (!beside || isFormXIVPlaceholderCell(beside)) return true;
-  if (below && (isFormXIVPlaceholderCell(below) || !below)) return true;
-  return /nature\s+of\s+work/i.test(below) || /principal\s+employer/i.test(below);
+
+  return {
+    valueRow: minBoxRow,
+    valueCol: halfStart,
+    top: minBoxRow,
+    bottom: minBoxRow + 4,
+    left: halfStart,
+    right: halfEnd,
+  };
 };
 
 const findFormXIVGJHeaderBoxValuePosition = (worksheet, labelRow, labelCol) => {
-  if (!worksheet || labelRow < 1 || labelCol < 1) {
-    return { row: labelRow + 1, col: labelCol };
+  const area = resolveFormXIVGJHeaderBoxArea(worksheet, labelRow, labelCol);
+  return { row: area.valueRow, col: area.valueCol };
+};
+
+const findFormXIVGJHeaderLabelPosition = (worksheet, spec, parsedFields = []) => {
+  if (!worksheet || !spec) return null;
+  const parsed = Array.isArray(parsedFields)
+    ? parsedFields.find((f) => f.key === spec.key)
+    : null;
+  if (parsed?.labelRow != null) {
+    return {
+      row: parsed.labelRow + 1,
+      col: (parsed.labelCol ?? 0) + 1,
+    };
   }
-  for (let r = labelRow + 1; r <= Math.min(labelRow + 8, 40); r += 1) {
-    const rowProbe = formXIVMPExcelCellValueToString(worksheet.getCell(r, labelCol)?.value).trim();
-    if (rowProbe && isFormXIVHeaderLabelBlob(rowProbe)) break;
-    if (rowProbe && /^\d+[\.\)]\s*/.test(rowProbe)) break;
-    const cellStr = formXIVMPExcelCellValueToString(worksheet.getCell(r, labelCol)?.value).trim();
-    if (!cellStr || isFormXIVPlaceholderCell(cellStr) || /^[_\\s.-]+$/.test(cellStr)) {
-      return { row: r, col: labelCol };
+  for (let r = 1; r <= 30; r += 1) {
+    for (let c = 1; c <= 12; c += 1) {
+      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw || !matchesFormXIVHeaderSpecLabel(spec, raw)) continue;
+      return { row: r, col: c };
     }
   }
-  return { row: labelRow + 1, col: labelCol };
+  const canonicalByKey = {
+    form_xiv_mp_contractor: { row: 5, col: 1 },
+    form_xiv_mp_establishment: { row: 5, col: 8 },
+    form_xiv_mp_nature_location: { row: 14, col: 1 },
+    form_xiv_mp_principal_employer: { row: 14, col: 8 },
+  };
+  return canonicalByKey[spec.key] || null;
+};
+
+const getFormXIVGJHeaderLabelLines = (worksheet, spec, snapshots, parsedFields) => {
+  const snap = snapshots.find((s) => s.spec?.key === spec.key);
+  if (snap?.lines?.length) return snap.lines;
+  const pos = findFormXIVGJHeaderLabelPosition(worksheet, spec, parsedFields);
+  if (!pos) return [{ row: 5, col: 1, text: spec.label }];
+  const lines = [{ row: pos.row, col: pos.col, text: spec.label }];
+  const nextRaw = formXIVMPExcelCellValueToString(worksheet.getCell(pos.row + 1, pos.col)?.value).trim();
+  if (nextRaw && isGJHeaderLabelContinuation(nextRaw) && !matchesFormXIVHeaderSpecLabel(spec, nextRaw)) {
+    lines.push({ row: pos.row + 1, col: pos.col, text: nextRaw });
+  }
+  return lines;
+};
+
+const clearFormXIVGJHeaderLabelAreaData = (worksheet, labelRow, labelCol, area, spec = null) => {
+  if (!worksheet || labelRow < 1) return;
+  const { halfStart, halfEnd } = resolveFormXIVGJHeaderHalfBounds(labelCol);
+  const boxTop = area?.top ?? labelRow + 2;
+  for (let r = labelRow; r < boxTop; r += 1) {
+    for (let c = halfStart; c <= halfEnd; c += 1) {
+      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      if (spec && (matchesFormXIVHeaderSpecLabel(spec, raw) || isGJHeaderLabelContinuation(raw))) {
+        continue;
+      }
+      if (!spec && (isFormXIVHeaderLabelBlob(raw) || isGJHeaderLabelContinuation(raw))) continue;
+      worksheet.getCell(r, c).value = '';
+    }
+  }
+};
+
+const snapshotFormXIVGJHeaderLabels = (worksheet) => {
+  if (!worksheet) return [];
+  const snapshots = [];
+  FORM_XIV_MP_HEADER_SPECS.forEach((spec) => {
+    for (let r = 1; r <= 25; r += 1) {
+      for (let c = 1; c <= 12; c += 1) {
+        const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+        if (!raw || !matchesFormXIVHeaderSpecLabel(spec, raw)) continue;
+        const lines = [{ row: r, col: c, text: raw }];
+        const nextRaw = formXIVMPExcelCellValueToString(worksheet.getCell(r + 1, c)?.value).trim();
+        if (nextRaw && isGJHeaderLabelContinuation(nextRaw) && !matchesFormXIVHeaderSpecLabel(spec, nextRaw)) {
+          lines.push({ row: r + 1, col: c, text: nextRaw });
+        }
+        snapshots.push({ spec, lines });
+        return;
+      }
+    }
+  });
+  return snapshots;
+};
+
+const restoreFormXIVGJHeaderLabels = (worksheet, snapshots = [], parsedFields = []) => {
+  if (!worksheet) return;
+  FORM_XIV_MP_HEADER_SPECS.forEach((spec) => {
+    const lines = getFormXIVGJHeaderLabelLines(worksheet, spec, snapshots, parsedFields);
+    lines.forEach(({ row, col, text }) => {
+      if (row < 1 || col < 1 || !text) return;
+      const cell = worksheet.getCell(row, col);
+      const current = formXIVMPExcelCellValueToString(cell.value).trim();
+      if (current && (matchesFormXIVHeaderSpecLabel(spec, current) || isGJHeaderLabelContinuation(current))) {
+        return;
+      }
+      cell.value = text;
+      const existingFont = cell.font || {};
+      if (!existingFont.bold) {
+        cell.font = { ...existingFont, bold: true };
+      }
+    });
+  });
+};
+
+const isGJHeaderLabelRow = (worksheet, row, labelCol) => {
+  if (!worksheet || row < 1 || labelCol < 1) return false;
+  const raw = formXIVMPExcelCellValueToString(worksheet.getCell(row, labelCol)?.value).trim();
+  if (!raw || isFormXIVPlaceholderCell(raw)) return false;
+  return isGJHeaderLabelContinuation(raw);
+};
+
+const clearFormXIVGJHeaderStrayAboveBox = (worksheet, labelRow, labelCol, boxRow) => {
+  if (!worksheet || labelRow < 1 || boxRow <= labelRow) return;
+  const isRightHalf = labelCol >= 6;
+  const colStart = isRightHalf ? 6 : 1;
+  const colEnd = isRightHalf ? 12 : 6;
+  for (let r = labelRow; r < boxRow; r += 1) {
+    for (let c = colStart; c <= colEnd; c += 1) {
+      if (r === labelRow && c === labelCol) continue;
+      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      if (c === labelCol && (isFormXIVHeaderLabelBlob(raw) || isGJHeaderLabelContinuation(raw))) {
+        continue;
+      }
+      if (r === labelRow && isFormXIVHeaderLabelBlob(raw)) continue;
+      worksheet.getCell(r, c).value = '';
+    }
+  }
 };
 
 const clearFormXIVGJHeaderRowSpill = (worksheet, labelRow, labelCol, boxRow) => {
   if (!worksheet || labelRow < 1 || labelCol < 1) return;
-  const isRightHalf = labelCol >= 4;
-  const spillEnd = isRightHalf ? Math.min(labelCol + 6, 14) : Math.min(labelCol + 5, 7);
+  const spillEnd = 14;
   for (let c = labelCol + 1; c <= spillEnd; c += 1) {
     if (boxRow === labelRow && c === labelCol) continue;
     const cellStr = formXIVMPExcelCellValueToString(worksheet.getCell(labelRow, c)?.value).trim();
@@ -1314,18 +1637,77 @@ const clearFormXIVGJHeaderRowSpill = (worksheet, labelRow, labelCol, boxRow) => 
   }
 };
 
-const writeFormXIVGJBoxedHeaderValue = (worksheet, labelRow, labelCol, value) => {
-  const pos = findFormXIVGJHeaderBoxValuePosition(worksheet, labelRow, labelCol);
-  clearFormXIVGJHeaderRowSpill(worksheet, labelRow, labelCol, pos.row);
-  setFormXIVMPWorkmanCellValue(worksheet, pos.row, pos.col, value);
-  const cell = worksheet.getCell(pos.row, pos.col);
-  cell.alignment = {
-    ...(cell.alignment || {}),
-    horizontal: 'left',
-    vertical: 'top',
-    wrapText: true,
-    shrinkToFit: false,
-  };
+/** Remove wrongly beside-written header values (e.g. address spill into column M). */
+const clearFormXIVGJHeaderSpillZones = (worksheet) => {
+  if (!worksheet) return;
+  for (let r = 1; r <= 22; r += 1) {
+    for (let c = 9; c <= 14; c += 1) {
+      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      if (isFormXIVPlaceholderCell(raw)) continue;
+      if (isFormXIVHeaderLabelBlob(raw)) continue;
+      if (isTableLabelBlob(raw)) continue;
+      if (/^form\s*xiv|employment\s+card|see\s+rule\s+76|vide\s+rule\s+76/i.test(raw)) continue;
+      worksheet.getCell(r, c).value = '';
+    }
+  }
+  FORM_XIV_MP_HEADER_SPECS.forEach((spec) => {
+    for (let r = 1; r <= 22; r += 1) {
+      for (let c = 1; c <= 12; c += 1) {
+        const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+        if (!raw || (!spec.match.test(raw) && !spec.match.test(formXIVMPHeaderNorm(raw)))) continue;
+        for (let spillCol = c + 1; spillCol <= 14; spillCol += 1) {
+          const spill = formXIVMPExcelCellValueToString(worksheet.getCell(r, spillCol)?.value).trim();
+          if (!spill) continue;
+          if (isFormXIVHeaderLabelBlob(spill)) break;
+          worksheet.getCell(r, spillCol).value = '';
+        }
+        return;
+      }
+    }
+  });
+};
+
+const clearFormXIVGJHeaderBoxBand = (worksheet, labelRow, labelCol, spec = null) => {
+  if (!worksheet || labelRow < 1 || labelCol < 1) return;
+  const area = resolveFormXIVGJHeaderBoxArea(worksheet, labelRow, labelCol);
+  let startRow = area.top;
+  const endRow = area.bottom;
+  const startCol = area.left;
+  const endCol = area.right;
+  if (startRow <= labelRow) startRow = labelRow + 2;
+  while (startRow <= endRow && isGJHeaderLabelRow(worksheet, startRow, labelCol)) {
+    startRow += 1;
+  }
+  if (startRow > endRow) return;
+  for (let r = startRow; r <= endRow; r += 1) {
+    if (isGJHeaderLabelRow(worksheet, r, labelCol)) continue;
+    for (let c = startCol; c <= endCol; c += 1) {
+      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (
+        raw &&
+        c === labelCol &&
+        (isFormXIVHeaderLabelBlob(raw) ||
+          isGJHeaderLabelContinuation(raw) ||
+          (spec && matchesFormXIVHeaderSpecLabel(spec, raw)))
+      ) {
+        continue;
+      }
+      worksheet.getCell(r, c).value = '';
+    }
+  }
+};
+
+const writeFormXIVGJBoxedHeaderValue = (worksheet, labelRow, labelCol, value, spec = null) => {
+  const area = resolveFormXIVGJHeaderBoxArea(worksheet, labelRow, labelCol);
+  clearFormXIVGJHeaderLabelAreaData(worksheet, labelRow, labelCol, area, spec);
+  clearFormXIVGJHeaderBoxBand(worksheet, labelRow, labelCol, spec);
+  clearFormXIVGJHeaderStrayAboveBox(worksheet, labelRow, labelCol, area.top);
+  clearFormXIVGJHeaderRowSpill(worksheet, labelRow, labelCol, area.top);
+  setFormXIVMPWorkmanCellValue(worksheet, area.valueRow, area.valueCol, value, {
+    variant: 'gj',
+    inBox: true,
+  });
 };
 
 const readFormXIVMPLabelWithContinuation = (worksheet, row, col) => {
@@ -1353,12 +1735,29 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
   const variant = parsedFormHeader?.formXIVVariant || 'mp';
   const workmanSpecs =
     variant === 'gj' ? FORM_XIV_GJ_WORKMAN_FIELD_SPECS : FORM_XIV_MP_WORKMAN_FIELD_SPECS;
-  const gjBoxedLayout = variant === 'gj' && detectFormXIVGJBoxedHeaderLayout(worksheet);
+  const gjBoxedLayout = variant === 'gj';
   const stackedLayout = variant !== 'gj' && detectFormXIVStackedWorkmanLayout(worksheet);
   const defaultValueCol = stackedLayout
     ? FORM_XIV_MP_STACKED_VALUE_COL
     : resolveFormXIVMPWorkmanValueColumn(worksheet, 45, workmanSpecs);
   const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  const gjHeaderLabelSnapshots = gjBoxedLayout ? snapshotFormXIVGJHeaderLabels(worksheet) : [];
+
+  if (gjBoxedLayout) {
+    FORM_XIV_MP_HEADER_SPECS.forEach((spec) => {
+      const labelPos = findFormXIVGJHeaderLabelPosition(worksheet, spec, parsedFields);
+      if (!labelPos) return;
+      const area = resolveFormXIVGJHeaderBoxArea(worksheet, labelPos.row, labelPos.col);
+      clearFormXIVGJHeaderLabelAreaData(worksheet, labelPos.row, labelPos.col, area, spec);
+    });
+    clearFormXIVGJHeaderSpillZones(worksheet);
+    FORM_XIV_MP_HEADER_SPECS.forEach((spec) => {
+      const labelPos = findFormXIVGJHeaderLabelPosition(worksheet, spec, parsedFields);
+      if (!labelPos) return;
+      clearFormXIVGJHeaderBoxBand(worksheet, labelPos.row, labelPos.col, spec);
+    });
+  }
+
   const writeAt = (row, col, value, wrapInBox = false) => {
     const text = String(value ?? '').trim();
     if (!text || row < 1 || col < 1) return;
@@ -1376,10 +1775,10 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
     }
     setFormXIVMPWorkmanCellValue(worksheet, row, col, text);
   };
-  const writeBesideLabel = (excelRow, labelCol, value) => {
+  const writeBesideLabel = (excelRow, labelCol, value, spec = null) => {
     if (excelRow < 1) return;
     if (gjBoxedLayout) {
-      writeFormXIVGJBoxedHeaderValue(worksheet, excelRow, labelCol, value);
+      writeFormXIVGJBoxedHeaderValue(worksheet, excelRow, labelCol, value, spec);
       return;
     }
     const targetCol =
@@ -1393,12 +1792,16 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
     const val = headerFormData[spec.key];
     if (val == null || String(val).trim() === '') return;
 
+    const labelPos = gjBoxedLayout
+      ? findFormXIVGJHeaderLabelPosition(worksheet, spec, parsedFields)
+      : null;
     const parsedField = parsedFields.find((f) => f.key === spec.key);
-    if (parsedField?.labelRow != null) {
-      const labelExcelRow = parsedField.labelRow + 1;
-      const labelExcelCol = (parsedField.labelCol ?? 0) + 1;
+    if (labelPos || parsedField?.labelRow != null) {
+      const labelExcelRow = labelPos?.row ?? parsedField.labelRow + 1;
+      const labelExcelCol = labelPos?.col ?? (parsedField.labelCol ?? 0) + 1;
       if (gjBoxedLayout) {
-        writeFormXIVGJBoxedHeaderValue(worksheet, labelExcelRow, labelExcelCol, val);
+        clearFormXIVGJHeaderBoxBand(worksheet, labelExcelRow, labelExcelCol, spec);
+        writeFormXIVGJBoxedHeaderValue(worksheet, labelExcelRow, labelExcelCol, val, spec);
         return;
       }
       const targetRow = (parsedField.valueRow ?? parsedField.labelRow) + 1;
@@ -1412,7 +1815,7 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
               defaultValueCol,
               workmanSpecs
             );
-      writeAt(targetRow, targetCol, val, gjBoxedLayout);
+      writeAt(targetRow, targetCol, val);
       return;
     }
 
@@ -1420,11 +1823,14 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
       for (let c = 1; c <= 14; c += 1) {
         const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
         if (!raw || (!spec.match.test(raw) && !spec.match.test(formXIVMPHeaderNorm(raw)))) continue;
-        writeBesideLabel(r, c, val);
+        writeBesideLabel(r, c, val, spec);
         return;
       }
     }
   });
+  if (gjBoxedLayout) {
+    restoreFormXIVGJHeaderLabels(worksheet, gjHeaderLabelSnapshots, parsedFields);
+  }
 }
 
 export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers) {
@@ -1438,6 +1844,9 @@ export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers) {
 
   const resolveTargetCol = (r, c) => {
     if (stackedLayout) return FORM_XIV_MP_STACKED_VALUE_COL;
+    if (variant === 'gj') {
+      return findGJWorkmanValueMergeOnRow(worksheet, r, c).col;
+    }
     let targetCol = findFormXIVValueColumnBesideLabel(worksheet, r, c, valueCol, workmanSpecs);
     if (!stackedLayout && variant !== 'gj') {
       for (let vc = c + 1; vc <= Math.min(c + 8, 14); vc += 1) {
@@ -1511,31 +1920,48 @@ export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers) {
   return { valueCol, positions, workmanSpecs, stackedLayout, variant };
 }
 
-export function clearFormXIVMPWorkmanFieldPositions(worksheet, positions) {
+export function clearFormXIVMPWorkmanFieldPositions(worksheet, positions, options = {}) {
   if (!worksheet || !Array.isArray(positions)) return;
-  positions.forEach(({ row, col }) => {
-    if (row >= 1 && col >= 1) worksheet.getCell(row, col).value = '';
+  const variant = options.variant || 'mp';
+  positions.forEach(({ row, col, labelCol }) => {
+    if (row < 1 || col < 1) return;
+    if (variant === 'gj') {
+      clearFormXIVGJWorkmanValueBand(worksheet, row, labelCol ?? 1);
+      return;
+    }
+    worksheet.getCell(row, col).value = '';
   });
 }
 
-export function writeFormXIVMPWorkmanFieldsViaPositions(worksheet, row, positions) {
+export function writeFormXIVMPWorkmanFieldsViaPositions(worksheet, row, positions, options = {}) {
   if (!worksheet || !row || typeof row !== 'object' || !Array.isArray(positions)) return;
+  const variant = options.variant || 'mp';
   positions.forEach(({ headerKey, row: targetRow, col, labelCol }) => {
     const value = getFormXIVMPRowValueForHeader(row, headerKey);
+    let writeRow = targetRow;
+    let writeCol = col;
+    if (variant === 'gj') {
+      if (labelCol != null) {
+        clearFormXIVGJWorkmanValueBand(worksheet, targetRow, labelCol);
+      }
+      const merged = resolveGJMergeTopLeft(worksheet, targetRow, col);
+      writeRow = merged.row;
+      writeCol = merged.col;
+    }
     if (value === '') {
-      worksheet.getCell(targetRow, col).value = '';
+      worksheet.getCell(writeRow, writeCol).value = '';
       return;
     }
-    if (labelCol != null && labelCol >= 1 && labelCol < col) {
-      for (let c = labelCol + 1; c < col; c += 1) {
-        const between = formXIVMPExcelCellValueToString(worksheet.getCell(targetRow, c)?.value).trim();
+    if (labelCol != null && labelCol >= 1 && labelCol < writeCol && variant !== 'gj') {
+      for (let c = labelCol + 1; c < writeCol; c += 1) {
+        const between = formXIVMPExcelCellValueToString(worksheet.getCell(writeRow, c)?.value).trim();
         if (between && !isFormXIVPlaceholderCell(between) && !isFormXIVLabelContinuationCell(between)) {
           continue;
         }
-        worksheet.getCell(targetRow, c).value = '';
+        worksheet.getCell(writeRow, c).value = '';
       }
     }
-    setFormXIVMPWorkmanCellValue(worksheet, targetRow, col, value);
+    setFormXIVMPWorkmanCellValue(worksheet, writeRow, writeCol, value, { variant, inBox: false });
   });
 }
 
@@ -1544,15 +1970,23 @@ export function writeFormXIVMPWorkmanFieldsToWorksheet(worksheet, row, headers, 
   const layout = cachedLayout || resolveFormXIVMPWorkmanFieldPositions(worksheet, headers);
   const workmanSpecs = layout.workmanSpecs || resolveFormXIVWorkmanFieldSpecsFromHeaders(headers);
   if (!cachedLayout) {
-    if (layout.stackedLayout) {
+    if (layout.variant === 'gj') {
+      layout.positions.forEach(({ row, labelCol }) => {
+        if (row >= 1) clearFormXIVGJWorkmanValueBand(worksheet, row, labelCol ?? 1);
+      });
+    } else if (layout.stackedLayout) {
       clearFormXIVMPStackedWorkmanValueBand(worksheet, 12, 45, workmanSpecs);
     } else {
       clearFormXIVMPWorkmanValueBand(worksheet, 12, 40, layout.valueCol, workmanSpecs);
     }
   } else {
-    clearFormXIVMPWorkmanFieldPositions(worksheet, layout.positions);
+    clearFormXIVMPWorkmanFieldPositions(worksheet, layout.positions, {
+      variant: layout.variant || 'mp',
+    });
   }
-  writeFormXIVMPWorkmanFieldsViaPositions(worksheet, row, layout.positions);
+  writeFormXIVMPWorkmanFieldsViaPositions(worksheet, row, layout.positions, {
+    variant: layout.variant || 'mp',
+  });
 }
 
 /** Preserve manual edits from the modal grid when rebuilding all employee rows for export. */
@@ -1705,16 +2139,26 @@ async function prepareFormXIVMPFastZipTemplate({
   if (!worksheet) throw new Error('Template worksheet not found.');
   writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData, parsedFormHeaderWithVariant);
   const workmanLayout = resolveFormXIVMPWorkmanFieldPositions(worksheet, hdrs);
-  clearFormXIVMPWorkmanFieldPositions(worksheet, workmanLayout.positions);
+  clearFormXIVMPWorkmanFieldPositions(worksheet, workmanLayout.positions, {
+    variant: workmanLayout.variant || 'mp',
+  });
   const preparedBuffer = await workbook.xlsx.writeBuffer();
   const templateZip = await JSZip.loadAsync(preparedBuffer);
   const sheetEntry = resolveFormXIVMPWorksheetEntry(templateZip.files);
   if (!sheetEntry) throw new Error('Template worksheet XML not found.');
   const baseSheetXml = await templateZip.file(sheetEntry).async('string');
-  const positions = workmanLayout.positions.map((pos) => ({
-    ...pos,
-    cellRef: formXIVMPToCellRef(pos.row, pos.col),
-  }));
+  const positions = workmanLayout.positions.map((pos) => {
+    const writePos =
+      workmanLayout.variant === 'gj'
+        ? resolveGJMergeTopLeft(worksheet, pos.row, pos.col)
+        : { row: pos.row, col: pos.col };
+    return {
+      ...pos,
+      row: writePos.row,
+      col: writePos.col,
+      cellRef: formXIVMPToCellRef(writePos.row, writePos.col),
+    };
+  });
   const staticFiles = {};
   await Promise.all(
     Object.keys(templateZip.files).map(async (path) => {
@@ -1746,14 +2190,23 @@ export async function buildFormXIVMPPerEmployeeDownload({
   formFileName,
   headerFormData,
 }) {
-  const hdrs = resolveFormXIVMPTableHeaders(headersToUse);
+  const hdrs = resolveFormXIVMPTableHeaders(headersToUse, {
+    formHeader: parsedFormHeader,
+    fileName: formFileName,
+  });
+  const parsedFormHeaderWithVariant = {
+    ...(parsedFormHeader || {}),
+    formXIVVariant:
+      parsedFormHeader?.formXIVVariant ||
+      resolveFormXIVVariant(parsedFormHeader, null, formFileName, '', hdrs),
+  };
   const exportRows = (Array.isArray(mappedData) ? mappedData : []).filter((row) =>
     rowHasMeaningfulFormXIVMPExportData(row, hdrs)
   );
   const workbookArgs = {
     templateArrayBuffer,
     headersToUse: hdrs,
-    parsedFormHeader,
+    parsedFormHeader: parsedFormHeaderWithVariant,
     formFileName,
     headerFormData,
   };
@@ -1767,7 +2220,7 @@ export async function buildFormXIVMPPerEmployeeDownload({
   const { sheetEntry, baseSheetXml, positions, staticFiles } = await prepareFormXIVMPFastZipTemplate({
     templateArrayBuffer,
     headersToUse: hdrs,
-    parsedFormHeader,
+    parsedFormHeader: parsedFormHeaderWithVariant,
     headerFormData,
     formFileName,
   });

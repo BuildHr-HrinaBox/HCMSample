@@ -55,6 +55,28 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
     box-sizing: border-box;
     flex: 1 1 auto;
   }
+
+  /* Form modal open: freeze background table — no row/column shift or animation behind popup */
+  .statutory-page.statutory-page--form-modal-open .statutory-table-container,
+  .statutory-page.statutory-page--form-modal-open .statutory-table-wrapper {
+    overflow: hidden;
+    contain: layout style;
+  }
+
+  .statutory-page.statutory-page--form-modal-open .statutory-table tbody tr,
+  .statutory-page.statutory-page--form-modal-open .statutory-table th,
+  .statutory-page.statutory-page--form-modal-open .statutory-table td {
+    transition: none !important;
+    animation: none !important;
+    transform: none !important;
+  }
+
+  .statutory-page.statutory-page--form-modal-open .statutory-table-top-btn,
+  .statutory-page.statutory-page--form-modal-open .statutory-edit-btn,
+  .statutory-page.statutory-page--form-modal-open .statutory-delete-btn {
+    transition: none !important;
+    transform: none !important;
+  }
   
   /* --- Card Container (Matching SiteManagement) --- */
   .statutory-card-container {

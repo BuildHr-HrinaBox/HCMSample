@@ -7,5 +7,16 @@
 	},
 	"execution": {
 		"main": "index.js"
-	}
+	},
+	"policies": [
+		{
+			"name": "datastore",
+			"type": "datastore",
+			"permissions": [
+				"read",
+				"write",
+				"delete"
+			]
+		}
+	]
 }

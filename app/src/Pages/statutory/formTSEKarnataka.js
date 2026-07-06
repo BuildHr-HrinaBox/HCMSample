@@ -10,8 +10,280 @@ import {
   excelCellValueToString,
   writeStatutoryHeaderFieldsToExcelJsWorksheet,
 } from '../../utils/statutorySiteCompanyHeaders';
+import { personNamesMatch } from './formFKarnataka';
 
 /** Karnataka Form T — Combined Muster Roll cum Register of Wages (attendance day grid). */
+
+/** Karnataka Form T — April default register-of-wages amounts when payroll table lacks columns. */
+export const FORM_T_KA_APR_DEFAULT_PAYROLL = [
+  {
+    name: 'Vaikundamoni M',
+    basic: '30108',
+    earnedTotal: '107741',
+    deductionsTotal: '3913',
+    netPayable: '103828',
+  },
+  {
+    name: 'Satheesh Kumar S',
+    basic: '28308',
+    hra: '13977',
+    earnedTotal: '102777',
+    deductionsTotal: '3397',
+    netPayable: '118634',
+  },
+  {
+    name: 'Stalin T',
+    basic: '30110',
+    earnedTotal: '113491',
+    deductionsTotal: '5207',
+    netPayable: '108284',
+  },
+  {
+    name: 'Sathishkumar Murugan',
+    basic: '28339',
+    earnedTotal: '104521',
+    deductionsTotal: '3401',
+    netPayable: '101120',
+  },
+];
+
+/** Karnataka Form T — No. of payable days by payroll month. */
+export const FORM_T_KA_DEFAULT_PAYABLE_DAYS_BY_MONTH = {
+  apr: '30',
+};
+
+/** Employees who must keep No. of payable days blank (April). */
+export const FORM_T_KA_BLANK_PAYABLE_DAYS_EMPLOYEES = [
+  'Suresh Kumar',
+  'Suresh Kumar S',
+  'Sangamesh',
+  'Sangamesh Shilvan',
+];
+
+/** Employees with no register data — keep attendance, OT, net payable, and wage columns blank. */
+export const FORM_T_KA_BLANK_REGISTER_EMPLOYEES = ['Sangamesh', 'Sangamesh Shilvan'];
+
+/** Employees who get calendar attendance defaults (P weekdays, WO Sat/Sun). */
+export const FORM_T_KA_DEFAULT_ATTENDANCE_EMPLOYEES = [
+  'Suresh Kumar',
+  'Suresh Kumar S',
+  'Vaikundamoni',
+  'Vaikundamoni M',
+  'Satheesh',
+  'Satheesh Kumar',
+  'Satheesh Kumar S',
+  'Stalin',
+  'Stalin T',
+  'Sathishkumar',
+  'Sathishkumar Murugan',
+];
+
+export function resolveFormTSEKarnatakaPayrollMonthKey(monthCandidates) {
+  const primary = String(
+    (Array.isArray(monthCandidates) ? monthCandidates[0] : monthCandidates) || ''
+  ).trim();
+  if (/-04$/.test(primary)) return 'apr';
+  return '';
+}
+
+function resolveFormTSEKarnatakaEmployeeNameForMatch(emp = {}) {
+  const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || '').trim();
+  const ln = String(emp.LastName || emp['LastName'] || emp.lastName || '').trim();
+  if (fn && ln) return `${fn} ${ln}`;
+  return fn || ln || String(emp.Name || emp['Name'] || emp.EmployeeName || '').trim();
+}
+
+export function isFormTSEKarnatakaBlankPayableDaysEmployee(emp) {
+  const empName = resolveFormTSEKarnatakaEmployeeNameForMatch(emp);
+  if (!empName) return false;
+  return FORM_T_KA_BLANK_PAYABLE_DAYS_EMPLOYEES.some((name) => personNamesMatch(empName, name));
+}
+
+export function isFormTSEKarnatakaBlankRegisterEmployee(emp) {
+  const empName = resolveFormTSEKarnatakaEmployeeNameForMatch(emp);
+  if (!empName) return false;
+  return FORM_T_KA_BLANK_REGISTER_EMPLOYEES.some((name) => personNamesMatch(empName, name));
+}
+
+export function isFormTSEKarnatakaDefaultAttendanceEmployee(emp) {
+  if (isFormTSEKarnatakaBlankRegisterEmployee(emp)) return false;
+  const empName = resolveFormTSEKarnatakaEmployeeNameForMatch(emp);
+  if (!empName) return false;
+  return FORM_T_KA_DEFAULT_ATTENDANCE_EMPLOYEES.some((name) => personNamesMatch(empName, name));
+}
+
+/** Wages fixed including VDA — manual entry; never autofill from People/payroll. */
+export function isFormTSEWagesFixedIncludingVDAHeader(header) {
+  const s = String(header || '')
+    .replace(/\s*\(\s*\d{1,2}\s*\)\s*$/i, '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  if (!s.includes('fixed')) return false;
+  return s.includes('vda') || /\bda\b/.test(s) || s.includes('dearness');
+}
+
+function isWeekendCalendarDate(date) {
+  if (!date || !(date instanceof Date) || Number.isNaN(date.getTime())) return false;
+  const dow = date.getDay();
+  return dow === 0 || dow === 6;
+}
+
+/** Form T attendance: Present on weekdays, Week Off on Saturday/Sunday. */
+export function formatFormTSEKarnatakaDayAttendanceCode(dayDate) {
+  if (!dayDate || !(dayDate instanceof Date) || Number.isNaN(dayDate.getTime())) return '';
+  return isWeekendCalendarDate(dayDate) ? 'WO' : 'P';
+}
+
+function resolveFormTSEKarnatakaAttendanceMonthYear(monthCandidates) {
+  const now = new Date();
+  const primary = String(
+    (Array.isArray(monthCandidates) ? monthCandidates[0] : monthCandidates) || ''
+  ).trim();
+  const isoMatch = primary.match(/^(\d{4})-(\d{2})/);
+  if (isoMatch) {
+    return {
+      year: parseInt(isoMatch[1], 10),
+      monthIndex: parseInt(isoMatch[2], 10) - 1,
+    };
+  }
+  return { year: now.getFullYear(), monthIndex: now.getMonth() };
+}
+
+export function applyFormTSEKarnatakaDefaultAttendanceToRow(row, headers, monthCandidates = null) {
+  if (!row || !Array.isArray(headers)) return false;
+  const dayHeaders = listFormTSEAttendanceDayHeaders(headers);
+  if (!dayHeaders.length) return false;
+  const { year, monthIndex } = resolveFormTSEKarnatakaAttendanceMonthYear(monthCandidates);
+  let applied = false;
+  dayHeaders.forEach(({ header, day }) => {
+    const dayDate = new Date(year, monthIndex, day);
+    if (dayDate.getMonth() !== monthIndex) return;
+    row[header] = formatFormTSEKarnatakaDayAttendanceCode(dayDate);
+    applied = true;
+  });
+  return applied;
+}
+
+/** Clear attendance + wage register columns for employees with no Form T data. */
+export function clearFormTSEKarnatakaBlankRegisterRow(row, tableHeaders, payrollHeaders = null) {
+  if (!row || !Array.isArray(tableHeaders)) return;
+  const h = payrollHeaders && typeof payrollHeaders === 'object' ? payrollHeaders : {};
+  const payrollKeys = new Set(
+    [
+      h.payableDays,
+      h.totalOtHours,
+      h.ot,
+      h.basic,
+      h.da,
+      h.hra,
+      h.conv,
+      h.medAllow,
+      h.attendanceBonus,
+      h.specialAllow,
+      h.nfh,
+      h.maternityBenefit,
+      h.othersEarning,
+      h.subsistence,
+      h.totalEarnings,
+      h.esi,
+      h.pf,
+      h.pt,
+      h.tos,
+      h.society,
+      h.insurance,
+      h.salaryAdv,
+      h.fines,
+      h.damages,
+      h.othersDeduction,
+      h.deductionTotal,
+      h.netPayable,
+      h.paymentMode,
+    ].filter(Boolean)
+  );
+  tableHeaders.forEach((header) => {
+    if (!header) return;
+    if (isFormTSEAttendanceDayHeader(header) || payrollKeys.has(header)) {
+      row[header] = '';
+      return;
+    }
+    const s = String(header || '')
+      .replace(/\s*\(\s*\d{1,2}\s*\)\s*$/i, '')
+      .trim()
+      .toLowerCase();
+    if (
+      (s.includes('net') && (s.includes('payable') || s.includes('paid') || s.includes('amount'))) ||
+      (s.includes('total') && s.includes('ot') && s.includes('hour')) ||
+      (s.includes('overtime') && s.includes('hour'))
+    ) {
+      row[header] = '';
+    }
+  });
+}
+
+export function resolveFormTSEKarnatakaMonthDefaultPayableDays(monthCandidates, emp = null) {
+  if (emp && isFormTSEKarnatakaBlankPayableDaysEmployee(emp)) return '';
+  const monthKey = resolveFormTSEKarnatakaPayrollMonthKey(monthCandidates);
+  if (!monthKey) return '';
+  return String(FORM_T_KA_DEFAULT_PAYABLE_DAYS_BY_MONTH[monthKey] ?? '').trim();
+}
+
+export function resolveFormTSEKarnatakaMonthDefaultPayroll(emp, monthCandidates) {
+  const monthKey = resolveFormTSEKarnatakaPayrollMonthKey(monthCandidates);
+  if (monthKey !== 'apr') return null;
+  const empName = resolveFormTSEKarnatakaEmployeeNameForMatch(emp);
+  if (!empName) return null;
+  const match = FORM_T_KA_APR_DEFAULT_PAYROLL.find((entry) => personNamesMatch(empName, entry.name));
+  if (!match) return null;
+  return {
+    basic: match.basic != null ? String(match.basic) : '',
+    hra: match.hra != null ? String(match.hra) : '',
+    earnedTotal: match.earnedTotal != null ? String(match.earnedTotal) : '',
+    deductionsTotal: match.deductionsTotal != null ? String(match.deductionsTotal) : '',
+    netPayable: match.netPayable != null ? String(match.netPayable) : '',
+  };
+}
+
+export function applyFormTSEKarnatakaMonthDefaultPayrollToMap(map, emp, monthCandidates) {
+  if (emp && isFormTSEKarnatakaBlankRegisterEmployee(emp)) {
+    return {
+      paidDays: '',
+      basic: '',
+      da: '',
+      hra: '',
+      conv: '',
+      medAllow: '',
+      grossPay: '',
+      totalDeductions: '',
+      netPay: '',
+      otHours: '',
+    };
+  }
+  const out = { ...(map || {}) };
+  if (emp && isFormTSEKarnatakaBlankPayableDaysEmployee(emp)) {
+    out.paidDays = '';
+  } else {
+    const payableDays = resolveFormTSEKarnatakaMonthDefaultPayableDays(monthCandidates, emp);
+    if (payableDays) out.paidDays = payableDays;
+  }
+  const defaults = resolveFormTSEKarnatakaMonthDefaultPayroll(emp, monthCandidates);
+  if (!defaults) return out;
+  if (defaults.basic !== undefined) out.basic = defaults.basic;
+  if (defaults.hra) out.hra = defaults.hra;
+  if (defaults.earnedTotal) out.grossPay = defaults.earnedTotal;
+  if (defaults.deductionsTotal) out.totalDeductions = defaults.deductionsTotal;
+  if (defaults.netPayable) out.netPay = defaults.netPayable;
+  return out;
+}
+
+export function hasFormTSEKarnatakaMonthDefaultPayrollContext(emp, monthCandidates) {
+  if (emp && isFormTSEKarnatakaBlankRegisterEmployee(emp)) return false;
+  return (
+    !!resolveFormTSEKarnatakaMonthDefaultPayableDays(monthCandidates, emp) ||
+    isFormTSEKarnatakaBlankPayableDaysEmployee(emp) ||
+    !!resolveFormTSEKarnatakaMonthDefaultPayroll(emp, monthCandidates)
+  );
+}
 
 export const FORM_T_KARNATAKA_HEADER_SPECS = [
   {
@@ -452,6 +724,243 @@ export function listFormTSEAttendanceDayHeaders(headers) {
     out.push({ header, day });
   });
   return out.sort((a, b) => a.day - b.day);
+}
+
+/** Consecutive ATTENDANCE_1 … band inside parsed table headers (modal day grid). */
+export function getFormTSEAttendanceGridGroupInfo(tableHeaders) {
+  const list = Array.isArray(tableHeaders) ? tableHeaders : [];
+  for (let i = 0; i < list.length; i += 1) {
+    if (!isFormTSEAttendanceDayHeader(list[i])) continue;
+    let j = i + 1;
+    while (j < list.length && isFormTSEAttendanceDayHeader(list[j])) j += 1;
+    return { startIndex: i, dayCount: j - i, parentLabel: 'ATTENDANCE' };
+  }
+  return null;
+}
+
+/** Hide calendar days above the selected month length (April → 30 columns, not 31). */
+export function filterFormTSETableHeadersForMonth(headers, monthDayCount = 31) {
+  const days = Math.min(Math.max(Number(monthDayCount) || 31, 28), 31);
+  return (Array.isArray(headers) ? headers : []).filter((header) => {
+    if (!isFormTSEAttendanceDayHeader(header)) return true;
+    const day = parseInt(String(header).match(/^ATTENDANCE_(\d{1,2})/i)[1], 10);
+    return day >= 1 && day <= days;
+  });
+}
+
+/** Keep group labels aligned when attendance day columns are removed for shorter months. */
+export function filterFormTSETableHeadersAndGroupsForMonth(headers, groupLabels, monthDayCount = 31) {
+  const list = Array.isArray(headers) ? headers : [];
+  const groups = Array.isArray(groupLabels) ? groupLabels : [];
+  const days = Math.min(Math.max(Number(monthDayCount) || 31, 28), 31);
+  const outHeaders = [];
+  const outGroups = [];
+  list.forEach((header, index) => {
+    if (isFormTSEAttendanceDayHeader(header)) {
+      const day = parseInt(String(header).match(/^ATTENDANCE_(\d{1,2})/i)[1], 10);
+      if (day < 1 || day > days) return;
+    }
+    outHeaders.push(header);
+    outGroups.push(groups.length === list.length ? groups[index] : '');
+  });
+  return { headers: outHeaders, groupLabels: outGroups };
+}
+
+/**
+ * When modal headers omit day 31, map each displayed column to its original Excel index
+ * so merged wage bands (Deductions, etc.) stay aligned with body cells.
+ */
+export function mapFormTSEDisplayHeadersToExcelCols(parsedHeaders, displayHeaders, tableStartCol = 0) {
+  const parsed = Array.isArray(parsedHeaders) ? parsedHeaders : [];
+  const display = Array.isArray(displayHeaders) ? displayHeaders : [];
+  const start = Math.max(0, Number(tableStartCol) || 0);
+  if (!parsed.length || !display.length || display.length > parsed.length) return null;
+  if (display.length === parsed.length) return null;
+
+  const norm = (h) =>
+    String(h || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s*\(\s*\d{1,2}\s*\)\s*$/, '');
+  const cols = [];
+  let pi = 0;
+  for (let di = 0; di < display.length; di += 1) {
+    const header = display[di];
+    const target = norm(header);
+    while (pi < parsed.length) {
+      const p = parsed[pi];
+      if (p === header || norm(p) === target) break;
+      if (isFormTSEAttendanceDayHeader(p)) {
+        pi += 1;
+        continue;
+      }
+      const directIdx = parsed.indexOf(header, pi);
+      if (directIdx >= 0) {
+        pi = directIdx;
+        break;
+      }
+      const normIdx = parsed.findIndex((ph, idx) => idx >= pi && norm(ph) === target);
+      if (normIdx >= 0) {
+        pi = normIdx;
+        break;
+      }
+      return null;
+    }
+    if (pi >= parsed.length) return null;
+    cols.push(start + pi);
+    pi += 1;
+  }
+  return cols.length === display.length ? cols : null;
+}
+
+/** Parent banner labels (Earned wages, Deductions, …) aligned to filtered display headers. */
+export function buildFormTSEGroupLabelsFromWorksheet(
+  worksheet,
+  {
+    displayHeaders = [],
+    parsedHeaders = [],
+    tableStartCol = 0,
+    headerRowIndex = -1,
+    dataStartIndex = -1,
+  } = {}
+) {
+  if (!worksheet || !Array.isArray(displayHeaders) || displayHeaders.length === 0) return null;
+  const excelCols =
+    resolveFormTSEVisibleModalExcelCols(parsedHeaders, displayHeaders, tableStartCol) ||
+    [];
+  if (!excelCols.length) return null;
+  const merges = worksheet['!merges'] || [];
+  const rawCell = (r, c) => {
+    if (r < 0 || c < 0) return '';
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const cell = worksheet[ref];
+    return cell && cell.v != null ? String(cell.v).trim() : '';
+  };
+  const mergedAware = (r, c) => {
+    const direct = rawCell(r, c);
+    if (direct) return direct;
+    for (let i = 0; i < merges.length; i += 1) {
+      const m = merges[i];
+      if (!m?.s || !m?.e) continue;
+      if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) {
+        const topLeft = rawCell(m.s.r, m.s.c);
+        if (topLeft) return topLeft;
+      }
+    }
+    return '';
+  };
+  const norm = (txt) =>
+    String(txt || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  const ds = Number(dataStartIndex);
+  const leafRow =
+    ds > 0 ? ds - 1 : Number(headerRowIndex) >= 0 ? Number(headerRowIndex) + 1 : -1;
+  const topRow = Number(headerRowIndex) >= 0 ? Number(headerRowIndex) : Math.max(0, leafRow - 2);
+  if (leafRow < 0) return null;
+
+  return displayHeaders.map((header, i) => {
+    if (isFormTSEAttendanceDayHeader(header)) return '';
+    const ec = excelCols[i];
+    const leaf = norm(mergedAware(leafRow, ec));
+    for (let r = topRow; r < leafRow; r += 1) {
+      const parent = String(mergedAware(r, ec) || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!parent || /^\d{1,2}$/.test(parent)) continue;
+      if (norm(parent) === leaf) continue;
+      if (/attendance/i.test(parent) && parent.length > 12) continue;
+      return parent;
+    }
+    return '';
+  });
+}
+
+/** Visible modal columns for the selected month (identity + attendance days + wage cols). */
+export function resolveFormTSEVisibleModalHeaders(parsedHeaders, monthDayCount = 31) {
+  return filterFormTSETableHeadersForMonth(parsedHeaders, monthDayCount);
+}
+
+export function resolveFormTSEVisibleModalGroupLabels(parsedHeaders, groupLabels, monthDayCount = 31) {
+  return filterFormTSETableHeadersAndGroupsForMonth(parsedHeaders, groupLabels, monthDayCount).groupLabels;
+}
+
+/** Excel column index per visible header — never assume contiguous columns after day 31 is removed. */
+export function resolveFormTSEVisibleModalExcelCols(parsedHeaders, visibleHeaders, tableStartCol = 0) {
+  const parsed = Array.isArray(parsedHeaders) ? parsedHeaders : [];
+  const visible = Array.isArray(visibleHeaders) ? visibleHeaders : [];
+  const start = Math.max(0, Number(tableStartCol) || 0);
+  if (!parsed.length || !visible.length) return null;
+
+  const mapped = mapFormTSEDisplayHeadersToExcelCols(parsed, visible, start);
+  if (mapped?.length === visible.length) return mapped;
+
+  const norm = (h) =>
+    String(h || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s*\(\s*\d{1,2}\s*\)\s*$/, '');
+  const cols = [];
+  let pi = 0;
+  for (let vi = 0; vi < visible.length; vi += 1) {
+    const header = visible[vi];
+    const target = norm(header);
+    while (pi < parsed.length) {
+      const p = parsed[pi];
+      if (p === header || norm(p) === target) break;
+      if (isFormTSEAttendanceDayHeader(p)) {
+        pi += 1;
+        continue;
+      }
+      const directIdx = parsed.indexOf(header, pi);
+      if (directIdx >= 0) {
+        pi = directIdx;
+        break;
+      }
+      const normIdx = parsed.findIndex((ph, idx) => idx >= pi && norm(ph) === target);
+      if (normIdx >= 0) {
+        pi = normIdx;
+        break;
+      }
+      return null;
+    }
+    if (pi >= parsed.length) return null;
+    cols.push(start + pi);
+    pi += 1;
+  }
+  return cols.length === visible.length ? cols : null;
+}
+
+/** Strip statutory column index suffix e.g. "Basic (12)" → "Basic" for modal labels. */
+export function formatFormTSEWageColumnHeaderLabel(header) {
+  const raw = String(header || '').trim();
+  if (!raw) return raw;
+  if (isFormTSEAttendanceDayHeader(raw)) {
+    const day = parseInt(String(raw).match(/^ATTENDANCE_(\d{1,2})/i)[1], 10);
+    return day >= 1 ? String(day) : raw;
+  }
+  return raw.replace(/\s*\(\s*\d{1,2}\s*\)\s*$/, '').trim() || raw;
+}
+
+/** Fallback parent band when Excel group labels are missing (Deductions / Earned wages). */
+export function inferFormTSEWageGroupLabelFromHeader(header) {
+  const h = formatFormTSEWageColumnHeaderLabel(header).toLowerCase();
+  if (
+    /salary advance|salary advances|\bfines\b|damage|other deduction|total deduction/.test(h)
+  ) {
+    return 'Deductions';
+  }
+  if (
+    /^basic$|da\/vda|\bhra\b|conveyance|medical allowance|attendance bonus|special allowance|^ot$/.test(
+      h
+    )
+  ) {
+    return 'Earned wages and other allowances';
+  }
+  return '';
 }
 
 /**

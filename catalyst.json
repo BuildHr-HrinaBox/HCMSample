@@ -51,7 +51,8 @@
       "settings_function",
       "importdata_function",
       "clra_function",
-      "approve_leave_function"
+      "approve_leave_function",
+      "samplepayroll_function"
     ],
     "ignore": [],
     "source": "functions"

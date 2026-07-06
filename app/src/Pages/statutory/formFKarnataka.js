@@ -60,6 +60,47 @@ export const FORM_F_KARNATAKA_PART_I_HEADERS = [
   'Remarks',
 ];
 
+/** April PART I defaults when payroll/leave APIs lack values (Karnataka Form F). */
+export const FORM_F_KA_APR_DEFAULT_PART_I = {
+  totalDaysWorked: '30',
+  leaveEarned: '0',
+  leaveAtCredit: '0',
+};
+
+export function isFormFKarnatakaAprilMonthCandidates(monthCandidates) {
+  const primary = String(
+    (Array.isArray(monthCandidates) ? monthCandidates[0] : monthCandidates) || ''
+  ).trim();
+  return /-04$/.test(primary);
+}
+
+export function applyFormFKarnatakaAprilPartIDefaultsToRow(
+  row,
+  monthCandidates,
+  { overwrite = true } = {}
+) {
+  if (!row || !isFormFKarnatakaAprilMonthCandidates(monthCandidates)) return 0;
+  const canon = FORM_F_KARNATAKA_PART_I_HEADERS;
+  const defaults = FORM_F_KA_APR_DEFAULT_PART_I;
+  let applied = 0;
+  const setByIndex = (idx, value) => {
+    if (value == null || value === '') return;
+    const key = canon[idx];
+    if (!key) return;
+    if (!overwrite && String(row[key] ?? '').trim() !== '') return;
+    row[key] = String(value);
+    applied += 1;
+  };
+  setByIndex(2, defaults.totalDaysWorked);
+  setByIndex(3, defaults.leaveEarned);
+  const credit =
+    defaults.leaveAtCredit != null && String(defaults.leaveAtCredit).trim() !== ''
+      ? String(defaults.leaveAtCredit).trim()
+      : computeFormFKarnatakaLeaveAtCredit(defaults.leaveEarned, '0');
+  setByIndex(4, credit);
+  return applied;
+}
+
 const PART_I_SUBHEADER_FRAGMENTS = [
   /^from$/i,
   /^to$/i,
@@ -510,6 +551,11 @@ export function applyFormFKarnatakaLeaveEarnedAutofill(
       approvedRecord,
       { overwrite: options.overwrite !== false }
     );
+    if (options.monthCandidates) {
+      applyFormFKarnatakaAprilPartIDefaultsToRow(row, options.monthCandidates, {
+        overwrite: options.overwrite !== false,
+      });
+    }
     if (applied > 0 || (fromDate && toDate)) hits += 1;
   });
   return hits;
@@ -1054,6 +1100,11 @@ export function applyFormFKarnatakaPayrollAutofill(
     const applied = applyFormFKarnatakaPayrollToRow(row, payrollRow, {
       overwrite: options.overwrite !== false,
     });
+    if (options.monthCandidates) {
+      applyFormFKarnatakaAprilPartIDefaultsToRow(row, options.monthCandidates, {
+        overwrite: options.overwrite !== false,
+      });
+    }
     if (applied > 0) hits += 1;
   });
   return hits;

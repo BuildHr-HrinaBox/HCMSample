@@ -5,7 +5,20 @@ import {
   mergePayrollRunEmployeePayload,
   readPayrollNetPayForStatutory,
   readPayrollScalar,
+  filterPayrollRowsWithGrossPay,
+  flattenPayrollEarningColumns,
+  payrollRowHasNetPay,
 } from '../../utils/payrollEarnings';
+import {
+  cacheForm15PayrollTableRows,
+  getCachedForm15PayrollTableRows,
+  getLatestCachedPayrollTableRows,
+} from '../../utils/statutoryAutofillCache';
+import { fetchPayrollTableRowsForMonths } from '../../utils/payrollTable';
+import { filterFormXIXMPEligiblePayrollRows } from './formXIXMPWageSlip';
+import { personNamesMatch } from './formFKarnataka';
+import { isAprilPayrollMonthCandidates } from './formQKarnataka';
+import { resolveFormXXIIIMPAprilDefaultNormalRate } from './formXXIIIMP';
 import {
   blobIndicatesEmploymentCard,
   isFormXIVEmploymentCardContext,
@@ -51,6 +64,134 @@ export function isFormXIVMPHeaderFieldLayoutFormHeader(formHeader) {
 
 export function isFormXIVMPEmploymentCardContext(formHeader, rowItem, fileName, sheetText = '') {
   return isFormXIVEmploymentCardContext(formHeader, rowItem, fileName, sheetText, null);
+}
+
+/** Karnataka CLRA Form XIV — Employment Card (stacked MP/Karnataka layout). */
+export function isFormXIVKarnatakaContext(formHeader, rowItem, fileName, sheetText = '') {
+  if (!isFormXIVMPEmploymentCardContext(formHeader, rowItem, fileName, sheetText)) return false;
+  const parts = [
+    rowItem?.state,
+    rowItem?.State,
+    rowItem?.formName,
+    rowItem?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    sheetText,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+  return /karnataka|form[\s._-]*xiv[\s._-]*ka|form_xiv[\s._-]*karnataka/.test(parts);
+}
+
+export function resolveFormXIVKarnatakaPayrollMonthKey(monthCandidates) {
+  const primary = String(
+    (Array.isArray(monthCandidates) ? monthCandidates[0] : monthCandidates) || ''
+  ).trim();
+  if (/-04$/.test(primary)) return 'apr';
+  if (/-05$/.test(primary)) return 'may';
+  return '';
+}
+
+/** Karnataka Form XIV — April default wage rates (piece-work / monthly gross). */
+export const FORM_XIV_KA_APR_DEFAULT_WAGE_RATES = [
+  { name: 'Suresh Kumar S', wageRate: '172569' },
+  { name: 'Vaikundamoni M', wageRate: '107741' },
+  { name: 'Satheesh Kumar S', wageRate: '124734' },
+  { name: 'Stalin T', wageRate: '113491' },
+  { name: 'Sathishkumar Murugan', wageRate: '104521' },
+];
+
+function resolveFormXIVKarnatakaEmployeeNameForMatch(emp = {}) {
+  return String(formatFormXIVMPWorkmanName(emp) || '').trim();
+}
+
+export function buildFormXIVKarnatakaWageRateHints(helpers = {}) {
+  return {
+    item: helpers.item ?? null,
+    fileName: String(helpers.fileName ?? helpers.formFileName ?? '').trim(),
+    formHeader: helpers.formHeader ?? helpers.parsedFormHeader ?? null,
+    sheetText: String(helpers.sheetText ?? '').trim(),
+  };
+}
+
+export function resolveFormXIVKarnatakaMonthDefaultWageRate(emp, monthCandidates, hints = {}) {
+  const contextHints = buildFormXIVKarnatakaWageRateHints(hints);
+  if (
+    !isFormXIVKarnatakaContext(
+      contextHints.formHeader,
+      contextHints.item,
+      contextHints.fileName,
+      contextHints.sheetText
+    )
+  ) {
+    return '';
+  }
+  if (resolveFormXIVKarnatakaPayrollMonthKey(monthCandidates) !== 'apr') return '';
+  const empName = resolveFormXIVKarnatakaEmployeeNameForMatch(emp);
+  if (!empName) return '';
+  const match = FORM_XIV_KA_APR_DEFAULT_WAGE_RATES.find((entry) =>
+    personNamesMatch(empName, entry.name)
+  );
+  return match?.wageRate != null ? String(match.wageRate).trim() : '';
+}
+
+export function hasFormXIVKarnatakaMonthDefaultWageRateContext(emp, monthCandidates, hints = {}) {
+  return !!resolveFormXIVKarnatakaMonthDefaultWageRate(emp, monthCandidates, hints);
+}
+
+/** Madhya Pradesh CLRA Form XIV — Employment Card (not Karnataka / Gujarat). */
+export function isFormXIVMadhyaPradeshContext(formHeader, rowItem, fileName, sheetText = '') {
+  if (!isFormXIVMPEmploymentCardContext(formHeader, rowItem, fileName, sheetText)) return false;
+  if (isFormXIVKarnatakaContext(formHeader, rowItem, fileName, sheetText)) return false;
+  const parts = [
+    rowItem?.state,
+    rowItem?.State,
+    rowItem?.siteState,
+    rowItem?.SiteState,
+    rowItem?.formName,
+    rowItem?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    sheetText,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+  if (/gujarat|xiv[\s._-]*gj/i.test(parts)) return false;
+  return (
+    /madhya[\s._-]*pradesh/.test(parts) ||
+    /\bform[\s._-]*xiv[\s._-]*mp\b/.test(parts) ||
+    /\bxiv[\s._-]*mp\b/.test(parts) ||
+    /form_xiv_mp/.test(parts)
+  );
+}
+
+export function buildFormXIVMPWageRateHints(helpers = {}) {
+  return buildFormXIVKarnatakaWageRateHints(helpers);
+}
+
+/** MP Form XIV — April default wage rate from Form XXIII_MP normal rate of wages. */
+export function resolveFormXIVMadhyaPradeshMonthDefaultWageRate(emp, monthCandidates, hints = {}) {
+  const contextHints = buildFormXIVMPWageRateHints(hints);
+  if (
+    !isFormXIVMadhyaPradeshContext(
+      contextHints.formHeader,
+      contextHints.item,
+      contextHints.fileName,
+      contextHints.sheetText
+    )
+  ) {
+    return '';
+  }
+  if (!isAprilPayrollMonthCandidates(monthCandidates)) return '';
+  return resolveFormXXIIIMPAprilDefaultNormalRate(emp);
+}
+
+export function hasFormXIVMadhyaPradeshMonthDefaultWageRateContext(emp, monthCandidates, hints = {}) {
+  return !!resolveFormXIVMadhyaPradeshMonthDefaultWageRate(emp, monthCandidates, hints);
 }
 
 export function headersIndicateFormXIVGJTable(tableHeaders) {
@@ -605,7 +746,74 @@ export function readFormXIVMPPayrollNetPay(payrollRow) {
   return '';
 }
 
+/** Payroll table rows usable for Form XIV wage rate — gross_pay or net_pay; no live Zoho. */
+export function filterFormXIVMPPayrollRowsForWageRate(rows) {
+  const flat = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && typeof row === 'object' && row.fetch_error !== true)
+    .map((row) => flattenPayrollEarningColumns(row));
+  const withGross = filterPayrollRowsWithGrossPay(flat);
+  if (withGross.length > 0) return withGross;
+  return flat.filter((row) => payrollRowHasNetPay(row));
+}
+
+/** Resolve Form XIV wage-rate rows from Payroll table snapshots (pay-run shape or gross/net). */
+export function resolveFormXIVMPPayrollRowsForAutofill(statutoryPayrollRows, monthCandidates = []) {
+  const fromPayRun = filterFormXIXMPEligiblePayrollRows(statutoryPayrollRows);
+  if (fromPayRun.length > 0) return fromPayRun;
+  const fromTable = filterFormXIVMPPayrollRowsForWageRate(statutoryPayrollRows);
+  if (fromTable.length > 0) return fromTable;
+
+  const cached = getCachedForm15PayrollTableRows(monthCandidates);
+  if (cached?.rows?.length > 0) {
+    const fromCachedPayRun = filterFormXIXMPEligiblePayrollRows(cached.rows);
+    if (fromCachedPayRun.length > 0) return fromCachedPayRun;
+    const fromCachedTable = filterFormXIVMPPayrollRowsForWageRate(cached.rows);
+    if (fromCachedTable.length > 0) return fromCachedTable;
+  }
+
+  const latest = getLatestCachedPayrollTableRows();
+  if (latest?.rows?.length > 0) {
+    const fromLatestPayRun = filterFormXIXMPEligiblePayrollRows(latest.rows);
+    if (fromLatestPayRun.length > 0) return fromLatestPayRun;
+    const fromLatestTable = filterFormXIVMPPayrollRowsForWageRate(latest.rows);
+    if (fromLatestTable.length > 0) return fromLatestTable;
+  }
+  return [];
+}
+
+/** Load Form XIV wage-rate rows from Catalyst Payroll table only (no live Zoho fallback). */
+export async function loadFormXIVMPPayrollRowsForAutofill(monthCandidates = [], options = {}) {
+  const months = Array.isArray(monthCandidates) ? monthCandidates : [];
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 45000;
+  const tableLoad = await fetchPayrollTableRowsForMonths(months, {
+    timeoutMs,
+    force: Boolean(options.force),
+    zohoFallback: false,
+  });
+  if (Array.isArray(tableLoad.rows) && tableLoad.rows.length > 0) {
+    const payrollMonth = tableLoad.payrollMonth || months[0] || '';
+    cacheForm15PayrollTableRows(payrollMonth, tableLoad.rows, tableLoad.meta || null);
+    const eligible = filterFormXIVMPPayrollRowsForWageRate(tableLoad.rows);
+    if (eligible.length > 0) return eligible;
+  }
+  return resolveFormXIVMPPayrollRowsForAutofill(tableLoad?.rows, months);
+}
+
 export function resolveFormXIVMPWageRate(emp = {}, payrollRow = null, options = {}) {
+  const monthDefault = resolveFormXIVKarnatakaMonthDefaultWageRate(
+    emp,
+    options.monthCandidates,
+    options
+  );
+  if (monthDefault) return monthDefault;
+
+  const mpMonthDefault = resolveFormXIVMadhyaPradeshMonthDefaultWageRate(
+    emp,
+    options.monthCandidates,
+    options
+  );
+  if (mpMonthDefault) return mpMonthDefault;
+
   const preferNetPay = options.variant === 'gj' || options.preferNetPay === true;
   if (preferNetPay && payrollRow) {
     const fromNet = readFormXIVMPPayrollNetPay(payrollRow);
@@ -620,6 +828,14 @@ export function resolveFormXIVMPWageRate(emp = {}, payrollRow = null, options = 
     const n = Number(String(fromPayroll).replace(/,/g, '').trim());
     if (Number.isFinite(n) && n > 0) return String(n);
     return String(fromPayroll).trim();
+  }
+  if (payrollRow) {
+    const fromNet = readFormXIVMPPayrollNetPay(payrollRow);
+    if (fromNet !== '') {
+      const n = Number(String(fromNet).replace(/,/g, '').trim());
+      if (Number.isFinite(n) && n > 0) return String(n);
+      return String(fromNet).trim();
+    }
   }
   const fromEmp = emp.MonthlySalary || emp['Monthly Salary'] || emp.BasicSalary || emp['Basic Salary'] || '';
   if (fromEmp != null && String(fromEmp).trim() !== '') return String(fromEmp).trim();
@@ -767,7 +983,16 @@ export function applyFormXIVMPEmployeeToRow(row, emp, headers, helpers = {}) {
       return;
     }
     if (isFormXIVMPWageRateHeader(header)) {
-      out[header] = sanitizeValue(resolveFormXIVMPWageRate(emp, payrollRow, { variant }));
+      out[header] = sanitizeValue(
+        resolveFormXIVMPWageRate(emp, payrollRow, {
+          variant,
+          monthCandidates: helpers.monthCandidates,
+          item,
+          fileName: helpers.fileName ?? helpers.formFileName ?? '',
+          formHeader: helpers.formHeader ?? helpers.parsedFormHeader ?? null,
+          sheetText: helpers.sheetText ?? '',
+        })
+      );
       return;
     }
     if (isFormXIVMPWagePeriodHeader(header)) {
@@ -793,18 +1018,41 @@ export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpe
     resolvePayrollRow = null,
     sanitizeValue = (v) => String(v ?? '').trim(),
     overwrite = false,
+    monthCandidates = null,
+    item = null,
+    fileName = '',
+    formHeader = null,
+    parsedFormHeader = null,
+    sheetText = '',
   } = helpers;
-  if (!Array.isArray(mappedData) || mappedData.length === 0 || typeof resolvePayrollRow !== 'function') {
-    return 0;
-  }
+  const wageRateHints = buildFormXIVKarnatakaWageRateHints({
+    item,
+    fileName,
+    formHeader: formHeader ?? parsedFormHeader,
+    sheetText,
+  });
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
   let hits = 0;
   mappedData.forEach((row, rowIndex) => {
-    if (!overwrite && String(row?.[wageRateHeader] ?? '').trim()) return;
     const empItem = employees[rowIndex];
     const emp = empItem?.Employee || empItem?.employee || empItem;
+    const monthDefault =
+      resolveFormXIVKarnatakaMonthDefaultWageRate(emp, monthCandidates, wageRateHints) ||
+      resolveFormXIVMadhyaPradeshMonthDefaultWageRate(emp, monthCandidates, wageRateHints);
+    if (monthDefault && (overwrite || !String(row?.[wageRateHeader] ?? '').trim())) {
+      row[wageRateHeader] = sanitizeValue(monthDefault);
+      hits += 1;
+      return;
+    }
+    if (!overwrite && String(row?.[wageRateHeader] ?? '').trim()) return;
+    if (typeof resolvePayrollRow !== 'function') return;
     const payrollRow = resolvePayrollRow(emp, row, rowIndex);
     if (!payrollRow || payrollRow.fetch_error) return;
-    const rate = resolveFormXIVMPWageRate(emp, payrollRow, { variant });
+    const rate = resolveFormXIVMPWageRate(emp, payrollRow, {
+      variant,
+      monthCandidates,
+      ...wageRateHints,
+    });
     if (rate) {
       row[wageRateHeader] = sanitizeValue(rate);
       hits += 1;
@@ -2000,6 +2248,11 @@ export function mapFormXIVMPRowsFromEmployees(employees, headers, helpers = {}) 
     formatStatutoryDateDisplay = (v) => String(v || '').trim(),
     item = null,
     resolvePayrollRow = null,
+    monthCandidates = null,
+    fileName = '',
+    formHeader = null,
+    parsedFormHeader = null,
+    sheetText = '',
   } = helpers;
   return list.map((empItem, rowIndex) => {
     const emp = empItem?.Employee || empItem?.employee || empItem;
@@ -2013,6 +2266,10 @@ export function mapFormXIVMPRowsFromEmployees(employees, headers, helpers = {}) 
       formatStatutoryDateDisplay,
       payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
       item,
+      monthCandidates,
+      fileName,
+      formHeader: formHeader ?? parsedFormHeader,
+      sheetText,
     });
   });
 }

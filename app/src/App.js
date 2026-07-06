@@ -48,6 +48,7 @@ import Leave from './Pages/Leave';
 import NewLeave from './Pages/NewLeave';
 import ApprovedLeaves from './Pages/ApprovedLeaves';
 import Payroll from './Pages/Payroll';
+import SamplePayroll from './Pages/SamplePayroll';
 import CLRA from './utils/CLRA';
 import Reports from './Pages/Reports';
 import Mainreport from './Pages/Mainreport';
@@ -419,6 +420,7 @@ function MainApp({ userRole, userEmail, userName }) {
   const isNewLeaveHcmShell = location.pathname === '/rule-book/newleave';
   const isApprovedLeavesHcmShell = location.pathname === '/rule-book/approved-leaves';
   const isPayrollHcmShell = location.pathname === '/rule-book/payroll';
+  const isSamplePayrollHcmShell = location.pathname === '/rule-book/sample-payroll';
   const isClraHcmShell = location.pathname === '/rule-book/clra';
   const isHcmFullShell =
     isHcmDashboardPage ||
@@ -440,6 +442,7 @@ function MainApp({ userRole, userEmail, userName }) {
     isNewLeaveHcmShell ||
     isApprovedLeavesHcmShell ||
     isPayrollHcmShell ||
+    isSamplePayrollHcmShell ||
     isClraHcmShell;
 
   // When user navigates, ensure NewHome sidebar is open (so it's visible on both home and other pages)
@@ -498,7 +501,7 @@ function MainApp({ userRole, userEmail, userName }) {
               : isAuditOnlyUser
                 ? auditOnlyAllowedPaths
                 : isRestrictedUser 
-                  ? ['/', '/new-dashboard', '/hcm-dashboard', '/rule-book/company-details', '/rule-book/site-management', '/rule-book/se-master', '/rule-book/formmaster', '/rule-book/actsbulk', '/rule-book/act-descriptions', '/rule-book/regulationsbulk', '/rule-book/regulations', '/rule-book/statutory', '/rule-book/checklist', '/rule-book/checklistbulk', '/rule-book/people', '/rule-book/attendance', '/rule-book/leave', '/rule-book/newleave', '/rule-book/approved-leaves', '/rule-book/payroll', '/rule-book/clra', '/rule-book/todo-list', '/rule-book/calendarbulk', '/rule-book/statutory-master', '/rule-book/statutorymasterfactory', '/form-builder', '/calendar-picker', '/compliance', '/certificate', '/mainreport', '/returned-report', '/settings', '/assessments/assessment-report', '/assessments/vendor-view', '/assessments/face-sheets', '/assessments/category-score'] 
+                  ? ['/', '/new-dashboard', '/hcm-dashboard', '/rule-book/company-details', '/rule-book/site-management', '/rule-book/se-master', '/rule-book/formmaster', '/rule-book/actsbulk', '/rule-book/act-descriptions', '/rule-book/regulationsbulk', '/rule-book/regulations', '/rule-book/statutory', '/rule-book/checklist', '/rule-book/checklistbulk', '/rule-book/people', '/rule-book/attendance', '/rule-book/leave', '/rule-book/newleave', '/rule-book/approved-leaves', '/rule-book/payroll', '/rule-book/sample-payroll', '/rule-book/clra', '/rule-book/todo-list', '/rule-book/calendarbulk', '/rule-book/statutory-master', '/rule-book/statutorymasterfactory', '/form-builder', '/calendar-picker', '/compliance', '/certificate', '/mainreport', '/returned-report', '/settings', '/assessments/assessment-report', '/assessments/vendor-view', '/assessments/face-sheets', '/assessments/category-score'] 
                   : ['*']
           }>
             <Routes>
@@ -728,6 +731,20 @@ function MainApp({ userRole, userEmail, userName }) {
                     mainExtraClassName="nd-content--viewport-scroll"
                   >
                     <Payroll />
+                  </HcmDashboardPageShell>
+                }
+              />
+              <Route
+                path="/rule-book/sample-payroll"
+                element={
+                  <HcmDashboardPageShell
+                    userName={userName || 'User'}
+                    userRole={userRole || 'App User'}
+                    userInitials={dashboardInitials}
+                    userEmail={userEmail}
+                    mainExtraClassName="nd-content--viewport-scroll"
+                  >
+                    <SamplePayroll userRole={userRole} userEmail={userEmail} />
                   </HcmDashboardPageShell>
                 }
               />

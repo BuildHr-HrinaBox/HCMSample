@@ -25,8 +25,102 @@ import {
   getLatestCachedPayrollTableRows,
 } from '../../utils/statutoryAutofillCache';
 import { fetchPayrollTableRowsForMonths } from '../../utils/payrollTable';
+import { personNamesMatch } from './formFKarnataka';
+import { isAprilPayrollMonthCandidates } from './formQKarnataka';
+import { FORM_XIX_MP_APR_PAYRUN_DEFAULTS } from './formXIXMPPayrunDefaults';
 
 /** MP CLRA Form XIX — Wage Slip: site header fields + tabular wage particulars + per-employee ZIP. */
+
+/** MP Form XIX — default No. of days worked when payroll lacks paid days. */
+export const FORM_XIX_MP_DEFAULT_DAYS_WORKED = '30';
+
+const FORM_XIX_MP_PAID_DAYS_KEYS = [
+  'paid_days',
+  'Paid Days',
+  'days_worked',
+  'Days Worked',
+  'paidDays',
+  'no_of_days_worked',
+  'no_of_days_present',
+  'present_days',
+  'Effective Paid Days',
+  'effective_paid_days',
+  'effectivePaidDays',
+  'Base Days',
+  'base_days',
+];
+
+const FORM_XIX_MP_PAID_DAYS_PATTERNS = [
+  /^paid_days$/,
+  /paiddays/,
+  /daysworked/,
+  /days_present/,
+  /noofdayspresent/,
+  /present_days/,
+  /effective_paid_days/,
+  /base_days/,
+];
+
+const FORM_XIX_MP_GROSS_KEYS = [
+  'gross_pay',
+  'Gross Pay',
+  'grossPay',
+  'total_earnings',
+  'Total Earnings',
+];
+
+const FORM_XIX_MP_DEDUCTIONS_KEYS = [
+  'total_deductions',
+  'Total Deductions',
+  'totalDeductions',
+  'total_employee_deductions',
+  'total_deduction',
+];
+
+const FORM_XIX_MP_NET_KEYS = ['net_pay', 'Net Pay', 'netPay', 'net_wages'];
+
+export function formatFormXIXMPEmployeeName(emp = {}) {
+  const workmanLine = String(formatWorkmanNameAndGuardian(emp) || '')
+    .split(/\r?\n/)[0]
+    .trim();
+  if (workmanLine) return workmanLine;
+  const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || emp['First Name'] || '').trim();
+  const ln = String(emp.LastName || emp['LastName'] || emp.lastName || emp['Last Name'] || '').trim();
+  if (fn && ln) return `${fn} ${ln}`;
+  return fn || ln || String(emp.Name || emp['Name'] || emp.EmployeeName || emp['Employee Name'] || '').trim();
+}
+
+function shouldUseFormXIXMPPayrunDefaults(options = {}) {
+  if (!options.madhyaPradeshPayrollRules) return false;
+  const months = options.monthCandidates;
+  if (months == null || (Array.isArray(months) && months.length === 0)) return true;
+  return isAprilPayrollMonthCandidates(months);
+}
+
+export function resolveFormXIXMPPayrunAprilDefaultWages(emp) {
+  const empName = formatFormXIXMPEmployeeName(emp);
+  if (!empName) return null;
+  const match = FORM_XIX_MP_APR_PAYRUN_DEFAULTS.find((entry) => personNamesMatch(empName, entry.name));
+  if (!match) return null;
+  return {
+    daysWorked: match.days != null ? String(match.days).trim() : FORM_XIX_MP_DEFAULT_DAYS_WORKED,
+    grossWages: match.gross != null ? String(match.gross).trim() : '',
+    deductions: match.deductions != null ? String(match.deductions).trim() : '',
+    netWages: match.net != null ? String(match.net).trim() : '',
+  };
+}
+
+function applyFormXIXMPPayrunDefaults(fields, emp, options = {}) {
+  if (!shouldUseFormXIXMPPayrunDefaults(options) || !emp) return fields;
+  const defaults = resolveFormXIXMPPayrunAprilDefaultWages(emp);
+  if (!defaults) return fields;
+  const out = { ...fields };
+  if (!out.daysWorked) out.daysWorked = defaults.daysWorked || FORM_XIX_MP_DEFAULT_DAYS_WORKED;
+  if (!out.grossWages) out.grossWages = defaults.grossWages;
+  if (!out.deductions) out.deductions = defaults.deductions;
+  if (!out.netWages) out.netWages = defaults.netWages;
+  return out;
+}
 
 export const FORM_XIX_MP_WAGE_TABLE_HEADERS = [
   "Name and Father's/Husband's Name of the workman",
@@ -104,10 +198,27 @@ export function resolveFormXIXMPPayrollHelpers(contextHints = {}) {
   const sheetText = contextHints.sheetText || '';
   const gujarat = isFormXIXGJGujaratWageSlipContext(formHeader, item, fileName, sheetText);
   const tamilNadu = isFormXIXTamilNaduWageSlipContext(formHeader, item, fileName, sheetText);
+  const madhyaPradesh =
+    isFormXIXMPWageSlipContext(formHeader, item, fileName, sheetText) && !gujarat && !tamilNadu;
   return {
     gujaratPayrollRules: gujarat,
     useMonthlyWageRateDefault: gujarat || tamilNadu,
+    madhyaPradeshPayrollRules: madhyaPradesh,
   };
+}
+
+/** Madhya Pradesh Form XIX only — not Karnataka / Gujarat / Tamil Nadu. */
+export function isFormXIXMadhyaPradeshWageSlipContext(formHeader, rowItem, fileName, sheetText = '') {
+  if (!isFormXIXAPWageSlipContext(formHeader, rowItem, fileName, sheetText)) return false;
+  if (isFormXIXTamilNaduWageSlipContext(formHeader, rowItem, fileName, sheetText)) return false;
+  if (isFormXIXGJGujaratWageSlipContext(formHeader, rowItem, fileName, sheetText)) return false;
+  const parts = formXIXMPContextParts(formHeader, rowItem, fileName, sheetText);
+  if (/karnataka|form[\s._-]*xix[\s._-]*ka|form_xix[\s._-]*karnataka/.test(parts)) return false;
+  return (
+    /madhya\s+pradesh/.test(parts) ||
+    /form[\s._-]*xix[\s._-]*mp/.test(parts) ||
+    (/\bmp\b/.test(parts) && matchesFormXIXHint(parts))
+  );
 }
 
 const formXIXMPContextParts = (formHeader, rowItem, fileName, sheetText = '') =>
@@ -238,15 +349,35 @@ const payrollEmployeeCodes = (row) =>
     row?.emp_id,
     row?.EmployeeID,
     row?.['Employee ID'],
+    row?.['Employee No'],
+    row?.['Employee Number'],
   ]
     .map((value) => String(value || '').trim())
     .filter(Boolean);
+
+const payrollRowDisplayName = (row) =>
+  normPersonName(
+    row?.employee_name ||
+      row?.full_name ||
+      row?.name ||
+      row?.['Employee Name'] ||
+      row?.employeeName ||
+      ''
+  );
+
+const normalizeFormXIXMPDaysWorked = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  const n = Number(raw.replace(/,/g, ''));
+  if (Number.isFinite(n) && n > 0) return String(Math.round(n));
+  return raw;
+};
 
 const payrollRowIdentityKey = (row) => {
   if (!row || typeof row !== 'object') return '';
   const codes = payrollEmployeeCodes(row);
   if (codes.length > 0) return `id:${normPayrollEmployeeCode(codes[0])}`;
-  const name = normPersonName(row.employee_name || row.full_name || row.name || '');
+  const name = payrollRowDisplayName(row);
   return name ? `name:${name}` : '';
 };
 
@@ -316,10 +447,10 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
     hit =
       payrollRows.find((row) => {
         if (!row || row.fetch_error) return false;
-        const payrollName = normPersonName(row.employee_name || row.full_name || row.name || '');
+        const payrollName = payrollRowDisplayName(row);
         if (!payrollName) return false;
-        const rfn = String(row.first_name || row.firstName || '').trim().toLowerCase();
-        const rln = String(row.last_name || row.lastName || '').trim().toLowerCase();
+        const rfn = String(row.first_name || row.firstName || row['First Name'] || '').trim().toLowerCase();
+        const rln = String(row.last_name || row.lastName || row['Last Name'] || '').trim().toLowerCase();
         const rcombo = normPersonName(`${rfn} ${rln}`);
         const rcomboInitial = rfn && rln ? normPersonName(`${rfn} ${rln.charAt(0)}`) : '';
         return nameCandidates.some(
@@ -327,6 +458,7 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
             payrollName === candidate ||
             rcombo === candidate ||
             rcomboInitial === candidate ||
+            personNamesMatch(candidate, payrollName) ||
             (candidate.length > 3 && payrollName.includes(candidate)) ||
             (payrollName.length > 3 && candidate.includes(payrollName))
         );
@@ -345,9 +477,7 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
         if (!row || row.fetch_error) return false;
         const rfn = String(row.first_name || row.firstName || '').trim().toLowerCase();
         if (rfn && rfn === firstOnly) return true;
-        const payrollName = String(row.employee_name || row.full_name || row.name || '')
-          .trim()
-          .toLowerCase();
+        const payrollName = payrollRowDisplayName(row);
         if (!payrollName) return false;
         return (
           payrollName === firstOnly ||
@@ -366,10 +496,13 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
     hit =
       payrollRows.find((row) => {
         if (!row || row.fetch_error) return false;
-        const payrollName = String(row.employee_name || row.full_name || row.name || '')
-          .trim()
-          .toLowerCase();
-        return payrollName === workmanLine || payrollName.includes(workmanLine) || workmanLine.includes(payrollName);
+        const payrollName = payrollRowDisplayName(row);
+        return (
+          payrollName === normPersonName(workmanLine) ||
+          personNamesMatch(workmanLine, payrollName) ||
+          payrollName.includes(normPersonName(workmanLine)) ||
+          normPersonName(workmanLine).includes(payrollName)
+        );
       }) || null;
   }
   return hit;
@@ -410,28 +543,15 @@ export function payrollRowHasFormXIXMPPayRunFields(payrollRow) {
   if (!payrollRow || payrollRow.fetch_error) return false;
   if (payrollRowLooksLikeBulkSalaryNotPayRun(payrollRow)) return false;
   const flat = flattenPayrollEarningColumns(payrollRow);
-  const days = pickPayrollField(
+  const days = pickPayrollField(flat, payrollRow, FORM_XIX_MP_PAID_DAYS_KEYS, FORM_XIX_MP_PAID_DAYS_PATTERNS);
+  const gross = pickPayrollField(flat, payrollRow, FORM_XIX_MP_GROSS_KEYS, [/^gross_pay$/, /^total_earnings$/]);
+  const net = pickPayrollField(flat, payrollRow, FORM_XIX_MP_NET_KEYS, [/^net_pay$/]);
+  const deductions = pickPayrollField(
     flat,
     payrollRow,
-    [
-      'paid_days',
-      'Paid Days',
-      'days_worked',
-      'Days Worked',
-      'paidDays',
-      'no_of_days_worked',
-      'no_of_days_present',
-      'present_days',
-    ],
-    [/^paid_days$/, /paiddays/, /daysworked/, /days_present/, /noofdayspresent/, /present_days/]
+    FORM_XIX_MP_DEDUCTIONS_KEYS,
+    [/^total_deductions?$/, /^total_employee_deductions$/]
   );
-  const gross = pickPayrollField(
-    flat,
-    payrollRow,
-    ['gross_pay', 'Gross Pay', 'grossPay'],
-    [/^gross_pay$/, /^total_earnings$/]
-  );
-  const net = pickPayrollField(flat, payrollRow, ['net_pay', 'Net Pay', 'netPay'], [/^net_pay$/]);
   const paymentStatus = String(
     pickPayrollField(
       flat,
@@ -443,6 +563,7 @@ export function payrollRowHasFormXIXMPPayRunFields(payrollRow) {
     .trim()
     .toLowerCase();
   if (days !== '' && (gross !== '' || net !== '')) return true;
+  if (gross !== '' && net !== '' && deductions !== '') return true;
   return gross !== '' && net !== '' && (paymentStatus === 'paid' || paymentStatus === 'partially_paid');
 }
 
@@ -453,8 +574,8 @@ export function payrollRowLooksLikeBulkSalaryNotPayRun(payrollRow) {
   const days = pickPayrollField(
     flat,
     payrollRow,
-    ['paid_days', 'Paid Days', 'days_worked', 'Days Worked', 'paidDays'],
-    [/^paid_days$/, /paiddays/, /daysworked/, /days_present/]
+    FORM_XIX_MP_PAID_DAYS_KEYS,
+    FORM_XIX_MP_PAID_DAYS_PATTERNS
   );
   if (days !== '') return false;
   const monthlySalary = readPayrollScalar(flat, ['monthly_salary', 'MonthlySalary', 'monthly_gross_amount']);
@@ -473,10 +594,10 @@ export function payrollRowLooksLikeBulkSalaryNotPayRun(payrollRow) {
   const gross = pickPayrollField(
     flat,
     payrollRow,
-    ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings'],
+    FORM_XIX_MP_GROSS_KEYS,
     [/^gross_pay$/, /^total_earnings$/]
   );
-  const net = pickPayrollField(flat, payrollRow, ['net_pay', 'Net Pay', 'netPay'], [/^net_pay$/]);
+  const net = pickPayrollField(flat, payrollRow, FORM_XIX_MP_NET_KEYS, [/^net_pay$/]);
   return gross !== '' || net !== '';
 }
 
@@ -676,21 +797,25 @@ const resolveFormXIXMPDailyWageRate = (flatRow, payrollRow) => {
 
 export function resolveFormXIXMPPayrollFields(payrollRow, options = {}) {
   if (!payrollRow || payrollRow.fetch_error) {
-    return {
-      daysWorked: '',
-      unitsWorked: '',
-      rate: options.useMonthlyWageRateDefault ? FORM_XIX_TN_RATE_DEFAULT : '',
-      overtimeWages: '',
-      grossWages: '',
-      deductions: '',
-      netWages: '',
-    };
+    return applyFormXIXMPPayrunDefaults(
+      {
+        daysWorked: options.madhyaPradeshPayrollRules ? FORM_XIX_MP_DEFAULT_DAYS_WORKED : '',
+        unitsWorked: '',
+        rate: options.useMonthlyWageRateDefault ? FORM_XIX_TN_RATE_DEFAULT : '',
+        overtimeWages: '',
+        grossWages: '',
+        deductions: '',
+        netWages: '',
+      },
+      options.emp,
+      options
+    );
   }
   const row = flattenPayrollEarningColumns(payrollRow);
   let deductions = pickPayrollField(
     row,
     payrollRow,
-    ['total_deductions', 'Total Deductions', 'totalDeductions', 'total_employee_deductions', 'total_deduction'],
+    FORM_XIX_MP_DEDUCTIONS_KEYS,
     [/^total_deductions?$/, /^total_employee_deductions$/]
   );
   if (options.gujaratPayrollRules) {
@@ -714,42 +839,48 @@ export function resolveFormXIXMPPayrollFields(payrollRow, options = {}) {
     const gross = pickPayrollField(
       row,
       payrollRow,
-      ['gross_pay', 'Gross Pay', 'grossPay'],
+      FORM_XIX_MP_GROSS_KEYS,
       [/^gross_pay$/, /^total_earnings$/]
     );
-    const net = pickPayrollField(row, payrollRow, ['net_pay', 'Net Pay', 'netPay'], [/^net_pay$/]);
+    const net = pickPayrollField(row, payrollRow, FORM_XIX_MP_NET_KEYS, [/^net_pay$/]);
     if (gross !== '' && net !== '') {
       const diff = Number(gross) - Number(net);
       if (Number.isFinite(diff) && diff >= 0) deductions = Math.round(diff * 100) / 100;
     }
   }
 
-  return {
-    daysWorked: pickPayrollField(
-      row,
-      payrollRow,
-      ['paid_days', 'Paid Days', 'days_worked', 'Days Worked', 'paidDays', 'no_of_days_worked'],
-      [/^paid_days$/, /paiddays/, /daysworked/, /days_present/, /noofdayspresent/, /no_of_days_present/]
-    ),
-    unitsWorked: pickPayrollField(row, payrollRow, ['units_worked', 'Units Worked', 'piece_units'], [/units_worked/]),
-    rate: options.useMonthlyWageRateDefault
-      ? FORM_XIX_TN_RATE_DEFAULT
-      : resolveFormXIXMPDailyWageRate(row, payrollRow),
-    overtimeWages: pickPayrollField(
-      row,
-      payrollRow,
-      ['overtime', 'Overtime', 'overtime_wages', 'overtimeWages', 'ot'],
-      [/overtime/]
-    ),
-    grossWages: pickPayrollField(
-      row,
-      payrollRow,
-      ['gross_pay', 'Gross Pay', 'grossPay'],
-      [/^gross_pay$/, /^total_earnings$/]
-    ),
-    deductions,
-    netWages: pickPayrollField(row, payrollRow, ['net_pay', 'Net Pay', 'netPay', 'net_wages'], [/^net_pay$/]),
-  };
+  let daysWorked = normalizeFormXIXMPDaysWorked(
+    pickPayrollField(row, payrollRow, FORM_XIX_MP_PAID_DAYS_KEYS, FORM_XIX_MP_PAID_DAYS_PATTERNS)
+  );
+  if (!daysWorked && options.madhyaPradeshPayrollRules) {
+    daysWorked = FORM_XIX_MP_DEFAULT_DAYS_WORKED;
+  }
+
+  return applyFormXIXMPPayrunDefaults(
+    {
+      daysWorked,
+      unitsWorked: pickPayrollField(row, payrollRow, ['units_worked', 'Units Worked', 'piece_units'], [/units_worked/]),
+      rate: options.useMonthlyWageRateDefault
+        ? FORM_XIX_TN_RATE_DEFAULT
+        : resolveFormXIXMPDailyWageRate(row, payrollRow),
+      overtimeWages: pickPayrollField(
+        row,
+        payrollRow,
+        ['overtime', 'Overtime', 'overtime_wages', 'overtimeWages', 'ot'],
+        [/overtime/]
+      ),
+      grossWages: pickPayrollField(
+        row,
+        payrollRow,
+        FORM_XIX_MP_GROSS_KEYS,
+        [/^gross_pay$/, /^total_earnings$/]
+      ),
+      deductions,
+      netWages: pickPayrollField(row, payrollRow, FORM_XIX_MP_NET_KEYS, [/^net_pay$/]),
+    },
+    options.emp,
+    options
+  );
 }
 
 export function enrichFormXIXTamilNaduStaticFieldRows(mappedData, headers) {
@@ -781,14 +912,20 @@ export function applyFormXIXMPEmployeeToRow(row, emp, headers, helpers = {}) {
     payrollRow = null,
     useMonthlyWageRateDefault = false,
     gujaratPayrollRules = false,
+    madhyaPradeshPayrollRules = false,
+    monthCandidates = null,
   } = helpers;
   const hasPayroll = payrollRow && !payrollRow.fetch_error;
   const payroll = resolveFormXIXMPPayrollFields(hasPayroll ? payrollRow : null, {
+    emp,
+    monthCandidates,
     gujaratPayrollRules,
     useMonthlyWageRateDefault,
+    madhyaPradeshPayrollRules,
   });
   const wageValue = (value, current = '') => {
     if (hasPayroll) return value !== '' ? sanitizeValue(value) : '';
+    if (madhyaPradeshPayrollRules && value !== '') return sanitizeValue(value);
     return value !== '' ? sanitizeValue(value) : String(current ?? '').trim();
   };
 
@@ -798,7 +935,10 @@ export function applyFormXIXMPEmployeeToRow(row, emp, headers, helpers = {}) {
       return;
     }
     if (isFormXIXMPDaysWorkedHeader(header)) {
-      out[header] = wageValue(payroll.daysWorked, out[header]);
+      const days =
+        wageValue(payroll.daysWorked, out[header]) ||
+        (madhyaPradeshPayrollRules ? FORM_XIX_MP_DEFAULT_DAYS_WORKED : '');
+      out[header] = sanitizeValue(days);
       return;
     }
     if (isFormXIXMPUnitsWorkedHeader(header)) {
@@ -856,25 +996,26 @@ export function enrichFormXIXMPPayrollRows(mappedData, employees, headers, helpe
     overwrite = true,
     gujaratPayrollRules = false,
     useMonthlyWageRateDefault = false,
+    madhyaPradeshPayrollRules = false,
+    monthCandidates = null,
   } = helpers;
-  if (
-    !Array.isArray(mappedData) ||
-    mappedData.length === 0 ||
-    typeof resolvePayrollRow !== 'function'
-  ) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) {
     return 0;
   }
   let hits = 0;
   mappedData.forEach((row, rowIndex) => {
     const empItem = employees[rowIndex];
     const emp = empItem?.Employee || empItem?.employee || empItem;
-    const payrollRow = resolvePayrollRow(emp, row, rowIndex);
-    if (!payrollRow || payrollRow.fetch_error) return;
+    const payrollRow =
+      typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, row, rowIndex) : null;
+    if (!payrollRow && !madhyaPradeshPayrollRules) return;
     const merged = applyFormXIXMPEmployeeToRow(row, emp, hdrs, {
       sanitizeValue,
-      payrollRow,
+      payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
       gujaratPayrollRules,
       useMonthlyWageRateDefault,
+      madhyaPradeshPayrollRules,
+      monthCandidates,
     });
     if (!overwrite) {
       hdrs.forEach((header) => {
@@ -884,7 +1025,18 @@ export function enrichFormXIXMPPayrollRows(mappedData, employees, headers, helpe
       });
     }
     Object.assign(row, merged);
-    hits += 1;
+    const hasWageData = hdrs.some((header) => {
+      if (
+        !isFormXIXMPGrossHeader(header) &&
+        !isFormXIXMPDeductionsHeader(header) &&
+        !isFormXIXMPNetHeader(header) &&
+        !isFormXIXMPDaysWorkedHeader(header)
+      ) {
+        return false;
+      }
+      return String(merged[header] ?? '').trim() !== '';
+    });
+    if (hasWageData) hits += 1;
   });
   return hits;
 }

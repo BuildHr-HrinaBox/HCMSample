@@ -39,6 +39,7 @@ export const HCM_FORM_FETCH_CHILDREN = [
   { label: 'New Leave', to: '/rule-book/newleave' },
   { label: 'Approved Leaves', to: '/rule-book/approved-leaves' },
   { label: 'Payroll', to: '/rule-book/payroll' },
+  { label: 'Sample Payroll', to: '/rule-book/sample-payroll' },
   { label: 'CLRA', to: '/rule-book/clra' },
 ];
 

@@ -1,0 +1,10 @@
+{
+	"name": "samplepayroll_function",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "zohoadmin@vayonaenergy.com",
+	"dependencies": {
+		"express": "^5.1.0",
+		"zcatalyst-sdk-node": "latest"
+	}
+}

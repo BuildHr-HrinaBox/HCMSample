@@ -129,6 +129,7 @@ const navigationItems = [
       { label: 'New Leave', path: '/rule-book/newleave' },
       { label: 'Approved Leaves', path: '/rule-book/approved-leaves' },
       { label: 'Payroll', path: '/rule-book/payroll' },
+      { label: 'Sample Payroll', path: '/rule-book/sample-payroll' },
       { label: 'CLRA', path: '/rule-book/clra' },
     ],
   },

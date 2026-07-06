@@ -1050,6 +1050,22 @@ export function prefetchFormTemplate(urls, cacheKey) {
   return fetchFormTemplateArrayBuffer(urls, cacheKey).catch(() => null);
 }
 
+/** Fetch with retry/backoff when Catalyst returns HTTP 429 (rate limit). */
+export async function fetchHttpWithRetry(url, options = {}) {
+  const retries = Number(options.retries) > 0 ? Number(options.retries) : 3;
+  const baseDelayMs = Number(options.baseDelayMs) > 0 ? Number(options.baseDelayMs) : 1500;
+  const fetchOptions = options.fetchOptions || { cache: 'no-store' };
+  let lastResp = null;
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    const resp = await fetch(url, fetchOptions);
+    lastResp = resp;
+    if (resp.ok) return resp;
+    if (resp.status !== 429 || attempt >= retries - 1) return resp;
+    await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (attempt + 1)));
+  }
+  return lastResp;
+}
+
 /** Try all form file URLs in parallel; return the first successful response. */
 export async function fetchFirstOkResponse(urls) {
   const list = Array.isArray(urls) ? urls.filter(Boolean) : [];
@@ -1062,7 +1078,7 @@ export async function fetchFirstOkResponse(urls) {
 
     list.forEach(async (url) => {
       try {
-        const resp = await fetch(url);
+        const resp = await fetchHttpWithRetry(url);
         if (settled) return;
         if (resp.ok) {
           settled = true;

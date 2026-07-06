@@ -483,10 +483,41 @@ function flattenPayrollEarningColumns(row) {
       pickScalarAmount(row, ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'monthly_gross_amount']),
       pickAmountByPatterns(row, [/^gross_pay$/, /^total_earnings$/])
     ),
-    net_pay: coalesceAmount(
-      pickScalarAmount(row, ['net_pay', 'Net Pay', 'netPay', 'monthly_salary', 'MonthlySalary']),
-      pickAmountByPatterns(row, [/^net_pay$/, /^monthly_salary$/])
-    ),
+    net_pay: (() => {
+      const grossVal = coalesceAmount(
+        pickScalarAmount(row, ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'monthly_gross_amount']),
+        pickAmountByPatterns(row, [/^gross_pay$/, /^total_earnings$/])
+      );
+      const dedVal = coalesceAmount(
+        pickScalarAmount(row, [
+          'total_deductions',
+          'Total Deductions',
+          'totalDeductions',
+          'total_employee_deductions',
+          'total_deduction',
+        ]),
+        pickAmountByPatterns(row, [/^total_deductions?$/, /^total_employee_deductions$/])
+      );
+      const computedNet =
+        Number.isFinite(grossVal) && Number.isFinite(dedVal)
+          ? Math.max(0, grossVal - dedVal)
+          : '';
+      return coalesceAmount(
+        pickScalarAmount(row, [
+          'net_pay',
+          'Net Pay',
+          'netPay',
+          'monthly_salary',
+          'MonthlySalary',
+          'net_wages',
+          'Net Wages',
+          'take_home_pay',
+          'employee_net_pay',
+        ]),
+        pickAmountByPatterns(row, [/^net_pay$/, /^monthly_salary$/, /^net_wages$/, /^take_home/, /^employee_net/]),
+        computedNet
+      );
+    })(),
     total_deductions: coalesceAmount(
       pickScalarAmount(row, [
         'total_deductions',

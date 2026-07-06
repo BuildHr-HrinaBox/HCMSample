@@ -497,6 +497,209 @@ export function formatEducationSkillFromEmployee(emp) {
   return parts.join('; ');
 }
 
+/** MP Combined Register — default total days worked when payroll lacks paid_days. */
+export const FORM_XVIII_MP_DEFAULT_DAYS_WORKED = '30';
+
+const mpPeopleHeaderNorm = (header) =>
+  mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+
+export function isFormXVIIIMPEmpIdHeader(header) {
+  const s = mpPeopleHeaderNorm(header);
+  return s === 'emp id' || s === 'empid' || (s.includes('emp') && s.includes('id'));
+}
+
+export function isFormXVIIIMPWorkerNameHeader(header) {
+  const s = mpPeopleHeaderNorm(header);
+  return (s.includes('full name') && s.includes('worker')) || (s.includes('name') && s.includes('workman'));
+}
+
+export function isFormXVIIIMPDobHeader(header) {
+  const s = mpPeopleHeaderNorm(header);
+  return (s.includes('age') && s.includes('birth')) || s.includes('date of birth') || s === 'age';
+}
+
+export function isFormXVIIIMPAddressHeader(header) {
+  const s = mpPeopleHeaderNorm(header);
+  if (s.includes('nominee')) return false;
+  if (s.includes('contractor') || s.includes('establishment') || s.includes('principal employer')) return false;
+  return s === 'address' || (s.includes('address') && !s.includes('name and'));
+}
+
+export function isFormXVIIIMPSexHeader(header) {
+  const s = mpPeopleHeaderNorm(header);
+  return s === 'sex' || s.includes('sex m f') || (s.startsWith('sex') && s.includes('m'));
+}
+
+export function isFormXVIIIMPFatherOrHusbandHeader(header) {
+  const s = mpPeopleHeaderNorm(header);
+  return (s.includes('father') || s.includes('husband')) && s.includes('name');
+}
+
+export function isFormXVIIIMPNomineeHeader(header) {
+  const s = mpPeopleHeaderNorm(header);
+  return s.includes('nominee');
+}
+
+export function isFormXVIIIMPDesignationHeader(header) {
+  const s = mpPeopleHeaderNorm(header);
+  return (
+    s.includes('designation') ||
+    (s.includes('nature') && s.includes('work')) ||
+    (s.includes('category') && s.includes('work'))
+  );
+}
+
+export function isFormXVIIIMPPeopleAutofillHeader(header) {
+  return (
+    isFormXVIIIMPEmpIdHeader(header) ||
+    isFormXVIIIMPWorkerNameHeader(header) ||
+    isFormXVIIIMPDobHeader(header) ||
+    isFormXVIIIMPAddressHeader(header) ||
+    isFormXVIIIMPEducationSkillHeader(header) ||
+    isFormXVIIIMPSexHeader(header) ||
+    isFormXVIIIMPFatherOrHusbandHeader(header) ||
+    isFormXVIIIMPNomineeHeader(header) ||
+    isFormXVIIIMPDesignationHeader(header) ||
+    isFormXVIIIMPDaysWorkedHeader(header)
+  );
+}
+
+function unwrapFormXVIIIMPEmployee(empItem) {
+  return empItem?.Employee || empItem?.employee || empItem || {};
+}
+
+function pickFormXVIIIMPEmployeeValue(emp, keys) {
+  const src = unwrapFormXVIIIMPEmployee(emp);
+  if (!src || typeof src !== 'object') return '';
+  for (let i = 0; i < keys.length; i += 1) {
+    const raw = src[keys[i]];
+    if (raw == null || raw === '') continue;
+    if (typeof raw === 'object') {
+      const nested = String(raw.displayValue ?? raw.name ?? raw.Name ?? '').trim();
+      if (nested) return nested;
+      continue;
+    }
+    const text = String(raw).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+export function isFormXVIIIMPSerialNoHeader(header) {
+  const s = mpPeopleHeaderNorm(header);
+  return (
+    s === 'sr no' ||
+    s === 's no' ||
+    s === 'sl no' ||
+    s === 'serial no' ||
+    (s.includes('serial') && !s.includes('register') && !s.includes('workmen') && !s.includes('workman'))
+  );
+}
+
+export function readFormXVIIIMPEmployeeId(emp = {}) {
+  return pickFormXVIIIMPEmployeeValue(emp, [
+    'EmployeeID',
+    'Employee ID',
+    'Employee_ID',
+    'EmployeeId',
+    'employeeId',
+    'Employee.ID',
+    'employee_number',
+    'Employee Number',
+    'Employee_Number',
+    'EmployeeCode',
+    'Employee Code',
+    'erecno',
+    'Erecno',
+    'Zoho_ID',
+    'Zoho_ID',
+    'Role.ID',
+  ]);
+}
+
+export function readFormXVIIIMPWorkerFullName(emp = {}) {
+  const fn = pickFormXVIIIMPEmployeeValue(emp, [
+    'FirstName',
+    'First Name',
+    'First_Name',
+    'firstName',
+    'Name',
+    'Name1',
+  ]);
+  const ln = pickFormXVIIIMPEmployeeValue(emp, ['LastName', 'Last Name', 'Last_Name', 'lastName', 'Surname']);
+  if (fn && ln) return `${fn} ${ln}`;
+  return (
+    fn ||
+    ln ||
+    pickFormXVIIIMPEmployeeValue(emp, ['DisplayName', 'EmployeeName', 'Employee Name', 'Employee_Name', 'Full Name'])
+  );
+}
+
+export function readFormXVIIIMPDateOfBirth(emp = {}, formatDateFn = (v) => String(v ?? '').trim()) {
+  const raw = pickFormXVIIIMPEmployeeValue(emp, [
+    'Date_of_birth',
+    'Date of Birth',
+    'DateofBirth',
+    'Dateofbirth',
+    'DOB',
+    'dob',
+  ]);
+  return formatDateFn(raw);
+}
+
+export function readFormXVIIIMPAddress(emp = {}) {
+  const line = pickFormXVIIIMPEmployeeValue(emp, [
+    'PresentAddress',
+    'Present Address',
+    'Present_Address',
+    'Address_Line_1',
+    'Address Line 1',
+    'PermanentAddress',
+    'Permanent Address',
+    'Permanent_Address',
+    'Address',
+  ]);
+  if (line) return line;
+  const city = pickFormXVIIIMPEmployeeValue(emp, ['City', 'City1', 'Present City', 'Work_location', 'LocationName']);
+  const state = pickFormXVIIIMPEmployeeValue(emp, ['State', 'State1']);
+  return [city, state].filter(Boolean).join(', ');
+}
+
+export function readFormXVIIIMPGender(emp = {}) {
+  const raw = pickFormXVIIIMPEmployeeValue(emp, ['Gender', 'Sex', 'gender', 'sex']);
+  if (!raw) return '';
+  const low = raw.toLowerCase();
+  if (low === 'm' || low === 'male' || low.startsWith('male')) return 'M';
+  if (low === 'f' || low === 'female' || low.startsWith('female')) return 'F';
+  return raw;
+}
+
+export function readFormXVIIIMPFatherOrHusbandName(emp = {}) {
+  return pickFormXVIIIMPEmployeeValue(emp, [
+    'Father_s_Name',
+    "Father's Name",
+    'Father_s Name',
+    'FatherName',
+    'Father Name',
+    'HusbandName',
+    'Husband Name',
+    'SpouseName',
+    'Spouse Name',
+  ]);
+}
+
+export function readFormXVIIIMPDesignation(emp = {}) {
+  return pickFormXVIIIMPEmployeeValue(emp, [
+    'Designation',
+    'Designation.displayValue',
+    'designation',
+    'JobTitle',
+    'Job Title',
+    'Department',
+    'department',
+  ]);
+}
+
 export function isFormXVIIIMPEducationSkillHeader(header) {
   const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   return s.includes('education') && (s.includes('skill') || s.includes('skil'));
@@ -725,6 +928,31 @@ export function resolveFormXVIIIMPTableHeaders(headers) {
     netPayable: findHeader((s) => s.includes('net') && (s.includes('payable') || s.includes('paid'))),
     bankUtr: findHeader((s) => s.includes('bank') && s.includes('utr')),
     educationSkill: findHeader((s) => s.includes('education') && (s.includes('skill') || s.includes('skil'))),
+    empId: findHeader((s) => s === 'emp id' || s === 'empid' || (s.includes('emp') && s.includes('id'))),
+    workerName: findHeader(
+      (s) => (s.includes('full name') && s.includes('worker')) || (s.includes('name') && s.includes('workman'))
+    ),
+    dob: findHeader(
+      (s) => (s.includes('age') && s.includes('birth')) || s.includes('date of birth') || s === 'age'
+    ),
+    address: findHeader((s) => {
+      if (s.includes('nominee')) return false;
+      if (s.includes('contractor') || s.includes('establishment') || s.includes('principal employer')) {
+        return false;
+      }
+      return s === 'address' || (s.includes('address') && !s.includes('name and'));
+    }),
+    sex: findHeader((s) => s === 'sex' || s.includes('sex m f') || (s.startsWith('sex') && s.includes('m'))),
+    fatherOrHusband: findHeader(
+      (s) => (s.includes('father') || s.includes('husband')) && s.includes('name')
+    ),
+    nominee: findHeader((s) => s.includes('nominee')),
+    designation: findHeader(
+      (s) =>
+        s.includes('designation') ||
+        (s.includes('nature') && s.includes('work')) ||
+        (s.includes('category') && s.includes('work'))
+    ),
     wageRate: findHeader(
       (s) =>
         (s.includes('wage') && (s.includes('rate') || s.includes('pay') || s.includes('piece'))) ||
@@ -747,17 +975,126 @@ export function resolveFormXVIIIMPTableHeaders(headers) {
 }
 
 export function applyFormXVIIIMPEmployeeToRow(row, emp, mpHeaders, helpers = {}) {
-  if (!row || !emp || !mpHeaders) return false;
+  if (!row || !emp) return false;
+  const empRecord = unwrapFormXVIIIMPEmployee(emp);
   const sanitizeValue = helpers.sanitizeValue || ((v) => v);
+  const formatStatutoryDateDisplay = helpers.formatStatutoryDateDisplay || ((v) => String(v ?? '').trim());
+  const headers = Array.isArray(helpers.headers) ? helpers.headers : [];
   let hit = false;
-  if (mpHeaders.educationSkill) {
-    const edu = formatEducationSkillFromEmployee(emp);
-    if (edu) {
-      row[mpHeaders.educationSkill] = sanitizeValue(edu);
-      hit = true;
+
+  const write = (header, val) => {
+    if (!header || val === '' || val == null) return;
+    row[header] = sanitizeValue(val);
+    hit = true;
+  };
+
+  const peopleValues = {
+    empId: readFormXVIIIMPEmployeeId(empRecord),
+    workerName: readFormXVIIIMPWorkerFullName(empRecord),
+    dob: readFormXVIIIMPDateOfBirth(empRecord, formatStatutoryDateDisplay),
+    address: readFormXVIIIMPAddress(empRecord),
+    educationSkill: formatEducationSkillFromEmployee(empRecord),
+    sex: readFormXVIIIMPGender(empRecord),
+    fatherOrHusband: readFormXVIIIMPFatherOrHusbandName(empRecord),
+    designation: readFormXVIIIMPDesignation(empRecord),
+    daysWorked: FORM_XVIII_MP_DEFAULT_DAYS_WORKED,
+  };
+
+  if (mpHeaders) {
+    write(mpHeaders.empId, peopleValues.empId);
+    write(mpHeaders.workerName, peopleValues.workerName);
+    write(mpHeaders.dob, peopleValues.dob);
+    write(mpHeaders.address, peopleValues.address);
+    write(mpHeaders.educationSkill, peopleValues.educationSkill);
+    write(mpHeaders.sex, peopleValues.sex);
+    write(mpHeaders.fatherOrHusband, peopleValues.fatherOrHusband);
+    write(mpHeaders.designation, peopleValues.designation);
+    if (!String(row[mpHeaders.daysWorked] ?? '').trim()) {
+      write(mpHeaders.daysWorked, peopleValues.daysWorked);
     }
   }
+
+  headers.forEach((header) => {
+    if (isFormXVIIIMPEmpIdHeader(header)) write(header, peopleValues.empId);
+    else if (isFormXVIIIMPWorkerNameHeader(header)) write(header, peopleValues.workerName);
+    else if (isFormXVIIIMPDobHeader(header)) write(header, peopleValues.dob);
+    else if (isFormXVIIIMPAddressHeader(header)) write(header, peopleValues.address);
+    else if (isFormXVIIIMPEducationSkillHeader(header)) write(header, peopleValues.educationSkill);
+    else if (isFormXVIIIMPSexHeader(header)) write(header, peopleValues.sex);
+    else if (isFormXVIIIMPFatherOrHusbandHeader(header)) write(header, peopleValues.fatherOrHusband);
+    else if (isFormXVIIIMPDesignationHeader(header)) write(header, peopleValues.designation);
+    else if (isFormXVIIIMPDaysWorkedHeader(header) && !String(row[header] ?? '').trim()) {
+      write(header, peopleValues.daysWorked);
+    }
+  });
+
   return hit;
+}
+
+const FORM_XVIII_MP_PEOPLE_HEADER_KEYS = new Set([
+  'empId',
+  'workerName',
+  'dob',
+  'address',
+  'educationSkill',
+  'sex',
+  'fatherOrHusband',
+  'nominee',
+  'designation',
+]);
+
+/** Payroll/leave columns cleared before autofill — excludes people identity columns. */
+export function getFormXVIIIMPPayrollSkipHeaders(mpHeaders) {
+  if (!mpHeaders || typeof mpHeaders !== 'object') return [];
+  return Object.entries(mpHeaders)
+    .filter(([key]) => !FORM_XVIII_MP_PEOPLE_HEADER_KEYS.has(key))
+    .map(([, header]) => header)
+    .filter(Boolean);
+}
+
+export function applyFormXVIIIMPPeopleField(row, header, emp, helpers = {}) {
+  if (!row || !header || !emp) return false;
+  const empRecord = unwrapFormXVIIIMPEmployee(emp);
+  const sanitizeValue = helpers.sanitizeValue || ((v) => v);
+  const formatStatutoryDateDisplay = helpers.formatStatutoryDateDisplay || ((v) => String(v ?? '').trim());
+
+  let val = '';
+  if (isFormXVIIIMPEmpIdHeader(header)) val = readFormXVIIIMPEmployeeId(empRecord);
+  else if (isFormXVIIIMPWorkerNameHeader(header)) val = readFormXVIIIMPWorkerFullName(empRecord);
+  else if (isFormXVIIIMPDobHeader(header)) val = readFormXVIIIMPDateOfBirth(empRecord, formatStatutoryDateDisplay);
+  else if (isFormXVIIIMPAddressHeader(header)) val = readFormXVIIIMPAddress(empRecord);
+  else if (isFormXVIIIMPEducationSkillHeader(header)) val = formatEducationSkillFromEmployee(empRecord);
+  else if (isFormXVIIIMPSexHeader(header)) val = readFormXVIIIMPGender(empRecord);
+  else if (isFormXVIIIMPFatherOrHusbandHeader(header)) val = readFormXVIIIMPFatherOrHusbandName(empRecord);
+  else if (isFormXVIIIMPDesignationHeader(header)) val = readFormXVIIIMPDesignation(empRecord);
+  else if (isFormXVIIIMPDaysWorkedHeader(header)) {
+    if (String(row[header] ?? '').trim()) return false;
+    val = FORM_XVIII_MP_DEFAULT_DAYS_WORKED;
+  } else return false;
+
+  if (val === '' || val == null) return false;
+  row[header] = sanitizeValue(val);
+  return true;
+}
+
+export function enrichFormXVIIIMPEmployeeRows(mappedData, employees, headers, helpers = {}) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+  const headerList = Array.isArray(headers) ? headers : [];
+  let hits = 0;
+  mappedData.forEach((row, rowIndex) => {
+    const empItem = employees?.[rowIndex];
+    if (!empItem) return;
+    if (
+      applyFormXVIIIMPEmployeeToRow(row, empItem, mpHeaders, {
+        ...helpers,
+        headers: headerList,
+      })
+    ) {
+      hits += 1;
+    }
+  });
+  return hits;
 }
 
 export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, helpers = {}) {
@@ -775,14 +1112,16 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
     row[header] = sanitizeValue(val);
     hit = true;
   };
+  const daysValue =
+    paid_days !== '' && paid_days != null ? paid_days : FORM_XVIII_MP_DEFAULT_DAYS_WORKED;
 
   headers.forEach((h) => {
     if (isFormXVIIIMPGrossWagesHeader(h)) writeAmount(h, gross);
     if (isFormXVIIIMPNetPayableHeader(h)) writeAmount(h, net);
     if (isFormXVIIIMPOtherAllowanceHeader(h)) writeAmount(h, other_allowance);
     if (isFormXVIIIMPWageRateHeader(h)) writeAmount(h, gross);
-    if (isFormXVIIIMPDaysWorkedHeader(h)) writeAmount(h, paid_days);
-    if (isFormXVIIIMPLeaveCategoryHeader(h)) writeAmount(h, paid_days);
+    if (isFormXVIIIMPDaysWorkedHeader(h)) writeAmount(h, daysValue);
+    if (isFormXVIIIMPLeaveCategoryHeader(h)) writeAmount(h, daysValue);
   });
 
   if (mpHeaders) {
@@ -790,8 +1129,8 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
     writeAmount(mpHeaders.netPayable, net);
     writeAmount(mpHeaders.otherAllowances, other_allowance);
     writeAmount(mpHeaders.wageRate, gross);
-    writeAmount(mpHeaders.daysWorked, paid_days);
-    writeAmount(mpHeaders.leaveCategory, paid_days);
+    writeAmount(mpHeaders.daysWorked, daysValue);
+    writeAmount(mpHeaders.leaveCategory, daysValue);
   }
 
   const findEarningAmount = helpers.findEarningAmount;
@@ -859,6 +1198,49 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
   set('daysWorked', paid_days);
   set('leaveCategory', paid_days);
   return hit;
+}
+
+/** Build Form XVIII MP grid rows from People (+ optional cached payroll) — fast modal open path. */
+export function mapFormXVIIIMPRowsFromEmployees(employees, headers, helpers = {}) {
+  const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+  const headerList = Array.isArray(headers) ? headers : [];
+  const list = Array.isArray(employees) ? employees : [];
+  const {
+    sanitizeValue = (v) => String(v ?? '').trim(),
+    formatStatutoryDateDisplay = (v) => String(v ?? '').trim(),
+    resolvePayrollRow = null,
+    rowIndexOffset = 0,
+    ...payrollHelpers
+  } = helpers;
+
+  return list.map((empItem, rowIndex) => {
+    const row = {};
+    headerList.forEach((header) => {
+      row[header] = '';
+    });
+    const globalRowIndex = rowIndexOffset + rowIndex;
+    headerList.forEach((header) => {
+      if (isFormXVIIIMPSerialNoHeader(header)) {
+        row[header] = String(globalRowIndex + 1);
+      }
+    });
+    applyFormXVIIIMPEmployeeToRow(row, empItem, mpHeaders, {
+      sanitizeValue,
+      formatStatutoryDateDisplay,
+      headers: headerList,
+    });
+    const emp = unwrapFormXVIIIMPEmployee(empItem);
+    const payrollRow =
+      typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, rowIndex) : null;
+    if (payrollRow && !payrollRow.fetch_error) {
+      applyFormXVIIIMPPayrollToRow(row, payrollRow, mpHeaders, {
+        sanitizeValue,
+        headers: headerList,
+        ...payrollHelpers,
+      });
+    }
+    return row;
+  });
 }
 
 /** Apply pay-run payroll fields onto Form XVIII MP grid rows. */

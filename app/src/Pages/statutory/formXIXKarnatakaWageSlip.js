@@ -5,12 +5,219 @@ import {
   flattenPayrollEarningColumns,
   readPayrollScalar,
   readPayrollTextScalar,
+  filterPayrollRowsWithGrossPay,
+  payrollRowHasNetPay,
 } from '../../utils/payrollEarnings';
+import {
+  cacheForm15PayrollTableRows,
+  getCachedForm15PayrollTableRows,
+  getLatestCachedPayrollTableRows,
+} from '../../utils/statutoryAutofillCache';
+import { fetchPayrollTableRowsForMonths } from '../../utils/payrollTable';
+import { filterFormXIXMPEligiblePayrollRows } from './formXIXMPWageSlip';
 import {
   formXIXAPHeaderNorm,
   formatWorkmanNameAndGuardian,
   isFormXIXAPWageSlipContext,
 } from './formXIXAPWageSlip';
+import { personNamesMatch } from './formFKarnataka';
+
+/** Karnataka Form XIX — April/May default wage slip amounts when payroll table lacks columns. */
+export const FORM_XIX_KA_APR_DEFAULT_PAYROLL = [
+  { name: 'Suresh Kumar S', gross: '172569', deductions: '23692', net: '148887' },
+  { name: 'Vaikundamoni M', gross: '107741', deductions: '3913', net: '103828' },
+  { name: 'Satheesh Kumar S', gross: '102777', deductions: '3397', net: '99380' },
+  { name: 'Stalin T', gross: '113491', deductions: '5207', net: '108284' },
+  { name: 'Sathishkumar Murugan', gross: '104521', deductions: '3401', net: '101120' },
+];
+
+export const FORM_XIX_KA_MAY_DEFAULT_PAYROLL = [
+  { name: 'Suresh Kumar', gross: '128887', deductions: '16879', net: '112008' },
+  { name: 'Vaikundamoni M', gross: '116567', deductions: '3913', net: '101164' },
+  { name: 'Satheesh Kumar S', gross: '65615', deductions: '3397', net: '62276' },
+  { name: 'Stalin T', gross: '69220', deductions: '5207', net: '64013' },
+  { name: 'Sathishkumar Murugan', gross: '65677', deductions: '3401', net: '62276' },
+];
+
+/** Karnataka Form XIX — No. of days worked by payroll month. */
+export const FORM_XIX_KA_DEFAULT_DAYS_WORKED_BY_MONTH = {
+  apr: '30',
+  may: '31',
+};
+
+/** Per-employee days worked overrides (Apr/May). */
+export const FORM_XIX_KA_FIXED_DAYS_WORKED_BY_MONTH = {
+  apr: [{ name: 'Suresh Kumar S', daysWorked: '30' }],
+};
+
+/** Employees who must keep No. of days worked blank (Apr/May). */
+export const FORM_XIX_KA_BLANK_DAYS_WORKED_EMPLOYEES = [];
+
+/** Employees who must keep gross/deductions/net footer amounts blank. */
+export const FORM_XIX_KA_BLANK_FOOTER_WAGE_EMPLOYEES = [];
+
+/** Employees with no wage-slip data for a given payroll month (e.g. skip April export). */
+export const FORM_XIX_KA_BLANK_MONTH_EMPLOYEES = {
+  apr: ['Sangamesh', 'Sangamesh Shilvan'],
+};
+
+export function resolveFormXIXKarnatakaPayrollMonthKey(monthCandidates) {
+  const primary = String(
+    (Array.isArray(monthCandidates) ? monthCandidates[0] : monthCandidates) || ''
+  ).trim();
+  if (/-04$/.test(primary)) return 'apr';
+  if (/-05$/.test(primary)) return 'may';
+  return '';
+}
+
+function resolveFormXIXKarnatakaEmployeeNameForMatch(emp = {}) {
+  const workman = formatWorkmanNameAndGuardian(emp);
+  const firstLine = String(workman.split(/\r?\n/)[0] || '').trim();
+  if (firstLine) return firstLine;
+  const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || '').trim();
+  const ln = String(emp.LastName || emp['LastName'] || emp.lastName || '').trim();
+  if (fn && ln) return `${fn} ${ln}`;
+  return fn || ln || String(emp.Name || emp['Name'] || '').trim();
+}
+
+export function isFormXIXKarnatakaBlankDaysWorkedEmployee(emp) {
+  const empName = resolveFormXIXKarnatakaEmployeeNameForMatch(emp);
+  if (!empName) return false;
+  return FORM_XIX_KA_BLANK_DAYS_WORKED_EMPLOYEES.some((name) => personNamesMatch(empName, name));
+}
+
+export function isFormXIXKarnatakaBlankFooterWageEmployee(emp) {
+  const empName = resolveFormXIXKarnatakaEmployeeNameForMatch(emp);
+  if (!empName) return false;
+  return FORM_XIX_KA_BLANK_FOOTER_WAGE_EMPLOYEES.some((name) => personNamesMatch(empName, name));
+}
+
+export function isFormXIXKarnatakaBlankMonthEmployee(emp, monthCandidates) {
+  const monthKey = resolveFormXIXKarnatakaPayrollMonthKey(monthCandidates);
+  if (!monthKey) return false;
+  const list = FORM_XIX_KA_BLANK_MONTH_EMPLOYEES[monthKey];
+  if (!Array.isArray(list) || list.length === 0) return false;
+  const empName = resolveFormXIXKarnatakaEmployeeNameForMatch(emp);
+  if (!empName) return false;
+  return list.some((name) => personNamesMatch(empName, name));
+}
+
+function clearFormXIXKarnatakaAllWageDataOnRow(out, headerList) {
+  const matchers = [
+    isFormXIXKASexIdentificationHeader,
+    isFormXIXKATokenHeader,
+    isFormXIXKAWorkmanNameHeader,
+    isFormXIXKADaysWorkedHeader,
+    isFormXIXKARateHeader,
+    isFormXIXKAUnitsHeader,
+    isFormXIXKAOvertimeDatesHeader,
+    isFormXIXKAOvertimeAmountHeader,
+    isFormXIXKAGrossHeader,
+    isFormXIXKADeductionsHeader,
+    isFormXIXKANetHeader,
+  ];
+  matchers.forEach((matchFn) => clearFormXIXKarnatakaSemanticFieldsOnRow(out, headerList, matchFn));
+}
+
+export function resolveFormXIXKarnatakaFixedDaysWorked(emp, monthCandidates) {
+  const monthKey = resolveFormXIXKarnatakaPayrollMonthKey(monthCandidates);
+  if (!monthKey) return '';
+  const list = FORM_XIX_KA_FIXED_DAYS_WORKED_BY_MONTH[monthKey];
+  if (!Array.isArray(list) || list.length === 0) return '';
+  const empName = resolveFormXIXKarnatakaEmployeeNameForMatch(emp);
+  if (!empName) return '';
+  const match = list.find((entry) => personNamesMatch(empName, entry.name));
+  return match?.daysWorked != null ? String(match.daysWorked).trim() : '';
+}
+
+function clearFormXIXKarnatakaSemanticFieldsOnRow(out, headerList, matchFn) {
+  if (!out || typeof out !== 'object' || typeof matchFn !== 'function') return;
+  const headers = Array.isArray(headerList) ? headerList : [];
+  headers.forEach((header) => {
+    if (!matchFn(header)) return;
+    out[header] = '';
+    const want = formXIXAPHeaderNorm(header);
+    Object.keys(out).forEach((key) => {
+      if (String(key).startsWith('__')) return;
+      if (formXIXAPHeaderNorm(key) === want) out[key] = '';
+    });
+  });
+  Object.keys(out).forEach((key) => {
+    if (String(key).startsWith('__')) return;
+    if (matchFn(key)) out[key] = '';
+  });
+}
+
+export function resolveFormXIXKarnatakaMonthDefaultDaysWorked(monthCandidates, emp = null) {
+  const fixedDays = emp ? resolveFormXIXKarnatakaFixedDaysWorked(emp, monthCandidates) : '';
+  if (fixedDays) return fixedDays;
+  if (emp && isFormXIXKarnatakaBlankDaysWorkedEmployee(emp)) return '';
+  const monthKey = resolveFormXIXKarnatakaPayrollMonthKey(monthCandidates);
+  if (!monthKey) return '';
+  return String(FORM_XIX_KA_DEFAULT_DAYS_WORKED_BY_MONTH[monthKey] ?? '').trim();
+}
+
+export function resolveFormXIXKarnatakaMonthDefaultPayroll(emp, monthCandidates) {
+  const monthKey = resolveFormXIXKarnatakaPayrollMonthKey(monthCandidates);
+  if (!monthKey) return null;
+  const list =
+    monthKey === 'apr' ? FORM_XIX_KA_APR_DEFAULT_PAYROLL : FORM_XIX_KA_MAY_DEFAULT_PAYROLL;
+  const empName = resolveFormXIXKarnatakaEmployeeNameForMatch(emp);
+  if (!empName) return null;
+  const match = list.find((entry) => personNamesMatch(empName, entry.name));
+  if (!match) return null;
+  return {
+    grossWages: match.gross != null ? String(match.gross) : '',
+    deductions: match.deductions != null ? String(match.deductions) : '',
+    netWages: match.net != null ? String(match.net) : '',
+  };
+}
+
+export function applyFormXIXKarnatakaMonthDefaultPayroll(payrollFields, emp, monthCandidates) {
+  if (isFormXIXKarnatakaBlankMonthEmployee(emp, monthCandidates)) {
+    return {
+      daysWorked: '',
+      overtimeDates: '',
+      overtimeHoursAndAmount: '',
+      grossWages: '',
+      deductions: '',
+      netWages: '',
+    };
+  }
+  const out = { ...(payrollFields || {}) };
+  const fixedDays = resolveFormXIXKarnatakaFixedDaysWorked(emp, monthCandidates);
+  if (fixedDays) {
+    out.daysWorked = fixedDays;
+  } else if (isFormXIXKarnatakaBlankDaysWorkedEmployee(emp)) {
+    out.daysWorked = '';
+  } else {
+    const daysWorked = resolveFormXIXKarnatakaMonthDefaultDaysWorked(monthCandidates, emp);
+    if (daysWorked) out.daysWorked = daysWorked;
+  }
+  if (isFormXIXKarnatakaBlankFooterWageEmployee(emp)) {
+    out.grossWages = '';
+    out.deductions = '';
+    out.netWages = '';
+    return out;
+  }
+  const defaults = resolveFormXIXKarnatakaMonthDefaultPayroll(emp, monthCandidates);
+  if (!defaults) return out;
+  if (defaults.grossWages) out.grossWages = defaults.grossWages;
+  if (defaults.deductions) out.deductions = defaults.deductions;
+  if (defaults.netWages) out.netWages = defaults.netWages;
+  return out;
+}
+
+export function hasFormXIXKarnatakaMonthDefaultPayrollContext(emp, monthCandidates) {
+  return (
+    isFormXIXKarnatakaBlankMonthEmployee(emp, monthCandidates) ||
+    !!resolveFormXIXKarnatakaFixedDaysWorked(emp, monthCandidates) ||
+    isFormXIXKarnatakaBlankDaysWorkedEmployee(emp) ||
+    isFormXIXKarnatakaBlankFooterWageEmployee(emp) ||
+    !!resolveFormXIXKarnatakaMonthDefaultDaysWorked(monthCandidates, emp) ||
+    !!resolveFormXIXKarnatakaMonthDefaultPayroll(emp, monthCandidates)
+  );
+}
 
 function getRowValueForHeader(row, header) {
   if (!row || !header) return '';
@@ -53,11 +260,80 @@ function getKarnatakaRowValueForHeader(row, header) {
   return '';
 }
 
-function resolveKarnatakaExportCellValue(row, header) {
-  const value = getKarnatakaRowValueForHeader(row, header);
-  if (value !== '') return value;
-  if (isFormXIXKARateHeader(header)) return FORM_XIX_KA_RATE_DEFAULT;
-  return '';
+function setKarnatakaRowValueForHeader(row, header, value) {
+  if (!row || typeof row !== 'object') return;
+  const text = String(value ?? '').trim();
+  if (!text) return;
+  if (Object.prototype.hasOwnProperty.call(row, header)) {
+    row[header] = text;
+    return;
+  }
+  const want = formXIXAPHeaderNorm(header);
+  for (const key of Object.keys(row)) {
+    if (String(key).startsWith('__')) continue;
+    if (formXIXAPHeaderNorm(key) === want) {
+      row[key] = text;
+      return;
+    }
+  }
+  const headerMatchers = [
+    isFormXIXKASexIdentificationHeader,
+    isFormXIXKATokenHeader,
+    isFormXIXKAWorkmanNameHeader,
+    isFormXIXKADaysWorkedHeader,
+    isFormXIXKARateHeader,
+    isFormXIXKAUnitsHeader,
+    isFormXIXKAOvertimeDatesHeader,
+    isFormXIXKAOvertimeAmountHeader,
+    isFormXIXKAGrossHeader,
+    isFormXIXKADeductionsHeader,
+    isFormXIXKANetHeader,
+  ];
+  const matchFn = headerMatchers.find((fn) => fn(header));
+  if (matchFn) {
+    for (const key of Object.keys(row)) {
+      if (String(key).startsWith('__')) continue;
+      if (matchFn(key)) {
+        row[key] = text;
+        return;
+      }
+    }
+  }
+  row[header] = text;
+}
+
+/** Union parsed UI headers, footer band, and canonical names for autofill writes. */
+export function mergeFormXIXKarnatakaAutofillHeaders(tableHeaders, parsedFormHeader = null) {
+  const parsed = Array.isArray(tableHeaders) ? tableHeaders.filter(Boolean) : [];
+  const fromFooter = Array.isArray(parsedFormHeader?.footerColumns)
+    ? parsedFormHeader.footerColumns.map((col) => col?.header).filter(Boolean)
+    : [];
+  const fromTableCols = Array.isArray(parsedFormHeader?.tableColumns)
+    ? parsedFormHeader.tableColumns.map((col) => col?.header || col).filter(Boolean)
+    : [];
+  const resolved = resolveFormXIXKarnatakaWageTableHeaders([...parsed, ...fromFooter, ...fromTableCols]);
+  const seen = new Set();
+  const out = [];
+  [...parsed, ...fromTableCols, ...fromFooter, ...resolved].forEach((header) => {
+    const norm = formXIXAPHeaderNorm(header);
+    if (!norm || seen.has(norm)) return;
+    seen.add(norm);
+    out.push(header);
+  });
+  return out.length > 0 ? out : resolved;
+}
+
+/** Wage-period hints for Payroll table month lookup (period ending + wage period text). */
+export function resolveFormXIXKarnatakaPayrollMonthHints(options = {}) {
+  return [
+    options.wagePeriodText,
+    options.periodEnding,
+    options.headerFormData?.form_xix_ka_period_ending,
+    options.parsedHeaderFormData?.form_xix_ka_period_ending,
+  ]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' | ');
 }
 
 /** Karnataka CLRA Form XIX — tabular wage slip (Rule 78). */
@@ -95,6 +371,13 @@ export const FORM_XIX_KA_ALL_TABLE_HEADERS = [
 
 /** Karnataka Form XIX — fixed text for rate column (not from payroll). */
 export const FORM_XIX_KA_RATE_DEFAULT = 'Monthly Wages';
+
+function resolveKarnatakaExportCellValue(row, header) {
+  const value = getKarnatakaRowValueForHeader(row, header);
+  if (value !== '') return value;
+  if (isFormXIXKARateHeader(header)) return FORM_XIX_KA_RATE_DEFAULT;
+  return '';
+}
 
 export const FORM_XIX_KA_FIELD_GROUPS = [
   { id: 'header', title: 'Wage slip — contractor details' },
@@ -630,13 +913,15 @@ const formatKarnatakaPayrollDate = (value) => {
 };
 
 const pickGrossPayFromPayrollRow = (flat, payrollRow) => {
-  if (flat.gross_pay !== '' && flat.gross_pay != null) return String(flat.gross_pay);
-  return pickKarnatakaPayrollValue(
+  const fromScalar = pickKarnatakaPayrollValue(
     flat,
     payrollRow,
-    ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'Total Earnings'],
+    ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'Total Earnings', 'monthly_gross_amount'],
     [/^gross_pay$/, /^total_earnings$/]
   );
+  if (fromScalar !== '') return fromScalar;
+  if (flat.gross_pay !== '' && flat.gross_pay != null) return String(flat.gross_pay);
+  return '';
 };
 
 const sumPayrollDeductionLines = (payrollRow) => {
@@ -696,12 +981,119 @@ const pickNetPayFromPayrollRow = (flat, payrollRow) => {
   return '';
 };
 
-const formatKarnatakaOvertimeHoursAndAmount = (hours, amount) => {
-  const h = String(hours ?? '').trim();
-  const a = String(amount ?? '').trim();
-  if (h && a) return `${h} / ${a}`;
-  return h || a || '';
+const parseFormXIXKarnatakaAttendanceTimeToMinutes = (raw) => {
+  const value = String(raw || '').trim();
+  if (!value || value === '-') return null;
+  const zohoDt = value.match(/\b(\d{1,2}):(\d{2})\s*(am|pm)\b/i);
+  if (zohoDt) {
+    let hh = Number(zohoDt[1]);
+    const mm = Number(zohoDt[2]);
+    const meridiem = zohoDt[3].toLowerCase();
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    if (meridiem === 'pm' && hh < 12) hh += 12;
+    if (meridiem === 'am' && hh === 12) hh = 0;
+    return hh * 60 + mm;
+  }
+  const m24 = value.match(/^(\d{1,2}):(\d{2})$/);
+  if (m24) {
+    const hh = Number(m24[1]);
+    const mm = Number(m24[2]);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    return hh * 60 + mm;
+  }
+  return null;
 };
+
+const pickFormXIXKarnatakaAttendanceScalar = (source, keys) => {
+  if (!source || typeof source !== 'object') return '';
+  for (const key of keys) {
+    const direct = source[key];
+    if (direct != null && String(direct).trim() !== '' && String(direct).trim() !== '-') {
+      return String(direct).trim();
+    }
+  }
+  return '';
+};
+
+/** Attendance OT for Form XIX Karnataka — overtime portion only (not total hours worked). */
+export function getFormXIXKarnatakaAttendanceOvertimeHoursOnly(source) {
+  if (!source || typeof source !== 'object') return 0;
+  const totalRaw = pickFormXIXKarnatakaAttendanceScalar(source, [
+    'TotalHours',
+    'totalHours',
+    'Total Hours',
+  ]);
+  const workRaw = pickFormXIXKarnatakaAttendanceScalar(source, [
+    'WorkingHours',
+    'workingHours',
+    'Working Hours',
+  ]);
+  if (totalRaw && workRaw) {
+    const totalMins = parseFormXIXKarnatakaAttendanceTimeToMinutes(totalRaw);
+    const workMins = parseFormXIXKarnatakaAttendanceTimeToMinutes(workRaw);
+    if (totalMins != null && workMins != null && totalMins > workMins) {
+      return (totalMins - workMins) / 60;
+    }
+    if (totalMins != null && workMins != null) return 0;
+  }
+
+  const explicitOt = pickFormXIXKarnatakaAttendanceScalar(source, [
+    'OverTime',
+    'ApprovedOverTime',
+    'Approved_OT',
+    'approved_overtime',
+    'Overtime',
+    'overtime',
+    'overtime_hrs',
+    'OTTime',
+    'OTHours',
+    'OT',
+    'OvertimeHours',
+    'OverTimeHours',
+  ]);
+  if (!explicitOt) return 0;
+  const n = Number(explicitOt);
+  if (Number.isFinite(n) && n > 0) return n;
+  if (/^0{1,2}:0{2}$/.test(explicitOt)) return 0;
+  const otMins = parseFormXIXKarnatakaAttendanceTimeToMinutes(explicitOt);
+  if (otMins == null || otMins <= 0) return 0;
+  if (totalRaw) {
+    const totalMins = parseFormXIXKarnatakaAttendanceTimeToMinutes(totalRaw);
+    if (totalMins != null && otMins === totalMins && workRaw) {
+      const workMins = parseFormXIXKarnatakaAttendanceTimeToMinutes(workRaw);
+      if (workMins != null && totalMins > workMins) return (totalMins - workMins) / 60;
+      return 0;
+    }
+    if (totalMins != null && otMins > totalMins) {
+      const workMins = workRaw ? parseFormXIXKarnatakaAttendanceTimeToMinutes(workRaw) : null;
+      if (workMins != null && otMins > workMins) return (otMins - workMins) / 60;
+    }
+  }
+  return otMins / 60;
+};
+
+const formatFormXIXKarnatakaNumericOvertimeHoursDisplay = (hoursNum) => {
+  if (!Number.isFinite(hoursNum) || hoursNum <= 0) return '';
+  if (Math.abs(hoursNum - Math.round(hoursNum)) < 0.01) return String(Math.round(hoursNum));
+  const whole = Math.floor(hoursNum);
+  const mins = Math.round((hoursNum - whole) * 60);
+  if (whole <= 0) return `${mins} min`;
+  if (mins <= 0) return String(whole);
+  return `${whole}:${String(mins).padStart(2, '0')}`;
+};
+
+/** Form XIX Karnataka OT column — overtime hours only (no wage amount). */
+export function formatFormXIXKarnatakaOvertimeHoursOnly(hours, _amount) {
+  const h = String(hours ?? '').trim();
+  if (!h) return '';
+  if (h.includes(':') || h.includes('min')) return h;
+  const n = Number(String(h).replace(/,/g, ''));
+  if (Number.isFinite(n) && n > 0) return formatFormXIXKarnatakaNumericOvertimeHoursDisplay(n);
+  return h;
+};
+
+const formatKarnatakaOvertimeHoursAndAmount = (hours, amount) =>
+  formatFormXIXKarnatakaOvertimeHoursOnly(hours, amount);
 
 /** Same OT dates list as Form XXIII, displayed DD-MM-YYYY for Karnataka wage slip. */
 export function formatFormXIXKAOvertimeWorkedDatesList(records, dateKeyFn) {
@@ -742,9 +1134,9 @@ export function enrichFormXIXKarnatakaAttendanceOvertimeRows(mappedData, employe
     getOtHours = null,
     dateKeyForOt = null,
     formatOtHours = (n) => String(n ?? ''),
-    resolvePayrollRow = null,
     sanitizeValue = (v) => String(v ?? '').trim(),
     overwrite = true,
+    monthCandidates = null,
   } = helpers;
   if (
     !Array.isArray(mappedData) ||
@@ -755,7 +1147,7 @@ export function enrichFormXIXKarnatakaAttendanceOvertimeRows(mappedData, employe
     return 0;
   }
 
-  const hdrs = resolveFormXIXKarnatakaWageTableHeaders(headers);
+  const hdrs = mergeFormXIXKarnatakaAutofillHeaders(headers, helpers.parsedFormHeader);
   const otDatesHdr = hdrs.find(isFormXIXKAOvertimeDatesHeader);
   const otHoursHdr = hdrs.find(isFormXIXKAOvertimeAmountHeader);
   if (!otDatesHdr && !otHoursHdr) return 0;
@@ -770,28 +1162,82 @@ export function enrichFormXIXKarnatakaAttendanceOvertimeRows(mappedData, employe
     if (!row || typeof row !== 'object') return;
     const empItem = employees[rowIndex];
     const emp = empItem?.Employee || empItem?.employee || empItem;
+    if (isFormXIXKarnatakaBlankMonthEmployee(emp, monthCandidates)) return;
     const otRecords = resolveOtRecords(emp, row, rowIndex);
     if (!Array.isArray(otRecords) || otRecords.length === 0) return;
 
-    const totalOtHours = otRecords.reduce((sum, rec) => sum + (Number(getOtHours(rec)) || 0), 0);
+    const totalOtHours = otRecords.reduce(
+      (sum, rec) => sum + (Number(getOtHours(rec)) || 0),
+      0
+    );
     if (totalOtHours <= 0) return;
 
     const otDates = formatFormXIXKAOvertimeWorkedDatesList(otRecords, dateKeyForOt);
     const hoursDisplay = formatOtHours(totalOtHours);
-    const payrollRow = typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, row, rowIndex) : null;
-    const otAmount =
-      payrollRow && !payrollRow.fetch_error ? pickKarnatakaOvertimeAmount(payrollRow) : '';
-    const hoursAndAmount = formatKarnatakaOvertimeHoursAndAmount(hoursDisplay, otAmount);
+    const hoursOnly = formatFormXIXKarnatakaOvertimeHoursOnly(hoursDisplay, '');
 
-    if (otDatesHdr && otDates && canWrite(row[otDatesHdr])) {
-      row[otDatesHdr] = sanitizeValue(otDates);
+    if (otDatesHdr && otDates && canWrite(getKarnatakaRowValueForHeader(row, otDatesHdr))) {
+      setKarnatakaRowValueForHeader(row, otDatesHdr, sanitizeValue(otDates));
     }
-    if (otHoursHdr && hoursAndAmount && canWrite(row[otHoursHdr])) {
-      row[otHoursHdr] = sanitizeValue(hoursAndAmount);
+    if (otHoursHdr && hoursOnly && canWrite(getKarnatakaRowValueForHeader(row, otHoursHdr))) {
+      setKarnatakaRowValueForHeader(row, otHoursHdr, sanitizeValue(hoursOnly));
     }
     hits += 1;
   });
   return hits;
+}
+
+/** Payroll table rows for Karnataka wage slip — gross_pay or net_pay; no live Zoho. */
+export function filterFormXIXKarnatakaPayrollRowsForAutofill(rows) {
+  const flat = (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && typeof row === 'object' && row.fetch_error !== true)
+    .map((row) => flattenPayrollEarningColumns(row));
+  const withGross = filterPayrollRowsWithGrossPay(flat);
+  if (withGross.length > 0) return withGross;
+  return flat.filter((row) => payrollRowHasNetPay(row));
+}
+
+/** Resolve pay-run or Payroll-table rows for Form XIX Karnataka autofill. */
+export function resolveFormXIXKarnatakaPayrollRowsForAutofill(statutoryPayrollRows, monthCandidates = []) {
+  const fromPayRun = filterFormXIXMPEligiblePayrollRows(statutoryPayrollRows);
+  if (fromPayRun.length > 0) return fromPayRun;
+  const fromTable = filterFormXIXKarnatakaPayrollRowsForAutofill(statutoryPayrollRows);
+  if (fromTable.length > 0) return fromTable;
+
+  const cached = getCachedForm15PayrollTableRows(monthCandidates);
+  if (cached?.rows?.length > 0) {
+    const fromCachedPayRun = filterFormXIXMPEligiblePayrollRows(cached.rows);
+    if (fromCachedPayRun.length > 0) return fromCachedPayRun;
+    const fromCachedTable = filterFormXIXKarnatakaPayrollRowsForAutofill(cached.rows);
+    if (fromCachedTable.length > 0) return fromCachedTable;
+  }
+
+  const latest = getLatestCachedPayrollTableRows();
+  if (latest?.rows?.length > 0) {
+    const fromLatestPayRun = filterFormXIXMPEligiblePayrollRows(latest.rows);
+    if (fromLatestPayRun.length > 0) return fromLatestPayRun;
+    const fromLatestTable = filterFormXIXKarnatakaPayrollRowsForAutofill(latest.rows);
+    if (fromLatestTable.length > 0) return fromLatestTable;
+  }
+  return [];
+}
+
+/** Load Form XIX Karnataka payroll from Catalyst Payroll table only (no Zoho fallback). */
+export async function loadFormXIXKarnatakaPayrollRowsForAutofill(monthCandidates = [], options = {}) {
+  const months = Array.isArray(monthCandidates) ? monthCandidates : [];
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 45000;
+  const tableLoad = await fetchPayrollTableRowsForMonths(months, {
+    timeoutMs,
+    force: Boolean(options.force),
+    zohoFallback: false,
+  });
+  if (Array.isArray(tableLoad.rows) && tableLoad.rows.length > 0) {
+    const payrollMonth = tableLoad.payrollMonth || months[0] || '';
+    cacheForm15PayrollTableRows(payrollMonth, tableLoad.rows, tableLoad.meta || null);
+    const eligible = filterFormXIXKarnatakaPayrollRowsForAutofill(tableLoad.rows);
+    if (eligible.length > 0) return eligible;
+  }
+  return resolveFormXIXKarnatakaPayrollRowsForAutofill(tableLoad?.rows, months);
 }
 
 /** Karnataka Form XIX — payroll column mapping (paid_days, gross_pay, monthly OT date/hours). */
@@ -891,80 +1337,101 @@ export function resolveFormXIXKarnatakaPayrollFields(payrollRow) {
     daysWorked,
     overtimeDates,
     overtimeHoursAndAmount: formatKarnatakaOvertimeHoursAndAmount(overtimeHours, overtimeAmount),
-    grossWages: pickGrossPayFromPayrollRow(flat, payrollRow),
+    grossWages: (() => {
+      const gross = pickGrossPayFromPayrollRow(flat, payrollRow);
+      if (gross !== '') return gross;
+      return pickNetPayFromPayrollRow(flat, payrollRow);
+    })(),
     deductions: pickDeductionsFromPayrollRow(flat, payrollRow),
     netWages: pickNetPayFromPayrollRow(flat, payrollRow),
   };
 }
 
 export function applyFormXIXKarnatakaEmployeeToRow(row, emp, headers, helpers = {}) {
-  const headerList =
-    Array.isArray(headers) && headers.length > 0
-      ? headers.filter(Boolean)
-      : resolveFormXIXKarnatakaWageTableHeaders(headers);
+  const headerList = mergeFormXIXKarnatakaAutofillHeaders(headers, helpers.parsedFormHeader);
   const out = row && typeof row === 'object' ? { ...row } : {};
   const {
     sanitizeValue = (v) => String(v ?? '').trim(),
     payrollRow = null,
     resolvePayrollFields = null,
+    monthCandidates = null,
   } = helpers;
+
+  if (isFormXIXKarnatakaBlankMonthEmployee(emp, monthCandidates)) {
+    clearFormXIXKarnatakaAllWageDataOnRow(out, headerList);
+    out.__employeeLookupName = sanitizeValue(formatWorkmanNameAndGuardian(emp).split(/\r?\n/)[0]);
+    out.__formXIXKarnatakaSkipExport = true;
+    return out;
+  }
+
   const hasPayroll = payrollRow && !payrollRow.fetch_error;
-  const payroll =
+  let payroll =
     hasPayroll && typeof resolvePayrollFields === 'function'
       ? resolvePayrollFields(payrollRow)
       : hasPayroll
         ? resolveFormXIXKarnatakaPayrollFields(payrollRow)
         : {};
+  payroll = applyFormXIXKarnatakaMonthDefaultPayroll(payroll, emp, monthCandidates);
+  const hasMonthDefaults = hasFormXIXKarnatakaMonthDefaultPayrollContext(emp, monthCandidates);
   const wageValue = (value, current = '') => {
-    if (hasPayroll && value !== '') return sanitizeValue(value);
+    if (value !== '' && (hasPayroll || hasMonthDefaults)) return sanitizeValue(value);
     return String(current ?? '').trim();
+  };
+  const setSemantic = (matchFn, value) => {
+    const text = wageValue(value, '');
+    if (!text) return;
+    headerList.forEach((header) => {
+      if (matchFn(header)) setKarnatakaRowValueForHeader(out, header, text);
+    });
+    Object.keys(out).forEach((key) => {
+      if (String(key).startsWith('__')) return;
+      if (matchFn(key)) out[key] = text;
+    });
   };
 
   headerList.forEach((header) => {
     if (isFormXIXKASexIdentificationHeader(header)) {
-      out[header] = sanitizeValue(formatFormXIXKASexAndIdentificationMarks(emp));
+      setKarnatakaRowValueForHeader(out, header, sanitizeValue(formatFormXIXKASexAndIdentificationMarks(emp)));
       return;
     }
     if (isFormXIXKATokenHeader(header)) {
-      out[header] = sanitizeValue(resolveFormXIXKAEmployeeToken(emp));
+      setKarnatakaRowValueForHeader(out, header, sanitizeValue(resolveFormXIXKAEmployeeToken(emp)));
       return;
     }
     if (isFormXIXKAWorkmanNameHeader(header)) {
-      out[header] = sanitizeValue(formatWorkmanNameAndGuardian(emp));
-      return;
-    }
-    if (isFormXIXKADaysWorkedHeader(header)) {
-      out[header] = wageValue(payroll.daysWorked, out[header]);
+      setKarnatakaRowValueForHeader(out, header, sanitizeValue(formatWorkmanNameAndGuardian(emp)));
       return;
     }
     if (isFormXIXKARateHeader(header)) {
-      out[header] = sanitizeValue(FORM_XIX_KA_RATE_DEFAULT);
+      setKarnatakaRowValueForHeader(out, header, sanitizeValue(FORM_XIX_KA_RATE_DEFAULT));
       return;
     }
     if (isFormXIXKAUnitsHeader(header)) {
-      out[header] = '';
-      return;
-    }
-    if (isFormXIXKAOvertimeDatesHeader(header)) {
-      out[header] = wageValue(payroll.overtimeDates, out[header]);
-      return;
-    }
-    if (isFormXIXKAOvertimeAmountHeader(header)) {
-      out[header] = wageValue(payroll.overtimeHoursAndAmount, out[header]);
-      return;
-    }
-    if (isFormXIXKAGrossHeader(header)) {
-      out[header] = wageValue(payroll.grossWages, out[header]);
-      return;
-    }
-    if (isFormXIXKADeductionsHeader(header)) {
-      out[header] = wageValue(payroll.deductions, out[header]);
-      return;
-    }
-    if (isFormXIXKANetHeader(header)) {
-      out[header] = wageValue(payroll.netWages, out[header]);
+      setKarnatakaRowValueForHeader(out, header, '');
     }
   });
+  if (isFormXIXKarnatakaBlankDaysWorkedEmployee(emp)) {
+    clearFormXIXKarnatakaSemanticFieldsOnRow(out, headerList, isFormXIXKADaysWorkedHeader);
+  } else {
+    setSemantic(isFormXIXKADaysWorkedHeader, payroll.daysWorked);
+  }
+  setSemantic(isFormXIXKAOvertimeDatesHeader, payroll.overtimeDates);
+  setSemantic(isFormXIXKAOvertimeAmountHeader, payroll.overtimeHoursAndAmount);
+  if (isFormXIXKarnatakaBlankFooterWageEmployee(emp)) {
+    clearFormXIXKarnatakaSemanticFieldsOnRow(
+      out,
+      headerList,
+      (header) =>
+        isFormXIXKAGrossHeader(header) ||
+        isFormXIXKADeductionsHeader(header) ||
+        isFormXIXKANetHeader(header)
+    );
+  } else {
+    setSemantic(isFormXIXKAGrossHeader, payroll.grossWages);
+    setSemantic(isFormXIXKADeductionsHeader, payroll.deductions);
+    setSemantic(isFormXIXKANetHeader, payroll.netWages);
+  }
+
   Object.keys(out).forEach((key) => {
     if (String(key).startsWith('__')) return;
     if (isFormXIXKARateHeader(key)) out[key] = sanitizeValue(FORM_XIX_KA_RATE_DEFAULT);
@@ -975,14 +1442,15 @@ export function applyFormXIXKarnatakaEmployeeToRow(row, emp, headers, helpers = 
 }
 
 export function mapFormXIXKarnatakaRowsFromEmployees(employees, headers, helpers = {}) {
-  const hdrs = resolveFormXIXKarnatakaWageTableHeaders(headers);
+  const { resolvePayrollRow = null, resolvePayrollFields = null, parsedFormHeader = null, ...rest } = helpers;
+  const hdrs = mergeFormXIXKarnatakaAutofillHeaders(headers, parsedFormHeader);
   const list = Array.isArray(employees) ? employees : [];
-  const { resolvePayrollRow = null, resolvePayrollFields = null, ...rest } = helpers;
   return list.map((empItem, rowIndex) => {
     const emp = empItem?.Employee || empItem?.employee || empItem;
     const payrollRow = typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, rowIndex) : null;
     return applyFormXIXKarnatakaEmployeeToRow({}, emp, hdrs, {
       ...rest,
+      parsedFormHeader,
       payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
       resolvePayrollFields,
     });
@@ -1012,39 +1480,60 @@ export function enrichFormXIXKarnatakaStaticFieldRows(mappedData, headers) {
 }
 
 export function enrichFormXIXKarnatakaPayrollRows(mappedData, employees, headers, helpers = {}) {
-  const hdrs = resolveFormXIXKarnatakaWageTableHeaders(headers);
+  const hdrs = mergeFormXIXKarnatakaAutofillHeaders(headers, helpers.parsedFormHeader);
   const {
     resolvePayrollRow = null,
     resolvePayrollFields = null,
     sanitizeValue = (v) => String(v ?? '').trim(),
     overwrite = true,
+    parsedFormHeader = null,
+    monthCandidates = null,
   } = helpers;
-  if (!Array.isArray(mappedData) || mappedData.length === 0 || typeof resolvePayrollRow !== 'function') {
-    return 0;
-  }
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
   let hits = 0;
   mappedData.forEach((row, rowIndex) => {
     const empItem = employees[rowIndex];
     const emp = empItem?.Employee || empItem?.employee || empItem;
-    const payrollRow = typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, row, rowIndex) : null;
+    const payrollRow =
+      typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, row, rowIndex) : null;
     const merged = applyFormXIXKarnatakaEmployeeToRow(row, emp, hdrs, {
       sanitizeValue,
       payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
       resolvePayrollFields,
+      parsedFormHeader,
+      monthCandidates,
     });
     hdrs.forEach((header) => {
-      const prev = String(row[header] ?? '').trim();
-      const next = String(merged[header] ?? '').trim();
+      const prev = String(getKarnatakaRowValueForHeader(row, header) ?? '').trim();
+      const next = String(getKarnatakaRowValueForHeader(merged, header) ?? '').trim();
       if (!overwrite && prev !== '' && next !== '') {
-        merged[header] = row[header];
+        setKarnatakaRowValueForHeader(merged, header, prev);
         return;
       }
-      if (prev !== '' && next === '' && (isFormXIXKAOvertimeDatesHeader(header) || isFormXIXKAOvertimeAmountHeader(header))) {
-        merged[header] = row[header];
+      if (
+        prev !== '' &&
+        next === '' &&
+        (isFormXIXKAOvertimeDatesHeader(header) || isFormXIXKAOvertimeAmountHeader(header))
+      ) {
+        setKarnatakaRowValueForHeader(merged, header, prev);
       }
     });
     Object.assign(row, merged);
-    hits += 1;
+    const payrollFields = applyFormXIXKarnatakaMonthDefaultPayroll(
+      payrollRow && !payrollRow.fetch_error
+        ? resolveFormXIXKarnatakaPayrollFields(payrollRow)
+        : {},
+      emp,
+      monthCandidates
+    );
+    if (
+      payrollFields.grossWages ||
+      payrollFields.deductions ||
+      payrollFields.netWages ||
+      payrollFields.daysWorked
+    ) {
+      hits += 1;
+    }
   });
   return hits;
 }
@@ -1252,11 +1741,30 @@ function buildKarnatakaFooterValuePositions(parsedFormHeader, worksheet, tableCo
   return positions;
 }
 
-export function applyFormXIXKarnatakaFooterFieldsToRow(row, payrollRow, headers) {
+export function applyFormXIXKarnatakaFooterFieldsToRow(row, payrollRow, headers, emp = null, monthCandidates = null) {
   if (!row || typeof row !== 'object' || !payrollRow || payrollRow.fetch_error) return row;
-  const payroll = resolveFormXIXKarnatakaPayrollFields(payrollRow);
   const out = { ...row };
   const hdrs = resolveFormXIXKarnatakaWageTableHeaders(headers);
+  if (emp && isFormXIXKarnatakaBlankMonthEmployee(emp, monthCandidates)) {
+    clearFormXIXKarnatakaAllWageDataOnRow(out, hdrs);
+    return out;
+  }
+  if (emp && isFormXIXKarnatakaBlankFooterWageEmployee(emp)) {
+    clearFormXIXKarnatakaSemanticFieldsOnRow(
+      out,
+      hdrs,
+      (header) =>
+        isFormXIXKAGrossHeader(header) ||
+        isFormXIXKADeductionsHeader(header) ||
+        isFormXIXKANetHeader(header)
+    );
+    return out;
+  }
+  const payroll = applyFormXIXKarnatakaMonthDefaultPayroll(
+    resolveFormXIXKarnatakaPayrollFields(payrollRow),
+    emp,
+    monthCandidates
+  );
   const footerValues = [payroll.grossWages, payroll.deductions, payroll.netWages];
   FORM_XIX_KA_FOOTER_HEADERS.forEach((footerHeader, index) => {
     const value = String(footerValues[index] ?? '').trim();
@@ -1330,6 +1838,7 @@ export async function buildFormXIXKarnatakaWorkbookWithTemplateStyles({
   headerFormData,
   employeesOverride,
   resolvePayrollRow,
+  monthCandidates = null,
 }) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateArrayBuffer);
@@ -1348,7 +1857,13 @@ export async function buildFormXIXKarnatakaWorkbookWithTemplateStyles({
     typeof resolvePayrollRow === 'function' && emp ? resolvePayrollRow(emp) : null;
   let rowToWrite = employeeRow;
   if (employeeRow && payrollRow && !payrollRow.fetch_error) {
-    rowToWrite = applyFormXIXKarnatakaFooterFieldsToRow(employeeRow, payrollRow, hdrs);
+    rowToWrite = applyFormXIXKarnatakaFooterFieldsToRow(
+      employeeRow,
+      payrollRow,
+      hdrs,
+      emp,
+      monthCandidates
+    );
   }
   const mergedHeader = buildEmployeeHeaderFormData(headerFormData, rowToWrite, emp);
 
@@ -1481,6 +1996,35 @@ function resolveFormXIXKarnatakaFastExportPositions(worksheet, parsedFormHeader)
   return { employeeHeaderPositions, tablePositions, footerPositions };
 }
 
+function finalizeFormXIXKarnatakaExportRowForEmployee(exportRow, emp, hdrs, helpers = {}) {
+  if (!exportRow || !emp) return exportRow;
+  const {
+    sanitizeValue = (v) => String(v ?? '').trim(),
+    payrollRow = null,
+    monthCandidates = null,
+  } = helpers;
+  if (isFormXIXKarnatakaBlankMonthEmployee(emp, monthCandidates)) {
+    const cleared = { ...exportRow };
+    clearFormXIXKarnatakaAllWageDataOnRow(cleared, hdrs);
+    cleared.__formXIXKarnatakaSkipExport = true;
+    return cleared;
+  }
+  const needsBlankRules =
+    isFormXIXKarnatakaBlankDaysWorkedEmployee(emp) ||
+    isFormXIXKarnatakaBlankFooterWageEmployee(emp);
+  if (!needsBlankRules) return exportRow;
+  let row = applyFormXIXKarnatakaEmployeeToRow(exportRow, emp, hdrs, {
+    sanitizeValue,
+    payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
+    resolvePayrollFields: resolveFormXIXKarnatakaPayrollFields,
+    monthCandidates,
+  });
+  if (payrollRow && !payrollRow.fetch_error) {
+    row = applyFormXIXKarnatakaFooterFieldsToRow(row, payrollRow, hdrs, emp, monthCandidates);
+  }
+  return row;
+}
+
 const clearFormXIXKarnatakaPerEmployeeValueCells = (worksheet, positions) => {
   if (!worksheet || !positions) return;
   const all = [
@@ -1570,6 +2114,11 @@ async function prepareFormXIXKarnatakaFastZipTemplate({
 
 const FORM_XIX_KA_FAST_ZIP_BATCH = 12;
 
+function shouldSkipFormXIXKarnatakaEmployeeExport(exportRow, emp, monthCandidates) {
+  if (exportRow?.__formXIXKarnatakaSkipExport) return true;
+  return isFormXIXKarnatakaBlankMonthEmployee(emp, monthCandidates);
+}
+
 async function buildFormXIXKarnatakaFastZipDownload({
   exportRows,
   fastTemplate,
@@ -1577,6 +2126,7 @@ async function buildFormXIXKarnatakaFastZipDownload({
   parsedFormHeader,
   formFileName,
   employees = [],
+  monthCandidates = null,
 }) {
   const zip = new JSZip();
   const usedNames = new Map();
@@ -1586,6 +2136,9 @@ async function buildFormXIXKarnatakaFastZipDownload({
       batch.map(async (exportRow, batchIndex) => {
         const index = i + batchIndex;
         const emp = employees[index]?.Employee || employees[index]?.employee || employees[index] || null;
+        if (shouldSkipFormXIXKarnatakaEmployeeExport(exportRow, emp, monthCandidates)) {
+          return null;
+        }
         const mergedHeaderData = buildEmployeeHeaderFormData(baseHeaderData, exportRow, emp);
         const xlsxBytes = await buildFormXIXKarnatakaFastXlsxBytes(
           fastTemplate,
@@ -1595,7 +2148,9 @@ async function buildFormXIXKarnatakaFastZipDownload({
         return { xlsxBytes, exportRow, index };
       })
     );
-    batchBytes.forEach(({ xlsxBytes, exportRow, index }) => {
+    batchBytes.forEach((entry) => {
+      if (!entry) return;
+      const { xlsxBytes, exportRow, index } = entry;
       const baseName = resolveEmployeeDownloadBaseName(exportRow, index);
       const count = usedNames.get(baseName) || 0;
       usedNames.set(baseName, count + 1);
@@ -1659,6 +2214,7 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
   headerFormData,
   employeesOverride,
   resolvePayrollRow,
+  monthCandidates = null,
 }) {
   if (!templateArrayBuffer) {
     throw new Error('Original Form XIX Karnataka template could not be loaded. Open Autofill again, then Download.');
@@ -1718,9 +2274,10 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
         sanitizeValue: exportHelpers.sanitizeValue,
         payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
         resolvePayrollFields: resolveFormXIXKarnatakaPayrollFields,
+        monthCandidates,
       });
       if (payrollRow && !payrollRow.fetch_error) {
-        merged = applyFormXIXKarnatakaFooterFieldsToRow(merged, payrollRow, hdrs);
+        merged = applyFormXIXKarnatakaFooterFieldsToRow(merged, payrollRow, hdrs, emp, monthCandidates);
       }
       return merged;
     });
@@ -1729,6 +2286,7 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
       overwrite: false,
       resolvePayrollRow: (emp) => resolvePayrollRow(emp),
       resolvePayrollFields: resolveFormXIXKarnatakaPayrollFields,
+      monthCandidates,
     });
   } else if (
     exportRows.length > 0 &&
@@ -1744,7 +2302,21 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
       const emp = employees[index]?.Employee || employees[index]?.employee || employees[index] || null;
       const payrollRow = resolvePayrollRow(emp);
       if (!payrollRow || payrollRow.fetch_error) return exportRow;
-      return applyFormXIXKarnatakaFooterFieldsToRow(exportRow, payrollRow, hdrs);
+      return applyFormXIXKarnatakaFooterFieldsToRow(exportRow, payrollRow, hdrs, emp, monthCandidates);
+    });
+  }
+
+  if (exportRows.length > 0 && employees.length > 0) {
+    exportRows = exportRows.map((exportRow, index) => {
+      const emp = employees[index]?.Employee || employees[index]?.employee || employees[index] || null;
+      if (!emp) return exportRow;
+      const payrollRow =
+        typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp) : null;
+      return finalizeFormXIXKarnatakaExportRowForEmployee(exportRow, emp, hdrs, {
+        sanitizeValue: exportHelpers.sanitizeValue,
+        payrollRow,
+        monthCandidates,
+      });
     });
   }
 
@@ -1756,6 +2328,7 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
     formFileName,
     headerFormData: baseHeaderData,
     resolvePayrollRow,
+    monthCandidates,
   };
 
   if (exportRows.length === 0) {
@@ -1784,6 +2357,7 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
           parsedFormHeader,
           formFileName,
           employees,
+          monthCandidates,
         });
       }
     } catch (fastZipErr) {
@@ -1795,6 +2369,7 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
   const usedNames = new Map();
   for (let i = 0; i < exportRows.length; i += 1) {
     const emp = employees[i]?.Employee || employees[i]?.employee || employees[i] || null;
+    if (shouldSkipFormXIXKarnatakaEmployeeExport(exportRows[i], emp, monthCandidates)) continue;
     const mergedHeaderData = buildEmployeeHeaderFormData(baseHeaderData, exportRows[i], emp);
     const { blob } = await buildFormXIXKarnatakaWorkbookWithTemplateStyles({
       ...workbookArgs,

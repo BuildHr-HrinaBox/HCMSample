@@ -7,8 +7,81 @@ import {
   readPayrollScalar,
   readStrictPayrollNetPay,
 } from '../../utils/payrollEarnings';
+import { personNamesMatch } from './formFKarnataka';
 
 /** Karnataka Form Q — establishment/employer header + employee particulars table. */
+
+/** April default Basic/Total for Karnataka Form Q when payroll lacks wage columns. */
+export const FORM_Q_KARNATAKA_APR_DEFAULT_PAYROLL = [
+  { name: 'Suresh Kumar S', basic: '55443', total: '172569' },
+  { name: 'Vaikundamoni M', basic: '30108', total: '103828' },
+  { name: 'Satheesh Kumar S', basic: '28308', total: '102777' },
+  { name: 'Stalin T', basic: '30110', total: '108284' },
+  { name: 'Sathishkumar Murugan', basic: '28339', total: '101120' },
+];
+
+export function isAprilPayrollMonthCandidates(monthCandidates) {
+  const primary = String(
+    (Array.isArray(monthCandidates) ? monthCandidates[0] : monthCandidates) || ''
+  ).trim();
+  return /-04$/.test(primary);
+}
+
+export function resolveFormQKarnatakaAprilDefaultWages(emp) {
+  const empName = formatFormQKarnatakaEmployeeName(emp);
+  if (!empName) return null;
+  const match = FORM_Q_KARNATAKA_APR_DEFAULT_PAYROLL.find((entry) =>
+    personNamesMatch(empName, entry.name)
+  );
+  if (!match) return null;
+  return {
+    basic: match.basic != null ? String(match.basic) : '',
+    vda: '',
+    other: '',
+    total: match.total != null ? String(match.total) : '',
+  };
+}
+
+export function applyFormQKarnatakaAprilDefaultWages(wages, emp, monthCandidates) {
+  if (!isAprilPayrollMonthCandidates(monthCandidates)) return wages;
+  const defaults = resolveFormQKarnatakaAprilDefaultWages(emp);
+  if (!defaults) return wages;
+  const out = { ...(wages || { basic: '', vda: '', other: '', total: '' }) };
+  if (defaults.basic !== undefined) out.basic = defaults.basic;
+  if (defaults.total) out.total = defaults.total;
+  return out;
+}
+
+/** Form Q Karnataka Total — used as Normal rate of wages on Form XXIII overtime register. */
+export function resolveFormQKarnatakaTotalWageForEmployee(emp, payrollRow = null, monthCandidates = null) {
+  const wages = applyFormQKarnatakaAprilDefaultWages(
+    resolveFormQKarnatakaPayrollWages(payrollRow),
+    emp,
+    monthCandidates
+  );
+  return String(wages?.total ?? '').trim();
+}
+
+export function isFormXXIIIKarnatakaContext(formHeader, rowItem, fileName, sheetText = '') {
+  const parts = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    rowItem?.state,
+    rowItem?.State,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    sheetText,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+  const hasKarnataka = /karnataka/.test(parts);
+  // No trailing \b — filenames like Form_XXIII_-_Karnataka.xlsx use underscores after xxiii.
+  const hasXXIII =
+    /\bform[\s._-]*xxiii/i.test(parts) || /register\s+of\s+overtime/.test(parts);
+  return hasKarnataka && hasXXIII;
+}
 
 export function formQKarnatakaHeaderNorm(txt) {
   return String(txt || '')
@@ -452,9 +525,14 @@ export function applyFormQKarnatakaEmployeeToRow(row, emp, headers, helpers = {}
     rowIndex = 0,
     formatStatutoryDateDisplay = (v) => String(v || '').trim(),
     payrollRow = null,
+    monthCandidates = null,
   } = helpers;
   const out = { ...row };
-  const wages = resolveFormQKarnatakaPayrollWages(payrollRow);
+  const wages = applyFormQKarnatakaAprilDefaultWages(
+    resolveFormQKarnatakaPayrollWages(payrollRow),
+    emp,
+    monthCandidates
+  );
   const postal = pickEmployeeValue(emp, [
     'Present_Address',
     'Present Address',
@@ -535,6 +613,7 @@ export function mapFormQKarnatakaRowsFromEmployees(employees, headers, helpers =
     formatStatutoryDateDisplay = (v) => String(v || '').trim(),
     resolvePayrollRow = null,
     rowIndexOffset = 0,
+    monthCandidates = null,
   } = helpers;
   return list.map((empItem, rowIndex) => {
     const emp = empItem?.Employee || empItem?.employee || empItem;
@@ -546,6 +625,7 @@ export function mapFormQKarnatakaRowsFromEmployees(employees, headers, helpers =
       rowIndex: globalRowIndex,
       formatStatutoryDateDisplay,
       payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
+      monthCandidates,
     });
   });
 }
@@ -564,6 +644,7 @@ export function enrichFormQKarnatakaPayrollRows(mappedData, employees, headers, 
     resolvePayrollRow = null,
     sanitizeValue = (v) => String(v ?? '').trim(),
     overwrite = false,
+    monthCandidates = null,
   } = helpers;
   if (!Array.isArray(mappedData) || typeof resolvePayrollRow !== 'function') return 0;
   let hits = 0;
@@ -571,19 +652,26 @@ export function enrichFormQKarnatakaPayrollRows(mappedData, employees, headers, 
     const empItem = employees[rowIndex];
     const emp = empItem?.Employee || empItem?.employee || empItem;
     const payrollRow = resolvePayrollRow(emp, rowIndex);
-    if (!payrollRow || payrollRow.fetch_error) return;
-    const wages = resolveFormQKarnatakaPayrollWages(payrollRow);
-    const hasWage = wages.basic || wages.vda || wages.other || wages.total;
+    const aprilMatch =
+      isAprilPayrollMonthCandidates(monthCandidates) && resolveFormQKarnatakaAprilDefaultWages(emp);
+    if ((!payrollRow || payrollRow.fetch_error) && !aprilMatch) return;
+    const wages = applyFormQKarnatakaAprilDefaultWages(
+      resolveFormQKarnatakaPayrollWages(payrollRow),
+      emp,
+      monthCandidates
+    );
+    const hasWage = wages.basic || wages.vda || wages.other || wages.total || aprilMatch;
     if (!hasWage) return;
-    if (!overwrite && wageHeaders.some((h) => String(row?.[h] ?? '').trim())) return;
+    if (!overwrite && !aprilMatch && wageHeaders.some((h) => String(row?.[h] ?? '').trim())) return;
     hdrs.forEach((header) => {
-      if (isFormQKarnatakaBasicHeader(header) && wages.basic) row[header] = sanitizeValue(wages.basic);
-      if (isFormQKarnatakaVdaHeader(header) && wages.vda) row[header] = sanitizeValue(wages.vda);
-      if (isFormQKarnatakaOtherAllowanceHeader(header) && wages.other) {
+      if (isFormQKarnatakaBasicHeader(header)) {
+        if (aprilMatch || wages.basic) row[header] = sanitizeValue(wages.basic);
+      } else if (isFormQKarnatakaVdaHeader(header) && wages.vda) {
+        row[header] = sanitizeValue(wages.vda);
+      } else if (isFormQKarnatakaOtherAllowanceHeader(header) && wages.other) {
         row[header] = sanitizeValue(wages.other);
-      }
-      if (isFormQKarnatakaTotalWageHeader(header) && wages.total) {
-        row[header] = sanitizeValue(wages.total);
+      } else if (isFormQKarnatakaTotalWageHeader(header)) {
+        if (aprilMatch || wages.total) row[header] = sanitizeValue(wages.total);
       }
     });
     hits += 1;

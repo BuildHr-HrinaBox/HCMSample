@@ -22,7 +22,13 @@ export function matchesFormXIXHint(blob) {
   );
 }
 
-export function isFormXIXAPWageSlipContext(formHeader, rowItem, fileName, sheetText = '') {
+/** Rajasthan CLRA Form XIX — Register of Overtime [Rule 77(2)(e)]; not a wage slip. */
+export function isFormXIXRajasthanOvertimeRegisterContext(
+  formHeader,
+  rowItem,
+  fileName,
+  sheetText = ''
+) {
   const parts = [
     rowItem?.formName,
     rowItem?.FormName,
@@ -30,6 +36,10 @@ export function isFormXIXAPWageSlipContext(formHeader, rowItem, fileName, sheetT
     rowItem?.Description,
     rowItem?.act,
     rowItem?.Act,
+    rowItem?.siteState,
+    rowItem?.SiteState,
+    rowItem?.state,
+    rowItem?.State,
     rowItem?.formFileName,
     rowItem?.FormFileName,
     fileName,
@@ -42,11 +52,79 @@ export function isFormXIXAPWageSlipContext(formHeader, rowItem, fileName, sheetT
     .join(' ')
     .toLowerCase();
 
+  if (/wage\s+slip/i.test(parts)) return false;
+  // Other states' Form XIX wage-slip files must not match via siteState=Rajasthan alone.
+  if (
+    /form[\s._-]*xix[\s._-]*(mp|ka|gj|ap|tn|tamil)/i.test(parts) ||
+    /madhya\s+pradesh|karnataka|gujarat|andhra\s+pradesh|tamil[\s._-]*nadu/i.test(parts)
+  ) {
+    return false;
+  }
+
+  if (/form[\s._-]*xix[\s._-]*rj/i.test(parts) || /\bxix_rj\b/i.test(parts)) return true;
+
+  if (/register\s+of\s+over[\s-]*time|over[\s-]*time\s+register/i.test(parts) && matchesFormXIXHint(parts)) {
+    return /rajasthan/i.test(parts) || /form[\s._-]*xix(?![a-z])/i.test(parts);
+  }
+
+  return /rajasthan/i.test(parts) && matchesFormXIXHint(parts);
+}
+
+export function isFormXIXAPWageSlipContext(formHeader, rowItem, fileName, sheetText = '') {
+  const parts = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    rowItem?.description,
+    rowItem?.Description,
+    rowItem?.act,
+    rowItem?.Act,
+    rowItem?.siteState,
+    rowItem?.SiteState,
+    rowItem?.state,
+    rowItem?.State,
+    rowItem?.formFileName,
+    rowItem?.FormFileName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference,
+    sheetText
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+
+  // Filename / catalog identity wins: Form XV (e.g. Form_XV_RJ) must never become Form XIX wage slip,
+  // even when the sheet has wage-particular columns that look like an AP Form XIX template.
+  const fileIdentity = [rowItem?.formFileName, rowItem?.FormFileName, fileName]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+  if (
+    /form[\s._-]*xv(?![a-z])/i.test(fileIdentity) ||
+    /\bxv[\s._-]*rj\b/i.test(fileIdentity) ||
+    /form[\s._-]*xv(?![a-z])/i.test(parts) ||
+    /\bxv[\s._-]*rj\b/i.test(parts)
+  ) {
+    return false;
+  }
+
+  // Rajasthan Form XIX is Register of Overtime (Rule 77(2)(e)), not wage slip.
+  if (isFormXIXRajasthanOvertimeRegisterContext(formHeader, rowItem, fileName, sheetText)) {
+    return false;
+  }
+  if (/register\s+of\s+over[\s-]*time|over[\s-]*time\s+register/i.test(parts)) {
+    return false;
+  }
+
   if (/wage\s+slip/i.test(parts)) return true;
   if (matchesFormXIXHint(parts) && /wage\s+slip|rule\s+78\s*\(\s*1\s*\)\s*\(\s*b\s*\)/i.test(parts)) {
     return true;
   }
-  if (matchesFormXIXHint(parts) && !/register\s+of\s+(fines|advances|workmen|wages|employment)/i.test(parts)) {
+  if (
+    matchesFormXIXHint(parts) &&
+    !/register\s+of\s+(fines|advances|workmen|wages|employment|over[\s-]*time)/i.test(parts)
+  ) {
     return true;
   }
   return false;

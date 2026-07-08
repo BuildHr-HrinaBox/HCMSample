@@ -5,6 +5,9 @@ const catalystSDK = require('zcatalyst-sdk-node');
 
 const app = express();
 const TABLE_NAME = 'SamplePayroll';
+const ZCQL_MAX_ROWS = 300;
+const SAMPLE_PAYROLL_SELECT_COLUMNS =
+	'ROWID, EmployeeName, EmployeeID, GIDNumber, Email, DateofBirth, Paid_days, Basic, HRA, Gross, Netpay, TotalDeduction, PayrollMonth, CREATEDTIME, MODIFIEDTIME';
 
 app.use(express.json({ limit: '50mb' }));
 
@@ -311,6 +314,9 @@ function mapRow(row) {
 		id: row.ROWID,
 		employeeName: row.EmployeeName || '',
 		employeeId: row.EmployeeID || '',
+		gidNumber: row.GIDNumber || '',
+		email: row.Email || '',
+		dateofBirth: row.DateofBirth || '',
 		paidDays: row.Paid_days || '',
 		basic: row.Basic || '',
 		hra: row.HRA || '',
@@ -321,6 +327,29 @@ function mapRow(row) {
 		createdTime: row.CREATEDTIME,
 		modifiedTime: row.MODIFIEDTIME,
 	};
+}
+
+async function fetchSamplePayrollRowsPaged(
+	catalyst,
+	{ whereClause = '', orderClause = 'ORDER BY ROWID ASC' } = {}
+) {
+	const zcql = catalyst.zcql();
+	const collected = [];
+	let offset = 1;
+
+	while (true) {
+		const rows = await zcql.executeZCQLQuery(
+			`SELECT ${SAMPLE_PAYROLL_SELECT_COLUMNS} FROM ${TABLE_NAME} ${whereClause} ${orderClause} LIMIT ${offset}, ${ZCQL_MAX_ROWS}`
+		);
+		const batch = (Array.isArray(rows) ? rows : []).map((entry) =>
+			mapRow(entry[TABLE_NAME] || entry)
+		);
+		collected.push(...batch);
+		if (batch.length < ZCQL_MAX_ROWS) break;
+		offset += ZCQL_MAX_ROWS;
+	}
+
+	return collected;
 }
 
 function pickField(record, keys) {
@@ -343,6 +372,7 @@ function mapPayrollRecordToSampleRow(record, payrollMonth) {
 		'net_pay',
 		'netPay',
 		'Netpay',
+		'netpay',
 		'monthly_salary',
 		'net_salary',
 		'net_wages',
@@ -353,7 +383,29 @@ function mapPayrollRecordToSampleRow(record, payrollMonth) {
 	}
 	return {
 		EmployeeName: pickField(record, ['employee_name', 'full_name', 'employeeName', 'name']),
-		EmployeeID: pickField(record, ['employee_id', 'employee_number', 'employeeId', 'EmployeeID']),
+		EmployeeID: pickField(record, ['employee_id', 'employeeId', 'EmployeeID']),
+		GIDNumber: pickField(record, ['employee_number', 'gidNumber', 'GIDNumber', 'gid_number']),
+		Email: pickField(record, [
+			'email',
+			'work_email',
+			'work_mail',
+			'personal_email',
+			'mail_id',
+			'EmailID',
+			'Email',
+			'Work_Email',
+			'Work Email',
+			'Email ID',
+		]),
+		DateofBirth: pickField(record, [
+			'date_of_birth',
+			'Date_of_birth',
+			'DateofBirth',
+			'dateofBirth',
+			'dateOfBirth',
+			'DOB',
+			'dob',
+		]),
 		Paid_days: pickField(record, ['paid_days', 'paidDays', 'Paid_days', 'paid_days_in_month']),
 		Basic: pickField(record, ['basic', 'earned_basic', 'Basic', 'basic_pay']),
 		HRA: pickField(record, ['hra', 'hra_fbp', 'HRA', 'house_rent_allowance']),
@@ -449,6 +501,9 @@ function buildRowData(body) {
 	const {
 		employeeName,
 		employeeId,
+		gidNumber,
+		email,
+		dateofBirth,
 		paidDays,
 		basic,
 		hra,
@@ -461,6 +516,9 @@ function buildRowData(body) {
 	return {
 		EmployeeName: toNullIfEmpty(employeeName),
 		EmployeeID: toNullIfEmpty(employeeId),
+		GIDNumber: toNullIfEmpty(gidNumber),
+		Email: toNullIfEmpty(email),
+		DateofBirth: toNullIfEmpty(dateofBirth),
 		Paid_days: toNullIfEmpty(paidDays),
 		Basic: toNullIfEmpty(basic),
 		HRA: toNullIfEmpty(hra),
@@ -508,12 +566,11 @@ app.post('/samplepayroll/sync-month', async (req, res) => {
 			});
 		}
 
-		const zcql = catalyst.zcql();
 		const month = normalizePayrollMonth(payrollMonth);
-		const rows = await zcql.executeZCQLQuery(
-			`SELECT ROWID, EmployeeName, EmployeeID, Paid_days, Basic, HRA, Gross, Netpay, TotalDeduction, PayrollMonth, CREATEDTIME, MODIFIEDTIME FROM ${TABLE_NAME} WHERE PayrollMonth = '${month}' ORDER BY ROWID ASC`
-		);
-		const stored = (Array.isArray(rows) ? rows : []).map((entry) => mapRow(entry[TABLE_NAME] || entry));
+		const stored = await fetchSamplePayrollRowsPaged(catalyst, {
+			whereClause: `WHERE PayrollMonth = '${month}'`,
+			orderClause: 'ORDER BY ROWID ASC',
+		});
 
 		res.status(200).json({
 			status: 'success',
@@ -621,8 +678,11 @@ app.get('/samplepayroll', async (req, res) => {
 		const page = parseInt(req.query.page, 10) || 1;
 		const perPage = parseInt(req.query.perPage, 10) || 50;
 		const search = req.query.search;
-		const payrollMonth = req.query.payroll_month;
-		const returnAll = !req.query.page && !req.query.perPage;
+		const payrollMonth = req.query.payroll_month || req.query.payrollMonth;
+		const returnAll =
+			req.query.fetch_all === '1' ||
+			req.query.fetch_all === 'true' ||
+			(!req.query.page && !req.query.perPage);
 		const limitClause = returnAll ? '' : `LIMIT ${(page - 1) * perPage + 1},${perPage}`;
 
 		const whereParts = [];
@@ -631,7 +691,9 @@ app.get('/samplepayroll', async (req, res) => {
 		}
 		if (search) {
 			const safe = String(search).replace(/'/g, "''");
-			whereParts.push(`(EmployeeName LIKE '%${safe}%' OR EmployeeID LIKE '%${safe}%')`);
+			whereParts.push(
+				`(EmployeeName LIKE '%${safe}%' OR EmployeeID LIKE '%${safe}%' OR Email LIKE '%${safe}%')`
+			);
 		}
 		const whereClause = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
 
@@ -640,9 +702,17 @@ app.get('/samplepayroll', async (req, res) => {
 		);
 		const total = parseInt(countRows[0][TABLE_NAME].count, 10) || 0;
 
-		const selectQuery = `SELECT ROWID, EmployeeName, EmployeeID, Paid_days, Basic, HRA, Gross, Netpay, TotalDeduction, PayrollMonth, CREATEDTIME, MODIFIEDTIME FROM ${TABLE_NAME} ${whereClause} ORDER BY ROWID DESC ${limitClause}`;
-		const rows = await zcql.executeZCQLQuery(selectQuery);
-		const records = rows.map((r) => mapRow(r[TABLE_NAME]));
+		let records = [];
+		if (returnAll) {
+			records = await fetchSamplePayrollRowsPaged(catalyst, {
+				whereClause,
+				orderClause: 'ORDER BY ROWID DESC',
+			});
+		} else {
+			const selectQuery = `SELECT ${SAMPLE_PAYROLL_SELECT_COLUMNS} FROM ${TABLE_NAME} ${whereClause} ORDER BY ROWID DESC ${limitClause}`;
+			const rows = await zcql.executeZCQLQuery(selectQuery);
+			records = rows.map((r) => mapRow(r[TABLE_NAME]));
+		}
 
 		res.status(200).json({
 			status: 'success',

@@ -2,12 +2,16 @@ import React, { useState, useCallback } from 'react';
 import './People.css';
 import { flattenPayrollEarningColumns } from '../utils/payrollEarnings';
 import { fetchZohoPayrollRowsForMonth } from '../utils/payrollTable';
+import { enrichPayrollRowsWithPeopleEmailFromApi } from '../utils/samplePayrollApi';
 
 const API_BASE = '/server/samplepayroll_function';
 
 const TABLE_COLUMNS = [
   { key: 'employeeName', label: 'Employee Name' },
   { key: 'employeeId', label: 'Employee ID' },
+  { key: 'gidNumber', label: 'GID Number' },
+  { key: 'email', label: 'Email' },
+  { key: 'dateofBirth', label: 'Date of Birth' },
   { key: 'paidDays', label: 'Paid Days' },
   { key: 'basic', label: 'Basic' },
   { key: 'hra', label: 'HRA' },
@@ -60,7 +64,27 @@ function mapPayrollRowToTable(row) {
   }
   return {
     employeeName: pickFirstValue(flat, ['employee_name', 'full_name', 'employeeName', 'name']),
-    employeeId: pickFirstValue(flat, ['employee_id', 'employee_number', 'employeeId', 'EmployeeID']),
+    employeeId: pickFirstValue(flat, ['employee_id', 'employeeId', 'EmployeeID']),
+    gidNumber: pickFirstValue(flat, ['employee_number', 'gidNumber', 'GIDNumber', 'gid_number']),
+    email: pickFirstValue(flat, [
+      'email',
+      'work_email',
+      'work_mail',
+      'personal_email',
+      'mail_id',
+      'EmailID',
+      'Email',
+      'Work_Email',
+    ]),
+    dateofBirth: pickFirstValue(flat, [
+      'date_of_birth',
+      'Date_of_birth',
+      'DateofBirth',
+      'dateofBirth',
+      'dateOfBirth',
+      'DOB',
+      'dob',
+    ]),
     paidDays: pickFirstValue(flat, ['paid_days', 'paidDays', 'Paid_days', 'paid_days_in_month']),
     basic: pickFirstValue(flat, ['basic', 'earned_basic', 'Basic', 'basic_pay']),
     hra: pickFirstValue(flat, ['hra', 'hra_fbp', 'HRA', 'house_rent_allowance']),
@@ -74,6 +98,9 @@ function mapSamplePayrollRecordToTable(record) {
   return {
     employeeName: record.employeeName || '',
     employeeId: record.employeeId || '',
+    gidNumber: record.gidNumber || '',
+    email: record.email || '',
+    dateofBirth: record.dateofBirth || '',
     paidDays: record.paidDays || '',
     basic: record.basic || '',
     hra: record.hra || '',
@@ -85,10 +112,11 @@ function mapSamplePayrollRecordToTable(record) {
 
 async function fetchAllPayrollRecordsForMonth(payrollMonth, { onProgress } = {}) {
   const zohoLoad = await fetchZohoPayrollRowsForMonth(payrollMonth, {
-    timeoutMs: 120000,
+    timeoutMs: 300000,
     includeEarningsDetail: true,
     batchSize: 50,
-    detailConcurrency: 5,
+    detailConcurrency: 4,
+    detailMode: 'payrun',
     onProgress,
   });
 
@@ -99,8 +127,13 @@ async function fetchAllPayrollRecordsForMonth(payrollMonth, { onProgress } = {})
     );
   }
 
+  if (typeof onProgress === 'function') {
+    onProgress('matching emails from People…');
+  }
+  const withEmail = await enrichPayrollRowsWithPeopleEmailFromApi(records);
+
   return {
-    records: records.map((row) => flattenPayrollEarningColumns(row)),
+    records: withEmail.map((row) => flattenPayrollEarningColumns(row)),
     meta: zohoLoad.meta || null,
     payrollMonth: zohoLoad.meta?.payrollMonth || payrollMonth,
     source: 'zoho_live',
@@ -162,7 +195,7 @@ const SamplePayroll = () => {
     try {
       const result = await fetchAllPayrollRecordsForMonth(payrollMonth, {
         onProgress: (label) =>
-          setProgress(`Loading payroll (Basic, HRA, Net Pay)… ${label} employee(s)`),
+          setProgress(`Loading Basic, HRA, Net Pay… ${label} (keep this page open)`),
       });
       setProgress('Saving to SamplePayroll table…');
       const syncResult = await syncRecordsToSamplePayrollTable(
@@ -170,9 +203,14 @@ const SamplePayroll = () => {
         result.records
       );
 
-      const stored = Array.isArray(syncResult.data?.records)
+      const storedFromSync = Array.isArray(syncResult.data?.records)
         ? syncResult.data.records.map(mapSamplePayrollRecordToTable)
-        : result.records.map(mapPayrollRowToTable);
+        : [];
+      const storedFromFetch = result.records.map(mapPayrollRowToTable);
+      const stored =
+        storedFromSync.length >= storedFromFetch.length
+          ? storedFromSync
+          : storedFromFetch;
 
       setData(stored);
       setMeta(result.meta || null);
@@ -207,6 +245,7 @@ const SamplePayroll = () => {
         <h1 className="people-title">Sample Payroll</h1>
         <p className="people-subtitle">
           Fetch month-wise payroll, store it in the SamplePayroll table, and view all employees below.
+          For large teams (1000+), keep the page open while Fetch Data runs — Basic and HRA load for every employee.
         </p>
       </header>
 
@@ -254,7 +293,8 @@ const SamplePayroll = () => {
 
       {loading && (
         <div className="people-loading">
-          {progress || `Loading all employees for ${formatMonthLabel(payrollMonth)}…`}
+          {progress ||
+            `Loading all employees for ${formatMonthLabel(payrollMonth)} (this may take several minutes)…`}
         </div>
       )}
 

@@ -311,6 +311,253 @@ const formTSEHeaderNorm = (txt) =>
     .toLowerCase()
     .replace(/[^a-z0-9 ]/g, '');
 
+/** Strip statutory column suffix e.g. "Name of Employee (2)" → normalized label key. */
+export function formTSEEmployeeHeaderKeyNorm(header) {
+  return String(header || '')
+    .replace(/\s*\(\s*\d{1,2}\s*\)\s*$/i, '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, '');
+}
+
+export function isFormTSESerialNumberHeader(h) {
+  const s = formTSEEmployeeHeaderKeyNorm(h);
+  return (
+    /^sno$/.test(s.replace(/\s/g, '')) ||
+    /^slno$/.test(s.replace(/\s/g, '')) ||
+    /^serialno$/.test(s.replace(/\s/g, '')) ||
+    (s.includes('serial') && !s.includes('register'))
+  );
+}
+
+export function isFormTSEEmployeeNameHeader(h) {
+  const s = formTSEEmployeeHeaderKeyNorm(h);
+  if (!s.includes('name')) return false;
+  return (
+    s.includes('employee') ||
+    s.includes('workman') ||
+    s.includes('worker') ||
+    /nameoftheemployee/.test(s.replace(/\s/g, ''))
+  );
+}
+
+export function isFormTSEFatherHusbandHeader(h) {
+  const s = formTSEEmployeeHeaderKeyNorm(h);
+  return s.includes('father') || s.includes('husband') || s.includes('spouse');
+}
+
+export function isFormTSEGenderHeader(h) {
+  const s = formTSEEmployeeHeaderKeyNorm(h);
+  return s === 'gender' || s === 'sex' || (s.includes('male') && s.includes('female'));
+}
+
+export function isFormTSEDesignationHeader(h) {
+  const s = formTSEEmployeeHeaderKeyNorm(h);
+  return s.includes('designation') || s.includes('department');
+}
+
+export function isFormTSEDateOfJoiningHeader(h) {
+  const s = formTSEEmployeeHeaderKeyNorm(h);
+  return (
+    (s.includes('date') && s.includes('join')) ||
+    s.includes('dateofjoining') ||
+    (s.includes('entry') && s.includes('employ'))
+  );
+}
+
+/** ESIC registration number — not wage-register ESI deduction column (26). */
+export function isFormTSEEsicRegistrationHeader(h) {
+  const raw = String(h || '');
+  const s = formTSEEmployeeHeaderKeyNorm(h);
+  if (!s) return false;
+  if (/\(\s*2[0-9]\s*\)/.test(raw) && !/\(\s*[1-9]\s*\)/.test(raw)) return false;
+  if (s.includes('deduction')) return false;
+  if (/employeesstateinsurance|stateinsurancecorporation/.test(s.replace(/\s/g, ''))) return true;
+  if (/\besic\b/.test(s) && (/\bno\b/.test(s) || s.includes('number'))) return true;
+  if (/\besi\b/.test(s) && (/\bno\b/.test(s) || s.includes('number'))) return true;
+  return false;
+}
+
+/** UAN / EPF registration — not PF deduction column (27). */
+export function isFormTSEUanRegistrationHeader(h) {
+  const raw = String(h || '');
+  const s = formTSEEmployeeHeaderKeyNorm(h);
+  if (!s) return false;
+  if (/\(\s*2[0-9]\s*\)/.test(raw) && !/\(\s*[1-9]\s*\)/.test(raw)) return false;
+  if (s.includes('deduction')) return false;
+  if (/\buan\b/.test(s) && (/\bno\b/.test(s) || s.includes('number'))) return true;
+  if (/\bepf\b/.test(s) && (/\bno\b/.test(s) || s.includes('uan') || s.includes('number'))) return true;
+  if (s.includes('provident') && (s.includes('uan') || s.includes('no'))) return true;
+  return false;
+}
+
+export function isFormTSEEmployeeIdentityHeader(h) {
+  return (
+    isFormTSESerialNumberHeader(h) ||
+    isFormTSEEmployeeNameHeader(h) ||
+    isFormTSEFatherHusbandHeader(h) ||
+    isFormTSEGenderHeader(h) ||
+    isFormTSEDesignationHeader(h) ||
+    isFormTSEDateOfJoiningHeader(h) ||
+    isFormTSEEsicRegistrationHeader(h) ||
+    isFormTSEUanRegistrationHeader(h)
+  );
+}
+
+export function formatFormTSEKarnatakaEmployeeName(emp = {}) {
+  const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || emp['First Name'] || '').trim();
+  const ln = String(emp.LastName || emp['LastName'] || emp.lastName || emp['Last Name'] || '').trim();
+  if (fn && ln) return `${fn} ${ln}`;
+  return (
+    fn ||
+    ln ||
+    String(
+      emp.Name ||
+        emp['Name'] ||
+        emp.EmployeeName ||
+        emp['Employee Name'] ||
+        emp.Name1 ||
+        emp['Name1'] ||
+        ''
+    ).trim()
+  );
+}
+
+function pickFormTSEEmployeeScalar(emp, keys) {
+  if (!emp || typeof emp !== 'object') return '';
+  for (const key of keys) {
+    const v = emp[key];
+    if (v != null && String(v).trim() !== '') return String(v).trim();
+  }
+  return '';
+}
+
+/** Read row cell when header keys changed after template repair (suffix / rename). */
+export function getFormTSEKarnatakaRowValueForHeader(row, header) {
+  if (!row || typeof row !== 'object') return '';
+  if (Object.prototype.hasOwnProperty.call(row, header)) {
+    const direct = row[header];
+    return direct == null ? '' : direct;
+  }
+  const target = formTSEEmployeeHeaderKeyNorm(header);
+  if (!target) return '';
+  const hit = Object.keys(row).find((k) => formTSEEmployeeHeaderKeyNorm(k) === target);
+  if (!hit) return '';
+  const v = row[hit];
+  return v == null ? '' : v;
+}
+
+export function applyFormTSEKarnatakaEmployeeToRow(row, emp, headers, helpers = {}) {
+  if (!row || !emp || !Array.isArray(headers)) return row;
+  const {
+    sanitizeValue = (v) => String(v ?? '').trim(),
+    rowIndex = 0,
+    formatStatutoryDateDisplay = (v) => String(v ?? '').trim(),
+    getEmployeeLookupName = null,
+    getFallbackName = null,
+    getFallbackFatherOrSpouse = null,
+    onlyEmpty = false,
+  } = helpers;
+
+  const setCell = (header, value) => {
+    if (!header) return;
+    if (onlyEmpty) {
+      const existing = getFormTSEKarnatakaRowValueForHeader(row, header);
+      if (String(existing ?? '').trim() !== '') return;
+    }
+    row[header] = sanitizeValue(value);
+  };
+
+  const name =
+    (typeof getFallbackName === 'function' && getFallbackName(emp)) ||
+    formatFormTSEKarnatakaEmployeeName(emp) ||
+    (typeof getEmployeeLookupName === 'function' && getEmployeeLookupName(emp)) ||
+    '';
+
+  const fatherName =
+    (typeof getFallbackFatherOrSpouse === 'function' && getFallbackFatherOrSpouse(emp)) ||
+    pickFormTSEEmployeeScalar(emp, [
+      'Father_s_Name',
+      'Father_s Name',
+      'Father_Name',
+      'Father Name',
+      'Spouse_Name',
+      'Spouse Name',
+    ]);
+
+  const genderRaw = pickFormTSEEmployeeScalar(emp, [
+    'Sex',
+    'Gender',
+    'gender',
+    'Gender.displayValue',
+  ]);
+  const gender =
+    genderRaw &&
+    (() => {
+      const sl = genderRaw.toLowerCase();
+      if (sl === 'm' || sl === 'male') return 'Male';
+      if (sl === 'f' || sl === 'female') return 'Female';
+      return genderRaw;
+    })();
+
+  const designation = pickFormTSEEmployeeScalar(emp, [
+    'Designation',
+    'designation',
+    'Designation.displayValue',
+    'Department',
+    'department',
+  ]);
+
+  const dojRaw = pickFormTSEEmployeeScalar(emp, [
+    'Dateofjoining',
+    'DateofJoining',
+    'Date of Joining',
+    'Date_of_Joining',
+    'Date_of_Joining',
+  ]);
+  const doj = dojRaw ? formatStatutoryDateDisplay(dojRaw) : '';
+
+  const esi = pickFormTSEEmployeeScalar(emp, [
+    'ESI_Number',
+    'ESI Number',
+    'ESIC_Number',
+    'ESIC No.',
+    "Employee's State Insurance Corporation No.",
+  ]);
+
+  const uan = pickFormTSEEmployeeScalar(emp, [
+    'UAN_Number',
+    'UAN Number',
+    'UAN',
+    'UAN No.',
+    'UAN_Number',
+  ]);
+
+  headers.forEach((header) => {
+    if (isFormTSESerialNumberHeader(header)) {
+      setCell(header, String(rowIndex + 1));
+    } else if (isFormTSEEmployeeNameHeader(header)) {
+      setCell(header, name);
+    } else if (isFormTSEFatherHusbandHeader(header)) {
+      setCell(header, fatherName);
+    } else if (isFormTSEGenderHeader(header)) {
+      setCell(header, gender);
+    } else if (isFormTSEDesignationHeader(header)) {
+      setCell(header, designation);
+    } else if (isFormTSEDateOfJoiningHeader(header)) {
+      setCell(header, doj);
+    } else if (isFormTSEEsicRegistrationHeader(header)) {
+      setCell(header, esi);
+    } else if (isFormTSEUanRegistrationHeader(header)) {
+      setCell(header, uan);
+    }
+  });
+
+  return row;
+}
+
 function resolveFormTHeaderExportValue(headerFormData, spec, parsedFields = []) {
   if (!headerFormData || typeof headerFormData !== 'object') return '';
   const tryKeys = (keys) => {
@@ -1076,7 +1323,7 @@ export function rebuildFormTSETableHeadersFromSheet({
   };
 }
 
-/** When table headers are rebuilt, copy cell values by column index. */
+/** When table headers are rebuilt, copy cell values by column index and matching label. */
 export function remapRowsToRebuiltTableHeaders(rows, oldHeaders, newHeaders) {
   if (!Array.isArray(rows) || !Array.isArray(oldHeaders) || !Array.isArray(newHeaders)) {
     return Array.isArray(rows) ? rows : [];
@@ -1103,6 +1350,20 @@ export function remapRowsToRebuiltTableHeaders(rows, oldHeaders, newHeaders) {
         delete out[oldH];
       }
     }
+    newHeaders.forEach((newH) => {
+      if (!newH) return;
+      if (String(out[newH] ?? '').trim() !== '') return;
+      const target = formTSEEmployeeHeaderKeyNorm(newH);
+      if (!target || isFormTSEAttendanceDayHeader(newH)) return;
+      for (let i = 0; i < oldHeaders.length; i += 1) {
+        const oldH = oldHeaders[i];
+        if (!oldH || formTSEEmployeeHeaderKeyNorm(oldH) !== target) continue;
+        const oldVal = row[oldH];
+        if (oldVal == null || String(oldVal).trim() === '') continue;
+        out[newH] = oldVal;
+        break;
+      }
+    });
     return out;
   });
 }

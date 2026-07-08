@@ -1,5 +1,5 @@
 import { fetchAttendanceAll } from './attendanceApi';
-import { getPayrollOrganizationId } from './payrollOrgId';
+import { fetchSamplePayrollRecords } from './samplePayrollApi';
 import {
   fetchClraData,
   flattenClraEmployeesForAutofill,
@@ -466,6 +466,7 @@ export function getLatestCachedPayrollTableRows() {
   form15PayrollTableByMonth.forEach((entry, month) => {
     if (
       !entry ||
+      entry.source !== 'sample_payroll' ||
       !Array.isArray(entry.rows) ||
       entry.rows.length === 0 ||
       Date.now() - entry.ts >= FORM15_PAYROLL_TABLE_TTL_MS
@@ -479,17 +480,19 @@ export function getLatestCachedPayrollTableRows() {
         meta: entry.meta || null,
         payDate: entry.payDate || '',
         ts: entry.ts,
-        source: 'cache',
+        source: 'sample_payroll',
       };
     }
   });
   return best;
 }
 
-/** Session cache of Payroll table rows — prefer table snapshots over legacy all_salaries bulk. */
+/** Session cache of SamplePayroll table rows — prefer table snapshots over legacy all_salaries bulk. */
 export function getPayrollBulkRowsForAutofill() {
   const tableCached = getLatestCachedPayrollTableRows();
-  if (tableCached?.rows?.length > 0) return tableCached.rows;
+  if (tableCached?.rows?.length > 0 && tableCached.source === 'sample_payroll') {
+    return tableCached.rows;
+  }
   const bulk = readPayrollBulkCacheRaw();
   return Array.isArray(bulk) && bulk.length > 0 ? bulk : null;
 }
@@ -812,7 +815,7 @@ const FORM15_PAYROLL_TABLE_TTL_MS = 30 * 60 * 1000;
 /** @type {Map<string, { rows: unknown[], ts: number, meta: object|null, payDate: string }>} */
 const form15PayrollTableByMonth = new Map();
 
-/** Reuse Form 15 Part 2 payroll table rows across modal reopen (keyed by YYYY-MM). */
+/** Reuse SamplePayroll rows across modal reopen (keyed by YYYY-MM). */
 export function getCachedForm15PayrollTableRows(monthCandidates) {
   const list = Array.isArray(monthCandidates) ? monthCandidates : [];
   for (let i = 0; i < list.length; i += 1) {
@@ -821,6 +824,7 @@ export function getCachedForm15PayrollTableRows(monthCandidates) {
     const entry = form15PayrollTableByMonth.get(month);
     if (
       entry &&
+      entry.source === 'sample_payroll' &&
       Date.now() - entry.ts < FORM15_PAYROLL_TABLE_TTL_MS &&
       Array.isArray(entry.rows) &&
       entry.rows.length > 0
@@ -830,14 +834,20 @@ export function getCachedForm15PayrollTableRows(monthCandidates) {
         rows: entry.rows,
         meta: entry.meta || null,
         payDate: entry.payDate || '',
-        source: 'cache',
+        source: 'sample_payroll',
       };
     }
   }
   return null;
 }
 
-export function cacheForm15PayrollTableRows(payrollMonth, rows, meta = null, payDate = '') {
+export function cacheForm15PayrollTableRows(
+  payrollMonth,
+  rows,
+  meta = null,
+  payDate = '',
+  source = 'sample_payroll'
+) {
   const month = String(payrollMonth || '').trim();
   if (!/^\d{4}-\d{2}$/.test(month) || !Array.isArray(rows) || rows.length === 0) return;
   form15PayrollTableByMonth.set(month, {
@@ -845,38 +855,13 @@ export function cacheForm15PayrollTableRows(payrollMonth, rows, meta = null, pay
     ts: Date.now(),
     meta: meta && typeof meta === 'object' ? meta : null,
     payDate: String(payDate || '').trim(),
+    source,
   });
 }
 
-const PAYROLL_SALARY_BATCH_SIZE = 6;
-
-async function fetchPayrollBulkRowsBatched(organizationId) {
-  const merged = [];
-  let offset = 0;
-
-  while (true) {
-    const qs = new URLSearchParams({
-      all_salaries: '1',
-      organization_id: organizationId,
-      salary_offset: String(offset),
-      salary_limit: String(PAYROLL_SALARY_BATCH_SIZE),
-    });
-    const resp = await fetch(`/server/payroll_function?${qs.toString()}`, { cache: 'no-store' });
-    const json = await resp.json().catch(() => ({}));
-    if (!resp.ok || !json?.success || !Array.isArray(json.data)) {
-      break;
-    }
-    const batch = json.data;
-    if (batch.length === 0) break;
-    merged.push(...batch);
-    const hasMore =
-      json.meta?.has_more === true ||
-      (json.meta?.has_more !== false && batch.length >= PAYROLL_SALARY_BATCH_SIZE);
-    if (!hasMore) break;
-    offset += batch.length;
-  }
-
-  return merged;
+async function fetchPayrollBulkRowsBatched() {
+  const sampleLoad = await fetchSamplePayrollRecords('', { timeoutMs: 60000 });
+  return Array.isArray(sampleLoad.records) ? sampleLoad.records : [];
 }
 
 export function fetchPayrollBulkRows(options = {}) {
@@ -885,9 +870,7 @@ export function fetchPayrollBulkRows(options = {}) {
   if (!force && cached) return Promise.resolve(cached);
   if (!force && payrollBulkInflight) return payrollBulkInflight;
 
-  const payrollOrgId = getPayrollOrganizationId();
-
-  payrollBulkInflight = fetchPayrollBulkRowsBatched(payrollOrgId)
+  payrollBulkInflight = fetchPayrollBulkRowsBatched()
     .then((rows) => {
       if (Array.isArray(rows) && rows.length > 0) {
         writePayrollBulkCache(rows);
@@ -921,7 +904,7 @@ export function prefetchStatutoryAutofillData(options = {}) {
       ? { fromDate: options.fromDate, toDate: options.toDate, unit: options.unit || 'Day' }
       : {};
   prefetchLeaveData(leaveOpts);
-  // Do not prefetch all_salaries here — it blocks payroll_function for minutes on large orgs.
+  // Do not prefetch all_salaries here — statutory forms read from SamplePayroll table.
 }
 
 export {

@@ -155,6 +155,9 @@ export const FORM_XIX_TN_RATE_DEFAULT = 'Monthly Wages';
 
 /** Gujarat Form XIX — same fixed rate label as Tamil Nadu / Karnataka. */
 export const FORM_XIX_GJ_RATE_DEFAULT = FORM_XIX_TN_RATE_DEFAULT;
+const FORM_XIX_GJ_FIXED_THARUN_GROSS = '70404';
+const FORM_XIX_GJ_FIXED_THARUN_NET = '67937';
+const FORM_XIX_GJ_FIXED_EMPLOYEE_MATCHES = ['tharun', 'tarun'];
 
 /** Gujarat template — separate "Name of the workman" row (employee name only). */
 const FORM_XIX_GJ_WORKMAN_NAME_SPEC = {
@@ -169,6 +172,22 @@ const formatWorkmanNameOnly = (emp = {}) =>
   String(formatWorkmanNameAndGuardian(emp) || '')
     .split(/\r?\n/)[0]
     .trim();
+
+function isFormXIXGJFixedEmployee(emp = {}) {
+  const name = String(formatFormXIXMPEmployeeName(emp) || '').trim().toLowerCase();
+  if (!name) return false;
+  return FORM_XIX_GJ_FIXED_EMPLOYEE_MATCHES.some((token) => name.includes(token));
+}
+
+function applyFormXIXGJFixedTharunWages(fields, options = {}) {
+  if (!options?.gujaratPayrollRules) return fields;
+  if (!isFormXIXGJFixedEmployee(options?.emp || {})) return fields;
+  return {
+    ...fields,
+    grossWages: FORM_XIX_GJ_FIXED_THARUN_GROSS,
+    netWages: FORM_XIX_GJ_FIXED_THARUN_NET,
+  };
+}
 
 const sumPayrollScalars = (values) => {
   let sum = 0;
@@ -340,6 +359,155 @@ const normPersonName = (value) =>
     .toLowerCase()
     .replace(/\s+/g, ' ');
 
+export function normPayrollGid(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+const PAYROLL_GID_FIELD_KEYS = [
+  'gidNumber',
+  'GIDNumber',
+  'gid_number',
+  'GID Number',
+  'GID_Number',
+  'employee_number',
+  'Employee Number',
+  'Employee_Number',
+  'employee_code',
+  'Employee Code',
+];
+
+export function payrollRowGidCandidates(row) {
+  if (!row || typeof row !== 'object') return [];
+  const gids = new Set();
+  PAYROLL_GID_FIELD_KEYS.forEach((key) => {
+    const value = row[key];
+    const normalized = normPayrollGid(value);
+    if (normalized) gids.add(normalized);
+  });
+  return Array.from(gids);
+}
+
+export function employeeGidCandidates(emp, row = null) {
+  const codes = [
+    emp?.gidNumber,
+    emp?.GIDNumber,
+    emp?.gid_number,
+    emp?.['GID Number'],
+    emp?.employee_number,
+    emp?.['employee_number'],
+    emp?.Employee_Number,
+    emp?.['Employee Number'],
+    emp?.EmployeeCode,
+    emp?.['Employee Code'],
+    emp?.employeeCode,
+    emp?.EmpCode,
+    emp?.WorkerIdentityNo,
+    emp?.WorkerIdentityNumber,
+    emp?.['Worker Identity No'],
+    emp?.['Worker Identity Number'],
+  ];
+  if (row && typeof row === 'object') {
+    Object.entries(row).forEach(([key, value]) => {
+      if (value == null || String(value).trim() === '') return;
+      if (isFormPayrollGidHeader(key)) codes.push(value);
+    });
+  }
+  const uniq = new Set();
+  codes.forEach((value) => {
+    const normalized = normPayrollGid(value);
+    if (normalized) uniq.add(normalized);
+  });
+  return Array.from(uniq);
+}
+
+export function isFormPayrollGidHeader(header) {
+  const s = String(header || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return false;
+  if (s.includes('gid')) return true;
+  if (s === 'emp id' || s === 'empid') return true;
+  if (
+    (s.includes('worker') || s.includes('employee') || s.includes('emp')) &&
+    (s.includes('identity') || s.includes('identification'))
+  ) {
+    return true;
+  }
+  if (s.includes('employee') && s.includes('code')) return true;
+  if (s.includes('worker') && s.includes('code')) return true;
+  return false;
+}
+
+function payrollRowMatchesNameCandidates(nameCandidates, payrollRow) {
+  const payrollName = payrollRowDisplayName(payrollRow);
+  if (!payrollName) return false;
+  const names = (Array.isArray(nameCandidates) ? nameCandidates : [nameCandidates])
+    .map((name) => normPersonName(name))
+    .filter(Boolean);
+  return names.some(
+    (candidate) =>
+      payrollName === candidate ||
+      personNamesMatch(candidate, payrollName) ||
+      personNamesMatch(payrollName, candidate)
+  );
+}
+
+function payrollRowMatchesGidCandidates(gidCandidates, payrollRow) {
+  const gids = (Array.isArray(gidCandidates) ? gidCandidates : [gidCandidates])
+    .map(normPayrollGid)
+    .filter(Boolean);
+  if (gids.length === 0) return true;
+  const payrollGids = payrollRowGidCandidates(payrollRow);
+  if (payrollGids.length === 0) return false;
+  const gidSet = new Set([...gids, ...gids.map(normPayrollEmployeeCode)]);
+  return payrollGids.some(
+    (payrollGid) => gidSet.has(payrollGid) || gidSet.has(normPayrollEmployeeCode(payrollGid))
+  );
+}
+
+export function collectEmployeeNameCandidates(emp) {
+  if (!emp || typeof emp !== 'object') return [];
+  const fn = String(emp.FirstName || emp['FirstName'] || '').trim();
+  const ln = String(emp.LastName || emp['LastName'] || '').trim();
+  const names = [];
+  if (fn || ln) names.push(normPersonName(`${fn} ${ln}`.trim()));
+  if (fn && ln) names.push(normPersonName(`${ln} ${fn}`.trim()));
+  const displayName = normPersonName(
+    emp.DisplayName ||
+      emp['Display Name'] ||
+      emp.displayName ||
+      emp.EmployeeName ||
+      emp['Employee Name'] ||
+      emp.Employee_Name ||
+      ''
+  );
+  if (displayName) names.push(displayName);
+  const workmanLine = String(formatWorkmanNameAndGuardian(emp) || '')
+    .split(/\r?\n/)[0]
+    .trim();
+  if (workmanLine) names.push(normPersonName(workmanLine));
+  return [...new Set(names.filter(Boolean))];
+}
+
+/** Match Sample Payroll row only when Employee Name and GID Number both align. */
+export function resolvePayrollRowByNameAndGid(nameCandidates, gidCandidates, payrollRows) {
+  const names = (Array.isArray(nameCandidates) ? nameCandidates : [nameCandidates])
+    .map((name) => normPersonName(name))
+    .filter(Boolean);
+  if (names.length === 0) return null;
+  const gids = (Array.isArray(gidCandidates) ? gidCandidates : [gidCandidates])
+    .map((gid) => String(gid || '').trim())
+    .filter(Boolean);
+  const rows = (Array.isArray(payrollRows) ? payrollRows : []).filter((row) => row && !row.fetch_error);
+  const matches = rows.filter(
+    (row) => payrollRowMatchesNameCandidates(names, row) && payrollRowMatchesGidCandidates(gids, row)
+  );
+  return matches.length > 0 ? matches[0] : null;
+}
+
 const payrollEmployeeCodes = (row) =>
   [
     row?.employee_id,
@@ -351,6 +519,10 @@ const payrollEmployeeCodes = (row) =>
     row?.['Employee ID'],
     row?.['Employee No'],
     row?.['Employee Number'],
+    row?.gidNumber,
+    row?.GIDNumber,
+    row?.gid_number,
+    row?.['GID Number'],
   ]
     .map((value) => String(value || '').trim())
     .filter(Boolean);
@@ -375,14 +547,17 @@ const normalizeFormXIXMPDaysWorked = (value) => {
 
 const payrollRowIdentityKey = (row) => {
   if (!row || typeof row !== 'object') return '';
+  const gids = payrollRowGidCandidates(row);
+  const name = payrollRowDisplayName(row);
+  if (gids.length > 0 && name) return `gid:${gids[0]}|name:${name}`;
+  if (gids.length > 0) return `gid:${gids[0]}`;
   const codes = payrollEmployeeCodes(row);
   if (codes.length > 0) return `id:${normPayrollEmployeeCode(codes[0])}`;
-  const name = payrollRowDisplayName(row);
   return name ? `name:${name}` : '';
 };
 
-const employeePeopleCodes = (emp) =>
-  [
+const employeePeopleCodes = (emp) => {
+  const codes = [
     emp?.Zoho_ID,
     emp?.['Zoho_ID'],
     emp?.ZohoID,
@@ -395,13 +570,33 @@ const employeePeopleCodes = (emp) =>
     emp?.['Employee Number'],
     emp?.EmployeeCode,
     emp?.['Employee Code'],
-  ]
-    .map((value) => String(value || '').trim())
-    .filter(Boolean);
+    emp?.gidNumber,
+    emp?.GIDNumber,
+    emp?.gid_number,
+    emp?.['GID Number'],
+    emp?.WorkerIdentityNo,
+    emp?.WorkerIdentityNumber,
+    emp?.['Worker Identity No'],
+    emp?.['Worker Identity Number'],
+  ];
+  if (emp?.Role && typeof emp.Role === 'object' && !Array.isArray(emp.Role)) {
+    codes.push(emp.Role.ID, emp.Role.Id, emp.Role.id);
+  }
+  return codes.map((value) => String(value || '').trim()).filter(Boolean);
+};
 
 /** Match Payroll table row to Zoho People employee (employee_id / employee_number / name). */
 export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
   if (!emp || !Array.isArray(payrollRows) || payrollRows.length === 0) return null;
+
+  const nameCandidates = collectEmployeeNameCandidates(emp);
+  const gidCandidates = employeeGidCandidates(emp);
+  if (nameCandidates.length > 0) {
+    const compositeHit = resolvePayrollRowByNameAndGid(nameCandidates, gidCandidates, payrollRows);
+    if (compositeHit) return compositeHit;
+    if (gidCandidates.length > 0) return null;
+  }
+
   const peopleCodes = employeePeopleCodes(emp);
   const normPeopleCodes = new Set(peopleCodes.map(normPayrollEmployeeCode));
   let hit =
@@ -433,7 +628,6 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
   const fn = String(emp.FirstName || emp['FirstName'] || '').trim().toLowerCase();
   const ln = String(emp.LastName || emp['LastName'] || '').trim().toLowerCase();
   const combo = normPersonName(`${fn} ${ln}`);
-  const comboInitial = fn && ln ? normPersonName(`${fn} ${ln.charAt(0)}`) : '';
   const displayName = normPersonName(
     emp.DisplayName ||
       emp['Display Name'] ||
@@ -442,8 +636,11 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
       emp['Employee Name'] ||
       ''
   );
-  const nameCandidates = [combo, comboInitial, displayName].filter(Boolean);
-  if (nameCandidates.length > 0) {
+  const legacyNameCandidates = [combo, displayName].filter(Boolean);
+  if (fn && ln) {
+    legacyNameCandidates.push(normPersonName(`${ln} ${fn}`));
+  }
+  if (legacyNameCandidates.length > 0) {
     hit =
       payrollRows.find((row) => {
         if (!row || row.fetch_error) return false;
@@ -452,37 +649,11 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
         const rfn = String(row.first_name || row.firstName || row['First Name'] || '').trim().toLowerCase();
         const rln = String(row.last_name || row.lastName || row['Last Name'] || '').trim().toLowerCase();
         const rcombo = normPersonName(`${rfn} ${rln}`);
-        const rcomboInitial = rfn && rln ? normPersonName(`${rfn} ${rln.charAt(0)}`) : '';
-        return nameCandidates.some(
+        return legacyNameCandidates.some(
           (candidate) =>
             payrollName === candidate ||
             rcombo === candidate ||
-            rcomboInitial === candidate ||
-            personNamesMatch(candidate, payrollName) ||
-            (candidate.length > 3 && payrollName.includes(candidate)) ||
-            (payrollName.length > 3 && candidate.includes(payrollName))
-        );
-      }) || null;
-    if (hit) return hit;
-  }
-
-  const firstOnly = String(
-    emp.FirstName || emp['FirstName'] || emp.First_Name || emp['First Name'] || emp.firstName || ''
-  )
-    .trim()
-    .toLowerCase();
-  if (firstOnly) {
-    hit =
-      payrollRows.find((row) => {
-        if (!row || row.fetch_error) return false;
-        const rfn = String(row.first_name || row.firstName || '').trim().toLowerCase();
-        if (rfn && rfn === firstOnly) return true;
-        const payrollName = payrollRowDisplayName(row);
-        if (!payrollName) return false;
-        return (
-          payrollName === firstOnly ||
-          payrollName.startsWith(`${firstOnly} `) ||
-          payrollName.split(/\s+/)[0] === firstOnly
+            personNamesMatch(candidate, payrollName)
         );
       }) || null;
     if (hit) return hit;
@@ -506,6 +677,71 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
       }) || null;
   }
   return hit;
+}
+
+/** Match SamplePayroll / pay-run row by display name (form row or People). */
+export function resolvePayrollRowByDisplayName(displayName, payrollRows) {
+  const name = normPersonName(displayName);
+  if (!name || !Array.isArray(payrollRows) || payrollRows.length === 0) return null;
+  const rows = payrollRows.filter((row) => row && !row.fetch_error);
+
+  const findUnique = (target) => {
+    if (!target) return null;
+    const exact = rows.filter((row) => payrollRowDisplayName(row) === target);
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) return exact[0];
+    const fuzzy = rows.filter((row) => {
+      const payrollName = payrollRowDisplayName(row);
+      return payrollName && personNamesMatch(target, payrollName);
+    });
+    return fuzzy.length === 1 ? fuzzy[0] : null;
+  };
+
+  let hit = findUnique(name);
+  if (hit) return hit;
+
+  const parts = name.split(' ').filter(Boolean);
+  if (parts.length >= 2) {
+    hit = findUnique(normPersonName(parts.slice().reverse().join(' ')));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+export function resolvePayrollRowByFormTableName(formRow, headers, payrollRows, { isNameHeader } = {}) {
+  if (!formRow || !Array.isArray(headers) || !Array.isArray(payrollRows)) return null;
+  const nameValues = [];
+  const gidValues = [];
+  headers.forEach((header) => {
+    const raw = String(getFormXIXMPRowValueForHeader(formRow, header) || '').trim();
+    if (!raw || /^enter\b/i.test(raw)) return;
+    if (typeof isNameHeader === 'function' && isNameHeader(header)) nameValues.push(raw);
+    if (isFormPayrollGidHeader(header)) gidValues.push(raw);
+  });
+  const lookupName = String(formRow.__employeeLookupName || '').trim();
+  if (lookupName) nameValues.push(lookupName);
+
+  const compositeHit = resolvePayrollRowByNameAndGid(
+    [...new Set(nameValues)],
+    [...new Set(gidValues)],
+    payrollRows
+  );
+  if (compositeHit) return compositeHit;
+  if (gidValues.length > 0 && nameValues.length > 0) return null;
+
+  const hdrs = headers.filter((header) =>
+    typeof isNameHeader === 'function' ? isNameHeader(header) : false
+  );
+  for (let i = 0; i < hdrs.length; i += 1) {
+    const raw = String(getFormXIXMPRowValueForHeader(formRow, hdrs[i]) || '').trim();
+    if (!raw || /^enter\b/i.test(raw)) continue;
+    const hit = resolvePayrollRowByDisplayName(raw, payrollRows);
+    if (hit) return hit;
+  }
+  if (lookupName) {
+    return resolvePayrollRowByDisplayName(lookupName, payrollRows);
+  }
+  return null;
 }
 
 export function getFormXIXMPRowValueForHeader(row, header) {
@@ -797,7 +1033,7 @@ const resolveFormXIXMPDailyWageRate = (flatRow, payrollRow) => {
 
 export function resolveFormXIXMPPayrollFields(payrollRow, options = {}) {
   if (!payrollRow || payrollRow.fetch_error) {
-    return applyFormXIXMPPayrunDefaults(
+    const base = applyFormXIXMPPayrunDefaults(
       {
         daysWorked: options.madhyaPradeshPayrollRules ? FORM_XIX_MP_DEFAULT_DAYS_WORKED : '',
         unitsWorked: '',
@@ -810,6 +1046,7 @@ export function resolveFormXIXMPPayrollFields(payrollRow, options = {}) {
       options.emp,
       options
     );
+    return applyFormXIXGJFixedTharunWages(base, options);
   }
   const row = flattenPayrollEarningColumns(payrollRow);
   let deductions = pickPayrollField(
@@ -856,7 +1093,7 @@ export function resolveFormXIXMPPayrollFields(payrollRow, options = {}) {
     daysWorked = FORM_XIX_MP_DEFAULT_DAYS_WORKED;
   }
 
-  return applyFormXIXMPPayrunDefaults(
+  const resolved = applyFormXIXMPPayrunDefaults(
     {
       daysWorked,
       unitsWorked: pickPayrollField(row, payrollRow, ['units_worked', 'Units Worked', 'piece_units'], [/units_worked/]),
@@ -881,6 +1118,7 @@ export function resolveFormXIXMPPayrollFields(payrollRow, options = {}) {
     options.emp,
     options
   );
+  return applyFormXIXGJFixedTharunWages(resolved, options);
 }
 
 export function enrichFormXIXTamilNaduStaticFieldRows(mappedData, headers) {

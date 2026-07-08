@@ -17,9 +17,12 @@ import { getCachedForm15PayrollTableRows, getLatestCachedPayrollTableRows, yield
 import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
 import {
   buildFormXIXMPPayrollRowResolver,
+  collectEmployeeNameCandidates,
+  employeeGidCandidates,
   loadFormXIXMPPayrollRowsForAutofill,
   resolveFormXIXMPPayrollRowForEmployee,
   resolveFormXIXMPPayrollRowsForAutofill,
+  resolvePayrollRowByNameAndGid,
 } from './formXIXMPWageSlip';
 
 export const resolveFormXVIIIMPPayrollRowsForAutofill = resolveFormXIXMPPayrollRowsForAutofill;
@@ -82,6 +85,22 @@ export function resolveFormXVIIIMPPayrollRowForAutofillRow(emp, row, payrollRows
     typeof resolver === 'function' ? resolver : buildFormXVIIIMPPayrollRowResolver(rows);
   const fromPeople = resolve(emp);
   if (fromPeople && !fromPeople.fetch_error) return fromPeople;
+
+  const nameCandidates = [
+    ...collectEmployeeNameCandidates(emp),
+    ...mpFormRowNameCandidates(row, headers),
+  ];
+  const gidCandidates = [
+    ...employeeGidCandidates(emp),
+    ...employeeGidCandidates(null, row),
+  ];
+  const compositeHit = resolvePayrollRowByNameAndGid(
+    [...new Set(nameCandidates)],
+    [...new Set(gidCandidates)],
+    rows
+  );
+  if (compositeHit) return compositeHit;
+  if (gidCandidates.length > 0 && nameCandidates.length > 0) return null;
 
   const rowNames = mpFormRowNameCandidates(row, headers);
   if (rowNames.length > 0) {
@@ -598,6 +617,10 @@ export function isFormXVIIIMPSerialNoHeader(header) {
 
 export function readFormXVIIIMPEmployeeId(emp = {}) {
   return pickFormXVIIIMPEmployeeValue(emp, [
+    'gidNumber',
+    'GIDNumber',
+    'gid_number',
+    'GID Number',
     'EmployeeID',
     'Employee ID',
     'Employee_ID',

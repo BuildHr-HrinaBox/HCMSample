@@ -127,6 +127,23 @@ export function matchesFormXIVHint(blob) {
   );
 }
 
+/**
+ * CLRA Form XI only (e.g. Form_XI_RJ Service Certificate).
+ * Must not match XII / XIII / XIV / XV / XVI / XVII / XVIII / XIX.
+ */
+export function matchesFormXIHint(blob) {
+  const parts = String(blob || '').toLowerCase();
+  if (matchesFormXIVHint(parts)) return false;
+  if (/form[\s._-]*x(?:i{2,}|[vx])/i.test(parts) && !/form[\s._-]*xi(?![vix])/i.test(parts)) {
+    return false;
+  }
+  return (
+    /form[\s._-]*xi(?![vix])/i.test(parts) ||
+    /\bxi_rj\b/i.test(parts) ||
+    /(?:^|[\s._-])xi(?![vix])(?=[\s._\W-]|$)/i.test(parts)
+  );
+}
+
 export function blobIndicatesEmploymentCard(blob, tableHeaders = null) {
   const text = String(blob || '').toLowerCase();
   if (/employment\s+card/i.test(text)) return true;
@@ -148,23 +165,40 @@ export function isFormXIVEmploymentCardContext(
   sheetText = '',
   tableHeaders = null
 ) {
-  const parts = [
+  // Row identity (form name / file / description) wins over sheet body — Form_XI_RJ must not open as XIV.
+  const identityBlob = [
     rowItem?.formName,
     rowItem?.FormName,
     rowItem?.description,
     rowItem?.Description,
     fileName,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+
+  const parts = [
+    identityBlob,
     formHeader?.title,
     formHeader?.subtitle,
     formHeader?.reference,
-    sheetText
+    sheetText,
   ]
     .filter((x) => x != null && String(x).trim() !== '')
     .join(' ')
     .toLowerCase();
 
   if (/form[\s._-]*xxiv(?![a-z])/i.test(parts)) return false;
-  if (matchesFormXIVHint(parts)) return true;
+
+  // Explicit Form XI / Service Certificate row — never force Employment Card (Form XIV) layout.
+  if (!matchesFormXIVHint(identityBlob)) {
+    if (matchesFormXIHint(identityBlob)) return false;
+    if (/service\s+certificate/i.test(identityBlob) && !/employment\s+card/i.test(identityBlob)) {
+      return false;
+    }
+  }
+
+  if (matchesFormXIVHint(identityBlob) || matchesFormXIVHint(parts)) return true;
   return blobIndicatesEmploymentCard(parts, tableHeaders);
 }
 

@@ -950,29 +950,37 @@ export async function buildFormQKarnatakaPerEmployeeDownload({
   const hdrs = resolveFormQKarnatakaTableHeaders(headersToUse);
   const employees = Array.isArray(employeesOverride) ? employeesOverride : [];
   const tableRows = Array.isArray(mappedData) ? mappedData : [];
+  const payrollRowMemo = new WeakMap();
+  const memoizedResolvePayrollRow =
+    typeof resolvePayrollRow === 'function'
+      ? (emp, rowIndex) => {
+          if (!emp || typeof emp !== 'object') return resolvePayrollRow(emp, rowIndex);
+          if (payrollRowMemo.has(emp)) return payrollRowMemo.get(emp);
+          const hit = resolvePayrollRow(emp, rowIndex);
+          payrollRowMemo.set(emp, hit);
+          return hit;
+        }
+      : null;
   const exportHelpers = {
     sanitizeValue: (v) => String(v ?? '').trim(),
-    resolvePayrollRow: typeof resolvePayrollRow === 'function' ? resolvePayrollRow : null,
+    resolvePayrollRow: memoizedResolvePayrollRow,
   };
+  const buildRowsFromEmployees = () =>
+    mapFormQKarnatakaRowsFromEmployees(employees, hdrs, exportHelpers).map((row, index) => {
+      const emp = employees[index]?.Employee || employees[index]?.employee || employees[index];
+      const name = formatFormQKarnatakaEmployeeName(emp);
+      if (name) row.__employeeLookupName = name;
+      return row;
+    });
   let exportRows =
     employees.length > 0
       ? resolveFormQKarnatakaExportRows(tableRows, hdrs, employees, exportHelpers)
       : tableRows.filter((row) => rowHasMeaningfulFormQKarnatakaExportData(row, hdrs));
   if (exportRows.length === 0 && employees.length > 0) {
-    exportRows = mapFormQKarnatakaRowsFromEmployees(employees, hdrs, exportHelpers).map((row, index) => {
-      const emp = employees[index]?.Employee || employees[index]?.employee || employees[index];
-      const name = formatFormQKarnatakaEmployeeName(emp);
-      if (name) row.__employeeLookupName = name;
-      return row;
-    });
+    exportRows = buildRowsFromEmployees();
   }
   if (employees.length > exportRows.length) {
-    exportRows = mapFormQKarnatakaRowsFromEmployees(employees, hdrs, exportHelpers).map((row, index) => {
-      const emp = employees[index]?.Employee || employees[index]?.employee || employees[index];
-      const name = formatFormQKarnatakaEmployeeName(emp);
-      if (name) row.__employeeLookupName = name;
-      return row;
-    });
+    exportRows = buildRowsFromEmployees();
     exportRows = overlayFormQKarnatakaUserEditsOntoRows(exportRows, tableRows, hdrs);
   }
 
@@ -1004,7 +1012,7 @@ export async function buildFormQKarnatakaPerEmployeeDownload({
     const xlsxBytes = new Uint8Array(await blob.arrayBuffer());
     const baseName = resolveFormQKarnatakaEmployeeDownloadBaseName(exportRows[i], hdrs, i);
     zip.file(allocateUniqueFormQKarnatakaDownloadFileName(baseName, usedNames), xlsxBytes);
-    if (i > 0 && i % 15 === 0) {
+    if (i > 0 && i % 5 === 0) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
   }

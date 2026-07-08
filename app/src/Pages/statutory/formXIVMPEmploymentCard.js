@@ -66,6 +66,42 @@ export function isFormXIVMPEmploymentCardContext(formHeader, rowItem, fileName, 
   return isFormXIVEmploymentCardContext(formHeader, rowItem, fileName, sheetText, null);
 }
 
+/** Rajasthan CLRA Form X — Employment Card [Rule 75]; tabular workman row (not Form XIV). */
+export function isFormXRajasthanEmploymentCardContext(formHeader, rowItem, fileName, sheetText = '') {
+  const parts = [
+    rowItem?.state,
+    rowItem?.State,
+    rowItem?.formName,
+    rowItem?.FormName,
+    rowItem?.description,
+    rowItem?.Description,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference,
+    sheetText,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+  if (matchesFormXIVHint(parts)) return false;
+  // Form_XI_RJ (Service Certificate) must not be treated as Form X Employment Card.
+  if (/form[\s._-]*xi(?![vix])/i.test(parts) || /\bxi_rj\b/i.test(parts)) return false;
+  if (/service\s+certificate/i.test(parts) && !/employment\s+card/i.test(parts)) return false;
+  if (/form[\s._-]*x[\s._-]*rj/i.test(parts) || /\bx_rj\b/i.test(parts)) return true;
+  if (/see\s+rule\s+75/i.test(parts) && /employment\s+card/i.test(parts)) return true;
+  if (
+    /rajasthan/.test(parts) &&
+    /employment\s+card/i.test(parts) &&
+    /form[\s._-]*x\b/i.test(parts) &&
+    !/form[\s._-]*xiv/i.test(parts) &&
+    !/form[\s._-]*xi(?![vix])/i.test(parts)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /** Karnataka CLRA Form XIV — Employment Card (stacked MP/Karnataka layout). */
 export function isFormXIVKarnatakaContext(formHeader, rowItem, fileName, sheetText = '') {
   if (!isFormXIVMPEmploymentCardContext(formHeader, rowItem, fileName, sheetText)) return false;
@@ -102,9 +138,17 @@ export const FORM_XIV_KA_APR_DEFAULT_WAGE_RATES = [
   { name: 'Stalin T', wageRate: '113491' },
   { name: 'Sathishkumar Murugan', wageRate: '104521' },
 ];
+const FORM_XIV_GJ_FIXED_THARUN_WAGE_RATE = '70404';
+const FORM_XIV_GJ_FIXED_EMPLOYEE_MATCHES = ['tharun', 'tarun'];
 
 function resolveFormXIVKarnatakaEmployeeNameForMatch(emp = {}) {
   return String(formatFormXIVMPWorkmanName(emp) || '').trim();
+}
+
+function isFormXIVGJFixedEmployee(emp = {}) {
+  const name = String(formatFormXIVMPWorkmanName(emp) || '').trim().toLowerCase();
+  if (!name) return false;
+  return FORM_XIV_GJ_FIXED_EMPLOYEE_MATCHES.some((token) => name.includes(token));
 }
 
 export function buildFormXIVKarnatakaWageRateHints(helpers = {}) {
@@ -234,6 +278,9 @@ export function resolveFormXIVVariant(formHeader, rowItem, fileName, sheetText =
     .filter((x) => x != null && String(x).trim() !== '')
     .join(' ')
     .toLowerCase();
+  if (isFormXRajasthanEmploymentCardContext(formHeader, rowItem, fileName, sheetText)) {
+    return 'rj';
+  }
   if (
     /gujarat/.test(parts) ||
     /xiv[\s._-]*gj/i.test(parts) ||
@@ -608,6 +655,9 @@ export function resolveFormXIVMPHeaderFieldLayout(parsed, workbook, hints = {}) 
   const layoutVariant =
     repaired?.variant ||
     resolveFormXIVVariant(formHeader, item, fileName, resolvedSheetText, tableHeaders);
+  const isRajasthanFormX =
+    layoutVariant === 'rj' ||
+    isFormXRajasthanEmploymentCardContext(formHeader, item, fileName, resolvedSheetText);
   const finalFields = buildFormXIVMPHeaderFields(
     getMergedAwareCellText,
     effectiveSheetCols,
@@ -616,12 +666,12 @@ export function resolveFormXIVMPHeaderFieldLayout(parsed, workbook, hints = {}) 
 
   return {
     formHeader: {
-      title: 'FORM XIV',
+      title: isRajasthanFormX ? 'FORM X' : 'FORM XIV',
       subtitle: 'Employment Card',
-      reference: '(See rule 76)',
+      reference: isRajasthanFormX ? '(See rule 75)' : '(See rule 76)',
       formXIVMPHeaderFieldLayout: true,
       formXIVMPTableLayout: true,
-      formXIVVariant: layoutVariant,
+      formXIVVariant: isRajasthanFormX ? 'rj' : layoutVariant,
       textRows: [],
       fields: finalFields,
     },
@@ -800,6 +850,10 @@ export async function loadFormXIVMPPayrollRowsForAutofill(monthCandidates = [], 
 }
 
 export function resolveFormXIVMPWageRate(emp = {}, payrollRow = null, options = {}) {
+  if ((options.variant === 'gj' || options.preferNetPay === true) && isFormXIVGJFixedEmployee(emp)) {
+    return FORM_XIV_GJ_FIXED_THARUN_WAGE_RATE;
+  }
+
   const monthDefault = resolveFormXIVKarnatakaMonthDefaultWageRate(
     emp,
     options.monthCandidates,
@@ -1192,6 +1246,18 @@ export function repairFormXIVTableHeadersFromWorkbook(workbook, hints = {}) {
     hints.tableHeaders || gjScanned || mpScanned
   );
   let variant = hintedVariant;
+  if (variant === 'rj') {
+    const tableHdrs = Array.isArray(hints.tableHeaders) ? hints.tableHeaders : [];
+    const headers =
+      headersIndicateFormXIVMPTable(tableHdrs) && tableHdrs.length > 0
+        ? [...tableHdrs]
+        : [...FORM_XIV_MP_CANONICAL_TABLE_HEADERS];
+    return {
+      headers,
+      variant,
+      sheetName: accessor.sheetName,
+    };
+  }
   let headers = variant === 'gj' ? gjScanned : mpScanned;
   if (!headers && gjScanned && mpScanned) {
     const gjHits = gjScanned.filter(Boolean).length;
@@ -1290,12 +1356,13 @@ export function resolveFormXIVMPEmployeeDownloadBaseName(row, headers, fallbackI
   return slug || `Employee_${fallbackIndex + 1}`;
 }
 
-export function allocateUniqueFormXIVMPDownloadFileName(baseName, usedNames) {
+export function allocateUniqueFormXIVMPDownloadFileName(baseName, usedNames, variant = 'mp') {
   const root = String(baseName || 'Employee').trim() || 'Employee';
   const count = usedNames.get(root) || 0;
   usedNames.set(root, count + 1);
   const suffix = count > 0 ? `_${count + 1}` : '';
-  return `Form_XIV_MP_${root}${suffix}.xlsx`;
+  const prefix = variant === 'rj' ? 'Form_X_RJ' : 'Form_XIV_MP';
+  return `${prefix}_${root}${suffix}.xlsx`;
 }
 
 const formXIVMPExcelCellValueToString = (val) => {
@@ -1331,9 +1398,246 @@ const looksLikeFormXIVMPWorkmanLabelCell = (cellStr, spec, ordinal) => {
 
 const FORM_XIV_MP_DEFAULT_VALUE_COL = 4;
 const FORM_XIV_GJ_DEFAULT_VALUE_COL = 2;
+/** Rajasthan Form X — header labels in column B, values in bordered column C. */
+const FORM_XIV_RJ_HEADER_VALUE_COL = 3;
 /** MP / Karnataka stacked employment card — labels in A–D, values in column E. */
 const FORM_XIV_MP_STACKED_VALUE_COL = 5;
 const FORM_XIV_MP_STACKED_VALUE_COL_TO = 12;
+
+const detectFormXRajasthanWorksheetLayout = (worksheet, maxScanRow = 24) => {
+  if (!worksheet) return false;
+  let contractorLabelInB = false;
+  let tableHeaderRow = false;
+  for (let r = 1; r <= maxScanRow; r += 1) {
+    const labelB = formXIVMPExcelCellValueToString(worksheet.getCell(r, 2)?.value).trim();
+    if (/name\s+and\s+address\s+.*contractor/i.test(labelB)) contractorLabelInB = true;
+    for (let c = 1; c <= 10; c += 1) {
+      const cellNorm = formXIVMPHeaderNorm(
+        formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value)
+      );
+      if (/name\s+of\s+the\s+workman/.test(cellNorm)) {
+        tableHeaderRow = true;
+        break;
+      }
+    }
+  }
+  return contractorLabelInB && tableHeaderRow;
+};
+
+const resolveFormXRJHeaderValueCell = (worksheet, labelRow, labelCol) => {
+  const targetCol = findFormXIVValueColumnBesideLabel(
+    worksheet,
+    labelRow,
+    labelCol,
+    FORM_XIV_RJ_HEADER_VALUE_COL,
+    FORM_XIV_MP_WORKMAN_FIELD_SPECS
+  );
+  return resolveGJMergeTopLeft(worksheet, labelRow, targetCol);
+};
+
+const clearFormXRJHeaderValueMerge = (worksheet, labelRow, labelCol) => {
+  const { row, col } = resolveFormXRJHeaderValueCell(worksheet, labelRow, labelCol);
+  const ranges = parseExcelJsMergeRanges(worksheet);
+  const merge = ranges.find(
+    (m) => row >= m.top && row <= m.bottom && col >= m.left && col <= m.right
+  );
+  if (!merge) {
+    const cellStr = formXIVMPExcelCellValueToString(worksheet.getCell(row, col)?.value).trim();
+    if (isFormXIVPlaceholderCell(cellStr)) worksheet.getCell(row, col).value = '';
+    return;
+  }
+  for (let r = merge.top; r <= merge.bottom; r += 1) {
+    for (let c = merge.left; c <= merge.right; c += 1) {
+      const cellStr = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!cellStr || isFormXIVPlaceholderCell(cellStr)) worksheet.getCell(r, c).value = '';
+    }
+  }
+};
+
+const writeFormXIVRJBoxedHeaderValue = (worksheet, labelRow, labelCol, value) => {
+  const text = String(value ?? '').trim();
+  if (!text || labelRow < 1) return;
+  clearFormXRJHeaderValueMerge(worksheet, labelRow, labelCol);
+  const { row, col } = resolveFormXRJHeaderValueCell(worksheet, labelRow, labelCol);
+  const bounds = resolveFormXRJDataBoxBounds(worksheet, row, col);
+  for (let r = bounds.top; r <= bounds.bottom; r += 1) {
+    const sheetRow = worksheet.getRow(r);
+    if (!sheetRow.height || sheetRow.height < 18) sheetRow.height = Math.max(18, text.split(/\n/).length * 15);
+  }
+  setFormXIVMPWorkmanCellValue(worksheet, row, col, text, { variant: 'mp', inBox: true });
+  const cell = worksheet.getCell(row, col);
+  cell.alignment = {
+    ...(cell.alignment || {}),
+    horizontal: 'left',
+    vertical: 'top',
+    wrapText: true,
+    shrinkToFit: false,
+  };
+};
+
+const resolveFormXRJTableHeaderMatchCol = (worksheet, headerRow, header) => {
+  const target = formXIVMPHeaderNorm(header);
+  for (let c = 1; c <= 12; c += 1) {
+    const cellNorm = formXIVMPHeaderNorm(
+      formXIVMPExcelCellValueToString(worksheet.getCell(headerRow, c)?.value)
+    );
+    if (!cellNorm) continue;
+    if (cellNorm === target || cellNorm.includes(target) || target.includes(cellNorm)) return c;
+    if (isFormXIVMPWorkmanNameHeader(header) && /name\s+of\s+the\s+workman/.test(cellNorm)) return c;
+    if (isFormXIVMPSerialNumberHeader(header) && /serial|s\.?\s*no|sl\.?\s*no/.test(cellNorm) && /register/.test(cellNorm)) {
+      return c;
+    }
+    if (isFormXIVMPNatureDesignationHeader(header) && /nature/.test(cellNorm) && /employ|designat/.test(cellNorm)) {
+      return c;
+    }
+    if (isFormXIVMPWageRateHeader(header) && /wage/.test(cellNorm) && /rate|piece|place/.test(cellNorm)) return c;
+    if (isFormXIVMPWagePeriodHeader(header) && /wage\s+period/.test(cellNorm)) return c;
+    if (isFormXIVMPTenureHeader(header) && /tenure|period\s+of\s+employ/.test(cellNorm)) return c;
+    if (isFormXIVMPRemarksHeader(header) && /remark/.test(cellNorm)) return c;
+  }
+  return -1;
+};
+
+const resolveFormXRJTableHeaderColumns = (worksheet, headerRow, hdrs) => {
+  const exportHdrs = resolveFormXIVMPTableHeaders(hdrs);
+  const tryRows = [headerRow, headerRow + 1].filter((r) => r >= 1);
+  let bestCols = null;
+  let bestHits = 0;
+  tryRows.forEach((r) => {
+    const columnByHeader = exportHdrs.map((header) => resolveFormXRJTableHeaderMatchCol(worksheet, r, header));
+    const hits = columnByHeader.filter((col) => col > 0).length;
+    if (hits > bestHits) {
+      bestHits = hits;
+      bestCols = columnByHeader;
+    }
+  });
+  return bestCols;
+};
+
+const isFormXRJColumnIndexRow = (worksheet, row, columnByHeader) => {
+  const usedCols = [...new Set(columnByHeader.filter((col) => col > 0))].sort((a, b) => a - b);
+  if (usedCols.length < 3) return false;
+  let indexHits = 0;
+  for (let i = 0; i < usedCols.length; i += 1) {
+    const col = usedCols[i];
+    const raw = formXIVMPExcelCellValueToString(worksheet.getCell(row, col)?.value).trim();
+    const asNum = Number(raw);
+    if (raw && Number.isFinite(asNum) && (asNum === i + 1 || asNum === col - usedCols[0] + 1)) {
+      indexHits += 1;
+    }
+  }
+  return indexHits >= 3;
+};
+
+const findFormXRJDataBoxStartRow = (worksheet, headerRow, columnByHeader, maxScanRows = 30) => {
+  for (let r = headerRow + 1; r <= Math.min(headerRow + 6, maxScanRows); r += 1) {
+    if (isFormXRJColumnIndexRow(worksheet, r, columnByHeader)) {
+      return r + 1;
+    }
+  }
+  return headerRow + 3;
+};
+
+const resolveFormXRJDataBoxBounds = (worksheet, dataStartRow, col) => {
+  const topLeft = resolveGJMergeTopLeft(worksheet, dataStartRow, col);
+  const ranges = parseExcelJsMergeRanges(worksheet);
+  const merge = ranges.find(
+    (m) =>
+      topLeft.row >= m.top &&
+      topLeft.row <= m.bottom &&
+      topLeft.col >= m.left &&
+      topLeft.col <= m.right
+  );
+  if (merge) {
+    return { top: merge.top, bottom: merge.bottom, left: merge.left, right: merge.right };
+  }
+  return { top: topLeft.row, bottom: topLeft.row + 3, left: topLeft.col, right: topLeft.col };
+};
+
+const setFormXRJTableBoxCellValue = (worksheet, dataStartRow, col, value) => {
+  const text = String(value ?? '').trim();
+  if (!text || dataStartRow < 1 || col < 1) return;
+  const writePos = resolveGJMergeTopLeft(worksheet, dataStartRow, col);
+  const bounds = resolveFormXRJDataBoxBounds(worksheet, dataStartRow, col);
+  for (let r = bounds.top; r <= bounds.bottom; r += 1) {
+    const row = worksheet.getRow(r);
+    if (!row.height || row.height < 22) row.height = 36;
+  }
+  setFormXIVMPWorkmanCellValue(worksheet, writePos.row, writePos.col, text, {
+    variant: 'mp',
+    inBox: true,
+  });
+  const cell = worksheet.getCell(writePos.row, writePos.col);
+  cell.alignment = {
+    ...(cell.alignment || {}),
+    horizontal: 'center',
+    vertical: 'middle',
+    wrapText: true,
+    shrinkToFit: false,
+  };
+};
+
+const ensureFormXRJDataBoxRowHeights = (worksheet, layout) => {
+  if (!worksheet || !layout) return;
+  const { dataStartRow, columnByHeader } = layout;
+  const usedCols = [...new Set(columnByHeader.filter((col) => col > 0))];
+  let maxBottom = dataStartRow;
+  usedCols.forEach((col) => {
+    const bounds = resolveFormXRJDataBoxBounds(worksheet, dataStartRow, col);
+    maxBottom = Math.max(maxBottom, bounds.bottom);
+  });
+  for (let r = dataStartRow; r <= maxBottom; r += 1) {
+    const row = worksheet.getRow(r);
+    if (!row.height || row.height < 22) row.height = 36;
+  }
+};
+
+export function resolveFormXRJTableExportLayout(worksheet, hdrs) {
+  if (!worksheet) return null;
+  const exportHdrs = resolveFormXIVMPTableHeaders(hdrs);
+  const maxScanRows = 30;
+  for (let r = 1; r <= maxScanRows; r += 1) {
+    const columnByHeader = resolveFormXRJTableHeaderColumns(worksheet, r, hdrs) || exportHdrs.map((header) =>
+      resolveFormXRJTableHeaderMatchCol(worksheet, r, header)
+    );
+    const hits = columnByHeader.filter((col) => col > 0).length;
+    if (hits < 3) continue;
+    const dataStartRow = findFormXRJDataBoxStartRow(worksheet, r, columnByHeader, maxScanRows);
+    const remappedCols = columnByHeader.map((col) => {
+      if (!col || col < 1) return col;
+      return resolveGJMergeTopLeft(worksheet, dataStartRow, col).col;
+    });
+    return { headerRow: r, dataStartRow, columnByHeader: remappedCols, hdrs: exportHdrs };
+  }
+  return null;
+};
+
+const writeFormXIVRJTableRowToWorksheet = (worksheet, row, layout) => {
+  if (!worksheet || !row || !layout) return;
+  ensureFormXRJDataBoxRowHeights(worksheet, layout);
+  const { dataStartRow, columnByHeader, hdrs } = layout;
+  hdrs.forEach((header, j) => {
+    const col = columnByHeader[j];
+    if (!col || col < 1) return;
+    const val = getFormXIVMPRowValueForHeader(row, header);
+    if (!val) return;
+    setFormXRJTableBoxCellValue(worksheet, dataStartRow, col, val);
+  });
+};
+
+const clearFormXRJTableDataRows = (worksheet, layout) => {
+  if (!worksheet || !layout) return;
+  const { dataStartRow, columnByHeader } = layout;
+  const usedCols = [...new Set(columnByHeader.filter((col) => col > 0))];
+  usedCols.forEach((col) => {
+    const bounds = resolveFormXRJDataBoxBounds(worksheet, dataStartRow, col);
+    for (let r = bounds.top; r <= bounds.bottom; r += 1) {
+      for (let c = bounds.left; c <= bounds.right; c += 1) {
+        worksheet.getCell(r, c).value = '';
+      }
+    }
+  });
+};
 
 const excelColLettersToNumber = (letters) => {
   let n = 0;
@@ -1536,11 +1840,12 @@ const setFormXIVMPWorkmanCellValue = (worksheet, row, col, value, options = {}) 
     Number.isFinite(asNum) && /^-?\d+(\.\d+)?$/.test(normalized) ? asNum : text;
   const isGjBox = variant === 'gj' && inBox;
   const isGjWorkman = variant === 'gj' && !inBox;
+  const isRjBox = inBox && variant === 'mp';
   cell.alignment = {
     ...(cell.alignment || {}),
-    horizontal: 'left',
-    vertical: isGjWorkman ? 'middle' : 'top',
-    wrapText: isGjBox || String(cell.value).length > 36 || String(cell.value).includes('\n'),
+    horizontal: isRjBox ? 'center' : 'left',
+    vertical: isGjWorkman || isRjBox ? 'middle' : 'top',
+    wrapText: isGjBox || isRjBox || String(cell.value).length > 36 || String(cell.value).includes('\n'),
     shrinkToFit: false,
   };
 };
@@ -1984,10 +2289,13 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
   const workmanSpecs =
     variant === 'gj' ? FORM_XIV_GJ_WORKMAN_FIELD_SPECS : FORM_XIV_MP_WORKMAN_FIELD_SPECS;
   const gjBoxedLayout = variant === 'gj';
-  const stackedLayout = variant !== 'gj' && detectFormXIVStackedWorkmanLayout(worksheet);
+  const rjBoxedLayout = variant === 'rj' || detectFormXRajasthanWorksheetLayout(worksheet);
+  const stackedLayout = !gjBoxedLayout && !rjBoxedLayout && detectFormXIVStackedWorkmanLayout(worksheet);
   const defaultValueCol = stackedLayout
     ? FORM_XIV_MP_STACKED_VALUE_COL
-    : resolveFormXIVMPWorkmanValueColumn(worksheet, 45, workmanSpecs);
+    : rjBoxedLayout
+      ? FORM_XIV_RJ_HEADER_VALUE_COL
+      : resolveFormXIVMPWorkmanValueColumn(worksheet, 45, workmanSpecs);
   const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
   const gjHeaderLabelSnapshots = gjBoxedLayout ? snapshotFormXIVGJHeaderLabels(worksheet) : [];
 
@@ -2029,6 +2337,10 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
       writeFormXIVGJBoxedHeaderValue(worksheet, excelRow, labelCol, value, spec);
       return;
     }
+    if (rjBoxedLayout) {
+      writeFormXIVRJBoxedHeaderValue(worksheet, excelRow, labelCol, value);
+      return;
+    }
     const targetCol =
       labelCol != null && labelCol >= 1
         ? findFormXIVValueColumnBesideLabel(worksheet, excelRow, labelCol, defaultValueCol, workmanSpecs)
@@ -2050,6 +2362,10 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
       if (gjBoxedLayout) {
         clearFormXIVGJHeaderBoxBand(worksheet, labelExcelRow, labelExcelCol, spec);
         writeFormXIVGJBoxedHeaderValue(worksheet, labelExcelRow, labelExcelCol, val, spec);
+        return;
+      }
+      if (rjBoxedLayout) {
+        writeFormXIVRJBoxedHeaderValue(worksheet, labelExcelRow, labelExcelCol, val);
         return;
       }
       const targetRow = (parsedField.valueRow ?? parsedField.labelRow) + 1;
@@ -2318,17 +2634,26 @@ export async function buildFormXIVMPWorkbookWithTemplateStyles({
     rowHasMeaningfulFormXIVMPExportData(row, hdrs)
   );
   const employeeRow = sourceRows.length === 1 ? sourceRows[0] : sourceRows[0] || null;
+  const isRajasthanTableLayout = parsedFormHeaderWithVariant.formXIVVariant === 'rj';
 
   writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData, parsedFormHeaderWithVariant);
   if (employeeRow) {
-    writeFormXIVMPWorkmanFieldsToWorksheet(worksheet, employeeRow, hdrs);
+    if (isRajasthanTableLayout) {
+      const tableLayout = resolveFormXRJTableExportLayout(worksheet, hdrs);
+      if (tableLayout) {
+        clearFormXRJTableDataRows(worksheet, tableLayout);
+        writeFormXIVRJTableRowToWorksheet(worksheet, employeeRow, tableLayout);
+      }
+    } else {
+      writeFormXIVMPWorkmanFieldsToWorksheet(worksheet, employeeRow, hdrs);
+    }
   }
 
   const out = await workbook.xlsx.writeBuffer();
   const fileName =
     formFileName ||
     parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
-    `Form_XIV_MP_${Date.now()}.xlsx`;
+    (isRajasthanTableLayout ? `Form_X_RJ_${Date.now()}.xlsx` : `Form_XIV_MP_${Date.now()}.xlsx`);
   const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   return { blob, fileName };
 }
@@ -2353,13 +2678,20 @@ const formXIVMPColToLetter = (col) => {
 
 const formXIVMPToCellRef = (row, col) => `${formXIVMPColToLetter(col)}${row}`;
 
-const formXIVMPUpsertInlineStrCell = (sheetXml, cellRef, value) => {
+const formXIVMPUpsertInlineStrCell = (sheetXml, cellRef, value, options = {}) => {
+  const { preserveStyle = false } = options;
   const text = formXIVMPEscapeXml(String(value ?? '').trim());
+  const cellRe = new RegExp(`<c\\s+r="${cellRef}"([^>/]*)(?:/>|>([\\s\\S]*?)</c>)`, 'i');
+  const existing = sheetXml.match(cellRe);
+  let styleAttr = '';
+  if (preserveStyle && existing) {
+    const styleMatch = String(existing[1] || '').match(/\ss="(\d+)"/i);
+    if (styleMatch) styleAttr = ` s="${styleMatch[1]}"`;
+  }
   const cellXml = text
-    ? `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`
-    : `<c r="${cellRef}"/>`;
-  const cellRe = new RegExp(`<c\\s+r="${cellRef}"[^>]*(?:/>|>[\\s\\S]*?</c>)`, 'i');
-  if (cellRe.test(sheetXml)) {
+    ? `<c r="${cellRef}"${styleAttr} t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`
+    : `<c r="${cellRef}"${styleAttr}/>`;
+  if (existing) {
     return sheetXml.replace(cellRe, cellXml);
   }
   const rowNum = cellRef.replace(/^[A-Z]+/i, '');
@@ -2395,27 +2727,47 @@ async function prepareFormXIVMPFastZipTemplate({
   const worksheet = workbook.worksheets[0];
   if (!worksheet) throw new Error('Template worksheet not found.');
   writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData, parsedFormHeaderWithVariant);
-  const workmanLayout = resolveFormXIVMPWorkmanFieldPositions(worksheet, hdrs);
-  clearFormXIVMPWorkmanFieldPositions(worksheet, workmanLayout.positions, {
-    variant: workmanLayout.variant || 'mp',
-  });
+  const isRajasthanTableLayout = parsedFormHeaderWithVariant.formXIVVariant === 'rj';
+  let positions = [];
+  if (isRajasthanTableLayout) {
+    const tableLayout = resolveFormXRJTableExportLayout(worksheet, hdrs);
+    if (tableLayout) {
+      clearFormXRJTableDataRows(worksheet, tableLayout);
+      positions = tableLayout.hdrs.map((headerKey, j) => {
+        const col = tableLayout.columnByHeader[j];
+        if (!col || col < 1) return null;
+        const writePos = resolveGJMergeTopLeft(worksheet, tableLayout.dataStartRow, col);
+        return {
+          headerKey,
+          row: writePos.row,
+          col: writePos.col,
+          cellRef: formXIVMPToCellRef(writePos.row, writePos.col),
+        };
+      }).filter(Boolean);
+    }
+  } else {
+    const workmanLayout = resolveFormXIVMPWorkmanFieldPositions(worksheet, hdrs);
+    clearFormXIVMPWorkmanFieldPositions(worksheet, workmanLayout.positions, {
+      variant: workmanLayout.variant || 'mp',
+    });
+    positions = workmanLayout.positions.map((pos) => {
+      const writePos =
+        workmanLayout.variant === 'gj'
+          ? resolveGJMergeTopLeft(worksheet, pos.row, pos.col)
+          : { row: pos.row, col: pos.col };
+      return {
+        ...pos,
+        row: writePos.row,
+        col: writePos.col,
+        cellRef: formXIVMPToCellRef(writePos.row, writePos.col),
+      };
+    });
+  }
   const preparedBuffer = await workbook.xlsx.writeBuffer();
   const templateZip = await JSZip.loadAsync(preparedBuffer);
   const sheetEntry = resolveFormXIVMPWorksheetEntry(templateZip.files);
   if (!sheetEntry) throw new Error('Template worksheet XML not found.');
   const baseSheetXml = await templateZip.file(sheetEntry).async('string');
-  const positions = workmanLayout.positions.map((pos) => {
-    const writePos =
-      workmanLayout.variant === 'gj'
-        ? resolveGJMergeTopLeft(worksheet, pos.row, pos.col)
-        : { row: pos.row, col: pos.col };
-    return {
-      ...pos,
-      row: writePos.row,
-      col: writePos.col,
-      cellRef: formXIVMPToCellRef(writePos.row, writePos.col),
-    };
-  });
   const staticFiles = {};
   await Promise.all(
     Object.keys(templateZip.files).map(async (path) => {
@@ -2468,8 +2820,32 @@ export async function buildFormXIVMPPerEmployeeDownload({
     headerFormData,
   };
   const xlsxMime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const isRajasthanTableLayout = parsedFormHeaderWithVariant.formXIVVariant === 'rj';
 
-  if (exportRows.length <= 1) {
+  if (exportRows.length <= 1 || isRajasthanTableLayout) {
+    if (isRajasthanTableLayout && exportRows.length > 1) {
+      const zip = new JSZip();
+      const usedNames = new Map();
+      for (let i = 0; i < exportRows.length; i += 1) {
+        const { blob } = await buildFormXIVMPWorkbookWithTemplateStyles({
+          ...workbookArgs,
+          mappedData: [exportRows[i]],
+        });
+        const xlsxBytes = new Uint8Array(await blob.arrayBuffer());
+        const baseName = resolveFormXIVMPEmployeeDownloadBaseName(exportRows[i], hdrs, i);
+        zip.file(
+          allocateUniqueFormXIVMPDownloadFileName(baseName, usedNames, 'rj'),
+          xlsxBytes
+        );
+      }
+      const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_X_RJ')
+        .replace(/\.xlsx?$/i, '')
+        .replace(/[^a-zA-Z0-9._-]+/g, '_');
+      return {
+        blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
+        fileName: `${zipBase}_Employees.zip`,
+      };
+    }
     const rows = exportRows.length === 1 ? exportRows : [];
     return buildFormXIVMPWorkbookWithTemplateStyles({ ...workbookArgs, mappedData: rows });
   }
@@ -2491,7 +2867,8 @@ export async function buildFormXIVMPPerEmployeeDownload({
       sheetXml = formXIVMPUpsertInlineStrCell(
         sheetXml,
         pos.cellRef,
-        getFormXIVMPRowValueForHeader(exportRows[i], pos.headerKey)
+        getFormXIVMPRowValueForHeader(exportRows[i], pos.headerKey),
+        { preserveStyle: true }
       );
     }
     const entryZip = new JSZip();
@@ -2501,9 +2878,16 @@ export async function buildFormXIVMPPerEmployeeDownload({
     entryZip.file(sheetEntry, sheetXml);
     const xlsxBytes = await entryZip.generateAsync({ type: 'uint8array', compression: 'STORE' });
     const baseName = resolveFormXIVMPEmployeeDownloadBaseName(exportRows[i], hdrs, i);
-    zip.file(allocateUniqueFormXIVMPDownloadFileName(baseName, usedNames), xlsxBytes);
+    zip.file(
+      allocateUniqueFormXIVMPDownloadFileName(
+        baseName,
+        usedNames,
+        parsedFormHeaderWithVariant.formXIVVariant
+      ),
+      xlsxBytes
+    );
   }
-  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_XIV_MP')
+  const zipBase = String(formFileName || parsedFormHeader?.title || (parsedFormHeaderWithVariant.formXIVVariant === 'rj' ? 'Form_X_RJ' : 'Form_XIV_MP'))
     .replace(/\.xlsx?$/i, '')
     .replace(/[^a-zA-Z0-9._-]+/g, '_');
   return {

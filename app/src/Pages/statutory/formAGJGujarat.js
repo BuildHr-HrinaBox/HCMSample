@@ -144,6 +144,9 @@ export function isFormAGJGujaratContext(
     return false;
   }
 
+  const hasRajasthan = /rajasthan|\b_rj\b|form[\s._-]*a[\s._-]*rj|form_a_rj/.test(parts);
+  if (hasRajasthan && /\bform[\s._-]*a\b/.test(parts)) return false;
+
   const hasGujarat = /gujarat|\b_gj\b|form[\s._-]*a[\s._-]*gj|form_a_gj/.test(parts);
   const hasFormA = /\bform[\s._-]*a\b/.test(parts);
   const hasEmployeeWorkmanFormat =

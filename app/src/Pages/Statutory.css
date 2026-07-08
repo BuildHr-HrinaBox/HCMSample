@@ -1175,7 +1175,9 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
     font-weight: 700;
     cursor: pointer;
     white-space: nowrap;
-    min-width: 0;
+    min-width: 128px;
+    box-sizing: border-box;
+    text-align: center;
   }
 
   .statutory-send-for-approval-btn:hover:not(:disabled) {
@@ -1193,6 +1195,7 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
     border: 1px solid #34d399;
     cursor: default;
     opacity: 1;
+    min-width: 128px;
   }
 
   .statutory-sfa-inline-value {
@@ -2330,3 +2333,81 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
     text-align: center;
     font-weight: 600;
   }
+
+/* Fixed toast — does not shift table layout when shown or dismissed */
+.statutory-toast-wrap {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 10050;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.statutory-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.22);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  animation: statutory-toast-in 0.28s ease;
+}
+
+.statutory-toast--success {
+  background: #f0fdf4;
+  color: #166534;
+  border: 1px solid #bbf7d0;
+}
+
+.statutory-toast--error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fecaca;
+}
+
+.statutory-toast-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.statutory-toast-dismiss {
+  flex-shrink: 0;
+  margin: -4px -6px -4px 0;
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.7;
+}
+
+.statutory-toast--success .statutory-toast-dismiss {
+  color: #166534;
+}
+
+.statutory-toast--error .statutory-toast-dismiss {
+  color: #991b1b;
+}
+
+.statutory-toast-dismiss:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+@keyframes statutory-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

@@ -7,7 +7,7 @@ import {
 } from '../../utils/payrollEarnings';
 import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
 import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
-import { resolveFormXIXMPPayrollRowForEmployee } from './formXIXMPWageSlip';
+import { resolveFormXIXMPPayrollRowForEmployee, resolvePayrollRowByFormTableName } from './formXIXMPWageSlip';
 
 /** Gujarat Form B — Register of Wages (Shops & Establishments). */
 
@@ -493,6 +493,7 @@ export function enrichFormBGJGujaratPayrollRows(mappedData, employees, headers, 
   const hdrs = resolveFormBGJGujaratTableHeaders(headers);
   const {
     resolvePayrollRow = null,
+    payrollRows = null,
     sanitizeValue = (v) => String(v ?? '').trim(),
     formatStatutoryDateDisplay = (v) => String(v || '').trim(),
     payDate = '',
@@ -506,8 +507,13 @@ export function enrichFormBGJGujaratPayrollRows(mappedData, employees, headers, 
   mappedData.forEach((row, rowIndex) => {
     const empItem = employees[rowIndex];
     const emp = unwrapEmployeeRecord(empItem);
-    const payrollRow =
+    let payrollRow =
       typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, row, rowIndex) : null;
+    if ((!payrollRow || payrollRow.fetch_error) && Array.isArray(payrollRows) && payrollRows.length > 0) {
+      payrollRow = resolvePayrollRowByFormTableName(row, headers, payrollRows, {
+        isNameHeader: isFormBGJNameHeader,
+      });
+    }
     const merged = applyFormBGJGujaratEmployeeToRow(row, emp, hdrs, {
       sanitizeValue,
       formatStatutoryDateDisplay,

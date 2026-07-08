@@ -6,8 +6,31 @@ import {
 } from './statutoryAutofillCache';
 import { getPayrollOrganizationId } from './payrollOrgId';
 import { flattenPayrollEarningColumns } from './payrollEarnings';
+import {
+  fetchLatestSamplePayrollRows,
+  fetchSamplePayrollRowsForMonth,
+} from './samplePayrollApi';
 
 const payrollTableInflight = new Map();
+const PAYROLL_DETAIL_BATCH_DELAY_MS = 350;
+const PAYROLL_DETAIL_BATCH_RETRIES = 3;
+/** Above this count, server-side month batches hit Catalyst timeouts — use per-employee detail. */
+const PAYRUN_DETAIL_ONLY_THRESHOLD = 20;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function payrollAmountPresent(value) {
+  if (value == null || value === '') return false;
+  const num = Number(String(value).replace(/,/g, '').trim());
+  return Number.isFinite(num) && num !== 0;
+}
+
+function payrollRowMissingSalaryBreakdown(row) {
+  const flat = flattenPayrollEarningColumns(row);
+  const hasBasic = payrollAmountPresent(flat.basic) || payrollAmountPresent(flat.earned_basic);
+  const hasHra = payrollAmountPresent(flat.hra) || payrollAmountPresent(flat.hra_fbp);
+  return !hasBasic || !hasHra;
+}
 
 function normalizePayrollTableRecords(records) {
   if (!Array.isArray(records)) return [];
@@ -16,29 +39,9 @@ function normalizePayrollTableRecords(records) {
     .map((row) => flattenPayrollEarningColumns(row));
 }
 
-function parsePayrollTableResponse(json) {
-  if (!json?.success) return { records: [], meta: null, payrollMonth: '' };
-  const data = json.data;
-  let records = [];
-  let meta = null;
-  let payrollMonth = '';
-  if (data && typeof data === 'object' && !Array.isArray(data)) {
-    records = Array.isArray(data.records) ? data.records : [];
-    meta = data.meta || null;
-    payrollMonth = String(data.payrollMonth || '').trim();
-  } else if (Array.isArray(data)) {
-    records = data;
-  }
-  return {
-    records: normalizePayrollTableRecords(records),
-    meta,
-    payrollMonth,
-  };
-}
-
 function readPayrollTableSessionCache(month) {
   const cached = getCachedForm15PayrollTableRows([month]);
-  if (cached?.rows?.length > 0) {
+  if (cached?.rows?.length > 0 && cached.source === 'sample_payroll') {
     return {
       records: cached.rows,
       meta: cached.meta || null,
@@ -49,28 +52,6 @@ function readPayrollTableSessionCache(month) {
   return null;
 }
 
-async function fetchPayrollTableHttpPayload(url, month, timeoutMs) {
-  try {
-    const { resp, json } = await fetchJsonWithTimeout(url, { cache: 'no-store' }, timeoutMs);
-    if (!resp.ok || !json?.success) return null;
-    const parsed = parsePayrollTableResponse(json);
-    if (parsed.records.length === 0) return null;
-    const resolvedMonth = parsed.payrollMonth || month || '';
-    if (resolvedMonth) {
-      cacheForm15PayrollTableRows(resolvedMonth, parsed.records, parsed.meta);
-    }
-    return {
-      records: parsed.records,
-      meta: parsed.meta,
-      payrollMonth: resolvedMonth,
-      source: 'table',
-    };
-  } catch (_) {
-    return null;
-  }
-}
-
-/** Real-time read from Payroll table API; falls back to session cache of stored table data. */
 async function fetchPayrollTablePayloadOnce(payrollMonth, { timeoutMs = 45000, force = false } = {}) {
   const month = String(payrollMonth || '').trim();
   if (!/^\d{4}-\d{2}$/.test(month)) {
@@ -81,15 +62,22 @@ async function fetchPayrollTablePayloadOnce(payrollMonth, { timeoutMs = 45000, f
     return payrollTableInflight.get(month);
   }
 
-  const attempts = [
-    `/server/payroll_function?${new URLSearchParams({ payroll_table: '1', payroll_month: month })}`,
-    `/server/payroll_function/payroll?${new URLSearchParams({ payroll_month: month })}`,
-  ];
-
   const task = (async () => {
-    for (let i = 0; i < attempts.length; i += 1) {
-      const hit = await fetchPayrollTableHttpPayload(attempts[i], month, timeoutMs);
-      if (hit) return hit;
+    const sampleLoad = await fetchSamplePayrollRowsForMonth(month, { timeoutMs });
+    if (sampleLoad.records.length > 0) {
+      cacheForm15PayrollTableRows(
+        sampleLoad.payrollMonth || month,
+        sampleLoad.records,
+        sampleLoad.meta,
+        '',
+        'sample_payroll'
+      );
+      return {
+        records: sampleLoad.records,
+        meta: sampleLoad.meta,
+        payrollMonth: sampleLoad.payrollMonth || month,
+        source: sampleLoad.source || 'sample_payroll',
+      };
     }
     const cached = readPayrollTableSessionCache(month);
     if (cached) return cached;
@@ -105,16 +93,24 @@ async function fetchPayrollTablePayloadOnce(payrollMonth, { timeoutMs = 45000, f
 }
 
 async function fetchLatestPayrollTablePayload({ timeoutMs = 45000 } = {}) {
-  const attempts = [
-    `/server/payroll_function/payroll/latest`,
-    `/server/payroll_function/payroll?${new URLSearchParams({ payroll_table_latest: '1' })}`,
-    `/server/payroll_function?${new URLSearchParams({ payroll_table_latest: '1' })}`,
-  ];
-  for (let i = 0; i < attempts.length; i += 1) {
-    const hit = await fetchPayrollTableHttpPayload(attempts[i], '', timeoutMs);
-    if (hit) {
-      return { ...hit, source: 'table_latest' };
+  const sampleLatest = await fetchLatestSamplePayrollRows({ timeoutMs });
+  if (sampleLatest.records.length > 0) {
+    const resolvedMonth = sampleLatest.payrollMonth || '';
+    if (resolvedMonth) {
+      cacheForm15PayrollTableRows(
+        resolvedMonth,
+        sampleLatest.records,
+        sampleLatest.meta,
+        '',
+        'sample_payroll'
+      );
     }
+    return {
+      records: sampleLatest.records,
+      meta: sampleLatest.meta,
+      payrollMonth: resolvedMonth,
+      source: sampleLatest.source || 'sample_payroll_latest',
+    };
   }
   const latestCached = getLatestCachedPayrollTableRows();
   if (latestCached?.rows?.length > 0) {
@@ -205,7 +201,10 @@ function pickPayrollEmployeeId(row) {
 }
 
 function mergeListAndDetailPayrollRow(listRow, detailRow) {
-  const listFlat = flattenPayrollEarningColumns(listRow);
+  const listFlat =
+    listRow && typeof listRow === 'object' && (listRow.basic != null || listRow.earned_basic != null)
+      ? listRow
+      : flattenPayrollEarningColumns(listRow);
   const detailFlat = flattenPayrollEarningColumns(detailRow);
   const merged = { ...listFlat, ...detailFlat };
   const preserveKeys = ['net_pay', 'gross_pay', 'total_earnings', 'paid_days', 'total_deductions'];
@@ -219,14 +218,125 @@ function mergeListAndDetailPayrollRow(listRow, detailRow) {
       merged[key] = listVal;
     }
   }
-  return flattenPayrollEarningColumns(merged);
+  const flat = flattenPayrollEarningColumns(merged);
+  if (!flat.basic && !flat.earned_basic) {
+    flat.basic = detailFlat.basic || detailFlat.earned_basic || listFlat.basic || listFlat.earned_basic || '';
+    flat.earned_basic = flat.basic;
+  }
+  if (!flat.hra && !flat.hra_fbp) {
+    flat.hra = detailFlat.hra || detailFlat.hra_fbp || listFlat.hra || listFlat.hra_fbp || '';
+    flat.hra_fbp = flat.hra;
+  }
+  return flat;
 }
 
-/** Per-employee pay-run detail for Basic / HRA (runs in small concurrent batches). */
+async function fetchPayrollMonthDetailBatch(
+  payrollMonth,
+  offset,
+  perBatch,
+  { timeoutMs = 180000, organizationId = getPayrollOrganizationId() } = {}
+) {
+  const qs = new URLSearchParams({
+    organization_id: organizationId,
+    payroll_month_data: '1',
+    payroll_month: String(payrollMonth || '').trim(),
+    payroll_run_type: 'regular',
+    employee_offset: String(offset),
+    employee_limit: String(perBatch),
+    include_earnings_detail: '1',
+    detail_limit: String(perBatch),
+  });
+
+  let lastError = null;
+  for (let attempt = 0; attempt < PAYROLL_DETAIL_BATCH_RETRIES; attempt += 1) {
+    try {
+      const { resp, json } = await fetchJsonWithTimeout(
+        `/server/payroll_function?${qs.toString()}`,
+        { cache: 'no-store' },
+        timeoutMs
+      );
+      if (resp.ok && json?.success) {
+        return Array.isArray(json.data) ? json.data : [];
+      }
+      lastError = new Error(json?.error || json?.message || `HTTP ${resp.status}`);
+    } catch (err) {
+      lastError = err;
+    }
+    if (attempt + 1 < PAYROLL_DETAIL_BATCH_RETRIES) {
+      await sleep(PAYROLL_DETAIL_BATCH_DELAY_MS * (attempt + 1));
+    }
+  }
+  if (lastError) throw lastError;
+  return [];
+}
+
+/** Load Basic / HRA via payroll_month_data batches (server-side pay-run detail enrichment). */
+async function enrichPayrollRowsWithMonthDetailBatches(
+  payrollMonth,
+  listRows,
+  { timeoutMs = 180000, batchSize = 10, onProgress = null } = {}
+) {
+  const list = Array.isArray(listRows) ? listRows : [];
+  const perBatch = Math.max(1, Math.min(10, Number(batchSize) || 10));
+  const byId = new Map();
+
+  list.forEach((row) => {
+    const flat = flattenPayrollEarningColumns(row);
+    const id = pickPayrollEmployeeId(flat);
+    if (id) byId.set(id, flat);
+  });
+
+  const total = list.length;
+  let offset = 0;
+
+  while (offset < total) {
+    let batch = [];
+    try {
+      batch = await fetchPayrollMonthDetailBatch(payrollMonth, offset, perBatch, { timeoutMs });
+    } catch (_) {
+      offset += perBatch;
+      if (typeof onProgress === 'function') {
+        onProgress(`${Math.min(offset, total)} / ${total}`);
+      }
+      if (offset < total) await sleep(PAYROLL_DETAIL_BATCH_DELAY_MS);
+      continue;
+    }
+
+    batch.forEach((row) => {
+      const detailFlat = flattenPayrollEarningColumns(row);
+      const id = pickPayrollEmployeeId(detailFlat);
+      if (!id) return;
+      const existing = byId.get(id) || {};
+      byId.set(id, mergeListAndDetailPayrollRow(existing, detailFlat));
+    });
+
+    if (batch.length === 0) {
+      offset += perBatch;
+    } else {
+      offset += batch.length;
+    }
+
+    if (typeof onProgress === 'function') {
+      onProgress(`${Math.min(offset, total)} / ${total}`);
+    }
+
+    if (offset < total) {
+      await sleep(PAYROLL_DETAIL_BATCH_DELAY_MS);
+    }
+  }
+
+  return list.map((row) => {
+    const id = pickPayrollEmployeeId(row);
+    if (id && byId.has(id)) return byId.get(id);
+    return flattenPayrollEarningColumns(row);
+  });
+}
+
+/** Per-employee pay-run detail for Basic / HRA when batch enrichment is incomplete. */
 async function enrichPayrollRowsWithPayrunDetail(
   rows,
   payrollRunId,
-  { timeoutMs = 90000, concurrency = 5, onProgress = null } = {}
+  { timeoutMs = 90000, concurrency = 5, batchDelayMs = PAYROLL_DETAIL_BATCH_DELAY_MS, onProgress = null } = {}
 ) {
   const list = Array.isArray(rows) ? rows : [];
   const runId = String(payrollRunId || '').trim();
@@ -265,6 +375,9 @@ async function enrichPayrollRowsWithPayrunDetail(
     if (typeof onProgress === 'function') {
       onProgress(`${enriched.length} / ${list.length}`);
     }
+    if (offset + workers < list.length && batchDelayMs > 0) {
+      await sleep(batchDelayMs);
+    }
   }
 
   return enriched;
@@ -279,6 +392,7 @@ export async function fetchZohoPayrollRowsForMonth(
     batchSize = null,
     onProgress = null,
     detailConcurrency = 5,
+    detailMode = null,
   } = {}
 ) {
   const listLoad = await fetchZohoPayrollListRowsForMonth(payrollMonth, {
@@ -296,13 +410,58 @@ export async function fetchZohoPayrollRowsForMonth(
   }
 
   const runId = listLoad.meta?.payroll_run_id;
-  const enriched = await enrichPayrollRowsWithPayrunDetail(listLoad.rows, runId, {
-    timeoutMs,
-    concurrency: detailConcurrency,
-    onProgress: (label) => {
-      if (typeof onProgress === 'function') onProgress(`Detail ${label}`);
-    },
-  });
+  const rowCount = listLoad.rows.length;
+  const usePayrunDetailOnly =
+    detailMode === 'payrun' ||
+    !runId ||
+    rowCount > PAYRUN_DETAIL_ONLY_THRESHOLD;
+
+  if (usePayrunDetailOnly) {
+    if (!runId) return listLoad;
+    const enriched = await enrichPayrollRowsWithPayrunDetail(listLoad.rows, runId, {
+      timeoutMs: 60000,
+      concurrency: detailConcurrency,
+      batchDelayMs: PAYROLL_DETAIL_BATCH_DELAY_MS,
+      onProgress: (label) => {
+        if (typeof onProgress === 'function') onProgress(`Salary detail ${label}`);
+      },
+    });
+    return { rows: enriched, meta: listLoad.meta };
+  }
+
+  let enriched = await enrichPayrollRowsWithMonthDetailBatches(
+    payrollMonth,
+    listLoad.rows,
+    {
+      timeoutMs: Math.max(timeoutMs, 90000),
+      batchSize: 5,
+      onProgress: (label) => {
+        if (typeof onProgress === 'function') onProgress(`Salary detail ${label}`);
+      },
+    }
+  );
+
+  const missingBreakdown = enriched.filter(payrollRowMissingSalaryBreakdown);
+  if (missingBreakdown.length > 0 && runId) {
+    const fallbackEnriched = await enrichPayrollRowsWithPayrunDetail(missingBreakdown, runId, {
+      timeoutMs: Math.max(timeoutMs, 60000),
+      concurrency: detailConcurrency,
+      batchDelayMs: PAYROLL_DETAIL_BATCH_DELAY_MS,
+      onProgress: (label) => {
+        if (typeof onProgress === 'function') onProgress(`Salary detail (retry) ${label}`);
+      },
+    });
+    const fallbackById = new Map();
+    fallbackEnriched.forEach((row) => {
+      const id = pickPayrollEmployeeId(row);
+      if (id) fallbackById.set(id, row);
+    });
+    enriched = enriched.map((row) => {
+      const id = pickPayrollEmployeeId(row);
+      if (id && fallbackById.has(id)) return fallbackById.get(id);
+      return row;
+    });
+  }
 
   return { rows: enriched, meta: listLoad.meta };
 }
@@ -345,7 +504,6 @@ export async function loadPayrollTableRowsForStatutoryAutofill(monthCandidates =
 export async function fetchPayrollTableRowsForMonths(monthCandidates, options = {}) {
   const list = Array.isArray(monthCandidates) ? monthCandidates : [];
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 45000;
-  const zohoFallback = options.zohoFallback !== false;
 
   for (let i = 0; i < list.length; i += 1) {
     const month = String(list[i] || '').trim();
@@ -369,25 +527,6 @@ export async function fetchPayrollTableRowsForMonths(monthCandidates, options = 
       meta: latest.meta,
       source: latest.source,
     };
-  }
-
-  if (zohoFallback && list.length > 0) {
-    for (let i = 0; i < list.length; i += 1) {
-      const month = String(list[i] || '').trim();
-      if (!/^\d{4}-\d{2}$/.test(month)) continue;
-      const zohoLoad = await fetchZohoPayrollRowsForMonth(month, { timeoutMs });
-      if (zohoLoad.rows.length > 0) {
-        console.info(
-          `Payroll table empty for ${month}; using live Zoho pay-run (${zohoLoad.rows.length} row(s)). Save payroll on the Payroll page to store in the Payroll table.`
-        );
-        return {
-          payrollMonth: month,
-          rows: zohoLoad.rows,
-          meta: zohoLoad.meta,
-          source: 'zoho_live',
-        };
-      }
-    }
   }
 
   return { payrollMonth: list[0] || '', rows: [], meta: null, source: 'none' };

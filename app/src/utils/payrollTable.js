@@ -14,6 +14,9 @@ import {
 const payrollTableInflight = new Map();
 const PAYROLL_DETAIL_BATCH_DELAY_MS = 350;
 const PAYROLL_DETAIL_BATCH_RETRIES = 3;
+/** Load salary breakdown / Sample Payroll: 25 employees per Zoho detail call, one call per minute. */
+const PAYRUN_DETAIL_BATCH_SIZE = 25;
+const PAYRUN_DETAIL_BATCH_INTERVAL_MS = 60_000;
 /** Above this count, server-side month batches hit Catalyst timeouts — use per-employee detail. */
 const PAYRUN_DETAIL_ONLY_THRESHOLD = 20;
 
@@ -332,55 +335,89 @@ async function enrichPayrollRowsWithMonthDetailBatches(
   });
 }
 
-/** Per-employee pay-run detail for Basic / HRA when batch enrichment is incomplete. */
+/** Pay-run detail for Basic / HRA — 25 employees per API call, one call per minute. */
 async function enrichPayrollRowsWithPayrunDetail(
   rows,
   payrollRunId,
-  { timeoutMs = 90000, concurrency = 5, batchDelayMs = PAYROLL_DETAIL_BATCH_DELAY_MS, onProgress = null } = {}
+  {
+    timeoutMs = 180000,
+    batchSize = PAYRUN_DETAIL_BATCH_SIZE,
+    batchIntervalMs = PAYRUN_DETAIL_BATCH_INTERVAL_MS,
+    onProgress = null,
+    onBatch = null,
+  } = {}
 ) {
   const list = Array.isArray(rows) ? rows : [];
   const runId = String(payrollRunId || '').trim();
   if (!runId || list.length === 0) return list;
 
   const organizationId = getPayrollOrganizationId();
-  const workers = Math.max(1, Math.min(10, Number(concurrency) || 5));
-  const enriched = [];
+  const perBatch = Math.max(1, Math.min(25, Number(batchSize) || PAYRUN_DETAIL_BATCH_SIZE));
+  const intervalMs = Math.max(0, Number(batchIntervalMs) || PAYRUN_DETAIL_BATCH_INTERVAL_MS);
+  const updated = list.map((row) => flattenPayrollEarningColumns(row));
 
-  for (let offset = 0; offset < list.length; offset += workers) {
-    const slice = list.slice(offset, offset + workers);
-    const batch = await Promise.all(
-      slice.map(async (row) => {
-        const employeeId = pickPayrollEmployeeId(row);
-        if (!employeeId) return flattenPayrollEarningColumns(row);
-        try {
-          const qs = new URLSearchParams({
-            organization_id: organizationId,
-            payrun_employee_detail: '1',
-            payroll_run_id: runId,
-            employee_id: employeeId,
+  for (let i = 0; i < updated.length; i += perBatch) {
+    const batchStart = Date.now();
+    const slice = updated.slice(i, i + perBatch);
+    const employeeIds = slice.map(pickPayrollEmployeeId).filter(Boolean);
+
+    if (employeeIds.length > 0) {
+      try {
+        const qs = new URLSearchParams({
+          organization_id: organizationId,
+          payrun_employee_detail: '1',
+          payroll_run_id: runId,
+          employee_ids: employeeIds.join(','),
+        });
+        const { resp, json } = await fetchJsonWithTimeout(
+          `/server/payroll_function?${qs.toString()}`,
+          { cache: 'no-store' },
+          timeoutMs
+        );
+        if (resp.ok && json?.success) {
+          const details = Array.isArray(json.data)
+            ? json.data
+            : json.data && typeof json.data === 'object'
+              ? [json.data]
+              : [];
+          const byId = new Map();
+          details.forEach((detail) => {
+            const id = pickPayrollEmployeeId(detail);
+            if (id) byId.set(id, detail);
           });
-          const { resp, json } = await fetchJsonWithTimeout(
-            `/server/payroll_function?${qs.toString()}`,
-            { cache: 'no-store' },
-            timeoutMs
-          );
-          if (!resp.ok || !json?.success) return flattenPayrollEarningColumns(row);
-          return mergeListAndDetailPayrollRow(row, json.data);
-        } catch (_) {
-          return flattenPayrollEarningColumns(row);
+          slice.forEach((row, idx) => {
+            const id = pickPayrollEmployeeId(row);
+            const detail = id ? byId.get(id) : null;
+            updated[i + idx] = detail ? mergeListAndDetailPayrollRow(row, detail) : row;
+          });
         }
-      })
-    );
-    enriched.push(...batch);
-    if (typeof onProgress === 'function') {
-      onProgress(`${enriched.length} / ${list.length}`);
+      } catch (_) {
+        /* keep list rows for this batch */
+      }
     }
-    if (offset + workers < list.length && batchDelayMs > 0) {
-      await sleep(batchDelayMs);
+
+    const done = Math.min(i + perBatch, updated.length);
+    if (typeof onProgress === 'function') {
+      onProgress(`${done} / ${updated.length}`);
+    }
+    if (typeof onBatch === 'function') {
+      onBatch([...updated], done, updated.length);
+    }
+
+    if (done < updated.length && intervalMs > 0) {
+      const waitMs = Math.max(0, intervalMs - (Date.now() - batchStart));
+      if (waitMs > 0) {
+        if (typeof onProgress === 'function') {
+          onProgress(
+            `${done} / ${updated.length} — waiting ${Math.ceil(waitMs / 1000)}s before next 25`
+          );
+        }
+        await sleep(waitMs);
+      }
     }
   }
 
-  return enriched;
+  return updated;
 }
 
 /** Live Zoho pay-run rows when the Catalyst Payroll table has no snapshot for the month yet. */
@@ -391,8 +428,10 @@ export async function fetchZohoPayrollRowsForMonth(
     includeEarningsDetail = false,
     batchSize = null,
     onProgress = null,
-    detailConcurrency = 5,
+    onDetailBatch = null,
     detailMode = null,
+    detailBatchSize = PAYRUN_DETAIL_BATCH_SIZE,
+    detailBatchIntervalMs = PAYRUN_DETAIL_BATCH_INTERVAL_MS,
   } = {}
 ) {
   const listLoad = await fetchZohoPayrollListRowsForMonth(payrollMonth, {
@@ -419,12 +458,13 @@ export async function fetchZohoPayrollRowsForMonth(
   if (usePayrunDetailOnly) {
     if (!runId) return listLoad;
     const enriched = await enrichPayrollRowsWithPayrunDetail(listLoad.rows, runId, {
-      timeoutMs: 60000,
-      concurrency: detailConcurrency,
-      batchDelayMs: PAYROLL_DETAIL_BATCH_DELAY_MS,
+      timeoutMs: Math.max(timeoutMs, 180000),
+      batchSize: detailBatchSize,
+      batchIntervalMs: detailBatchIntervalMs,
       onProgress: (label) => {
         if (typeof onProgress === 'function') onProgress(`Salary detail ${label}`);
       },
+      onBatch: onDetailBatch,
     });
     return { rows: enriched, meta: listLoad.meta };
   }
@@ -444,12 +484,13 @@ export async function fetchZohoPayrollRowsForMonth(
   const missingBreakdown = enriched.filter(payrollRowMissingSalaryBreakdown);
   if (missingBreakdown.length > 0 && runId) {
     const fallbackEnriched = await enrichPayrollRowsWithPayrunDetail(missingBreakdown, runId, {
-      timeoutMs: Math.max(timeoutMs, 60000),
-      concurrency: detailConcurrency,
-      batchDelayMs: PAYROLL_DETAIL_BATCH_DELAY_MS,
+      timeoutMs: Math.max(timeoutMs, 180000),
+      batchSize: detailBatchSize,
+      batchIntervalMs: detailBatchIntervalMs,
       onProgress: (label) => {
         if (typeof onProgress === 'function') onProgress(`Salary detail (retry) ${label}`);
       },
+      onBatch: onDetailBatch,
     });
     const fallbackById = new Map();
     fallbackEnriched.forEach((row) => {

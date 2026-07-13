@@ -23,7 +23,8 @@ const PAYROLL_TABLE = 'Payroll';
  *   - list_employees=1 (optional) — fast employee list without per-employee salary calls
  *   - payroll_month_data=1 (optional) — pay-run employee summary for payroll_month=YYYY-MM (or year + month)
  *   - include_earnings_detail=0 (optional) — skip per-employee pay-run detail (faster; no Basic/HRA)
- *   - payrun_employee_detail=1 (optional) — earnings/deductions for one employee in a pay run (payroll_run_id + employee_id)
+ *   - payrun_employee_detail=1 (optional) — earnings/deductions for one employee (payroll_run_id + employee_id)
+ *     or a batch (payroll_run_id + employee_ids=id1,id2,... max 25) — returns an array when employee_ids is used
  *
  * OAuth (same pattern as peopledata_function / leavedata_function):
  *   - ZOHO_PAYROLL_ACCESS_TOKEN — optional direct bearer (refreshed hourly in Zoho)
@@ -382,19 +383,23 @@ function buildPayrollSnapshotResult(best, payrollMonth) {
   const records = extractPayrollRecordsFromParsed(best.parsed).map((row) =>
     flattenPayrollEarningColumns(row)
   );
+  const runMeta =
+    best.parsed.runMeta && typeof best.parsed.runMeta === 'object' ? best.parsed.runMeta : {};
   return {
     found: true,
     rowId: best.row.ROWID,
     payrollMonth,
     records,
     meta: {
+      ...runMeta,
       hasBreakdown: best.parsed.hasBreakdown === true,
       loadedCount: best.parsed.loadedCount,
       totalExpected: best.parsed.totalExpected,
       breakdownComplete: best.parsed.breakdownComplete === true,
       savedAt: best.parsed.savedAt || null,
-      payDate: best.parsed.runMeta?.pay_date || best.parsed.runMeta?.payDate || null,
-      payroll_run_id: best.parsed.runMeta?.payroll_run_id || null,
+      payDate: runMeta.pay_date || runMeta.payDate || null,
+      pay_date: runMeta.pay_date || runMeta.payDate || null,
+      payroll_run_id: runMeta.payroll_run_id || null,
       organizationId: best.parsed.organizationId || null,
       source: best.parsed.source || null,
     },
@@ -491,22 +496,54 @@ async function handlePayrollFetch(req, res) {
     const accessToken = await getPayrollAccessToken();
 
     if (payrunEmployeeDetail) {
-      if (!payrollRunId || !employeeId) {
+      const employeeIdsRaw = readQueryParam(req, 'employee_ids');
+      const batchIds = employeeIdsRaw
+        ? employeeIdsRaw
+            .split(',')
+            .map((id) => String(id || '').trim())
+            .filter(Boolean)
+            .slice(0, 25)
+        : [];
+      const singleId = employeeId || (batchIds.length === 1 ? batchIds[0] : '');
+
+      if (!payrollRunId || (!singleId && batchIds.length === 0)) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
             success: false,
-            error: 'payroll_run_id and employee_id are required for payrun_employee_detail',
+            error:
+              'payroll_run_id and employee_id (or employee_ids, max 25) are required for payrun_employee_detail',
           })
         );
         return;
       }
+
+      // Batch: up to 25 employees per call (Load salary breakdown).
+      if (batchIds.length > 1 || (employeeIdsRaw && batchIds.length >= 1)) {
+        const rows = await enrichPayrollRunRowsWithEmployeeDetail({
+          accessToken,
+          organizationId,
+          payrollRunId,
+          rows: batchIds.map((id) => ({ employee_id: id })),
+          concurrency: Math.max(
+            1,
+            Math.min(
+              5,
+              parseInt(process.env.ZOHO_PAYROLL_DETAIL_CONCURRENCY || '3', 10) || 3
+            )
+          ),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, data: rows }));
+        return;
+      }
+
       const data = flattenPayrollEarningColumns(
         await fetchPayrollRunEmployeeDetail({
           accessToken,
           organizationId,
           payrollRunId,
-          employeeId,
+          employeeId: singleId,
         })
       );
       res.writeHead(200, { 'Content-Type': 'application/json' });

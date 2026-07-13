@@ -293,7 +293,7 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     kind: 'establishment_name'
   },
   {
-    match: /^name\s+of\s+establishment(?!.*principal)(?!.*employer)/i,
+    match: /^name\s+of\s+(?:the\s+)?establishment(?!.*principal)(?!.*employer)/i,
     label: 'Name of Establishment',
     key: 'statutory_establishment_name',
     kind: 'establishment_name'

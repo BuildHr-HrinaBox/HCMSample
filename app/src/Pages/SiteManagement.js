@@ -16,9 +16,48 @@ import { INDIAN_STATES } from '../utils/indianStates';
 import CityCombobox, { StateCombobox } from '../components/CityCombobox';
 
 const API_BASE = '/server/sitemanagement_function';
+const COMPANY_API = '/server/company_function';
 const CHECKLISTBULK_API = '/server/checklistbulk_function';
 
 const SITE_TABLE_PAGE_SIZE = 10;
+
+/** Company Details fields shown read-only after a company is selected (from company_function). */
+const COMPANY_LINK_DISPLAY_FIELDS = [
+  { key: 'companyName', label: 'Company name' },
+  { key: 'companyMail', label: 'Mail Id' },
+  { key: 'companyPhoneNumber', label: 'Mobile number' },
+  { key: 'companyAddress', label: 'Address' },
+  { key: 'city', label: 'City' },
+  { key: 'state', label: 'State' },
+  { key: 'postalcode', label: 'Postal code' },
+  { key: 'incorprationDate', label: 'Incorporation date' },
+  { key: 'incorporationNo', label: 'Incorporation no.' },
+  { key: 'companyPANNumber', label: 'Company PAN' },
+  { key: 'gstNo', label: 'GST no.' },
+  { key: 'pfNo', label: 'PF no.' },
+  { key: 'esiNo', label: 'ESI no.' },
+  { key: 'directorName', label: 'Director name' },
+  { key: 'directorPhoneNumber', label: 'Director phone' },
+  { key: 'directorMail', label: 'Director mail' },
+  { key: 'directorAddress', label: 'Director address' },
+  { key: 'ownerName', label: 'Owner name' },
+  { key: 'ownerPAN', label: 'Owner PAN' },
+  { key: 'ownerAaadhar', label: 'Owner Aadhaar' },
+  { key: 'ownerDesignation', label: 'Owner designation' },
+  { key: 'safetyOfficerName', label: 'Safety officer name' },
+  { key: 'safetyOfficerPhone', label: 'Safety officer phone' }
+];
+
+function siteCompanyName(s) {
+  if (!s || typeof s !== 'object') return '';
+  return String(s.companyName ?? s.CompanyName ?? '').trim();
+}
+
+function siteCompanyId(s) {
+  if (!s || typeof s !== 'object') return '';
+  const id = s.companyId ?? s.CompanyId ?? s.companyROWID ?? '';
+  return id == null || id === '' ? '' : String(id);
+}
 
 /** @returns {(number | 'ellipsis')[]} */
 function buildPaginationItems(currentPage, totalPages) {
@@ -125,6 +164,8 @@ async function readJsonFromResponse(res) {
 
 const initialForm = {
   siteName: '',
+  companyId: '',
+  companyName: '',
   siteAddress: '',
   siteCity: '',
   siteState: '',
@@ -196,7 +237,8 @@ function sanitizeSiteFormField(name, raw) {
 /** Client-side validation (Add / Edit site modal). */
 function validateSiteFormValues(form) {
   const errors = {};
-  if (!form.siteName.trim()) errors.siteName = 'Name is required';
+  if (!form.siteName.trim()) errors.siteName = 'Site name is required';
+  if (!String(form.companyId || '').trim()) errors.companyId = 'Company is required';
   if (!form.siteCity.trim()) errors.siteCity = 'City is required';
   if (!form.siteState.trim()) errors.siteState = 'State is required';
   const pin = digitsOnly(form.sitePostalCode);
@@ -234,6 +276,7 @@ function validateSiteFormValues(form) {
 
 const SITE_FORM_BLUR_VALIDATE_NAMES = new Set([
   'siteName',
+  'companyId',
   'siteCity',
   'siteState',
   'sitePostalCode',
@@ -283,6 +326,8 @@ const SiteManagement = ({ userEmail, userRole }) => {
   const toastTimerRef = useRef(null);
   /** Unique sectors from Checklist Master (checklistbulk), sorted */
   const [checklistSectors, setChecklistSectors] = useState([]);
+  /** Companies from company_function for Site → Company link */
+  const [companies, setCompanies] = useState([]);
   /** Login email aligned with Catalyst + localStorage (prop alone is often stale vs real sign-in). */
   const [sessionLoginEmail, setSessionLoginEmail] = useState(() => {
     try {
@@ -331,6 +376,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
     return displaySites.filter((s) => {
       const hay = [
         s.siteName,
+        siteCompanyName(s),
         s.siteAddress,
         s.siteCity,
         s.siteState,
@@ -445,7 +491,8 @@ const SiteManagement = ({ userEmail, userRole }) => {
     /** Site export: main form fields (audit omitted); all rows in scope (ignores table search). */
     const cols = [
       { key: 'id', label: 'ID' },
-      { key: 'siteName', label: 'Name' },
+      { key: 'companyName', label: 'Company Name' },
+      { key: 'siteName', label: 'Site Name' },
       { key: 'siteAddress', label: 'Address' },
       { key: 'siteCity', label: 'City' },
       { key: 'siteState', label: 'State' },
@@ -484,6 +531,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
       return `"${s}"`;
     };
     const cellValue = (site, key) => {
+      if (key === 'companyName') return siteCompanyName(site) || site.companyName || '';
       if (key === 'inchargeEmail') return siteInchargeEmail(site) || site.inchargeEmail || '';
       if (key === 'industry') return siteIndustry(site) || site.industry || '';
       if (key === 'location') return siteLocation(site) || site.location || '';
@@ -584,9 +632,46 @@ const SiteManagement = ({ userEmail, userRole }) => {
     }
   }, []);
 
+  const fetchCompanies = useCallback(async () => {
+    try {
+      const res = await fetch(`${COMPANY_API}/company`, { cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      const list = Array.isArray(data?.data?.companyDetails) ? data.data.companyDetails : [];
+      const sorted = [...list].sort((a, b) =>
+        String(a.companyName || '')
+          .toLowerCase()
+          .localeCompare(String(b.companyName || '').toLowerCase(), undefined, { sensitivity: 'base' })
+      );
+      setCompanies(sorted);
+    } catch (_) {
+      setCompanies([]);
+    }
+  }, []);
+
   useEffect(() => {
     fetchChecklistSectors();
   }, [fetchChecklistSectors]);
+
+  useEffect(() => {
+    fetchCompanies();
+  }, [fetchCompanies]);
+
+  const selectedCompanyDetails = useMemo(() => {
+    const id = String(form.companyId || '').trim();
+    if (!id) return null;
+    return companies.find((c) => String(c.id) === id) || null;
+  }, [companies, form.companyId]);
+
+  /** Company dropdown options; keep legacy linked name if company list has not loaded that id yet */
+  const companySelectOptions = useMemo(() => {
+    const list = [...companies];
+    const curId = String(form.companyId || '').trim();
+    const curName = String(form.companyName || '').trim();
+    if (curId && !list.some((c) => String(c.id) === curId)) {
+      list.unshift({ id: curId, companyName: curName || `Company #${curId}` });
+    }
+    return list;
+  }, [companies, form.companyId, form.companyName]);
 
   /** Include current site industry if it is not in Checklist Master (legacy rows) */
   const industrySelectOptions = useMemo(() => {
@@ -646,6 +731,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
     );
     setFormErrors({});
     fetchChecklistSectors();
+    fetchCompanies();
     setShowForm(true);
   };
 
@@ -654,6 +740,8 @@ const SiteManagement = ({ userEmail, userRole }) => {
     setEditingId(site.id);
     setForm({
       siteName: site.siteName || '',
+      companyId: siteCompanyId(site),
+      companyName: siteCompanyName(site),
       siteAddress: site.siteAddress || '',
       siteCity: site.siteCity || '',
       siteState: site.siteState || '',
@@ -678,6 +766,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
     });
     setFormErrors({});
     fetchChecklistSectors();
+    fetchCompanies();
     setShowForm(true);
   };
 
@@ -686,6 +775,8 @@ const SiteManagement = ({ userEmail, userRole }) => {
     setEditingId(site.id);
     setForm({
       siteName: site.siteName || '',
+      companyId: siteCompanyId(site),
+      companyName: siteCompanyName(site),
       siteAddress: site.siteAddress || '',
       siteCity: site.siteCity || '',
       siteState: site.siteState || '',
@@ -710,6 +801,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
     });
     setFormErrors({});
     fetchChecklistSectors();
+    fetchCompanies();
     setShowForm(true);
   };
 
@@ -751,6 +843,22 @@ const SiteManagement = ({ userEmail, userRole }) => {
 
   const handleChange = (e) => {
     const { name, value } = e.target;
+    if (name === 'companyId') {
+      const company = companies.find((c) => String(c.id) === String(value));
+      setForm((prev) => ({
+        ...prev,
+        companyId: value,
+        companyName: company?.companyName || ''
+      }));
+      setFormErrors((prev) => {
+        if (!prev.companyId && !prev.companyName) return prev;
+        const next = { ...prev };
+        delete next.companyId;
+        delete next.companyName;
+        return next;
+      });
+      return;
+    }
     const nextValue = sanitizeSiteFormField(name, value);
     setForm((prev) => {
       const next = { ...prev, [name]: nextValue };
@@ -794,6 +902,8 @@ const SiteManagement = ({ userEmail, userRole }) => {
     try {
       const payload = {
         siteName: form.siteName.trim(),
+        companyId: String(form.companyId || '').trim(),
+        companyName: form.companyName.trim(),
         siteAddress: form.siteAddress.trim(),
         siteCity: form.siteCity.trim(),
         siteState: form.siteState.trim(),
@@ -880,7 +990,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
 
   const subtitle = scopeSubtitle;
 
-  const TABLE_COL_COUNT = 13;
+  const TABLE_COL_COUNT = 14;
 
   const siteFormModalTitle = viewOnly ? 'View Site' : editingId ? 'Edit Site' : 'Add Site';
 
@@ -961,8 +1071,35 @@ const SiteManagement = ({ userEmail, userRole }) => {
                       </header>
                       <div className="company-details-fields-grid">
                         <div className="company-details-field">
+                          <label htmlFor="sm-companyId">
+                            Company <span className="required" aria-hidden="true">*</span>
+                          </label>
+                          <select
+                            id="sm-companyId"
+                            name="companyId"
+                            value={form.companyId}
+                            onChange={handleChange}
+                            onBlur={handleSiteFieldBlur}
+                            disabled={viewOnly}
+                            required
+                            aria-describedby={formErrors.companyId ? 'sm-companyId-error' : undefined}
+                          >
+                            <option value="">Select company</option>
+                            {companySelectOptions.map((co) => (
+                              <option key={String(co.id)} value={String(co.id)}>
+                                {co.companyName || `Company #${co.id}`}
+                              </option>
+                            ))}
+                          </select>
+                          {formErrors.companyId && (
+                            <div id="sm-companyId-error" style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>
+                              {formErrors.companyId}
+                            </div>
+                          )}
+                        </div>
+                        <div className="company-details-field">
                           <label htmlFor="sm-siteName">
-                            Name <span className="required" aria-hidden="true">*</span>
+                            Site name <span className="required" aria-hidden="true">*</span>
                           </label>
                           <input
                             id="sm-siteName"
@@ -970,7 +1107,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
                             value={form.siteName}
                             onChange={handleChange}
                             onBlur={handleSiteFieldBlur}
-                            placeholder="Enter name"
+                            placeholder="Enter site name"
                             disabled={viewOnly}
                             maxLength={200}
                             required
@@ -1162,6 +1299,62 @@ const SiteManagement = ({ userEmail, userRole }) => {
                         </div>
                       </div>
                     </section>
+
+                    {form.companyId ? (
+                      <section className="company-details-section-card">
+                        <header className="company-details-section-head">
+                          <h3 className="company-details-section-title">
+                            <svg
+                              className="company-details-section-title-icon"
+                              width="20"
+                              height="20"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              aria-hidden
+                            >
+                              <path d="M3 21h18" />
+                              <path d="M5 21V7l7-4 7 4v14" />
+                              <path d="M9 21v-6h6v6" />
+                            </svg>
+                            Company details
+                          </h3>
+                        </header>
+                        <div className="company-details-fields-grid">
+                          {COMPANY_LINK_DISPLAY_FIELDS.map(({ key, label }) => {
+                            const raw =
+                              selectedCompanyDetails?.[key] ??
+                              (key === 'companyName' ? form.companyName : '');
+                            const display = String(raw ?? '').trim() || '—';
+                            return (
+                              <div
+                                key={key}
+                                className={`company-details-field${
+                                  key === 'companyAddress' || key === 'directorAddress'
+                                    ? ' company-details-field--full-row'
+                                    : ''
+                                }`}
+                              >
+                                <label htmlFor={`sm-co-${key}`}>{label}</label>
+                                <input
+                                  id={`sm-co-${key}`}
+                                  value={display}
+                                  readOnly
+                                  disabled
+                                  title={display === '—' ? undefined : display}
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {!selectedCompanyDetails && form.companyName ? (
+                          <p style={{ margin: '8px 0 0', fontSize: '0.9em', color: '#666' }}>
+                            Linked company: {form.companyName}. Full details will appear once company list loads.
+                          </p>
+                        ) : null}
+                      </section>
+                    ) : null}
 
                     <section className="company-details-section-card">
                       <header className="company-details-section-head">
@@ -1492,7 +1685,8 @@ const SiteManagement = ({ userEmail, userRole }) => {
                           />
                         </th>
                         <th scope="col">#</th>
-                        <th scope="col">Name</th>
+                        <th scope="col">Company</th>
+                        <th scope="col">Site name</th>
                         <th scope="col">City</th>
                         <th scope="col">State</th>
                         <th scope="col">Address</th>
@@ -1527,6 +1721,9 @@ const SiteManagement = ({ userEmail, userRole }) => {
                               />
                             </td>
                             <td className="company-details-td-num">{(effectiveTablePage - 1) * SITE_TABLE_PAGE_SIZE + idx + 1}</td>
+                            <td className="site-management-td-clip" title={siteCompanyName(site)}>
+                              {siteCompanyName(site) || '—'}
+                            </td>
                             <td className="company-details-td-strong">{site.siteName || '—'}</td>
                             <td>{site.siteCity || '—'}</td>
                             <td>{site.siteState || '—'}</td>

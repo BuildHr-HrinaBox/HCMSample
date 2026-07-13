@@ -2658,6 +2658,8 @@ export async function buildFormXIVMPWorkbookWithTemplateStyles({
   return { blob, fileName };
 }
 
+const FORM_XIV_MP_FAST_ZIP_BATCH = 12;
+
 const formXIVMPEscapeXml = (value) =>
   String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -2819,79 +2821,108 @@ export async function buildFormXIVMPPerEmployeeDownload({
     formFileName,
     headerFormData,
   };
-  const xlsxMime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   const isRajasthanTableLayout = parsedFormHeaderWithVariant.formXIVVariant === 'rj';
+  const zipFilePrefix = isRajasthanTableLayout ? 'Form_X_RJ' : 'Form_XIV_MP';
 
-  if (exportRows.length <= 1 || isRajasthanTableLayout) {
-    if (isRajasthanTableLayout && exportRows.length > 1) {
-      const zip = new JSZip();
-      const usedNames = new Map();
-      for (let i = 0; i < exportRows.length; i += 1) {
-        const { blob } = await buildFormXIVMPWorkbookWithTemplateStyles({
-          ...workbookArgs,
-          mappedData: [exportRows[i]],
-        });
-        const xlsxBytes = new Uint8Array(await blob.arrayBuffer());
-        const baseName = resolveFormXIVMPEmployeeDownloadBaseName(exportRows[i], hdrs, i);
-        zip.file(
-          allocateUniqueFormXIVMPDownloadFileName(baseName, usedNames, 'rj'),
-          xlsxBytes
-        );
-      }
-      const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_X_RJ')
-        .replace(/\.xlsx?$/i, '')
-        .replace(/[^a-zA-Z0-9._-]+/g, '_');
-      return {
-        blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
-        fileName: `${zipBase}_Employees.zip`,
-      };
-    }
+  if (exportRows.length <= 1) {
     const rows = exportRows.length === 1 ? exportRows : [];
     return buildFormXIVMPWorkbookWithTemplateStyles({ ...workbookArgs, mappedData: rows });
   }
 
-  const { sheetEntry, baseSheetXml, positions, staticFiles } = await prepareFormXIVMPFastZipTemplate({
-    templateArrayBuffer,
-    headersToUse: hdrs,
-    parsedFormHeader: parsedFormHeaderWithVariant,
-    headerFormData,
-    formFileName,
-  });
-
-  const zip = new JSZip();
-  const usedNames = new Map();
-  for (let i = 0; i < exportRows.length; i += 1) {
-    let sheetXml = baseSheetXml;
-    for (let pi = 0; pi < positions.length; pi += 1) {
-      const pos = positions[pi];
-      sheetXml = formXIVMPUpsertInlineStrCell(
-        sheetXml,
-        pos.cellRef,
-        getFormXIVMPRowValueForHeader(exportRows[i], pos.headerKey),
-        { preserveStyle: true }
+  const buildSlowZipDownload = async () => {
+    const zip = new JSZip();
+    const usedNames = new Map();
+    for (let i = 0; i < exportRows.length; i += 1) {
+      const { blob } = await buildFormXIVMPWorkbookWithTemplateStyles({
+        ...workbookArgs,
+        mappedData: [exportRows[i]],
+      });
+      const xlsxBytes = new Uint8Array(await blob.arrayBuffer());
+      const baseName = resolveFormXIVMPEmployeeDownloadBaseName(exportRows[i], hdrs, i);
+      zip.file(
+        allocateUniqueFormXIVMPDownloadFileName(
+          baseName,
+          usedNames,
+          parsedFormHeaderWithVariant.formXIVVariant
+        ),
+        xlsxBytes
       );
+      if (i > 0 && i % 10 === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
     }
-    const entryZip = new JSZip();
-    Object.entries(staticFiles).forEach(([path, data]) => {
-      entryZip.file(path, data);
-    });
-    entryZip.file(sheetEntry, sheetXml);
-    const xlsxBytes = await entryZip.generateAsync({ type: 'uint8array', compression: 'STORE' });
-    const baseName = resolveFormXIVMPEmployeeDownloadBaseName(exportRows[i], hdrs, i);
-    zip.file(
-      allocateUniqueFormXIVMPDownloadFileName(
-        baseName,
-        usedNames,
-        parsedFormHeaderWithVariant.formXIVVariant
-      ),
-      xlsxBytes
-    );
-  }
-  const zipBase = String(formFileName || parsedFormHeader?.title || (parsedFormHeaderWithVariant.formXIVVariant === 'rj' ? 'Form_X_RJ' : 'Form_XIV_MP'))
-    .replace(/\.xlsx?$/i, '')
-    .replace(/[^a-zA-Z0-9._-]+/g, '_');
-  return {
-    blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
-    fileName: `${zipBase}_Employees.zip`,
+    const zipBase = String(formFileName || parsedFormHeader?.title || zipFilePrefix)
+      .replace(/\.xlsx?$/i, '')
+      .replace(/[^a-zA-Z0-9._-]+/g, '_');
+    return {
+      blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
+      fileName: `${zipBase}_Employees.zip`,
+    };
   };
+
+  try {
+    const { sheetEntry, baseSheetXml, positions, staticFiles } = await prepareFormXIVMPFastZipTemplate({
+      templateArrayBuffer,
+      headersToUse: hdrs,
+      parsedFormHeader: parsedFormHeaderWithVariant,
+      headerFormData,
+      formFileName,
+    });
+    if (!Array.isArray(positions) || positions.length === 0) {
+      return buildSlowZipDownload();
+    }
+
+    const zip = new JSZip();
+    const usedNames = new Map();
+    for (let i = 0; i < exportRows.length; i += FORM_XIV_MP_FAST_ZIP_BATCH) {
+      const batch = exportRows.slice(i, i + FORM_XIV_MP_FAST_ZIP_BATCH);
+      const batchBytes = await Promise.all(
+        batch.map(async (exportRow, batchIndex) => {
+          const index = i + batchIndex;
+          let sheetXml = baseSheetXml;
+          for (let pi = 0; pi < positions.length; pi += 1) {
+            const pos = positions[pi];
+            sheetXml = formXIVMPUpsertInlineStrCell(
+              sheetXml,
+              pos.cellRef,
+              getFormXIVMPRowValueForHeader(exportRow, pos.headerKey),
+              { preserveStyle: true }
+            );
+          }
+          const entryZip = new JSZip();
+          Object.entries(staticFiles).forEach(([path, data]) => {
+            entryZip.file(path, data);
+          });
+          entryZip.file(sheetEntry, sheetXml);
+          const xlsxBytes = await entryZip.generateAsync({ type: 'uint8array', compression: 'STORE' });
+          return { xlsxBytes, exportRow, index };
+        })
+      );
+      batchBytes.forEach((entry) => {
+        if (!entry) return;
+        const { xlsxBytes, exportRow, index } = entry;
+        const baseName = resolveFormXIVMPEmployeeDownloadBaseName(exportRow, hdrs, index);
+        zip.file(
+          allocateUniqueFormXIVMPDownloadFileName(
+            baseName,
+            usedNames,
+            parsedFormHeaderWithVariant.formXIVVariant
+          ),
+          xlsxBytes
+        );
+      });
+      if (i > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+    const zipBase = String(formFileName || parsedFormHeader?.title || zipFilePrefix)
+      .replace(/\.xlsx?$/i, '')
+      .replace(/[^a-zA-Z0-9._-]+/g, '_');
+    return {
+      blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
+      fileName: `${zipBase}_Employees.zip`,
+    };
+  } catch (_err) {
+    return buildSlowZipDownload();
+  }
 }

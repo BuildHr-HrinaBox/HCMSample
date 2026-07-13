@@ -23,6 +23,81 @@ app.get('/', (req, res) => {
   res.status(200).json({ status: 'success', message: 'sitemanagement_function ready' });
 });
 
+function isMissingColumnError(err) {
+  return /invalid|unknown|no such|column|does not exist/i.test(String(err?.message || err || ''));
+}
+
+function omitKeys(obj, keys) {
+  const next = { ...obj };
+  keys.forEach((k) => {
+    delete next[k];
+  });
+  return next;
+}
+
+/** Persist row; retry without Company or Audit columns if Site table schema is older. */
+async function insertSiteWithFallback(table, insertData) {
+  try {
+    return await table.insertRow(insertData);
+  } catch (err) {
+    if (!isMissingColumnError(err)) throw err;
+    console.warn('Site insert: retrying without Company*/Audit columns:', err.message || err);
+    try {
+      return await table.insertRow(omitKeys(insertData, ['CompanyId', 'CompanyName', 'Audit']));
+    } catch (err2) {
+      if (!isMissingColumnError(err2)) throw err2;
+      console.warn('Site insert: retrying without contractor/RC/Company/Audit columns:', err2.message || err2);
+      return await table.insertRow(
+        omitKeys(insertData, [
+          'CompanyId',
+          'CompanyName',
+          'Audit',
+          'ContractorName',
+          'ContractorAddress',
+          'ContractorEmail',
+          'ContractorPhone',
+          'ContractorCity',
+          'ContractorState',
+          'SandERCNumber',
+          'FactoryRCNumber',
+          'CLRARCNumber'
+        ])
+      );
+    }
+  }
+}
+
+async function updateSiteWithFallback(table, updateData) {
+  try {
+    return await table.updateRow(updateData);
+  } catch (err) {
+    if (!isMissingColumnError(err)) throw err;
+    console.warn('Site update: retrying without Company*/Audit columns:', err.message || err);
+    try {
+      return await table.updateRow(omitKeys(updateData, ['CompanyId', 'CompanyName', 'Audit']));
+    } catch (err2) {
+      if (!isMissingColumnError(err2)) throw err2;
+      console.warn('Site update: retrying without contractor/RC/Company/Audit columns:', err2.message || err2);
+      return await table.updateRow(
+        omitKeys(updateData, [
+          'CompanyId',
+          'CompanyName',
+          'Audit',
+          'ContractorName',
+          'ContractorAddress',
+          'ContractorEmail',
+          'ContractorPhone',
+          'ContractorCity',
+          'ContractorState',
+          'SandERCNumber',
+          'FactoryRCNumber',
+          'CLRARCNumber'
+        ])
+      );
+    }
+  }
+}
+
 // Test endpoint to check Site table columns
 app.get('/test-columns', async (req, res) => {
   try {
@@ -155,6 +230,8 @@ app.post('/sitemanagement', async (req, res) => {
     
     const {
       siteName,
+      companyId,
+      companyName,
       siteAddress,
       siteCity,
       siteState,
@@ -181,6 +258,9 @@ app.post('/sitemanagement', async (req, res) => {
     // Validate required fields
     if (!siteName || !String(siteName).trim()) {
       return res.status(400).send({ status: 'failure', message: 'Site Name is required.' });
+    }
+    if (!companyId || !String(companyId).trim()) {
+      return res.status(400).send({ status: 'failure', message: 'Company is required.' });
     }
     if (!siteAddress || !String(siteAddress).trim()) {
       return res.status(400).send({ status: 'failure', message: 'Site Address is required.' });
@@ -220,6 +300,8 @@ app.post('/sitemanagement', async (req, res) => {
     // Insert all site data
     const insertData = {
       SiteName: siteName,
+      CompanyId: String(companyId || '').trim(),
+      CompanyName: companyName || '',
       SiteAddress: siteAddress,
       SiteCity: siteCity,
       SiteState: siteState,
@@ -245,7 +327,7 @@ app.post('/sitemanagement', async (req, res) => {
     
     console.log('Inserting data to Site table:', JSON.stringify(insertData, null, 2));
     
-    const insertResp = await table.insertRow(insertData);
+    const insertResp = await insertSiteWithFallback(table, insertData);
     console.log('Insert response:', JSON.stringify(insertResp, null, 2));
     
     const created = await table.getRow(insertResp.ROWID);
@@ -255,6 +337,8 @@ app.post('/sitemanagement', async (req, res) => {
     const siteDetail = {
       ROWID: created.ROWID,
       SiteName: created.SiteName || siteName,
+      CompanyId: created.CompanyId || companyId || '',
+      CompanyName: created.CompanyName || companyName || '',
       SiteAddress: created.SiteAddress || siteAddress,
       SiteCity: created.SiteCity || siteCity,
       SiteState: created.SiteState || siteState,
@@ -297,6 +381,8 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
 
     const {
       siteName,
+      companyId,
+      companyName,
       siteAddress,
       siteCity,
       siteState,
@@ -322,6 +408,9 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
 
     if (!siteName || !String(siteName).trim()) {
       return res.status(400).send({ status: 'failure', message: 'Site Name is required.' });
+    }
+    if (!companyId || !String(companyId).trim()) {
+      return res.status(400).send({ status: 'failure', message: 'Company is required.' });
     }
     if (!siteAddress || !String(siteAddress).trim()) {
       return res.status(400).send({ status: 'failure', message: 'Site Address is required.' });
@@ -360,6 +449,8 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
     const updateData = {
       ROWID,
       SiteName: siteName,
+      CompanyId: String(companyId || '').trim(),
+      CompanyName: companyName || '',
       SiteAddress: siteAddress,
       SiteCity: siteCity,
       SiteState: siteState,
@@ -384,12 +475,14 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
     };
 
     console.log('Updating Site row:', ROWID, JSON.stringify(updateData, null, 2));
-    await table.updateRow(updateData);
+    await updateSiteWithFallback(table, updateData);
     const updated = await table.getRow(ROWID);
 
     const siteDetail = {
       ROWID: updated.ROWID,
       SiteName: updated.SiteName || siteName,
+      CompanyId: updated.CompanyId || companyId || '',
+      CompanyName: updated.CompanyName || companyName || '',
       SiteAddress: updated.SiteAddress || siteAddress,
       SiteCity: updated.SiteCity || siteCity,
       SiteState: updated.SiteState || siteState,
@@ -443,6 +536,8 @@ app.get('/sitemanagement', async (req, res) => {
     console.log('Total records:', total);
     
     console.log('Executing data query...');
+    const siteSelectWithCompany =
+      'ROWID, SiteName, CompanyId, CompanyName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, SandERCNumber, FactoryRCNumber, CLRARCNumber, Location, CREATEDTIME, MODIFIEDTIME';
     const siteSelectFull =
       'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, SandERCNumber, FactoryRCNumber, CLRARCNumber, Location, CREATEDTIME, MODIFIEDTIME';
     const siteSelectBase =
@@ -452,33 +547,47 @@ app.get('/sitemanagement', async (req, res) => {
     let rows;
     let hasContractorColumns = true;
     let hasRcNumberColumns = true;
+    let hasCompanyColumns = true;
     try {
       rows = await zcql.executeZCQLQuery(
-        `SELECT ${siteSelectFull} FROM Site ORDER BY ROWID DESC ${limitClause}`
+        `SELECT ${siteSelectWithCompany} FROM Site ORDER BY ROWID DESC ${limitClause}`
       );
-    } catch (queryErr) {
-      const errMsg = String(queryErr?.message || queryErr || '');
-      if (/invalid|unknown|no such|column/i.test(errMsg)) {
-        console.warn('Site list: contractor columns missing, trying without contractor columns:', errMsg);
-        hasContractorColumns = false;
+    } catch (companyErr) {
+      const companyErrMsg = String(companyErr?.message || companyErr || '');
+      if (/invalid|unknown|no such|column/i.test(companyErrMsg)) {
+        console.warn('Site list: Company columns missing, trying without Company columns:', companyErrMsg);
+        hasCompanyColumns = false;
         try {
           rows = await zcql.executeZCQLQuery(
-            `SELECT ${siteSelectWithRc} FROM Site ORDER BY ROWID DESC ${limitClause}`
+            `SELECT ${siteSelectFull} FROM Site ORDER BY ROWID DESC ${limitClause}`
           );
-        } catch (rcErr) {
-          const rcErrMsg = String(rcErr?.message || rcErr || '');
-          if (/invalid|unknown|no such|column/i.test(rcErrMsg)) {
-            console.warn('Site list: RC number columns missing, using base SELECT:', rcErrMsg);
-            hasRcNumberColumns = false;
-            rows = await zcql.executeZCQLQuery(
-              `SELECT ${siteSelectBase} FROM Site ORDER BY ROWID DESC ${limitClause}`
-            );
+        } catch (queryErr) {
+          const errMsg = String(queryErr?.message || queryErr || '');
+          if (/invalid|unknown|no such|column/i.test(errMsg)) {
+            console.warn('Site list: contractor columns missing, trying without contractor columns:', errMsg);
+            hasContractorColumns = false;
+            try {
+              rows = await zcql.executeZCQLQuery(
+                `SELECT ${siteSelectWithRc} FROM Site ORDER BY ROWID DESC ${limitClause}`
+              );
+            } catch (rcErr) {
+              const rcErrMsg = String(rcErr?.message || rcErr || '');
+              if (/invalid|unknown|no such|column/i.test(rcErrMsg)) {
+                console.warn('Site list: RC number columns missing, using base SELECT:', rcErrMsg);
+                hasRcNumberColumns = false;
+                rows = await zcql.executeZCQLQuery(
+                  `SELECT ${siteSelectBase} FROM Site ORDER BY ROWID DESC ${limitClause}`
+                );
+              } else {
+                throw rcErr;
+              }
+            }
           } else {
-            throw rcErr;
+            throw queryErr;
           }
         }
       } else {
-        throw queryErr;
+        throw companyErr;
       }
     }
     console.log('Raw rows from database:', JSON.stringify(rows, null, 2));
@@ -486,6 +595,8 @@ app.get('/sitemanagement', async (req, res) => {
     const siteDetails = rows.map(r => ({
       id: r.Site.ROWID,
       siteName: r.Site.SiteName,
+      companyId: hasCompanyColumns ? (r.Site.CompanyId || '') : '',
+      companyName: hasCompanyColumns ? (r.Site.CompanyName || '') : '',
       siteAddress: r.Site.SiteAddress,
       siteCity: r.Site.SiteCity,
       siteState: r.Site.SiteState,

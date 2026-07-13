@@ -590,7 +590,7 @@ const setCellValue = (worksheet, row, col, value) => {
   };
 };
 
-const writeBesideLabel = (worksheet, row, labelCol, value, defaultValueCol = FORM_XV_RJ_STACKED_VALUE_COL) => {
+const resolveBesideLabelCol = (worksheet, row, labelCol, defaultValueCol = FORM_XV_RJ_STACKED_VALUE_COL) => {
   let targetCol = defaultValueCol;
   for (let c = labelCol + 1; c <= Math.min(labelCol + 12, 14); c += 1) {
     const cellStr = excelCellValueToString(worksheet.getCell(row, c)?.value).trim();
@@ -603,6 +603,11 @@ const writeBesideLabel = (worksheet, row, labelCol, value, defaultValueCol = FOR
       break;
     }
   }
+  return targetCol;
+};
+
+const writeBesideLabel = (worksheet, row, labelCol, value, defaultValueCol = FORM_XV_RJ_STACKED_VALUE_COL) => {
+  const targetCol = resolveBesideLabelCol(worksheet, row, labelCol, defaultValueCol);
   setCellValue(worksheet, row, targetCol, value);
 };
 
@@ -735,6 +740,9 @@ export async function buildFormXVRJWorkbookWithTemplateStyles({
   return { blob, fileName };
 }
 
+const FORM_XV_RJ_EMPLOYEE_HEADER_KEYS = new Set(['form_xv_rj_workman', 'form_xv_rj_sex_token']);
+const FORM_XV_RJ_FAST_ZIP_BATCH = 12;
+
 const sanitizeDownloadBaseName = (name, fallback) => {
   const base = String(name || fallback || 'Employee')
     .replace(/[<>:"/\\|?*]+/g, '_')
@@ -754,17 +762,237 @@ const allocateUniqueFileName = (baseName, usedNames, ext = 'xlsx') => {
 
 const unwrapEmployee = (empItem) => empItem?.Employee || empItem?.employee || empItem || null;
 
-const resolveEmployeeDownloadBaseName = (row, index, employeesOverride) => {
+const resolveEmployeeDownloadBaseName = (row, empItem, fallbackIndex) => {
   const fromRow = String(row?.__employeeLookupName ?? '').trim();
   if (fromRow) return fromRow.split(/\r?\n/)[0].trim();
-  const emp = Array.isArray(employeesOverride) ? employeesOverride[index] : null;
-  const fromEmp = emp
-    ? String(formatWorkmanNameAndGuardian(unwrapEmployee(emp)) || '')
+  const fromEmp = empItem
+    ? String(formatWorkmanNameAndGuardian(unwrapEmployee(empItem)) || '')
         .split(/\r?\n/)[0]
         .trim()
     : '';
-  return fromEmp || `Employee_${index + 1}`;
+  return fromEmp || `Employee_${fallbackIndex + 1}`;
 };
+
+const formXVRJSanitizeExportText = (value) =>
+  String(value ?? '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    .trim();
+
+const formXVRJEscapeXml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const formXVRJColToLetter = (col) => {
+  let result = '';
+  let n = col;
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    result = String.fromCharCode(65 + rem) + result;
+    n = Math.floor((n - 1) / 26);
+  }
+  return result;
+};
+
+const formXVRJToCellRef = (row, col) => `${formXVRJColToLetter(col)}${row}`;
+
+const formXVRJUpsertInlineStrCell = (sheetXml, cellRef, value) => {
+  const text = formXVRJEscapeXml(formXVRJSanitizeExportText(value));
+  const cellXml = text
+    ? `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`
+    : `<c r="${cellRef}"/>`;
+  const cellRe = new RegExp(`<c\\s+r="${cellRef}"[^>]*(?:/>|>[\\s\\S]*?</c>)`, 'i');
+  if (cellRe.test(sheetXml)) {
+    return sheetXml.replace(cellRe, cellXml);
+  }
+  const rowNum = cellRef.replace(/^[A-Z]+/i, '');
+  const rowRe = new RegExp(`(<row\\s+r="${rowNum}"[^>]*>)([\\s\\S]*?)(</row>)`, 'i');
+  if (!rowRe.test(sheetXml)) return sheetXml;
+  return sheetXml.replace(rowRe, `$1$2${cellXml}$3`);
+};
+
+const resolveFormXVRJWorksheetEntry = (zipFiles) =>
+  Object.keys(zipFiles)
+    .filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0] || null;
+
+const resolveFormXVRJEmployeeHeaderValueCol = (worksheet, labelRow, labelCol, parsedField) => {
+  if (parsedField?.valueCol != null) return parsedField.valueCol + 1;
+  return resolveBesideLabelCol(worksheet, labelRow, labelCol, FORM_XV_RJ_STACKED_VALUE_COL);
+};
+
+function resolveFormXVRJFastExportPositions(worksheet, parsedFormHeader, hdrs) {
+  const employeeHeaderPositions = [];
+  const seenHeaderKeys = new Set();
+  const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  const parsedByKey = new Map(parsedFields.map((f) => [f.key, f]));
+
+  const pushEmployeeHeader = (key, row, col) => {
+    if (!key || row == null || col == null || seenHeaderKeys.has(key)) return;
+    seenHeaderKeys.add(key);
+    employeeHeaderPositions.push({ key, row, col, cellRef: formXVRJToCellRef(row, col) });
+  };
+
+  FORM_XV_RJ_HEADER_SPECS.forEach((spec) => {
+    if (!FORM_XV_RJ_EMPLOYEE_HEADER_KEYS.has(spec.key)) return;
+    const parsedField = parsedByKey.get(spec.key);
+    if (parsedField?.labelRow != null) {
+      const labelExcelRow = parsedField.labelRow + 1;
+      const labelExcelCol = (parsedField.labelCol ?? 0) + 1;
+      const targetRow = (parsedField.valueRow ?? parsedField.labelRow) + 1;
+      const targetCol = resolveFormXVRJEmployeeHeaderValueCol(
+        worksheet,
+        labelExcelRow,
+        labelExcelCol,
+        parsedField
+      );
+      pushEmployeeHeader(spec.key, targetRow, targetCol);
+      return;
+    }
+    if (!worksheet) return;
+    for (let r = 1; r <= 30; r += 1) {
+      for (let c = 1; c <= 10; c += 1) {
+        const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+        if (!raw || !labelMatchesSpec(raw, spec)) continue;
+        pushEmployeeHeader(spec.key, r, resolveBesideLabelCol(worksheet, r, c));
+        return;
+      }
+    }
+  });
+
+  const tableLayout = resolveFormXVRJTableExportLayout(worksheet, hdrs);
+  const tablePositions = [];
+  if (tableLayout) {
+    tableLayout.hdrs.forEach((header, j) => {
+      const col = tableLayout.columnByHeader[j];
+      if (!col || col < 1) return;
+      tablePositions.push({
+        header,
+        row: tableLayout.dataStartRow,
+        col,
+        cellRef: formXVRJToCellRef(tableLayout.dataStartRow, col),
+      });
+    });
+  }
+
+  return { employeeHeaderPositions, tablePositions };
+}
+
+const clearFormXVRJPerEmployeeValueCells = (worksheet, positions) => {
+  if (!worksheet || !positions) return;
+  const all = [...(positions.employeeHeaderPositions || []), ...(positions.tablePositions || [])];
+  all.forEach((pos) => {
+    if (pos?.row != null && pos?.col != null) {
+      worksheet.getCell(pos.row, pos.col).value = '';
+    }
+  });
+};
+
+const patchFormXVRJFastSheetXml = (baseSheetXml, mergedHeaderData, exportRow, positions) => {
+  let sheetXml = baseSheetXml;
+  (positions.employeeHeaderPositions || []).forEach((pos) => {
+    const value = mergedHeaderData?.[pos.key];
+    if (value != null && String(value).trim() !== '') {
+      sheetXml = formXVRJUpsertInlineStrCell(sheetXml, pos.cellRef, value);
+    }
+  });
+  (positions.tablePositions || []).forEach((pos) => {
+    const value = getFormXVRJRowValueForHeader(exportRow, pos.header);
+    if (value !== '') {
+      sheetXml = formXVRJUpsertInlineStrCell(sheetXml, pos.cellRef, value);
+    }
+  });
+  return sheetXml;
+};
+
+const buildFormXVRJFastXlsxBytes = async (fastTemplate, mergedHeaderData, exportRow) => {
+  const { sheetEntry, baseSheetXml, staticFiles, positions } = fastTemplate;
+  const sheetXml = patchFormXVRJFastSheetXml(baseSheetXml, mergedHeaderData, exportRow, positions);
+  const entryZip = new JSZip();
+  Object.entries(staticFiles).forEach(([path, data]) => {
+    entryZip.file(path, data);
+  });
+  entryZip.file(sheetEntry, sheetXml);
+  return entryZip.generateAsync({ type: 'uint8array', compression: 'STORE' });
+};
+
+async function prepareFormXVRJFastZipTemplate({
+  templateArrayBuffer,
+  parsedFormHeader,
+  headerFormData,
+  headersToUse,
+}) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateArrayBuffer);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) throw new Error('Template worksheet not found.');
+
+  const hdrs = resolveFormXVRJTableHeaders(headersToUse);
+  const staticHeaderData = { ...(headerFormData || {}) };
+  FORM_XV_RJ_EMPLOYEE_HEADER_KEYS.forEach((key) => {
+    delete staticHeaderData[key];
+  });
+  writeFormXVRJHeaderFieldsToWorksheet(worksheet, staticHeaderData, parsedFormHeader);
+
+  const positions = resolveFormXVRJFastExportPositions(worksheet, parsedFormHeader, hdrs);
+  clearFormXVRJPerEmployeeValueCells(worksheet, positions);
+
+  const preparedBuffer = await workbook.xlsx.writeBuffer();
+  const templateZip = await JSZip.loadAsync(preparedBuffer);
+  const sheetEntry = resolveFormXVRJWorksheetEntry(templateZip.files);
+  if (!sheetEntry) throw new Error('Template worksheet XML not found.');
+  const baseSheetXml = await templateZip.file(sheetEntry).async('string');
+  const staticFiles = {};
+  await Promise.all(
+    Object.keys(templateZip.files).map(async (path) => {
+      const file = templateZip.files[path];
+      if (!file || file.dir || path === sheetEntry) return;
+      staticFiles[path] = await file.async('uint8array');
+    })
+  );
+  return { sheetEntry, baseSheetXml, staticFiles, positions };
+}
+
+async function buildFormXVRJFastZipDownload({
+  exportPairs,
+  fastTemplate,
+  baseHeaderData,
+  formFileName,
+  parsedFormHeader,
+}) {
+  const zip = new JSZip();
+  const usedNames = new Map();
+  for (let i = 0; i < exportPairs.length; i += FORM_XV_RJ_FAST_ZIP_BATCH) {
+    const batch = exportPairs.slice(i, i + FORM_XV_RJ_FAST_ZIP_BATCH);
+    const batchBytes = await Promise.all(
+      batch.map(async (pair, batchIndex) => {
+        const index = i + batchIndex;
+        const emp = pair?.emp ? unwrapEmployee(pair.emp) : {};
+        const mergedHeaderData = applyFormXVRJEmployeeToHeader(baseHeaderData || {}, emp || {});
+        const xlsxBytes = await buildFormXVRJFastXlsxBytes(fastTemplate, mergedHeaderData, pair.row);
+        return { xlsxBytes, pair, index };
+      })
+    );
+    batchBytes.forEach((entry) => {
+      if (!entry) return;
+      const { xlsxBytes, pair, index } = entry;
+      const baseName = resolveEmployeeDownloadBaseName(pair.row, pair.emp, index);
+      zip.file(allocateUniqueFileName(baseName, usedNames), xlsxBytes);
+    });
+    if (i > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_XV_RJ')
+    .replace(/\.xlsx?$/i, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return {
+    blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
+    fileName: `${zipBase}_Employees.zip`,
+  };
+}
 
 export function triggerFormXVRJZipDownload(blob, fileName) {
   if (!blob || !fileName) return;
@@ -807,6 +1035,29 @@ export async function buildFormXVRJPerEmployeeDownload({
     });
   }
 
+  try {
+    const fastTemplate = await prepareFormXVRJFastZipTemplate({
+      templateArrayBuffer,
+      parsedFormHeader,
+      headerFormData,
+      headersToUse: hdrs,
+    });
+    const hasPatchTargets =
+      (fastTemplate.positions?.employeeHeaderPositions?.length || 0) > 0 ||
+      (fastTemplate.positions?.tablePositions?.length || 0) > 0;
+    if (hasPatchTargets) {
+      return buildFormXVRJFastZipDownload({
+        exportPairs,
+        fastTemplate,
+        baseHeaderData: headerFormData || {},
+        formFileName,
+        parsedFormHeader,
+      });
+    }
+  } catch (_err) {
+    // Fall back to ExcelJS-per-file path if fast template prep fails.
+  }
+
   const zip = new JSZip();
   const usedNames = new Map();
   for (let i = 0; i < exportPairs.length; i += 1) {
@@ -820,7 +1071,7 @@ export async function buildFormXVRJPerEmployeeDownload({
       mappedData: [row],
       headerFormData: mergedHeader,
     });
-    const baseName = resolveEmployeeDownloadBaseName(row, i, employeesOverride);
+    const baseName = resolveEmployeeDownloadBaseName(row, emp, i);
     zip.file(allocateUniqueFileName(baseName, usedNames), blob);
     if (i > 0 && i % 10 === 0) {
       await new Promise((resolve) => setTimeout(resolve, 0));

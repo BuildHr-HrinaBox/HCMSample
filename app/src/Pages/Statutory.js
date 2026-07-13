@@ -467,10 +467,57 @@ import {
   rowHasMeaningfulFormAGJGujaratExportData,
 } from './statutory/formAGJGujarat';
 import {
+  buildFormARajasthanWorkbookWithTemplateStyles,
+  filterFormARajasthanExportRows,
   isFormARajasthanContext,
   remapFormARajasthanRowsToHeaders,
+  resolveFormARajasthanExportHeaders,
   resolveFormARajasthanTableHeaders,
+  rowHasMeaningfulFormARajasthanExportData,
 } from './statutory/formARajasthan';
+import {
+  applyFormCRajasthanEmployeeToRow,
+  applyFormCRajasthanNilToMappedRows,
+  enrichFormCRajasthanDisplayHeader,
+  isFormCRajasthanContext,
+  isFormCRJDeductionNilHeader,
+  prepareFormCRajasthanDownloadHeaderData,
+  repairFormCRajasthanTableHeadersFromWorkbook,
+} from './statutory/formCRajasthan';
+import {
+  applyFormDRajasthanEmployeeToRow,
+  applyFormDRajasthanPayrollToRow,
+  buildFormDRJSubColumnsFromHeaders,
+  buildFormDRajasthanPeriodLine,
+  buildFormDRajasthanWorkbookWithTemplateStyles,
+  enrichFormDRajasthanDisplayHeader,
+  enrichFormDRajasthanRowsFromAttendance,
+  enrichFormDRajasthanPayrollRows,
+  expandFormDRajasthanInOutRows,
+  filterFormDRajasthanExportRows,
+  FORM_D_RJ_ROWS_PER_EMPLOYEE,
+  getFormDRajasthanRowValueForHeader,
+  isFormDRJDateHeader,
+  isFormDRJNameHeader,
+  isFormDRJPeopleFieldHeader,
+  isFormDRJPlaceOfWorkHeader,
+  isFormDRajasthanAttendanceTableLayoutFormHeader,
+  isFormDRajasthanContext,
+  isFormDRajasthanUsingWrongTable,
+  headersIndicateFormDRajasthanAttendanceTable,
+  listFormDRajasthanDayColumnHeaders,
+  prepareFormDRajasthanDownloadHeaderData,
+  parseFormDRJInOutCell,
+  formatFormDRJInOutCell,
+  readFormDRJDesignation,
+  readFormDRJEmployeeFullName,
+  remapFormDRajasthanRowsToHeaders,
+  repairFormDRajasthanTableHeadersFromWorkbook,
+  resolveFormDRajasthanTableHeaders,
+  resolveFormDRJEmployeeIndex,
+  resolveFormDRajasthanWorkbookSheetName,
+  rowHasMeaningfulFormDRajasthanExportData,
+} from './statutory/formDRajasthan';
 import {
   applyFormBGJGujaratEmployeeToRow,
   buildFormBGJGujaratWorkbookWithTemplateStyles,
@@ -483,6 +530,18 @@ import {
   resolveFormBGJGujaratTableHeaders,
   rowHasMeaningfulFormBGJGujaratExportData,
 } from './statutory/formBGJGujarat';
+import {
+  applyFormBRajasthanEmployeeToRow,
+  buildFormBRajasthanWorkbookWithTemplateStyles,
+  enrichFormBRajasthanPayrollRows,
+  filterFormBRajasthanExportRows,
+  isFormBRajasthanContext,
+  isFormBRJSkipPeopleAutofillHeader,
+  remapFormBRajasthanRowsToHeaders,
+  resolveFormBRajasthanPayrollRowForEmployee,
+  resolveFormBRajasthanTableHeaders,
+  rowHasMeaningfulFormBRajasthanExportData,
+} from './statutory/formBRajasthan';
 import {
   applyFormCGJGujaratEmployeeToRow,
   enrichFormCGJGujaratDisplayHeader,
@@ -589,6 +648,10 @@ import {
   resolveFormPGJTableHeadersForWorkbook,
   stripAndNormalizeFormPGJTableHeaders,
 } from './statutory/formPGJGujarat';
+import {
+  applyFormQMaharashtraPayrollToRow,
+  enrichFormQMaharashtraPayrollRows,
+} from './statutory/formQMaharashtra';
 import {
   applyFormOGJGujaratApprovedLeaveAutofill,
   buildFormOGJGujaratWorkbookWithTemplateStyles,
@@ -1485,6 +1548,25 @@ function filterStatutoryRecordsForFormOGJAutofill(records, headers) {
     const headerKey = findBaseHeaderForStatutoryColumnName(columnName, headers);
     if (headerKey && isFormOGJSkipPeopleAutofillHeader(headerKey)) return false;
     if (!headerKey && isFormOGJSkipPeopleAutofillHeader(columnName)) return false;
+    return true;
+  });
+}
+
+function filterStatutoryRecordsForFormDRJAutofill(records, headers) {
+  if (!Array.isArray(records) || records.length === 0) return records;
+  if (!Array.isArray(headers) || headers.length === 0) return records;
+  const isDayHeader = (hdr) => /^\d{1,2}$/.test(String(hdr || '').trim());
+  return records.filter((rec) => {
+    const columnName = String(rec?.ColumnName ?? rec?.columnName ?? '').trim();
+    if (!columnName) return true;
+    const headerKey = findBaseHeaderForStatutoryColumnName(columnName, headers);
+    const hdr = headerKey || columnName;
+    const val = String(rec?.Value ?? rec?.value ?? '').trim();
+    if (isFormDRJPeopleFieldHeader(hdr) || isDayHeader(hdr)) {
+      if (!val) return false;
+      if (/^enter\b/i.test(val)) return false;
+      if (/^enter\s+/i.test(val)) return false;
+    }
     return true;
   });
 }
@@ -3186,7 +3268,68 @@ function resolveAutofillTableHeaders(currentHeaders, hints = {}) {
   return trimmed;
 }
 
-/** Form Q (Excel model): worker columns + Working hours / Interval for Rest / Date of the Month (1–31). */
+/** Form Q (Excel model): worker columns + Working hours / Interval for Rest / Date of the Month (1–31) + wage summary. */
+const FORM_Q_WAGE_TAIL_HEADERS = [
+  'Total Days worked',
+  'Minimum rate of wages payable Rs.',
+  'Total production in case of piece rate Rs.',
+  'Actual Wages Paid Rs',
+  'House Rent Allowance Paid Rs.',
+  'Dearness Allowance Paid Rs.',
+  'Gross Amount Payable Rs.',
+  'Total hours of overtime worked during the month',
+  'Overtime earnings Rs.',
+  'Provident Fund Rs.',
+  'Family Pension Rs.',
+  'ESI Contribution Rs.',
+  'Professional Tax Rs.',
+  'Income Tax Rs.',
+  'Loan & Interest Rs.',
+  'Advances Rs.',
+  'Other Deductions Rs.',
+  'Total Deduction Rs.',
+  'Net Payable Rs.',
+  'Date of Payment',
+  'Signature/Thumb Impression',
+];
+
+const formQWageHeaderNorm = (h) =>
+  String(h || '')
+    .replace(/^\(?\d+\)?\s*[\.\)]?\s*/i, '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/[^a-z0-9 ]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+const isFormQWageTailHeader = (header) => {
+  const n = formQWageHeaderNorm(header);
+  if (!n) return false;
+  if (FORM_Q_WAGE_TAIL_HEADERS.some((h) => formQWageHeaderNorm(h) === n)) return true;
+  return (
+    /total\s+days?\s+worked/.test(n) ||
+    /minimum\s+rate\s+of\s+wages/.test(n) ||
+    /total\s+production/.test(n) ||
+    /actual\s+wages\s+paid/.test(n) ||
+    /house\s+rent\s+allowance/.test(n) ||
+    /dearness\s+allowance/.test(n) ||
+    /gross\s+amount\s+payable/.test(n) ||
+    (/overtime/.test(n) && (/hour|earning/.test(n))) ||
+    /provident\s+fund/.test(n) ||
+    /family\s+pension/.test(n) ||
+    /esi\s+contribution/.test(n) ||
+    /professional\s+tax/.test(n) ||
+    /income\s+tax/.test(n) ||
+    /loan.*interest/.test(n) ||
+    /^advances$/.test(n) ||
+    /other\s+deductions?/.test(n) ||
+    /total\s+deductions?/.test(n) ||
+    /net\s+payable/.test(n) ||
+    /date\s+of\s+payment/.test(n) ||
+    /signature|thumb\s+impression/.test(n)
+  );
+};
+
 const buildFormQCanonicalHeaders = (daysInMonth = 31) => {
   const headers = [
     'Sr. No.',
@@ -3204,6 +3347,7 @@ const buildFormQCanonicalHeaders = (daysInMonth = 31) => {
   for (let d = 1; d <= days; d += 1) {
     headers.push(`Date of the Month_${d}`);
   }
+  FORM_Q_WAGE_TAIL_HEADERS.forEach((h) => headers.push(h));
   return headers;
 };
 
@@ -3218,6 +3362,23 @@ const buildFormQSubColumnsFromHeaders = (headers) => {
     if (!subs[parent].includes(sub)) subs[parent].push(sub);
   });
   return subs;
+};
+
+/** Ensure wage-summary columns after day 1–31 are always present in the modal grid. */
+const resolveFormQDisplayHeaders = (headers, daysInMonth = 31) => {
+  const canonical = stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(daysInMonth));
+  const current = stripAndNormalizeFormQTableHeaders(headers || []);
+  if (current.length >= canonical.length) return current;
+  const seen = new Set(current.map((h) => String(h || '').toLowerCase()));
+  const out = [...current];
+  canonical.forEach((h) => {
+    const key = String(h || '').toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(h);
+    }
+  });
+  return out;
 };
 
 const FORM_12_ALIGNMENT_HEADERS = [
@@ -5429,6 +5590,22 @@ function zohoBookedBalanceRangeForUiMonth(selectedMonthStr) {
   return { fromDate, toDate };
 }
 
+function resolveFormQMonthEndDateForAutofill(selectedMonthStr, formatDate = null) {
+  const now = new Date();
+  let monthIdx = now.getMonth();
+  const idx = MONTH_NAMES.findIndex((m) =>
+    m.toLowerCase().startsWith(String(selectedMonthStr || '').toLowerCase().trim())
+  );
+  if (idx >= 0) monthIdx = idx;
+  const year = now.getFullYear();
+  const last = new Date(year, monthIdx + 1, 0);
+  const iso = `${year}-${String(monthIdx + 1).padStart(2, '0')}-${String(last.getDate()).padStart(2, '0')}`;
+  if (typeof formatDate === 'function') {
+    return formatDate(iso) || iso;
+  }
+  return iso;
+}
+
 function normalizeLooseHeaderText(value) {
   return String(value || '')
     .toLowerCase()
@@ -6322,6 +6499,12 @@ const formatForm25DayAttendanceCode = (rec, dayDate) => {
   if (bucket === 'Weekend') return 'WO';
   if (isWeekendCalendarDate(dayDate)) return 'WO';
   return 'A';
+};
+
+/** Form Q Maharashtra: P/A/WO only when attendance API has a record for that day. */
+const formatFormQDayAttendanceCode = (rec, dayDate) => {
+  if (!rec) return '';
+  return formatForm25DayAttendanceCode(rec, dayDate);
 };
 
 const form25StatusIsHalfDay = (statusRaw) => {
@@ -9181,6 +9364,44 @@ function resolveDraftTemplateLayout(templateWb, opts = {}) {
     }
   }
 
+  const formDRajasthanDraftLayout = isFormDRajasthanContext(
+    opts.parsedFormHeader,
+    opts.item,
+    opts.fileName || firstSheetName,
+    sheetText,
+    headersToUse
+  );
+  if (formDRajasthanDraftLayout) {
+    const forceMusterLayout =
+      isFormDRajasthanUsingWrongTable(headersToUse);
+    if (
+      !forceMusterLayout &&
+      headerRowIndex >= 0 &&
+      dataStartIndex >= 0 &&
+      headersToUse.length > 0
+    ) {
+      return { templateWb, headersToUse, headerRowIndex, dataStartIndex, ok: true };
+    }
+    const drjLayout = repairFormDRajasthanTableHeadersFromWorkbook(templateWb, {
+      preferredSheetName: opts.sheetName || '',
+      fileName: opts.fileName || '',
+      formFileName: opts.formFileName || '',
+      formName: opts.formName || '',
+      item: opts.item,
+      formHeader: opts.parsedFormHeader,
+      parsedFormHeader: opts.parsedFormHeader,
+    });
+    if (drjLayout?.headers?.length && drjLayout.headerRowIndex >= 0 && drjLayout.dataStartIndex >= 0) {
+      return {
+        templateWb,
+        headersToUse: resolveFormDRajasthanTableHeaders(drjLayout.headers),
+        headerRowIndex: drjLayout.headerRowIndex,
+        dataStartIndex: drjLayout.dataStartIndex,
+        ok: true
+      };
+    }
+  }
+
   const formDGJGujaratDraftLayout = isFormDGJGujaratContext(
     opts.parsedFormHeader,
     opts.item,
@@ -10563,6 +10784,9 @@ const isFormQContext = (formHeader, rowItem, fileName, tableHeaders) => {
     .toLowerCase();
   if (/\bform\s*xxiii\b|\bform_xxiii\b|\bform-xxiii\b/i.test(parts)) return false;
   if (/\bform\s*["']?\s*q\b|\bform[_\s-]*q\b|form_q\.xlsx/i.test(parts)) return true;
+  if (/muster[\s-]*roll/.test(parts) && /wage\s+register/.test(parts) && /working\s+hours/.test(parts)) {
+    return true;
+  }
   return (
     /sr\.?\s*no/.test(parts) &&
     /full\s+name\s+of\s+the\s+worker/.test(parts) &&
@@ -10757,7 +10981,7 @@ const rebuildFormQTableHeadersFromSheet = ({
   const mainHeaders = [];
 
   let c = startCol;
-  const maxCols = Math.max(effectiveSheetCols, (jsonData[headerRowIndex] || []).length, 40);
+  const maxCols = Math.max(effectiveSheetCols, (jsonData[headerRowIndex] || []).length, 80);
   while (c < maxCols) {
     const mergeEnd = getMergeSpanEndCol(headerRowIndex, c);
     let endC = mergeEnd;
@@ -10870,11 +11094,11 @@ const rebuildFormQTableHeadersFromSheet = ({
 
 /** Prefer Excel rebuild; fall back to canonical headers so autofill always matches FORM Q layout. */
 const resolveFormQTableHeadersForWorkbook = (workbook, daysInMonth = 31) => {
-  const canonical = buildFormQCanonicalHeaders(daysInMonth);
+  const canonicalHeaders = stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(daysInMonth));
   if (!workbook?.SheetNames?.[0]) {
     return {
-      headers: canonical,
-      subColumns: buildFormQSubColumnsFromHeaders(canonical),
+      headers: canonicalHeaders,
+      subColumns: buildFormQSubColumnsFromHeaders(canonicalHeaders),
       headerRowIndex: 8,
       dataStartIndex: 11,
       headerFields: [
@@ -10922,7 +11146,15 @@ const resolveFormQTableHeadersForWorkbook = (workbook, daysInMonth = 31) => {
     getMergedAwareCellText,
     merges
   });
-  const headers = stripAndNormalizeFormQTableHeaders(canonical);
+  const canonical = canonicalHeaders;
+  const rebuiltExpanded =
+    rebuild?.expandedHeaders?.length >= 4
+      ? stripAndNormalizeFormQTableHeaders(rebuild.expandedHeaders)
+      : [];
+  const headers =
+    rebuiltExpanded.length > canonical.length
+      ? rebuiltExpanded
+      : resolveFormQDisplayHeaders(rebuiltExpanded.length > 0 ? rebuiltExpanded : canonical, daysInMonth);
   const subColumns =
     rebuild?.subColumnsData && Object.keys(rebuild.subColumnsData).some((k) => (rebuild.subColumnsData[k] || []).length > 0)
       ? rebuild.subColumnsData
@@ -17209,17 +17441,119 @@ const parseFlexibleStatutoryDate = (raw) => {
   return null;
 };
 
-const getEmployeeDateofjoiningRaw = (emp) =>
-  emp.Dateofjoining ||
-  emp['Dateofjoining'] ||
-  emp.DateofJoining ||
-  emp['Date of Joining'] ||
-  emp['DateofJoining'] ||
-  emp.dateOfJoining ||
-  emp['Date of joining'] ||
-  emp.Date_of_Joining ||
-  emp['Date_of_Joining'] ||
-  '';
+const calendarDateOnly = (date) => {
+  if (!date || !(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+};
+
+const getEmployeeDateofjoiningRaw = (emp) => {
+  const e = unwrapZohoEmployeeRecord(emp) || emp || {};
+  return (
+    coerceZohoPeopleDateRaw(e.Dateofjoining) ||
+    coerceZohoPeopleDateRaw(e['Dateofjoining']) ||
+    coerceZohoPeopleDateRaw(e.DateofJoining) ||
+    coerceZohoPeopleDateRaw(e['Date of Joining']) ||
+    coerceZohoPeopleDateRaw(e['DateofJoining']) ||
+    coerceZohoPeopleDateRaw(e.dateOfJoining) ||
+    coerceZohoPeopleDateRaw(e['Date of joining']) ||
+    coerceZohoPeopleDateRaw(e.Date_of_Joining) ||
+    coerceZohoPeopleDateRaw(e['Date_of_Joining']) ||
+    coerceZohoPeopleDateRaw(findNestedValueByNormalizedKey(e, 'dateofjoining')) ||
+    coerceZohoPeopleDateRaw(findNestedValueByNormalizedKey(e, 'dateofjoin')) ||
+    ''
+  );
+};
+
+const resolveStatutoryEmployeeJoinDate = (emp, row = null, headers = null) => {
+  const fromEmp = parseFlexibleStatutoryDate(getEmployeeDateofjoiningRaw(emp));
+  if (fromEmp) return fromEmp;
+  if (!row || !Array.isArray(headers)) return null;
+  const joinHeader = headers.find((h) =>
+    /date\s+of\s+entry\s+into\s+service/i.test(String(h || '').replace(/_/g, ' '))
+  );
+  if (!joinHeader) return null;
+  return parseFlexibleStatutoryDate(row[joinHeader]);
+};
+
+const resolveStatutoryEmployeeExitDate = (emp, row = null, headers = null) => {
+  const fromEmp = parseFlexibleStatutoryDate(getEmployeeDateofexitRaw(emp));
+  if (fromEmp) return fromEmp;
+  if (!row || !Array.isArray(headers)) return null;
+  const exitHeader = headers.find((h) =>
+    /date\s+of\s+(exit|leaving|relieving)/i.test(String(h || '').replace(/_/g, ' '))
+  );
+  if (!exitHeader) return null;
+  return parseFlexibleStatutoryDate(row[exitHeader]);
+};
+
+const isStatutoryDayBeforeEmployeeJoining = (emp, dayDate, row = null, headers = null) => {
+  const doj = resolveStatutoryEmployeeJoinDate(emp, row, headers);
+  if (!doj) return false;
+  const day = calendarDateOnly(dayDate);
+  const join = calendarDateOnly(doj);
+  if (!day || !join) return false;
+  return day < join;
+};
+
+const isStatutoryDayAfterEmployeeExit = (emp, dayDate, row = null, headers = null) => {
+  const doe = resolveStatutoryEmployeeExitDate(emp, row, headers);
+  if (!doe) return false;
+  const day = calendarDateOnly(dayDate);
+  const exit = calendarDateOnly(doe);
+  if (!day || !exit) return false;
+  return day > exit;
+};
+
+const shouldSkipStatutoryDayAttendanceForEmployee = (emp, dayDate, row = null, headers = null) =>
+  isStatutoryDayBeforeEmployeeJoining(emp, dayDate, row, headers) ||
+  isStatutoryDayAfterEmployeeExit(emp, dayDate, row, headers);
+
+const listStatutoryAttendanceDayHeaders = (headers) =>
+  (headers || [])
+    .map((header) => {
+      const t = String(header || '').trim();
+      const direct = t.match(/^(\d{1,2})$/);
+      if (direct) {
+        const day = Number(direct[1]);
+        if (day >= 1 && day <= 31) return { header, day };
+      }
+      const suffixed = t.match(/(?:^|_)(\d{1,2})$/);
+      if (suffixed) {
+        const day = Number(suffixed[1]);
+        if (day >= 1 && day <= 31) return { header, day };
+      }
+      return null;
+    })
+    .filter(Boolean);
+
+const scrubStatutoryPreJoinDayMarks = (
+  rows,
+  employees,
+  headers,
+  { selectedMonth = '', rowIndexOffset = 0, item = null, wagePeriodLine = '' } = {}
+) => {
+  if (!Array.isArray(rows) || rows.length === 0) return 0;
+  const dayHeaders = listStatutoryAttendanceDayHeaders(headers);
+  if (dayHeaders.length === 0) return 0;
+  const { year: targetYear, monthIndex: targetMonthIndex } = resolveStatutoryAttendanceMonthYear(
+    selectedMonth,
+    item,
+    wagePeriodLine
+  );
+  let cleared = 0;
+  rows.forEach((row, rowIndex) => {
+    const empItem = employees?.[rowIndex + rowIndexOffset] ?? employees?.[rowIndex];
+    const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+    dayHeaders.forEach(({ header, day }) => {
+      const dayDate = new Date(targetYear, targetMonthIndex, day);
+      if (dayDate.getMonth() !== targetMonthIndex) return;
+      if (!shouldSkipStatutoryDayAttendanceForEmployee(emp, dayDate, row, headers)) return;
+      if (String(row[header] ?? '').trim() !== '') cleared += 1;
+      row[header] = '';
+    });
+  });
+  return cleared;
+};
 
 const coerceZohoPeopleDateRaw = (value) => {
   if (value == null || value === '') return '';
@@ -30241,6 +30575,13 @@ const Statutory = ({ userEmail, userRole }) => {
         sheetTextForDownload,
         headersToUse
       );
+      const isFormBRajasthanDownload = isFormBRajasthanContext(
+        parsed?.formHeader,
+        lineItem,
+        fn,
+        sheetTextForDownload,
+        headersToUse
+      );
       const isFormKGJGujaratDownload = isFormKGJGujaratContext(
         parsed?.formHeader,
         lineItem,
@@ -30262,16 +30603,40 @@ const Statutory = ({ userEmail, userRole }) => {
         sheetTextForDownload,
         headersToUse
       );
-      const isFormDGJGujaratDownload = isFormDGJGujaratContext(
+      const isFormDRajasthanDownload = isFormDRajasthanContext(
         parsed?.formHeader,
         lineItem,
         fn,
         sheetTextForDownload,
         headersToUse
       );
+      const isFormDGJGujaratDownload =
+        !isFormDRajasthanDownload &&
+        isFormDGJGujaratContext(
+        parsed?.formHeader,
+        lineItem,
+        fn,
+        sheetTextForDownload,
+        headersToUse
+      );
+      const isFormARajasthanDownload =
+        !isFormBGJGujaratDownload &&
+        !isFormBRajasthanDownload &&
+        !isFormDGJGujaratDownload &&
+        !isFormDRajasthanDownload &&
+        isFormARajasthanContext(
+          parsed?.formHeader,
+          lineItem,
+          fn,
+          sheetTextForDownload,
+          headersToUse
+        );
       const isFormAGJGujaratDownload =
         !isFormBGJGujaratDownload &&
+        !isFormBRajasthanDownload &&
         !isFormDGJGujaratDownload &&
+        !isFormDRajasthanDownload &&
+        !isFormARajasthanDownload &&
         isFormAGJGujaratContext(
           parsed?.formHeader,
           lineItem,
@@ -30281,6 +30646,7 @@ const Statutory = ({ userEmail, userRole }) => {
         );
       const isFormADownload =
         !isFormAGJGujaratDownload &&
+        !isFormARajasthanDownload &&
         (isFormAMusterRollContext(parsed.formHeader) ||
           /\bform\s*[-"']?\s*a\b/i.test(String(item?.formName || item?.FormName || '')));
       const isFormUDownload =
@@ -30414,6 +30780,10 @@ const Statutory = ({ userEmail, userRole }) => {
         headersToUse = resolveFormBGJGujaratTableHeaders(headersToUse);
         downloadHeaderHints.tableHeaders = headersToUse;
       }
+      if (isFormBRajasthanDownload) {
+        headersToUse = resolveFormBRajasthanTableHeaders(headersToUse);
+        downloadHeaderHints.tableHeaders = headersToUse;
+      }
       if (isFormKGJGujaratDownload) {
         headersToUse = resolveFormKGJGujaratTableHeaders(headersToUse);
         downloadHeaderHints.tableHeaders = headersToUse;
@@ -30426,12 +30796,20 @@ const Statutory = ({ userEmail, userRole }) => {
         headersToUse = resolveFormLGJGujaratTableHeaders(headersToUse);
         downloadHeaderHints.tableHeaders = headersToUse;
       }
+      if (isFormDRajasthanDownload) {
+        headersToUse = resolveFormDRajasthanTableHeaders(headersToUse);
+        downloadHeaderHints.tableHeaders = headersToUse;
+      }
       if (isFormDGJGujaratDownload) {
         headersToUse = resolveFormDGJGujaratTableHeaders(headersToUse);
         downloadHeaderHints.tableHeaders = headersToUse;
       }
       if (isFormAGJGujaratDownload) {
         headersToUse = resolveFormAGJGujaratTableHeaders(headersToUse);
+        downloadHeaderHints.tableHeaders = headersToUse;
+      }
+      if (isFormARajasthanDownload) {
+        headersToUse = resolveFormARajasthanExportHeaders(headersToUse);
         downloadHeaderHints.tableHeaders = headersToUse;
       }
       if (isForm17BDownload) {
@@ -30540,6 +30918,13 @@ const Statutory = ({ userEmail, userRole }) => {
       const isFormXXAPDeductionsDownload = isFormXXAPRegisterOfDeductionsContext(
         parsed?.formHeader,
         item,
+        templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
+        sheetTextForDownload || parsed?.sheetText || '',
+        headersToUse
+      );
+      const isFormCRajasthanDownload = isFormCRajasthanContext(
+        parsed?.formHeader,
+        lineItem,
         templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
         sheetTextForDownload || parsed?.sheetText || '',
         headersToUse
@@ -30753,11 +31138,14 @@ const Statutory = ({ userEmail, userRole }) => {
         statutoryAutofillExportCacheRef.current.rows.length > 0;
       const formTSEAutofillCacheMatches = isFormTSEDownload && autofillExportCacheMatches;
       const formBGJGujaratAutofillCacheMatches = isFormBGJGujaratDownload && autofillExportCacheMatches;
+      const formBRajasthanAutofillCacheMatches = isFormBRajasthanDownload && autofillExportCacheMatches;
       const formKGJGujaratAutofillCacheMatches = isFormKGJGujaratDownload && autofillExportCacheMatches;
       const formOGJGujaratAutofillCacheMatches = isFormOGJGujaratDownload && autofillExportCacheMatches;
       const formLGJGujaratAutofillCacheMatches = isFormLGJGujaratDownload && autofillExportCacheMatches;
+      const formDRajasthanAutofillCacheMatches = isFormDRajasthanDownload && autofillExportCacheMatches;
       const formDGJGujaratAutofillCacheMatches = isFormDGJGujaratDownload && autofillExportCacheMatches;
       const formAGJGujaratAutofillCacheMatches = isFormAGJGujaratDownload && autofillExportCacheMatches;
+      const formARajasthanAutofillCacheMatches = isFormARajasthanDownload && autofillExportCacheMatches;
       const formXIXKarnatakaAutofillCacheMatches = isFormXIXKarnatakaDownload && autofillExportCacheMatches;
 
       // Export exactly what the user sees in the open modal (including imported / manual edits).
@@ -32494,6 +32882,28 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
       if (
+        isFormBRajasthanDownload &&
+        !usedLiveModalGrid &&
+        !usedSnapshot &&
+        !usedSavedDraftFile &&
+        !downloadHasMeaningfulRows &&
+        formBRajasthanAutofillCacheMatches &&
+        statutoryAutofillExportCacheRef.current?.rows?.length
+      ) {
+        const brjCacheHdrs = resolveFormBRajasthanTableHeaders(
+          statutoryAutofillExportCacheRef.current.headers?.length
+            ? statutoryAutofillExportCacheRef.current.headers
+            : headersToUse
+        );
+        mappedData = filterFormBRajasthanExportRows(
+          statutoryAutofillExportCacheRef.current.rows.filter((row) => formTableRowHasMeaningfulData(row)),
+          brjCacheHdrs
+        );
+        headersToUse = [...brjCacheHdrs];
+        usedSnapshot = true;
+        savedDraftRowMatrix = null;
+      }
+      if (
         isFormAGJGujaratDownload &&
         !usedLiveModalGrid &&
         !usedSnapshot &&
@@ -32512,6 +32922,28 @@ const Statutory = ({ userEmail, userRole }) => {
           agjCacheHdrs
         );
         headersToUse = [...agjCacheHdrs];
+        usedSnapshot = true;
+        savedDraftRowMatrix = null;
+      }
+      if (
+        isFormARajasthanDownload &&
+        !usedLiveModalGrid &&
+        !usedSnapshot &&
+        !usedSavedDraftFile &&
+        !downloadHasMeaningfulRows &&
+        formARajasthanAutofillCacheMatches &&
+        statutoryAutofillExportCacheRef.current?.rows?.length
+      ) {
+        const arjCacheHdrs = resolveFormARajasthanExportHeaders(
+          statutoryAutofillExportCacheRef.current.headers?.length
+            ? statutoryAutofillExportCacheRef.current.headers
+            : headersToUse
+        );
+        mappedData = filterFormARajasthanExportRows(
+          statutoryAutofillExportCacheRef.current.rows.filter((row) => formTableRowHasMeaningfulData(row)),
+          arjCacheHdrs
+        );
+        headersToUse = [...arjCacheHdrs];
         usedSnapshot = true;
         savedDraftRowMatrix = null;
       }
@@ -33010,6 +33442,15 @@ const Statutory = ({ userEmail, userRole }) => {
         headersToUse = [...bgjExportHdrs];
         savedDraftRowMatrix = null;
       }
+      if (isFormBRajasthanDownload && Array.isArray(mappedData)) {
+        const brjExportHdrs = resolveFormBRajasthanTableHeaders(headersToUse);
+        mappedData = filterFormBRajasthanExportRows(
+          remapFormBRajasthanRowsToHeaders(mappedData, brjExportHdrs, brjExportHdrs),
+          brjExportHdrs
+        );
+        headersToUse = [...brjExportHdrs];
+        savedDraftRowMatrix = null;
+      }
       if (isFormKGJGujaratDownload && Array.isArray(mappedData)) {
         const kgjExportHdrs = resolveFormKGJGujaratTableHeaders(headersToUse);
         mappedData = filterFormKGJGujaratExportRows(
@@ -33026,6 +33467,15 @@ const Statutory = ({ userEmail, userRole }) => {
           agjExportHdrs
         );
         headersToUse = [...agjExportHdrs];
+        savedDraftRowMatrix = null;
+      }
+      if (isFormARajasthanDownload && Array.isArray(mappedData)) {
+        const arjExportHdrs = resolveFormARajasthanExportHeaders(headersToUse);
+        mappedData = filterFormARajasthanExportRows(
+          remapFormAGJGujaratRowsToHeaders(mappedData, arjExportHdrs, arjExportHdrs),
+          arjExportHdrs
+        );
+        headersToUse = [...arjExportHdrs];
         savedDraftRowMatrix = null;
       }
       if (isFormVIDownload && Array.isArray(mappedData) && mappedData.length > 0) {
@@ -33472,6 +33922,50 @@ const Statutory = ({ userEmail, userRole }) => {
         );
       }
 
+      if (isFormDRajasthanDownload) {
+        const resolvedSiteForDRJ = resolveStatutorySiteNameForContractorAutofill(item, {
+          siteFromUrl,
+          allowedSiteNameList,
+          allRows: statutoryData,
+          resolveSiteFn: typeof resolveSiteDisplayName === 'function' ? resolveSiteDisplayName : null,
+        });
+        const sitesForDRJ =
+          Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+            ? siteDetailsList
+            : readSiteDetailsCache() || [];
+        const stateHintDRJ = String(item?.state ?? item?.State ?? '').trim();
+        const siteForDRJ = resolvedSiteForDRJ
+          ? findSiteDetailByName(sitesForDRJ, resolvedSiteForDRJ, stateHintDRJ)
+          : null;
+        const companiesForDRJ =
+          Array.isArray(companyDetailsList) && companyDetailsList.length > 0
+            ? companyDetailsList
+            : readCompanyDetailsCache() || [];
+        const companyForDRJ = resolveCompanyRecordForStatutory(item, companiesForDRJ);
+        const { fullMonth: drjFullMonth, year: drjYear } = resolveForm25DisplayPeriodMonthYear(
+          selectedMonth,
+          item,
+          parsed?.formHeader?.wagePeriodText || formFileModalData?.parsedFormHeader?.wagePeriodText || ''
+        );
+        downloadHeaderFormData = prepareFormDRajasthanDownloadHeaderData(
+          downloadHeaderFormData,
+          enrichFormDRajasthanDisplayHeader(
+            parsed?.formHeader,
+            fn,
+            lineItem,
+            headersToUse,
+            sheetTextForDownload || parsed?.sheetText || ''
+          ),
+          {
+            establishmentText: siteForDRJ ? buildSiteEstablishmentNameAndAddress(siteForDRJ) : '',
+            principalEmployerText:
+              buildCompanyNameAndAddress(companyForDRJ) ||
+              (siteForDRJ ? buildSiteEstablishmentNameAndAddress(siteForDRJ) : ''),
+            periodText: buildFormDRajasthanPeriodLine(drjFullMonth, drjYear),
+          }
+        );
+      }
+
       if (isFormDGJGujaratDownload) {
         const resolvedSiteForDGJ = resolveStatutorySiteNameForContractorAutofill(item, {
           siteFromUrl,
@@ -33506,6 +34000,36 @@ const Statutory = ({ userEmail, userRole }) => {
               buildCompanyNameAndAddress(companyForDGJ) ||
               (siteForDGJ ? buildSiteEstablishmentNameAndAddress(siteForDGJ) : ''),
             periodText: buildFormDGJGujaratPeriodLine(fullMonth, year),
+          }
+        );
+      }
+
+      if (isFormCRajasthanDownload) {
+        const resolvedSiteForCRJ = resolveStatutorySiteNameForContractorAutofill(item, {
+          siteFromUrl,
+          allowedSiteNameList,
+          allRows: statutoryData,
+          resolveSiteFn: typeof resolveSiteDisplayName === 'function' ? resolveSiteDisplayName : null,
+        });
+        const sitesForCRJ =
+          Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+            ? siteDetailsList
+            : readSiteDetailsCache() || [];
+        const stateHintCRJ = String(item?.state ?? item?.State ?? '').trim();
+        const siteForCRJ = resolvedSiteForCRJ
+          ? findSiteDetailByName(sitesForCRJ, resolvedSiteForCRJ, stateHintCRJ)
+          : null;
+        downloadHeaderFormData = prepareFormCRajasthanDownloadHeaderData(
+          downloadHeaderFormData,
+          enrichFormCRajasthanDisplayHeader(
+            parsed?.formHeader,
+            fn,
+            lineItem,
+            headersToUse,
+            sheetTextForDownload || parsed?.sheetText || ''
+          ),
+          {
+            establishmentText: siteForCRJ ? buildSiteEstablishmentNameAndAddress(siteForCRJ) : '',
           }
         );
       }
@@ -34390,6 +34914,9 @@ const Statutory = ({ userEmail, userRole }) => {
             selectedMonth,
             item
           );
+          if (isFormCRajasthanDownload) {
+            mappedData = applyFormCRajasthanNilToMappedRows(mappedData, headersToUse);
+          }
           savedDraftRowMatrix = null;
         }
       }
@@ -34837,6 +35364,51 @@ const Statutory = ({ userEmail, userRole }) => {
           downloadHeaderRowIndex = layoutSource.headerRowIndex;
         }
       }
+      if (isFormDRajasthanDownload) {
+        if (isFormFileModalOpen && countMeaningfulFormTableRows(formTableDataRef.current) > 0) {
+          snapshotStatutoryAutofillExportCache();
+        }
+        const modalHdrs = resolveFormDRajasthanTableHeaders(
+          Array.isArray(formFileModalData?.parsedTableHeaders) &&
+            formFileModalData.parsedTableHeaders.length > 0
+            ? formFileModalData.parsedTableHeaders
+            : formDRajasthanAutofillCacheMatches &&
+                statutoryAutofillExportCacheRef.current?.headers?.length
+              ? statutoryAutofillExportCacheRef.current.headers
+              : headersToUse
+        );
+        let liveRows = [];
+        if (isFormFileModalOpen || liveModalGridLoadedRowCount > 0) {
+          liveRows = copyLiveModalGridRowsForDownload().filter((row) =>
+            rowHasMeaningfulFormDRajasthanExportData(row, modalHdrs)
+          );
+        } else if (formDRajasthanAutofillCacheMatches && statutoryAutofillExportCacheRef.current) {
+          liveRows = statutoryAutofillExportCacheRef.current.rows.filter((row) =>
+            rowHasMeaningfulFormDRajasthanExportData(row, modalHdrs)
+          );
+        }
+        if (liveRows.length > 0) {
+          mappedData = filterFormDRajasthanExportRows(
+            remapFormDRajasthanRowsToHeaders(liveRows, modalHdrs, modalHdrs),
+            modalHdrs
+          );
+          headersToUse = [...modalHdrs];
+          usedLiveModalGrid = true;
+          savedDraftRowMatrix = null;
+        }
+        const layoutSource =
+          formFileModalData ||
+          (formDRajasthanAutofillCacheMatches ? statutoryAutofillExportCacheRef.current : null);
+        if (layoutSource?.tableStartCol != null) {
+          downloadTableStartCol = layoutSource.tableStartCol;
+        }
+        if (layoutSource?.dataStartIndex != null) {
+          downloadDataStartIndex = layoutSource.dataStartIndex;
+        }
+        if (layoutSource?.headerRowIndex != null) {
+          downloadHeaderRowIndex = layoutSource.headerRowIndex;
+        }
+      }
       if (isFormDGJGujaratDownload) {
         if (isFormFileModalOpen && countMeaningfulFormTableRows(formTableDataRef.current) > 0) {
           snapshotStatutoryAutofillExportCache();
@@ -34927,6 +35499,51 @@ const Statutory = ({ userEmail, userRole }) => {
           downloadHeaderRowIndex = layoutSource.headerRowIndex;
         }
       }
+      if (isFormBRajasthanDownload) {
+        if (isFormFileModalOpen && countMeaningfulFormTableRows(formTableDataRef.current) > 0) {
+          snapshotStatutoryAutofillExportCache();
+        }
+        const modalHdrs = resolveFormBRajasthanTableHeaders(
+          Array.isArray(formFileModalData?.parsedTableHeaders) &&
+            formFileModalData.parsedTableHeaders.length > 0
+            ? formFileModalData.parsedTableHeaders
+            : formBRajasthanAutofillCacheMatches &&
+                statutoryAutofillExportCacheRef.current?.headers?.length
+              ? statutoryAutofillExportCacheRef.current.headers
+              : headersToUse
+        );
+        let liveRows = [];
+        if (isFormFileModalOpen || liveModalGridLoadedRowCount > 0) {
+          liveRows = copyLiveModalGridRowsForDownload().filter((row) =>
+            rowHasMeaningfulFormBRajasthanExportData(row, modalHdrs)
+          );
+        } else if (formBRajasthanAutofillCacheMatches && statutoryAutofillExportCacheRef.current) {
+          liveRows = statutoryAutofillExportCacheRef.current.rows.filter((row) =>
+            rowHasMeaningfulFormBRajasthanExportData(row, modalHdrs)
+          );
+        }
+        if (liveRows.length > 0) {
+          mappedData = filterFormBRajasthanExportRows(
+            remapFormBRajasthanRowsToHeaders(liveRows, modalHdrs, modalHdrs),
+            modalHdrs
+          );
+          headersToUse = [...modalHdrs];
+          usedLiveModalGrid = true;
+          savedDraftRowMatrix = null;
+        }
+        const layoutSource =
+          formFileModalData ||
+          (formBRajasthanAutofillCacheMatches ? statutoryAutofillExportCacheRef.current : null);
+        if (layoutSource?.tableStartCol != null) {
+          downloadTableStartCol = layoutSource.tableStartCol;
+        }
+        if (layoutSource?.dataStartIndex != null) {
+          downloadDataStartIndex = layoutSource.dataStartIndex;
+        }
+        if (layoutSource?.headerRowIndex != null) {
+          downloadHeaderRowIndex = layoutSource.headerRowIndex;
+        }
+      }
       if (isFormAGJGujaratDownload) {
         if (isFormFileModalOpen && countMeaningfulFormTableRows(formTableDataRef.current) > 0) {
           snapshotStatutoryAutofillExportCache();
@@ -34962,6 +35579,51 @@ const Statutory = ({ userEmail, userRole }) => {
         const layoutSource =
           formFileModalData ||
           (formAGJGujaratAutofillCacheMatches ? statutoryAutofillExportCacheRef.current : null);
+        if (layoutSource?.tableStartCol != null) {
+          downloadTableStartCol = layoutSource.tableStartCol;
+        }
+        if (layoutSource?.dataStartIndex != null) {
+          downloadDataStartIndex = layoutSource.dataStartIndex;
+        }
+        if (layoutSource?.headerRowIndex != null) {
+          downloadHeaderRowIndex = layoutSource.headerRowIndex;
+        }
+      }
+      if (isFormARajasthanDownload) {
+        if (isFormFileModalOpen && countMeaningfulFormTableRows(formTableDataRef.current) > 0) {
+          snapshotStatutoryAutofillExportCache();
+        }
+        const modalHdrs = resolveFormARajasthanExportHeaders(
+          Array.isArray(formFileModalData?.parsedTableHeaders) &&
+            formFileModalData.parsedTableHeaders.length > 0
+            ? formFileModalData.parsedTableHeaders
+            : formARajasthanAutofillCacheMatches &&
+                statutoryAutofillExportCacheRef.current?.headers?.length
+              ? statutoryAutofillExportCacheRef.current.headers
+              : headersToUse
+        );
+        let liveRows = [];
+        if (isFormFileModalOpen || liveModalGridLoadedRowCount > 0) {
+          liveRows = copyLiveModalGridRowsForDownload().filter((row) =>
+            rowHasMeaningfulFormARajasthanExportData(row, modalHdrs)
+          );
+        } else if (formARajasthanAutofillCacheMatches && statutoryAutofillExportCacheRef.current) {
+          liveRows = statutoryAutofillExportCacheRef.current.rows.filter((row) =>
+            rowHasMeaningfulFormARajasthanExportData(row, modalHdrs)
+          );
+        }
+        if (liveRows.length > 0) {
+          mappedData = filterFormARajasthanExportRows(
+            remapFormAGJGujaratRowsToHeaders(liveRows, modalHdrs, modalHdrs),
+            modalHdrs
+          );
+          headersToUse = [...modalHdrs];
+          usedLiveModalGrid = true;
+          savedDraftRowMatrix = null;
+        }
+        const layoutSource =
+          formFileModalData ||
+          (formARajasthanAutofillCacheMatches ? statutoryAutofillExportCacheRef.current : null);
         if (layoutSource?.tableStartCol != null) {
           downloadTableStartCol = layoutSource.tableStartCol;
         }
@@ -35025,6 +35687,73 @@ const Statutory = ({ userEmail, userRole }) => {
           downloadHeaderRowIndex = layoutSource.headerRowIndex;
         }
       }
+      if (isFormDRajasthanDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        try {
+          const drjHdrs = resolveFormDRajasthanTableHeaders(headersToUse);
+          const drjMonthCandidates = resolvePayrollMonthIsoCandidates(
+            selectedMonth,
+            lineItem,
+            parsed?.formHeader?.wagePeriodText ||
+              formFileModalData?.parsedFormHeader?.wagePeriodText ||
+              ''
+          );
+          const drjDownloadCached = getCachedForm15PayrollTableRows(drjMonthCandidates);
+          let drjDownloadPayrollRows = resolveFormXIXMPPayrollRowsForAutofill(
+            drjDownloadCached?.rows?.length > 0
+              ? drjDownloadCached.rows.map((row) => flattenPayrollEarningColumns(row))
+              : null,
+            drjMonthCandidates
+          );
+          if (!Array.isArray(drjDownloadPayrollRows) || drjDownloadPayrollRows.length === 0) {
+            const syncDrjPayroll = getPayrollTableRowsForStatutoryAutofillSync(drjMonthCandidates);
+            if (syncDrjPayroll?.rows?.length > 0) {
+              drjDownloadPayrollRows = syncDrjPayroll.rows.map((row) =>
+                flattenPayrollEarningColumns(row)
+              );
+            }
+          }
+          if (!Array.isArray(drjDownloadPayrollRows) || drjDownloadPayrollRows.length === 0) {
+            drjDownloadPayrollRows = await loadFormXIXMPPayrollRowsForAutofill(drjMonthCandidates, {
+              timeoutMs: 15000,
+            });
+          }
+          const employeesForDrjDownload = autofillEmployeesRef.current?.length
+            ? autofillEmployeesRef.current
+            : [];
+          if (
+            Array.isArray(drjDownloadPayrollRows) &&
+            drjDownloadPayrollRows.length > 0 &&
+            employeesForDrjDownload.length > 0
+          ) {
+            const resolveDrjPayrollRow = buildFormXIXMPPayrollRowResolver(drjDownloadPayrollRows);
+            const drjPayrollFilled = enrichFormDRajasthanPayrollRows(
+              mappedData,
+              employeesForDrjDownload,
+              drjHdrs,
+              {
+                payrollRows: drjDownloadPayrollRows,
+                overwrite: true,
+                sanitizeValue: (v) => String(v ?? '').trim(),
+                resolvePayrollRow: (emp) => {
+                  const hit = resolveDrjPayrollRow(emp);
+                  if (hit && !hit.fetch_error) return hit;
+                  return resolveFormXIXMPPayrollRowForEmployee(emp, drjDownloadPayrollRows);
+                },
+              }
+            );
+            if (drjPayrollFilled > 0) {
+              console.log(
+                `Form D Rajasthan download payroll enrich: ${drjPayrollFilled} row(s)`
+              );
+            }
+          }
+        } catch (drjDownloadPayrollErr) {
+          console.warn(
+            'Form D Rajasthan download payroll enrich skipped:',
+            drjDownloadPayrollErr?.message || drjDownloadPayrollErr
+          );
+        }
+      }
       let { blob, fileName } = isFormKGJGujaratDownload
         ? await buildFormKGJGujaratWorkbookWithTemplateStyles({
             templateArrayBuffer: arrayBuffer,
@@ -35035,6 +35764,22 @@ const Statutory = ({ userEmail, userRole }) => {
             parsedTableStartCol: downloadTableStartCol,
             parsedFormHeader: parsed.formHeader,
             headerFormData: downloadHeaderFormData,
+            formFileName:
+              templateMeta.formFileName ||
+              resolvedFormFileItem.formFileName ||
+              'form-draft.xlsx',
+          })
+        : isFormDRajasthanDownload
+        ? await buildFormDRajasthanWorkbookWithTemplateStyles({
+            templateArrayBuffer: arrayBuffer,
+            mappedData,
+            headersToUse: resolveFormDRajasthanTableHeaders(headersToUse),
+            parsedHeaderRowIndex: downloadHeaderRowIndex,
+            parsedDataStartIndex: downloadDataStartIndex,
+            parsedTableStartCol: downloadTableStartCol,
+            parsedFormHeader: parsed.formHeader,
+            headerFormData: downloadHeaderFormData,
+            preferredSheetName: resolvedDownloadSheetName || parsed.sheetName || '',
             formFileName:
               templateMeta.formFileName ||
               resolvedFormFileItem.formFileName ||
@@ -35070,6 +35815,39 @@ const Statutory = ({ userEmail, userRole }) => {
               templateMeta.formFileName ||
               resolvedFormFileItem.formFileName ||
               'form-draft.xlsx',
+            formatStatutoryDateDisplay
+          })
+        : isFormBRajasthanDownload
+        ? await buildFormBRajasthanWorkbookWithTemplateStyles({
+            templateArrayBuffer: arrayBuffer,
+            mappedData,
+            headersToUse: resolveFormBRajasthanTableHeaders(headersToUse),
+            parsedHeaderRowIndex: downloadHeaderRowIndex,
+            parsedDataStartIndex: downloadDataStartIndex,
+            parsedTableStartCol: downloadTableStartCol,
+            parsedFormHeader: parsed.formHeader,
+            headerFormData: downloadHeaderFormData,
+            formFileName:
+              templateMeta.formFileName ||
+              resolvedFormFileItem.formFileName ||
+              'form-draft.xlsx',
+            formatStatutoryDateDisplay
+          })
+        : isFormARajasthanDownload
+        ? await buildFormARajasthanWorkbookWithTemplateStyles({
+            templateArrayBuffer: arrayBuffer,
+            mappedData,
+            headersToUse: resolveFormARajasthanExportHeaders(headersToUse),
+            parsedHeaderRowIndex: downloadHeaderRowIndex,
+            parsedDataStartIndex: downloadDataStartIndex,
+            parsedTableStartCol: downloadTableStartCol,
+            parsedFormHeader: parsed.formHeader,
+            headerFormData: downloadHeaderFormData,
+            formFileName:
+              templateMeta.formFileName ||
+              resolvedFormFileItem.formFileName ||
+              'form-draft.xlsx',
+            employeesOverride: resolveStatutoryEmployeesForSaveOrder(autofillEmployeesRef.current),
             formatStatutoryDateDisplay
           })
         : isFormAGJGujaratDownload
@@ -35837,7 +36615,15 @@ const Statutory = ({ userEmail, userRole }) => {
                         parsedHeaderRowIndex: downloadHeaderRowIndex,
                         parsedDataStartIndex: downloadDataStartIndex,
                         parsedTableStartCol: downloadTableStartCol,
-                        parsedFormHeader: parsed.formHeader,
+                        parsedFormHeader: isFormCRajasthanDownload
+                          ? enrichFormCRajasthanDisplayHeader(
+                              parsed.formHeader,
+                              fn,
+                              lineItem,
+                              headersToUse,
+                              sheetTextForDownload || parsed?.sheetText || ''
+                            )
+                          : parsed.formHeader,
                         headerFormData: downloadHeaderFormData,
                         formFileName:
                           templateMeta.formFileName ||
@@ -35847,7 +36633,8 @@ const Statutory = ({ userEmail, userRole }) => {
                           resolvedDownloadSheetName ||
                           formFileModalData?.sheetName ||
                           parsed.sheetName ||
-                          ''
+                          '',
+                        headerWriteMode: isFormCRajasthanDownload ? 'adjacent' : 'combined',
                       })
                   : isFormXXIAPFinesDownload
                     ? await buildFormXXIAPWorkbookWithTemplateStyles({
@@ -37346,6 +38133,13 @@ const Statutory = ({ userEmail, userRole }) => {
         formFileModalData?.sheetText || '',
         headersToUse
       );
+      const formBRajasthanSave = isFormBRajasthanContext(
+        parsedFormHeaderForSave || formHeader,
+        currentItem,
+        draftFileNameForSave,
+        formFileModalData?.sheetText || '',
+        headersToUse
+      );
       const formKGJGujaratSave = isFormKGJGujaratContext(
         parsedFormHeaderForSave || formHeader,
         currentItem,
@@ -37353,16 +38147,40 @@ const Statutory = ({ userEmail, userRole }) => {
         formFileModalData?.sheetText || '',
         headersToUse
       );
-      const formDGJGujaratSave = isFormDGJGujaratContext(
+      const formDRajasthanSave = isFormDRajasthanContext(
         parsedFormHeaderForSave || formHeader,
         currentItem,
         draftFileNameForSave,
         formFileModalData?.sheetText || '',
         headersToUse
       );
+      const formDGJGujaratSave =
+        !formDRajasthanSave &&
+        isFormDGJGujaratContext(
+        parsedFormHeaderForSave || formHeader,
+        currentItem,
+        draftFileNameForSave,
+        formFileModalData?.sheetText || '',
+        headersToUse
+      );
+      const formARajasthanSave =
+        !formBGJGujaratSave &&
+        !formBRajasthanSave &&
+        !formDGJGujaratSave &&
+        !formDRajasthanSave &&
+        isFormARajasthanContext(
+          parsedFormHeaderForSave || formHeader,
+          currentItem,
+          draftFileNameForSave,
+          formFileModalData?.sheetText || '',
+          headersToUse
+        );
       const formAGJGujaratSave =
         !formBGJGujaratSave &&
+        !formBRajasthanSave &&
         !formDGJGujaratSave &&
+        !formDRajasthanSave &&
+        !formARajasthanSave &&
         isFormAGJGujaratContext(
           parsedFormHeaderForSave || formHeader,
           currentItem,
@@ -37373,8 +38191,11 @@ const Statutory = ({ userEmail, userRole }) => {
       const form17BSave =
         !form27CSave &&
         !formBGJGujaratSave &&
+        !formBRajasthanSave &&
         !formDGJGujaratSave &&
+        !formDRajasthanSave &&
         !formAGJGujaratSave &&
+        !formARajasthanSave &&
         isForm17BStatutoryContext(
           currentItem,
           draftFileNameForSave,
@@ -37503,6 +38324,13 @@ const Statutory = ({ userEmail, userRole }) => {
         formFileModalData?.sheetText || '',
         headersToUse
       );
+      const formCRajasthanSave = isFormCRajasthanContext(
+        parsedFormHeaderForSave || formHeader,
+        currentItem,
+        draftFileNameForSave || draftFileNameForSaveEarly,
+        formFileModalData?.sheetText || '',
+        headersToUse
+      );
       const formXXIAPFinesSave = isFormXXIAPRegisterOfFinesContext(
         parsedFormHeaderForSave || formHeader,
         currentItem,
@@ -37518,6 +38346,7 @@ const Statutory = ({ userEmail, userRole }) => {
       );
       const formASave =
         !formAGJGujaratSave &&
+        !formARajasthanSave &&
         (isFormAMusterRollContext(parsedFormHeaderForSave || formHeader) ||
           isFormAMusterRollRowContext(
             parsedFormHeaderForSave || formHeader,
@@ -38779,12 +39608,47 @@ const Statutory = ({ userEmail, userRole }) => {
           throw new Error('Could not locate Form XX Register of Deductions table in template.');
         }
 
-        const formXXRows = prepareFormXXAPDeductionsExportRows(
+        const formXXRowsRaw = prepareFormXXAPDeductionsExportRows(
           formXXHeaders,
           tableDataForSave,
           selectedMonth,
           currentItem
         );
+        const formXXRows = formCRajasthanSave
+          ? applyFormCRajasthanNilToMappedRows(formXXRowsRaw, formXXHeaders)
+          : formXXRowsRaw;
+        let formXXHeaderDataForSave = headerDataForSave;
+        if (formCRajasthanSave) {
+          const resolvedSiteForCRJSave = resolveStatutorySiteNameForContractorAutofill(currentItem, {
+            siteFromUrl,
+            allowedSiteNameList,
+            allRows: statutoryData,
+            resolveSiteFn: typeof resolveSiteDisplayName === 'function' ? resolveSiteDisplayName : null,
+          });
+          const sitesForCRJSave =
+            Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+              ? siteDetailsList
+              : readSiteDetailsCache() || [];
+          const stateHintCRJSave = String(currentItem?.state ?? currentItem?.State ?? '').trim();
+          const siteForCRJSave = resolvedSiteForCRJSave
+            ? findSiteDetailByName(sitesForCRJSave, resolvedSiteForCRJSave, stateHintCRJSave)
+            : null;
+          formXXHeaderDataForSave = prepareFormCRajasthanDownloadHeaderData(
+            headerDataForSave,
+            enrichFormCRajasthanDisplayHeader(
+              parsedFormHeaderForSave || formHeader,
+              draftFileNameForSave,
+              currentItem,
+              formXXHeaders,
+              formFileModalData?.sheetText || ''
+            ),
+            {
+              establishmentText: siteForCRJSave
+                ? buildSiteEstablishmentNameAndAddress(siteForCRJSave)
+                : '',
+            }
+          );
+        }
         const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
         ({ blob, fileName } = await buildFormXXAPWorkbookWithTemplateStyles({
           templateArrayBuffer,
@@ -38793,10 +39657,19 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedHeaderRowIndex: saveHeaderRowIndex,
           parsedDataStartIndex: saveDataStartIndex,
           parsedTableStartCol: saveTableStartCol,
-          parsedFormHeader: parsedFormHeaderForSave || formHeader,
-          headerFormData: headerDataForSave,
+          parsedFormHeader: formCRajasthanSave
+            ? enrichFormCRajasthanDisplayHeader(
+                parsedFormHeaderForSave || formHeader,
+                draftFileNameForSave,
+                currentItem,
+                formXXHeaders,
+                formFileModalData?.sheetText || ''
+              )
+            : parsedFormHeaderForSave || formHeader,
+          headerFormData: formXXHeaderDataForSave,
           formFileName: draftFileNameForSave,
-          sheetNameHint: formXXSheetName
+          sheetNameHint: formXXSheetName,
+          headerWriteMode: formCRajasthanSave ? 'adjacent' : 'combined',
         }));
       } else if (form26ASave && templateWb) {
         const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
@@ -38836,6 +39709,51 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedTableStartCol: formFileModalData?.tableStartCol ?? 0,
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           headerFormData: headerDataForSave,
+          formFileName: draftFileNameForSave,
+        }));
+      } else if (formDRajasthanSave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const formDRJHeaders = resolveFormDRajasthanTableHeaders(
+          Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : []
+        );
+        const { fullMonth: drjFullMonth, year: drjYear } = resolveForm25DisplayPeriodMonthYear(
+          selectedMonth,
+          currentItem,
+          parsedFormHeaderForSave?.wagePeriodText || formFileModalData?.parsedFormHeader?.wagePeriodText || ''
+        );
+        const drjHeaderData = prepareFormDRajasthanDownloadHeaderData(
+          headerDataForSave,
+          enrichFormDRajasthanDisplayHeader(
+            parsedFormHeaderForSave || formHeader,
+            draftFileNameForSave,
+            currentItem,
+            formDRJHeaders,
+            formFileModalData?.sheetText || ''
+          ),
+          {
+            establishmentText: String(
+              headerDataForSave?.statutory_establishment_name ||
+                headerDataForSave?.form_d_rj_establishment ||
+                ''
+            ).trim(),
+            principalEmployerText: String(
+              headerDataForSave?.statutory_principal_employer ||
+                headerDataForSave?.form_d_rj_principal_employer ||
+                ''
+            ).trim(),
+            periodText: buildFormDRajasthanPeriodLine(drjFullMonth, drjYear),
+          }
+        );
+        ({ blob, fileName } = await buildFormDRajasthanWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: tableDataForSave,
+          headersToUse: formDRJHeaders,
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedTableStartCol: formFileModalData?.tableStartCol ?? 0,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          headerFormData: drjHeaderData,
+          preferredSheetName: resolvedSaveSheetNameForBuild || formFileModalData?.sheetName || '',
           formFileName: draftFileNameForSave,
         }));
       } else if (formDGJGujaratSave && templateWb) {
@@ -38892,6 +39810,41 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           headerFormData: headerDataForSave,
           formFileName: draftFileNameForSave,
+          formatStatutoryDateDisplay
+        }));
+      } else if (formBRajasthanSave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const formBRJHeaders = resolveFormBRajasthanTableHeaders(
+          Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : []
+        );
+        ({ blob, fileName } = await buildFormBRajasthanWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: tableDataForSave,
+          headersToUse: formBRJHeaders,
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedTableStartCol: formFileModalData?.tableStartCol ?? 0,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          headerFormData: headerDataForSave,
+          formFileName: draftFileNameForSave,
+          formatStatutoryDateDisplay
+        }));
+      } else if (formARajasthanSave && templateWb) {
+        const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const formARJHeaders = resolveFormARajasthanExportHeaders(
+          Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : []
+        );
+        ({ blob, fileName } = await buildFormARajasthanWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: tableDataForSave,
+          headersToUse: formARJHeaders,
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedTableStartCol: formFileModalData?.tableStartCol ?? 0,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          headerFormData: headerDataForSave,
+          formFileName: draftFileNameForSave,
+          employeesOverride: resolveStatutoryEmployeesForSaveOrder(autofillEmployeesRef.current),
           formatStatutoryDateDisplay
         }));
       } else if (formAGJGujaratSave && templateWb) {
@@ -39816,6 +40769,7 @@ const Statutory = ({ userEmail, userRole }) => {
     let skipStatutoryOverlayForFormFKarnatakaLeave = false;
     let skipStatutoryOverlayForFormKGJ = false;
     let skipStatutoryOverlayForFormOGJ = false;
+    let skipStatutoryOverlayForFormDRJ = false;
     const formMGJAutofillState = { active: false, employees: [] };
     let formNGJEmployerAutofillText = '';
 
@@ -39868,6 +40822,16 @@ const Statutory = ({ userEmail, userRole }) => {
         overlayRecords.length > 0
       ) {
         overlayRecords = filterStatutoryRecordsForFormOGJAutofill(
+          overlayRecords,
+          statutoryOverlayState.headers
+        );
+      }
+      if (
+        skipStatutoryOverlayForFormDRJ &&
+        Array.isArray(overlayRecords) &&
+        overlayRecords.length > 0
+      ) {
+        overlayRecords = filterStatutoryRecordsForFormDRJAutofill(
           overlayRecords,
           statutoryOverlayState.headers
         );
@@ -39948,7 +40912,10 @@ const Statutory = ({ userEmail, userRole }) => {
         (/form[\s_-]*q/i.test(formQAutofillFileHint) ||
           isFormQContext(modalData?.parsedFormHeader, modalData?.item, formQAutofillFileHint, currentHeaders));
       if (formQAutofillContext) {
-        currentHeaders = stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount));
+        currentHeaders = resolveFormQDisplayHeaders(
+          stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount)),
+          formQDayCount
+        );
         if (!returnMappedData) {
           setFormFileModalData((prev) =>
             prev ? { ...prev, parsedTableHeaders: currentHeaders } : prev
@@ -41622,9 +42589,35 @@ const Statutory = ({ userEmail, userRole }) => {
             const cleaned = Array.isArray(prev)
               ? prev.filter((row) => !isStatutoryTemplateColumnIndexRow(row, hdrs))
               : [];
-            if (cleaned.length >= employees.length) return cleaned;
-            const next = [...cleaned];
-            while (next.length < employees.length) next.push({});
+            const formDRJTableRows =
+              isFormDRajasthanContext(
+                modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+                modalData?.item || options?.item || null,
+                String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+                modalData?.sheetText || options?.sheetText || '',
+                hdrs
+              ) ||
+              (isFormFileModalOpen &&
+                isFormDRajasthanContext(
+                  formFileModalData?.parsedFormHeader || {},
+                  formFileModalData?.item,
+                  String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+                  formFileModalData?.sheetText || '',
+                  hdrs
+                ));
+            const cleanedForForm =
+              formDRJTableRows && cleaned.length > 0
+                ? expandFormDRajasthanInOutRows(cleaned, hdrs)
+                : cleaned;
+            const targetRows = formDRJTableRows
+              ? employees.length * FORM_D_RJ_ROWS_PER_EMPLOYEE
+              : employees.length;
+            if (cleanedForForm.length >= targetRows) {
+              formTableDataRef.current = cleanedForForm;
+              return cleanedForForm;
+            }
+            const next = [...cleanedForForm];
+            while (next.length < targetRows) next.push({});
             formTableDataRef.current = next;
             return next;
           });
@@ -41982,7 +42975,24 @@ const Statutory = ({ userEmail, userRole }) => {
         );
       const form25DailyHoursGrid =
         form25SkipLossPayAndNationalHolidayBenefit && form25HasExplicitDailyHoursBand;
+      const formDRajasthanDayGridExcluded =
+        isFormDRajasthanContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.sheetText || options?.sheetText || '',
+          currentHeaders
+        ) ||
+        (isFormFileModalOpen &&
+          isFormDRajasthanContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            formFileModalData?.sheetText || '',
+            currentHeaders
+          ));
       let form25DayStatusGrid =
+        !formDRajasthanDayGridExcluded &&
         !form25DailyHoursGrid &&
         (form25SkipLossPayAndNationalHolidayBenefit ||
           formXXVIAutofillContext ||
@@ -42044,6 +43054,23 @@ const Statutory = ({ userEmail, userRole }) => {
         !(
           isFormFileModalOpen &&
           isFormCGJGujaratContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            formFileModalData?.sheetText || '',
+            currentHeaders
+          )
+        ) &&
+        !isFormDRajasthanContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.sheetText || options?.sheetText || '',
+          currentHeaders
+        ) &&
+        !(
+          isFormFileModalOpen &&
+          isFormDRajasthanContext(
             formFileModalData?.parsedFormHeader || {},
             formFileModalData?.item,
             String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
@@ -42361,10 +43388,30 @@ const Statutory = ({ userEmail, userRole }) => {
       if (formBGJGujaratAutofillContext) {
         currentHeaders = resolveFormBGJGujaratTableHeaders(currentHeaders);
       }
+      const formBRajasthanAutofillContext =
+        isFormBRajasthanContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.sheetText || options?.sheetText || '',
+          currentHeaders
+        ) ||
+        (isFormFileModalOpen &&
+          isFormBRajasthanContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            formFileModalData?.sheetText || '',
+            currentHeaders
+          ));
+      if (formBRajasthanAutofillContext) {
+        currentHeaders = resolveFormBRajasthanTableHeaders(currentHeaders);
+      }
       const formXIXPayrollTableAutofillContext =
         formXIXMPAutofillContext ||
         formXIXKarnatakaAutofillContext ||
-        formBGJGujaratAutofillContext;
+        formBGJGujaratAutofillContext ||
+        formBRajasthanAutofillContext;
       if (formXIXPayrollTableAutofillContext) {
         skipStatutoryOverlayForFormXIXMPPayroll = true;
       }
@@ -42438,8 +43485,29 @@ const Statutory = ({ userEmail, userRole }) => {
             formFileModalData?.sheetText || '',
             currentHeaders
           ));
+      const formDRajasthanAutofillContext =
+        isFormDRajasthanContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.sheetText || options?.sheetText || '',
+          currentHeaders
+        ) ||
+        (isFormFileModalOpen &&
+          isFormDRajasthanContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            formFileModalData?.sheetText || '',
+            currentHeaders
+          ));
+      if (formDRajasthanAutofillContext) {
+        form25DayStatusGrid = false;
+        skipStatutoryOverlayForFormDRJ = true;
+      }
       const formDGJGujaratAutofillContext =
-        isFormDGJGujaratContext(
+        !formDRajasthanAutofillContext &&
+        (isFormDGJGujaratContext(
           modalData?.parsedFormHeader || options?.parsedFormHeader || {},
           modalData?.item || options?.item || null,
           String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
@@ -42453,7 +43521,7 @@ const Statutory = ({ userEmail, userRole }) => {
             String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
             formFileModalData?.sheetText || '',
             currentHeaders
-          ));
+          )));
       const formKGJGujaratAutofillContext =
         isFormKGJGujaratContext(
           modalData?.parsedFormHeader || options?.parsedFormHeader || {},
@@ -42474,6 +43542,22 @@ const Statutory = ({ userEmail, userRole }) => {
         currentHeaders = resolveFormKGJGujaratTableHeaders(currentHeaders);
         skipStatutoryOverlayForFormKGJ = true;
       }
+      const formCRajasthanAutofillContext =
+        isFormCRajasthanContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          modalData?.sheetText || options?.sheetText || '',
+          currentHeaders
+        ) ||
+        (isFormFileModalOpen &&
+          isFormCRajasthanContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            formFileModalData?.sheetText || '',
+            currentHeaders
+          ));
       const formOGJGujaratAutofillContext =
         !formKGJGujaratAutofillContext &&
         (isFormOGJGujaratTableLayoutFormHeader(modalData?.parsedFormHeader || options?.parsedFormHeader) ||
@@ -42599,7 +43683,9 @@ const Statutory = ({ userEmail, userRole }) => {
       const formAGJGujaratAutofillContext =
         !formARajasthanAutofillContext &&
         !formBGJGujaratAutofillContext &&
+        !formBRajasthanAutofillContext &&
         !formCGJGujaratAutofillContext &&
+        !formDRajasthanAutofillContext &&
         !formDGJGujaratAutofillContext &&
         (isFormAGJGujaratContext(
           modalData?.parsedFormHeader || options?.parsedFormHeader || {},
@@ -46792,7 +47878,9 @@ const Statutory = ({ userEmail, userRole }) => {
         formXIXMPAutofillContext ||
         formXIXKarnatakaAutofillContext ||
         formBGJGujaratAutofillContext ||
+        formBRajasthanAutofillContext ||
         formPGJAutofillContext ||
+        formQAutofillContext ||
         formXVAutofillContext ||
         formXVRJWageSlipAutofillContext ||
         formXIRJAutofillContext ||
@@ -48940,6 +50028,61 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       if (
+        formBRajasthanAutofillContext &&
+        fastPaginatedAutofill &&
+        !enrichOnlyPhase &&
+        !returnMappedData &&
+        currentHeaders?.length
+      ) {
+        const brjMonthInstant = resolvePayrollMonthIsoCandidates(
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        const cachedBrjTable = getCachedForm15PayrollTableRows(brjMonthInstant);
+        const instantBrjPayrollRows = resolveFormXIXMPPayrollRowsForAutofill(
+          cachedBrjTable?.rows || getPayrollBulkRowsForAutofill() || [],
+          brjMonthInstant
+        );
+        const resolveInstantBrjPayroll =
+          instantBrjPayrollRows.length > 0
+            ? buildFormXIXMPPayrollRowResolver(instantBrjPayrollRows)
+            : null;
+        const brjHdrsInstant = resolveFormBRajasthanTableHeaders(currentHeaders);
+        const quickBrjRows = employeesForMapping.map((empItem, index) => {
+          const emp = unwrapEmp(empItem);
+          const payrollRow =
+            typeof resolveInstantBrjPayroll === 'function' ? resolveInstantBrjPayroll(emp) : null;
+          const row = applyFormBRajasthanEmployeeToRow({}, emp, brjHdrsInstant, {
+            sanitizeValue,
+            formatStatutoryDateDisplay,
+            payDate: String(
+              cachedBrjTable?.meta?.payDate || cachedBrjTable?.meta?.pay_date || form10PayDate || ''
+            ).trim(),
+            rowIndex: employeePageOffset + index,
+            payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
+          });
+          return {
+            ...row,
+            __employeeLookupName: getEmployeeLookupName(emp) || getFallbackName(emp),
+            __employeeLookupId: firstPresent(
+              getPayrollEmployeeId(emp),
+              getFallbackEmployeeId(emp),
+              getFallbackWorkerId(emp)
+            ),
+          };
+        });
+        mergeMappedIntoFormTable(quickBrjRows, true);
+        await yieldToMain();
+        setTableAutofillLoading(false);
+        setTableAutofillProgress(
+          instantBrjPayrollRows.length > 0 ? 'Updating attendance & leave…' : 'Updating payroll, attendance & leave…'
+        );
+      }
+
+      if (
         formPGJAutofillContext &&
         fastPaginatedAutofill &&
         !enrichOnlyPhase &&
@@ -49006,6 +50149,74 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       if (
+        formQAutofillContext &&
+        fastPaginatedAutofill &&
+        !enrichOnlyPhase &&
+        !returnMappedData &&
+        currentHeaders?.length
+      ) {
+        const formQMonthInstant = resolvePayrollMonthIsoCandidates(
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        const cachedFormQTable = getCachedForm15PayrollTableRows(formQMonthInstant);
+        const instantFormQPayrollRows = resolveFormXIXMPPayrollRowsForAutofill(
+          cachedFormQTable?.rows || getPayrollBulkRowsForAutofill() || statutoryPayrollRows || [],
+          formQMonthInstant
+        );
+        const resolveInstantFormQPayroll =
+          instantFormQPayrollRows.length > 0
+            ? buildFormPGJPayrollRowResolverForAutofill(instantFormQPayrollRows)
+            : null;
+        const formQHdrsInstant = resolveFormQDisplayHeaders(
+          stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount)),
+          formQDayCount
+        );
+        const formQMonthEndInstant = resolveFormQMonthEndDateForAutofill(
+          selectedMonth,
+          formatStatutoryDateDisplay
+        );
+        const quickFormQRows = buildFastPaginatedStatutoryGridRows(
+          employeesForMapping,
+          currentHeaders,
+          employeePageOffset,
+          {
+            sanitizeValue,
+            getEmployeeLookupName,
+            getFallbackName,
+            getFallbackEmployeeId,
+            getFallbackWorkerId,
+            getFallbackFatherOrSpouse,
+            getPayrollEmployeeId,
+            firstPresent,
+            formatStatutoryDateDisplay,
+            getEmployeeDateofjoiningRaw,
+          }
+        ).map((row, index) => {
+          const empItem = employeesForMapping[index];
+          const payrollRow =
+            typeof resolveInstantFormQPayroll === 'function'
+              ? resolveInstantFormQPayroll(empItem, row)
+              : null;
+          applyFormQMaharashtraPayrollToRow(row, payrollRow, formQHdrsInstant, {
+            sanitizeValue,
+            monthEndDate: formQMonthEndInstant,
+            overwrite: true,
+          });
+          return row;
+        });
+        mergeMappedIntoFormTable(quickFormQRows, true);
+        await yieldToMain();
+        setTableAutofillLoading(false);
+        setTableAutofillProgress(
+          instantFormQPayrollRows.length > 0 ? 'Updating attendance & leave…' : 'Updating payroll, attendance & leave…'
+        );
+      }
+
+      if (
         formTSEAutofillContext &&
         fastPaginatedAutofill &&
         !enrichOnlyPhase &&
@@ -49062,7 +50273,7 @@ const Statutory = ({ userEmail, userRole }) => {
         );
       }
 
-      if (fastPaginatedAutofill && !enrichOnlyPhase && !returnMappedData && !formXIVMPAutofillContext && !formXIXKarnatakaAutofillContext && !formBGJGujaratAutofillContext && !formMGJGujaratAutofillContext && !formPGJAutofillContext && !formTSEAutofillContext) {
+      if (fastPaginatedAutofill && !enrichOnlyPhase && !returnMappedData && !formXIVMPAutofillContext && !formXIXKarnatakaAutofillContext && !formBGJGujaratAutofillContext && !formBRajasthanAutofillContext && !formMGJGujaratAutofillContext && !formPGJAutofillContext && !formQAutofillContext && !formTSEAutofillContext && !formDRajasthanAutofillContext) {
         const quickMapped = buildFastPaginatedStatutoryGridRows(
           employeesForMapping,
           currentHeaders,
@@ -49268,6 +50479,33 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       if (enrichOnlyPhase) {
+        if (formDRajasthanAutofillContext) {
+          const existingRows = Array.isArray(formTableDataRef.current)
+            ? formTableDataRef.current
+            : [];
+          const collapsedRows = expandFormDRajasthanInOutRows(existingRows, currentHeaders);
+          if (collapsedRows.length !== existingRows.length) {
+            formTableDataRef.current = collapsedRows;
+            setFormTableData(collapsedRows);
+          }
+          const pageRowCount = Math.min(
+            employeesForMapping.length * FORM_D_RJ_ROWS_PER_EMPLOYEE,
+            Math.max(0, (formTableDataRef.current?.length || 0) - employeePageOffset)
+          );
+          mappedData = Array.from({ length: pageRowCount }, (_, index) => {
+            const globalRowIndex = employeePageOffset + index;
+            const src =
+              formTableDataRef.current[globalRowIndex] &&
+              typeof formTableDataRef.current[globalRowIndex] === 'object'
+                ? formTableDataRef.current[globalRowIndex]
+                : {};
+            const row = { ...src };
+            currentHeaders.forEach((header) => {
+              if (row[header] == null) row[header] = '';
+            });
+            return row;
+          });
+        } else {
         mappedData = employeesForMapping.map((_, index) => {
           const globalRowIndex = employeePageOffset + index;
           const src =
@@ -49286,6 +50524,23 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           return row;
         });
+        }
+        if (formDRajasthanAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
+          mappedData.forEach((row, rowIndex) => {
+            const empIndex = resolveFormDRJEmployeeIndex(row, rowIndex);
+            const empItem = employeesForMapping[empIndex];
+            const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+            if (!emp) return;
+            Object.assign(
+              row,
+              applyFormDRajasthanEmployeeToRow(row, emp, currentHeaders, {
+                sanitizeValue,
+                rowIndex,
+                overwrite: true,
+              })
+            );
+          });
+        }
         if (formTSEAutofillContext) {
           mappedData.forEach((row, index) => {
             const emp = unwrapEmp(employeesForMapping[index]);
@@ -49466,6 +50721,36 @@ const Statutory = ({ userEmail, userRole }) => {
             });
           }
         }
+        if (formBRajasthanAutofillContext) {
+          const brjMonthEnrich = resolvePayrollMonthIsoCandidates(
+            selectedMonth,
+            modalData?.item || formFileModalData?.item,
+            modalData?.parsedFormHeader?.wagePeriodText ||
+              formFileModalData?.parsedFormHeader?.wagePeriodText ||
+              ''
+          );
+          const brjPayrollRowsEnrich = resolveFormXIXMPPayrollRowsForAutofill(
+            statutoryPayrollRows,
+            brjMonthEnrich
+          );
+          if (brjPayrollRowsEnrich.length > 0) {
+            const brjHdrsEnrich = resolveFormBRajasthanTableHeaders(currentHeaders);
+            const resolveBrjPayrollEnrich = buildFormXIXMPPayrollRowResolver(brjPayrollRowsEnrich);
+            enrichFormBRajasthanPayrollRows(mappedData, employeesForMapping, brjHdrsEnrich, {
+              sanitizeValue,
+              formatStatutoryDateDisplay,
+              payDate: form10PayDate,
+              overwrite: true,
+              rowIndexOffset: employeePageOffset,
+              payrollRows: brjPayrollRowsEnrich,
+              resolvePayrollRow: (em, formRow, rowIndex) => {
+                const hit = resolveBrjPayrollEnrich(em);
+                if (hit && !hit.fetch_error) return hit;
+                return resolvePayrollRowForPeople(em, brjPayrollRowsEnrich);
+              },
+            });
+          }
+        }
         if (formPGJAutofillContext) {
           const pgjMonthEnrich = resolvePayrollMonthIsoCandidates(
             selectedMonth,
@@ -49497,6 +50782,40 @@ const Statutory = ({ userEmail, userRole }) => {
               overwrite: true,
               rowIndexOffset: employeePageOffset,
               resolvePayrollRow: resolvePgjPayrollEnrich,
+            });
+          }
+        }
+        if (formQAutofillContext) {
+          const formQMonthEnrich = resolvePayrollMonthIsoCandidates(
+            selectedMonth,
+            modalData?.item || formFileModalData?.item,
+            modalData?.parsedFormHeader?.wagePeriodText ||
+              formFileModalData?.parsedFormHeader?.wagePeriodText ||
+              ''
+          );
+          let formQPayrollRowsEnrich = resolveFormXIXMPPayrollRowsForAutofill(
+            statutoryPayrollRows,
+            formQMonthEnrich
+          );
+          if (formQPayrollRowsEnrich.length === 0) {
+            const cachedFormQEnrich = getCachedForm15PayrollTableRows(formQMonthEnrich);
+            formQPayrollRowsEnrich = resolveFormXIXMPPayrollRowsForAutofill(
+              cachedFormQEnrich?.rows || getPayrollBulkRowsForAutofill() || [],
+              formQMonthEnrich
+            );
+          }
+          if (formQPayrollRowsEnrich.length > 0) {
+            const formQHdrsEnrich = resolveFormQDisplayHeaders(
+              stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount)),
+              formQDayCount
+            );
+            const resolveFormQPayrollEnrich = buildFormPGJPayrollRowResolverForAutofill(formQPayrollRowsEnrich);
+            enrichFormQMaharashtraPayrollRows(mappedData, employeesForMapping, formQHdrsEnrich, {
+              sanitizeValue,
+              monthEndDate: resolveFormQMonthEndDateForAutofill(selectedMonth, formatStatutoryDateDisplay),
+              overwrite: true,
+              rowIndexOffset: employeePageOffset,
+              resolvePayrollRow: resolveFormQPayrollEnrich,
             });
           }
         }
@@ -49834,6 +51153,45 @@ const Statutory = ({ userEmail, userRole }) => {
         }
         if (payrollRowsForBgjGrid.length > 0) {
           resolveXixPayrollRowForGrid = buildFormXIXMPPayrollRowResolver(payrollRowsForBgjGrid);
+        }
+      }
+      if (formBRajasthanAutofillContext) {
+        const brjMonthForGrid = resolvePayrollMonthIsoCandidates(
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        let payrollRowsForBrjGrid = resolveFormXIXMPPayrollRowsForAutofill(
+          statutoryPayrollRows,
+          brjMonthForGrid
+        );
+        if (payrollRowsForBrjGrid.length === 0) {
+          const cachedBrjTable = getCachedForm15PayrollTableRows(brjMonthForGrid);
+          payrollRowsForBrjGrid = resolveFormXIXMPPayrollRowsForAutofill(
+            cachedBrjTable?.rows || getPayrollBulkRowsForAutofill() || [],
+            brjMonthForGrid
+          );
+        }
+        const skipBlockingBrjPayrollFetch =
+          fastPaginatedAutofill || fastModalAutofill || enrichOnlyPhase;
+        if (payrollRowsForBrjGrid.length === 0 && !skipBlockingBrjPayrollFetch) {
+          try {
+            payrollRowsForBrjGrid = await loadFormXIXMPPayrollRowsForAutofill(brjMonthForGrid, {
+              timeoutMs: fastModalAutofill ? 15000 : 45000,
+            });
+            if (payrollRowsForBrjGrid.length > 0) {
+              statutoryPayrollRows = payrollRowsForBrjGrid;
+              formWPayrollLookup = buildPayrollLookupFromRows(payrollRowsForBrjGrid);
+              autofillPayrollLookupRef.current = formWPayrollLookup;
+            }
+          } catch (brjGridPayErr) {
+            console.warn('Form B Rajasthan payroll grid load skipped:', brjGridPayErr?.message || brjGridPayErr);
+          }
+        }
+        if (payrollRowsForBrjGrid.length > 0) {
+          resolveXixPayrollRowForGrid = buildFormXIXMPPayrollRowResolver(payrollRowsForBrjGrid);
         }
       }
       let resolveXvPayrollRowForGrid = null;
@@ -50226,17 +51584,28 @@ const Statutory = ({ userEmail, userRole }) => {
             }
             if (/date\s+of\s+entry\s+into\s+service/.test(headerLower)) {
               row[header] = sanitizeValue(
-                emp.Dateofjoining ||
-                  emp['Dateofjoining'] ||
-                  emp['Date of Joining'] ||
-                  emp.Date_of_Joining ||
-                  emp['Date_of_Joining'] ||
-                  ''
+                formatStatutoryDateDisplay(getEmployeeDateofjoiningRaw(emp)) || ''
               );
               return;
             }
+            if (isFormPGJWorkingHoursFromHeader(header)) {
+              row[header] = sanitizeValue(
+                formatAttendanceShiftTimeDisplay(readFormPGJShiftStartFromEmployee(empItem))
+              );
+              return;
+            }
+            if (isFormPGJWorkingHoursToHeader(header)) {
+              row[header] = sanitizeValue(
+                formatAttendanceShiftTimeDisplay(readFormPGJShiftEndFromEmployee(empItem))
+              );
+              return;
+            }
+            if (isFormQWageTailHeader(header)) {
+              row[header] = '';
+              return;
+            }
             if (
-              /working\s+hours|interval\s+for\s+rest|date\s+of\s+the\s+month/.test(headerLower) ||
+              /interval\s+for\s+rest|date\s+of\s+the\s+month/.test(headerLower) ||
               /^date\s+of\s+the\s+month_\d{1,2}$/i.test(String(header || '').trim())
             ) {
               row[header] = '';
@@ -50455,7 +51824,8 @@ const Statutory = ({ userEmail, userRole }) => {
           if (
             (formXIXMPAutofillContext && isFormXIXMPSkipPeopleAutofillHeader(header)) ||
             (formXIXKarnatakaAutofillContext && isFormXIXKASkipPeopleAutofillHeader(header)) ||
-            (formBGJGujaratAutofillContext && isFormBGJSkipPeopleAutofillHeader(header))
+            (formBGJGujaratAutofillContext && isFormBGJSkipPeopleAutofillHeader(header)) ||
+            (formBRajasthanAutofillContext && isFormBRJSkipPeopleAutofillHeader(header))
           ) {
             if (formXIXKarnatakaAutofillContext && isFormXIXKARateHeader(header)) {
               row[header] = FORM_XIX_KA_RATE_DEFAULT;
@@ -50832,15 +52202,30 @@ const Statutory = ({ userEmail, userRole }) => {
           }
 
           if (
+            formCRajasthanAutofillContext &&
+            isFormCRJDeductionNilHeader(header)
+          ) {
+            row[header] = 'NIL';
+            return;
+          }
+
+          if (
             formXXAPClraWorkmenAutofillContext &&
             ((formXXAPDeductionsAutofillContext && isFormXXAPSkipAutofillHeader(header)) ||
               (formCGJGujaratAutofillContext && isFormCGJSkipAutofillHeader(header)) ||
-              (formXXIAPFinesAutofillContext && isFormXXIAPSkipAutofillHeader(header)) ||
-              (form12AdvancesAutofillContext &&
-                isForm12AdvancesSkipAutofillHeader(header) &&
+              (formXXIAPFinesAutofillContext &&
+                isFormXXIAPSkipAutofillHeader(header) &&
                 !isForm12AdvancesSerialHeader(header)))
           ) {
             row[header] = '';
+            return;
+          }
+
+          if (
+            formCRajasthanAutofillContext &&
+            isFormCGJNameHeader(header)
+          ) {
+            row[header] = sanitizeValue(getFormXXIIIEmployeeFullName(emp));
             return;
           }
 
@@ -50852,6 +52237,14 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
+          if (formDRajasthanAutofillContext && isFormDRJNameHeader(header)) {
+            row[header] = sanitizeValue(readFormDRJEmployeeFullName(emp));
+            return;
+          }
+          if (formDRajasthanAutofillContext && isFormDRJPlaceOfWorkHeader(header)) {
+            row[header] = sanitizeValue(readFormDRJDesignation(emp));
+            return;
+          }
           if (formDGJGujaratAutofillContext && isFormDGJNameHeader(header)) {
             row[header] = sanitizeValue(getFormXXIIIEmployeeFullName(emp));
             return;
@@ -50865,6 +52258,7 @@ const Statutory = ({ userEmail, userRole }) => {
           if (
             formXXAPClraWorkmenAutofillContext &&
             !formCGJGujaratAutofillContext &&
+            !formDRajasthanAutofillContext &&
             !formDGJGujaratAutofillContext &&
             isFormXXAPWorkmenNameHeader(header) &&
             !isFormXXAPDuplicateHeader(header)
@@ -50876,6 +52270,7 @@ const Statutory = ({ userEmail, userRole }) => {
           if (
             formXXAPClraWorkmenAutofillContext &&
             !formCGJGujaratAutofillContext &&
+            !formDRajasthanAutofillContext &&
             !formDGJGujaratAutofillContext &&
             isFormXXAPFatherHusbandHeader(header) &&
             !isFormXXAPDuplicateHeader(header)
@@ -50884,7 +52279,7 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
-          if (formXXAPClraWorkmenAutofillContext && !formCGJGujaratAutofillContext && !formDGJGujaratAutofillContext && isFormXXAPNatureOfEmploymentHeader(header)) {
+          if (formXXAPClraWorkmenAutofillContext && !formCGJGujaratAutofillContext && !formDRajasthanAutofillContext && !formDGJGujaratAutofillContext && isFormXXAPNatureOfEmploymentHeader(header)) {
             row[header] = sanitizeValue(
               emp.Designation ||
                 emp['Designation'] ||
@@ -52233,6 +53628,14 @@ const Statutory = ({ userEmail, userRole }) => {
             }
 
             if (
+              formCRajasthanAutofillContext &&
+              isFormCRJDeductionNilHeader(header)
+            ) {
+              row[header] = 'NIL';
+              return;
+            }
+
+            if (
               (formXXAPDeductionsAutofillContext && isFormXXAPSkipAutofillHeader(header)) ||
               (formCGJGujaratAutofillContext && isFormCGJSkipAutofillHeader(header)) ||
               (formKGJGujaratAutofillContext && isFormKGJSkipPeopleAutofillHeader(header)) ||
@@ -52242,11 +53645,24 @@ const Statutory = ({ userEmail, userRole }) => {
               return;
             }
 
+            if (formCRajasthanAutofillContext && isFormCGJNameHeader(header)) {
+              row[header] = sanitizeValue(getFormXXIIIEmployeeFullName(emp));
+              return;
+            }
+
             if (formCGJGujaratAutofillContext && isFormCGJNameHeader(header)) {
               row[header] = sanitizeValue(getFormXXIIIEmployeeFullName(emp));
               return;
             }
 
+            if (formDRajasthanAutofillContext && isFormDRJNameHeader(header)) {
+              row[header] = sanitizeValue(readFormDRJEmployeeFullName(emp));
+              return;
+            }
+            if (formDRajasthanAutofillContext && isFormDRJPlaceOfWorkHeader(header)) {
+              row[header] = sanitizeValue(readFormDRJDesignation(emp));
+              return;
+            }
             if (formDGJGujaratAutofillContext && isFormDGJNameHeader(header)) {
               row[header] = sanitizeValue(getFormXXIIIEmployeeFullName(emp));
               return;
@@ -52686,6 +54102,25 @@ const Statutory = ({ userEmail, userRole }) => {
           );
         }
 
+        if (formBRajasthanAutofillContext && currentHeaders?.length) {
+          const brjPayrollRow =
+            typeof resolveXixPayrollRowForGrid === 'function'
+              ? resolveXixPayrollRowForGrid(emp)
+              : Array.isArray(statutoryPayrollRows) && statutoryPayrollRows.length > 0
+                ? resolveFormBRajasthanPayrollRowForEmployee(emp, statutoryPayrollRows)
+                : null;
+          Object.assign(
+            row,
+            applyFormBRajasthanEmployeeToRow(row, emp, currentHeaders, {
+              sanitizeValue,
+              rowIndex: globalRowIndex,
+              formatStatutoryDateDisplay,
+              payDate: form10PayDate,
+              payrollRow: brjPayrollRow && !brjPayrollRow.fetch_error ? brjPayrollRow : null,
+            })
+          );
+        }
+
         if (formXVAutofillContext && currentHeaders?.length) {
           const rateHeader = currentHeaders.find(isFormXVRateOfWageHeader);
           if (rateHeader) {
@@ -52758,10 +54193,24 @@ const Statutory = ({ userEmail, userRole }) => {
         if (formARajasthanAutofillContext && currentHeaders?.length) {
           Object.assign(
             row,
-            applyFormAGJGujaratEmployeeToRow(row, emp, currentHeaders, {
+            applyFormAGJGujaratEmployeeToRow(
+              row,
+              emp,
+              resolveFormARajasthanExportHeaders(currentHeaders),
+              {
+                sanitizeValue,
+                rowIndex: globalRowIndex,
+                formatStatutoryDateDisplay,
+              }
+            )
+          );
+        }
+
+        if (formCRajasthanAutofillContext && currentHeaders?.length) {
+          Object.assign(
+            row,
+            applyFormCRajasthanEmployeeToRow(row, emp, currentHeaders, {
               sanitizeValue,
-              rowIndex: globalRowIndex,
-              formatStatutoryDateDisplay,
             })
           );
         }
@@ -52882,6 +54331,23 @@ const Statutory = ({ userEmail, userRole }) => {
         return row;
       });
       }
+
+      if (formDRajasthanAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
+        mappedData = expandFormDRajasthanInOutRows(mappedData, currentHeaders);
+        mappedData.forEach((row, rowIndex) => {
+          const empIndex = resolveFormDRJEmployeeIndex(row, rowIndex);
+          const empItem = employeesForMapping[empIndex];
+          const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+          if (!emp) return;
+          Object.assign(
+            row,
+            applyFormDRajasthanEmployeeToRow(row, emp, currentHeaders, {
+              sanitizeValue,
+              rowIndex,
+            })
+          );
+        });
+      }
       }
 
       if (apShopsRegisterAutofillContext && Array.isArray(mappedData)) {
@@ -52995,6 +54461,7 @@ const Statutory = ({ userEmail, userRole }) => {
           if (
             isLikelyForm10 ||
             formDAutofillContext ||
+            formDRajasthanAutofillContext ||
             apShopsRegisterAutofillContext ||
             formXVIIAutofillContext ||
             formXXIAPFinesAutofillContext ||
@@ -53419,6 +54886,42 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
 
+      if (formBRajasthanAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
+        const brjMonthEarly = resolvePayrollMonthIsoCandidates(
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        const brjPayrollRowsEarly = resolveFormXIXMPPayrollRowsForAutofill(
+          statutoryPayrollRows,
+          brjMonthEarly
+        );
+        if (Array.isArray(brjPayrollRowsEarly) && brjPayrollRowsEarly.length > 0) {
+          const brjHdrsEarly = resolveFormBRajasthanTableHeaders(currentHeaders);
+          const resolveBrjPayrollRowEarly = buildFormXIXMPPayrollRowResolver(brjPayrollRowsEarly);
+          const brjEarlyHits = enrichFormBRajasthanPayrollRows(
+            mappedData,
+            employeesForMapping,
+            brjHdrsEarly,
+            {
+              sanitizeValue,
+              formatStatutoryDateDisplay,
+              payDate: form10PayDate,
+              overwrite: true,
+              rowIndexOffset: employeePageOffset,
+              payrollRows: brjPayrollRowsEarly,
+              resolvePayrollRow: (em) => resolveBrjPayrollRowEarly(em),
+            }
+          );
+          if (!returnMappedData && !isStaleAutofillRun() && brjEarlyHits > 0) {
+            mergeMappedIntoFormTable(mappedData, true);
+          }
+          console.log(`Form B Rajasthan payroll enrich (post-preload): ${brjEarlyHits}/${mappedData.length} row(s)`);
+        }
+      }
+
       if (formPGJAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
         const pgjMonthEarly = resolvePayrollMonthIsoCandidates(
           selectedMonth,
@@ -53460,6 +54963,50 @@ const Statutory = ({ userEmail, userRole }) => {
             mergeMappedIntoFormTable(mappedData, true);
           }
           console.log(`Form P Gujarat payroll enrich (post-preload): ${pgjEarlyHits}/${mappedData.length} row(s)`);
+        }
+      }
+
+      if (formQAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
+        const formQMonthEarly = resolvePayrollMonthIsoCandidates(
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        let formQPayrollRowsEarly = resolveFormXIXMPPayrollRowsForAutofill(
+          statutoryPayrollRows,
+          formQMonthEarly
+        );
+        if (formQPayrollRowsEarly.length === 0) {
+          const cachedFormQEarly = getCachedForm15PayrollTableRows(formQMonthEarly);
+          formQPayrollRowsEarly = resolveFormXIXMPPayrollRowsForAutofill(
+            cachedFormQEarly?.rows || getPayrollBulkRowsForAutofill() || [],
+            formQMonthEarly
+          );
+        }
+        if (Array.isArray(formQPayrollRowsEarly) && formQPayrollRowsEarly.length > 0) {
+          const formQHdrsEarly = resolveFormQDisplayHeaders(
+            stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount)),
+            formQDayCount
+          );
+          const resolveFormQPayrollRowEarly = buildFormPGJPayrollRowResolverForAutofill(formQPayrollRowsEarly);
+          const formQEarlyHits = enrichFormQMaharashtraPayrollRows(
+            mappedData,
+            employeesForMapping,
+            formQHdrsEarly,
+            {
+              sanitizeValue,
+              monthEndDate: resolveFormQMonthEndDateForAutofill(selectedMonth, formatStatutoryDateDisplay),
+              overwrite: true,
+              rowIndexOffset: employeePageOffset,
+              resolvePayrollRow: resolveFormQPayrollRowEarly,
+            }
+          );
+          if (!returnMappedData && !isStaleAutofillRun() && formQEarlyHits > 0) {
+            mergeMappedIntoFormTable(mappedData, true);
+          }
+          console.log(`Form Q Maharashtra payroll enrich (post-preload): ${formQEarlyHits}/${mappedData.length} row(s)`);
         }
       }
 
@@ -54089,6 +55636,90 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
 
+      if (formDRajasthanAutofillContext && Array.isArray(mappedData)) {
+        try {
+          const drjMonthCandidates = resolvePayrollMonthIsoCandidates(
+            selectedMonth,
+            modalData?.item || formFileModalData?.item,
+            modalData?.parsedFormHeader?.wagePeriodText ||
+              formFileModalData?.parsedFormHeader?.wagePeriodText ||
+              ''
+          );
+          let drjPayrollRows =
+            Array.isArray(statutoryPayrollRows) && statutoryPayrollRows.length > 0
+              ? statutoryPayrollRows
+              : getPayrollBulkRowsForAutofill() || [];
+          const cachedDrjPayroll = getCachedForm15PayrollTableRows(drjMonthCandidates);
+          if (cachedDrjPayroll?.rows?.length > 0) {
+            drjPayrollRows = cachedDrjPayroll.rows;
+          }
+          if (!Array.isArray(drjPayrollRows) || drjPayrollRows.length === 0) {
+            const syncDrjPayroll = getPayrollTableRowsForStatutoryAutofillSync(drjMonthCandidates);
+            if (syncDrjPayroll?.rows?.length > 0) {
+              drjPayrollRows = syncDrjPayroll.rows.map((row) => flattenPayrollEarningColumns(row));
+            }
+          }
+          if (!Array.isArray(drjPayrollRows) || drjPayrollRows.length === 0) {
+            drjPayrollRows = await loadFormXIXMPPayrollRowsForAutofill(drjMonthCandidates, {
+              timeoutMs: enrichOnlyPhase ? 8000 : 15000,
+            });
+          }
+          if (Array.isArray(drjPayrollRows) && drjPayrollRows.length > 0) {
+            statutoryPayrollRows = drjPayrollRows;
+            formWPayrollLookup = buildPayrollLookupFromRows(drjPayrollRows);
+            autofillPayrollLookupRef.current = formWPayrollLookup;
+          }
+
+          let byPayrollPayload = formWPayrollLookup?.byPayrollPayload;
+          const payrollRows = drjPayrollRows;
+          if (!byPayrollPayload || byPayrollPayload.size === 0) {
+            const refLookup = autofillPayrollLookupRef.current?.byPayrollPayload;
+            if (refLookup?.size > 0) byPayrollPayload = refLookup;
+          }
+          if ((!byPayrollPayload || byPayrollPayload.size === 0) && payrollRows?.length) {
+            byPayrollPayload = buildPayrollLookupFromRows(payrollRows).byPayrollPayload;
+          }
+          let formDRJPayrollFilled = 0;
+          for (let rowIndex = 0; rowIndex < mappedData.length; rowIndex += 1) {
+            const row = mappedData[rowIndex];
+            const empIndex = resolveFormDRJEmployeeIndex(row, rowIndex);
+            const empItem = employeesForMapping[empIndex];
+            const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+            let matchedPayrollRow = resolveFormXIXMPPayrollRowForEmployee(emp || {}, payrollRows || []);
+            if (!matchedPayrollRow || matchedPayrollRow.fetch_error) {
+              matchedPayrollRow = resolveForm10PayrollRow(
+                emp || {},
+                row,
+                currentHeaders,
+                byPayrollPayload,
+                payrollRows
+              );
+            }
+            if (
+              matchedPayrollRow &&
+              !matchedPayrollRow.fetch_error &&
+              applyFormDRajasthanPayrollToRow(row, matchedPayrollRow, currentHeaders, {
+                overwrite: true,
+                sanitizeValue,
+              })
+            ) {
+              formDRJPayrollFilled += 1;
+            }
+          }
+          if (formDRJPayrollFilled > 0) {
+            console.log(
+              `Form D Rajasthan SamplePayroll paid_days enrich: ${formDRJPayrollFilled} row(s)`
+            );
+            if (!returnMappedData) mergeMappedIntoFormTable(mappedData, true);
+          }
+        } catch (formDRJPayrollErr) {
+          console.warn(
+            'Form D Rajasthan payroll enrich skipped:',
+            formDRJPayrollErr?.message || formDRJPayrollErr
+          );
+        }
+      }
+
       if (formDAutofillContext && Array.isArray(mappedData)) {
         try {
           const formDPayrollFilled = await enrichFormDPayrollRows({ overwrite: true });
@@ -54176,6 +55807,7 @@ const Statutory = ({ userEmail, userRole }) => {
                         formXXIIIAutofillContext ||
                         formXIXKarnatakaAutofillContext ||
                         formTSEAutofillContext ||
+                        formDRajasthanAutofillContext ||
                         form25DayStatusGrid ||
                         form25DailyHoursGrid ||
                         formXXIIAutofillContext ||
@@ -54186,6 +55818,8 @@ const Statutory = ({ userEmail, userRole }) => {
                         formXIXKarnatakaAutofillContext ||
                         formTSEAutofillContext
                           ? 15000
+                          : formDRajasthanAutofillContext
+                            ? 8000
                           : form25DayStatusGrid || form25DailyHoursGrid
                             ? 8000
                             : form25SkipLossPayAndNationalHolidayBenefit
@@ -54203,6 +55837,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 formXXIIIAutofillContext ||
                 formXIXKarnatakaAutofillContext ||
                 formTSEAutofillContext ||
+                formDRajasthanAutofillContext ||
                 form25DayStatusGrid ||
                 form25DailyHoursGrid ||
                 formXXIIAutofillContext ||
@@ -54220,6 +55855,10 @@ const Statutory = ({ userEmail, userRole }) => {
                         ? 3000
                         : 8000
                       : 60000
+                    : formDRajasthanAutofillContext
+                      ? enrichOnlyPhase
+                        ? 8000
+                        : 15000
                     : form25DayStatusGrid || form25DailyHoursGrid
                       ? 60000
                       : fastModalAutofill
@@ -54410,6 +56049,12 @@ const Statutory = ({ userEmail, userRole }) => {
             const form25WorkCommencesHeader = currentHeaders.find((header) => isForm25WorkCommencesHeader(header));
             const form25WorkEndsHeader = currentHeaders.find((header) => isForm25WorkEndsHeader(header));
             const form25SchemeOfShiftsHeader = currentHeaders.find((header) => isForm25SchemeOfShiftsHeader(header));
+            const formQWorkingHoursFromHeader = formQAutofillContext
+              ? currentHeaders.find((header) => isFormPGJWorkingHoursFromHeader(header))
+              : null;
+            const formQWorkingHoursToHeader = formQAutofillContext
+              ? currentHeaders.find((header) => isFormPGJWorkingHoursToHeader(header))
+              : null;
 
             const totalHoursHeader = currentHeaders.find((header) => {
               const h = String(header || '').toLowerCase().trim();
@@ -54463,6 +56108,7 @@ const Statutory = ({ userEmail, userRole }) => {
 
             const needsForm25ShiftMerge =
               form25WorkCommencesHeader || form25WorkEndsHeader || form25SchemeOfShiftsHeader;
+            const needsFormQShiftMerge = formQWorkingHoursFromHeader || formQWorkingHoursToHeader;
             const needsAttendanceHoursMerge =
               totalHoursHeader ||
               totalHoursWorkedAggHeader ||
@@ -54470,7 +56116,8 @@ const Statutory = ({ userEmail, userRole }) => {
               dailyWorkedHoursHeader ||
               normalHoursHeader ||
               dateDayHeaders.length > 0 ||
-              needsForm25ShiftMerge;
+              needsForm25ShiftMerge ||
+              needsFormQShiftMerge;
             const needsForm10OvertimeMerge = isLikelyForm10;
             const needsFormXXIIIOvertimeMerge = formXXIIIAutofillContext;
             const needsFormXIXKarnatakaOvertimeMerge = formXIXKarnatakaAutofillContext;
@@ -54868,7 +56515,10 @@ const Statutory = ({ userEmail, userRole }) => {
               };
 
               await processInChunks(mappedData, 30, (row, rowIndex) => {
-                const empItem = employeesForMapping[rowIndex];
+                const empIndex = formDRajasthanAutofillContext
+                  ? resolveFormDRJEmployeeIndex(row, rowIndex)
+                  : rowIndex;
+                const empItem = employeesForMapping[empIndex];
                 const emp = empItem && (empItem.Employee || empItem.employee || empItem);
                 const idCandidates = Array.from(
                   new Set(
@@ -54981,6 +56631,16 @@ const Statutory = ({ userEmail, userRole }) => {
                   if (form25SchemeOfShiftsHeader) {
                     row[form25SchemeOfShiftsHeader] = getAttendanceShiftNameRaw(shiftTemplateRec);
                   }
+                  if (formQWorkingHoursFromHeader && !String(row[formQWorkingHoursFromHeader] || '').trim()) {
+                    row[formQWorkingHoursFromHeader] = formatAttendanceShiftTimeDisplay(
+                      getAttendanceShiftStartRaw(shiftTemplateRec)
+                    );
+                  }
+                  if (formQWorkingHoursToHeader && !String(row[formQWorkingHoursToHeader] || '').trim()) {
+                    row[formQWorkingHoursToHeader] = formatAttendanceShiftTimeDisplay(
+                      getAttendanceShiftEndRaw(shiftTemplateRec)
+                    );
+                  }
 
                   const totalHoursValue = matchedAttendance
                     ? String(matchedAttendance.TotalHours || matchedAttendance.totalHours || '')
@@ -55021,8 +56681,13 @@ const Statutory = ({ userEmail, userRole }) => {
                     const isCurrentSelectedMonth =
                       targetYear === today.getFullYear() && targetMonthIndex === today.getMonth();
                     dateDayHeaders.forEach(({ header, day }) => {
+                      if (formDRajasthanAutofillContext) return;
                       const dayDate = new Date(targetYear, targetMonthIndex, day);
                       if (dayDate.getMonth() !== targetMonthIndex) return;
+                      if (shouldSkipStatutoryDayAttendanceForEmployee(emp, dayDate, row, currentHeaders)) {
+                        row[header] = '';
+                        return;
+                      }
                       if (isCurrentSelectedMonth && day > today.getDate()) {
                         row[header] = '';
                         return;
@@ -55051,6 +56716,8 @@ const Statutory = ({ userEmail, userRole }) => {
                           isFormTSEKarnatakaDefaultAttendanceEmployee(emp)
                         ) {
                           row[header] = formatFormTSEKarnatakaDayAttendanceCode(dayDate);
+                        } else if (formQAutofillContext) {
+                          row[header] = formatFormQDayAttendanceCode(rec, dayDate);
                         } else {
                           row[header] = formatForm25DayAttendanceCode(rec, dayDate);
                         }
@@ -55236,6 +56903,113 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
 
+      if (formDRajasthanAutofillContext && Array.isArray(mappedData)) {
+        try {
+          const wagePeriodLine =
+            modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            '';
+          const { year: targetYear, monthIndex: targetMonthIndex } = resolveStatutoryAttendanceMonthYear(
+            selectedMonth,
+            modalData?.item || formFileModalData?.item,
+            wagePeriodLine
+          );
+          const startDate = new Date(targetYear, targetMonthIndex, 1);
+          const endDate = new Date(targetYear, targetMonthIndex + 1, 0);
+          const sdate = formatLocalDateYYYYMMDD(startDate);
+          const edate = formatLocalDateYYYYMMDD(endDate);
+
+          let attRecords =
+            (Array.isArray(autofillAttendanceCacheRef.current?.records) &&
+            autofillAttendanceCacheRef.current.sdate === sdate &&
+            autofillAttendanceCacheRef.current.edate === edate
+              ? autofillAttendanceCacheRef.current.records
+              : []) || [];
+
+          if (attRecords.length === 0) {
+            const prefetched = getCachedAttendanceData(sdate, edate);
+            let raw = prefetched?.success ? prefetched.data : null;
+            if (!raw) {
+              const fetched = await fetchAttendanceData({
+                sdate,
+                edate,
+                force: true,
+                timeoutMs: enrichOnlyPhase ? 8000 : 15000,
+              }).catch((err) => {
+                console.warn('Form D Rajasthan attendance fetch failed:', err?.message || err);
+                return {};
+              });
+              if (fetched?.success) raw = fetched.data;
+            }
+            if (raw) {
+              attRecords = expandAttendanceToDailyRows(raw).filter((rec) => {
+                const k = normalizeAttendanceDateKey(rec?.date ?? rec?.Date ?? '');
+                return Boolean(k && k >= sdate && k <= edate);
+              });
+              if (attRecords.length > 0) {
+                autofillAttendanceCacheRef.current = {
+                  sdate,
+                  edate,
+                  records: attRecords,
+                  targetMonthIndex,
+                  targetYear,
+                  otRecordsByEmployeeKey: null,
+                };
+              }
+            }
+          }
+
+          if (attRecords.length > 0) {
+            const attFilled = enrichFormDRajasthanRowsFromAttendance(
+              mappedData,
+              currentHeaders,
+              attRecords,
+              {
+                targetYear,
+                targetMonthIndex,
+                overwrite: true,
+                employees: employeesForMapping,
+              }
+            );
+            if (attFilled > 0) {
+              console.log(`Form D Rajasthan attendance enrich: ${attFilled} cell(s)`);
+            } else {
+              console.warn(
+                'Form D Rajasthan attendance: records found but no IN/OUT cells matched employees/dates'
+              );
+            }
+          } else {
+            console.warn(`Form D Rajasthan attendance: no records for ${sdate}..${edate}`);
+          }
+          mappedData.forEach((row, rowIndex) => {
+            const stored = Number(row.__formDRJEmployeeIndex);
+            const empIndex =
+              Number.isFinite(stored) &&
+              stored >= 0 &&
+              stored < employeesForMapping.length
+                ? stored
+                : rowIndex;
+            const empItem = employeesForMapping[empIndex];
+            const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+            if (!emp) return;
+            Object.assign(
+              row,
+              applyFormDRajasthanEmployeeToRow(row, emp, currentHeaders, {
+                sanitizeValue,
+                rowIndex: employeePageOffset + empIndex,
+                overwrite: true,
+              })
+            );
+          });
+          if (!returnMappedData) mergeMappedIntoFormTable(mappedData, true);
+        } catch (formDRJAttErr) {
+          console.warn(
+            'Form D Rajasthan attendance enrich skipped:',
+            formDRJAttErr?.message || formDRJAttErr
+          );
+        }
+      }
+
       if (formDAutofillContext && Array.isArray(mappedData)) {
         try {
           const formDPayrollFilled = await enrichFormDPayrollRows({ overwrite: true });
@@ -55256,6 +57030,8 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       if (
+        !formDRajasthanAutofillContext &&
+        !formQAutofillContext &&
         (form25DayStatusGrid ||
           formXXIIAutofillContext ||
           formTSEAutofillContext ||
@@ -55305,10 +57081,14 @@ const Statutory = ({ userEmail, userRole }) => {
             const useFormTDefaultAttendance =
               formTSEAutofillContext && isFormTSEKarnatakaDefaultAttendanceEmployee(emp);
             form25DayHeaders.forEach(({ header, day }) => {
-              if (!useFormTDefaultAttendance && String(row[header] ?? '').trim()) return;
-              if (isCurrentSelectedMonth && day > now.getDate()) return;
               const dayDate = new Date(targetYear, targetMonthIndex, day);
               if (dayDate.getMonth() !== targetMonthIndex) return;
+              if (shouldSkipStatutoryDayAttendanceForEmployee(emp, dayDate, row, currentHeaders)) {
+                row[header] = '';
+                return;
+              }
+              if (!useFormTDefaultAttendance && String(row[header] ?? '').trim()) return;
+              if (isCurrentSelectedMonth && day > now.getDate()) return;
               row[header] = useFormTDefaultAttendance
                 ? formatFormTSEKarnatakaDayAttendanceCode(dayDate)
                 : formatForm25DayAttendanceCode(null, dayDate);
@@ -55317,6 +57097,31 @@ const Statutory = ({ userEmail, userRole }) => {
         }
         if (formTSEAutofillContext && !returnMappedData) {
           mergeMappedIntoFormTable(mappedData, true);
+        }
+      }
+
+      if (formQAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
+        const formQPreJoinCleared = scrubStatutoryPreJoinDayMarks(
+          mappedData,
+          employeesForMapping,
+          currentHeaders,
+          {
+            selectedMonth,
+            rowIndexOffset: employeePageOffset,
+            item: modalData?.item || formFileModalData?.item,
+            wagePeriodLine:
+              modalData?.parsedFormHeader?.wagePeriodText ||
+              formFileModalData?.parsedFormHeader?.wagePeriodText ||
+              '',
+          }
+        );
+        if (formQPreJoinCleared > 0 && !returnMappedData) {
+          mergeMappedIntoFormTable(mappedData, true);
+        }
+        if (formQPreJoinCleared > 0) {
+          console.log(
+            `Form Q Maharashtra: cleared ${formQPreJoinCleared} pre-join / post-exit day mark(s) for ${selectedMonth || 'selected month'}`
+          );
         }
       }
 
@@ -56117,6 +57922,80 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
 
+      if (formBRajasthanAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
+        const brjMonthCandidates = resolvePayrollMonthIsoCandidates(
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        let brjPayrollRows = resolveFormXIXMPPayrollRowsForAutofill(
+          statutoryPayrollRows,
+          brjMonthCandidates
+        );
+        if (brjPayrollRows.length === 0) {
+          const cachedBrjReload = getCachedForm15PayrollTableRows(brjMonthCandidates);
+          brjPayrollRows = resolveFormXIXMPPayrollRowsForAutofill(
+            cachedBrjReload?.rows || getPayrollBulkRowsForAutofill() || [],
+            brjMonthCandidates
+          );
+          if (!form10PayDate && cachedBrjReload?.meta) {
+            form10PayDate = String(
+              cachedBrjReload.meta.payDate || cachedBrjReload.meta.pay_date || ''
+            ).trim();
+          }
+        }
+        if (brjPayrollRows.length === 0) {
+          try {
+            brjPayrollRows = await loadFormXIXMPPayrollRowsForAutofill(brjMonthCandidates, {
+              timeoutMs: enrichOnlyPhase ? 8000 : 45000,
+            });
+            if (brjPayrollRows.length > 0) {
+              statutoryPayrollRows = brjPayrollRows;
+              formWPayrollLookup = buildPayrollLookupFromRows(brjPayrollRows);
+              autofillPayrollLookupRef.current = formWPayrollLookup;
+            }
+          } catch (brjReloadErr) {
+            console.warn('Form B Rajasthan payroll reload skipped:', brjReloadErr?.message || brjReloadErr);
+          }
+        }
+        if (Array.isArray(brjPayrollRows) && brjPayrollRows.length > 0) {
+          const brjHdrs = resolveFormBRajasthanTableHeaders(currentHeaders);
+          const resolveBrjPayrollRow = buildFormXIXMPPayrollRowResolver(brjPayrollRows);
+          const brjPayrollHits = enrichFormBRajasthanPayrollRows(
+            mappedData,
+            employeesForMapping,
+            brjHdrs,
+            {
+              sanitizeValue,
+              formatStatutoryDateDisplay,
+              payDate: form10PayDate,
+              overwrite: true,
+              rowIndexOffset: employeePageOffset,
+              payrollRows: brjPayrollRows,
+              resolvePayrollRow: (em, formRow, rowIndex) => {
+                const hit = resolveBrjPayrollRow(em);
+                if (hit && !hit.fetch_error) return hit;
+                return resolvePayrollRowForPeople(em, brjPayrollRows);
+              },
+            }
+          );
+          if (!returnMappedData && !isStaleAutofillRun()) {
+            mergeMappedIntoFormTable(mappedData, true);
+          }
+          console.log(`Form B Rajasthan payroll final pass: ${brjPayrollHits}/${mappedData.length} row(s)`);
+        } else {
+          console.warn(
+            `Form B Rajasthan payroll: no rows for ${brjMonthCandidates.join(', ')} — fetch payroll on Payroll page first, then Autofill again`
+          );
+        }
+        if (enrichOnlyPhase && !returnMappedData && !isStaleAutofillRun()) {
+          setTableAutofillProgress('');
+          return;
+        }
+      }
+
       if (formPGJAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
         const pgjMonthCandidates = resolvePayrollMonthIsoCandidates(
           selectedMonth,
@@ -56180,6 +58059,86 @@ const Statutory = ({ userEmail, userRole }) => {
         } else {
           console.warn(
             `Form P Gujarat payroll: no rows for ${pgjMonthCandidates.join(', ')} — fetch payroll on Payroll page first, then Autofill again`
+          );
+        }
+        if (enrichOnlyPhase && !returnMappedData && !isStaleAutofillRun()) {
+          setTableAutofillProgress('');
+          return;
+        }
+      }
+
+      if (formQAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
+        const formQMonthCandidates = resolvePayrollMonthIsoCandidates(
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        let formQPayrollRows = resolveFormXIXMPPayrollRowsForAutofill(
+          statutoryPayrollRows,
+          formQMonthCandidates
+        );
+        if (formQPayrollRows.length === 0) {
+          const cachedFormQReload = getCachedForm15PayrollTableRows(formQMonthCandidates);
+          formQPayrollRows = resolveFormXIXMPPayrollRowsForAutofill(
+            cachedFormQReload?.rows || getPayrollBulkRowsForAutofill() || [],
+            formQMonthCandidates
+          );
+        }
+        if (formQPayrollRows.length === 0) {
+          try {
+            formQPayrollRows = await loadFormXIXMPPayrollRowsForAutofill(formQMonthCandidates, {
+              timeoutMs: enrichOnlyPhase ? 8000 : 45000,
+            });
+            if (formQPayrollRows.length > 0) {
+              statutoryPayrollRows = formQPayrollRows;
+              formWPayrollLookup = buildPayrollLookupFromRows(formQPayrollRows);
+              autofillPayrollLookupRef.current = formWPayrollLookup;
+            }
+          } catch (formQReloadErr) {
+            console.warn('Form Q Maharashtra payroll reload skipped:', formQReloadErr?.message || formQReloadErr);
+          }
+        }
+        const formQMonthEndDate = resolveFormQMonthEndDateForAutofill(
+          selectedMonth,
+          formatStatutoryDateDisplay
+        );
+        const formQHdrs = resolveFormQDisplayHeaders(
+          stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount)),
+          formQDayCount
+        );
+        if (Array.isArray(formQPayrollRows) && formQPayrollRows.length > 0) {
+          const resolveFormQPayrollRow = buildFormPGJPayrollRowResolverForAutofill(formQPayrollRows);
+          const formQPayrollHits = enrichFormQMaharashtraPayrollRows(
+            mappedData,
+            employeesForMapping,
+            formQHdrs,
+            {
+              sanitizeValue,
+              monthEndDate: formQMonthEndDate,
+              overwrite: true,
+              rowIndexOffset: employeePageOffset,
+              resolvePayrollRow: resolveFormQPayrollRow,
+            }
+          );
+          if (!returnMappedData && !isStaleAutofillRun()) {
+            mergeMappedIntoFormTable(mappedData, true);
+          }
+          console.log(`Form Q Maharashtra payroll final pass: ${formQPayrollHits}/${mappedData.length} row(s)`);
+        } else {
+          mappedData.forEach((row) => {
+            applyFormQMaharashtraPayrollToRow(row, null, formQHdrs, {
+              sanitizeValue,
+              monthEndDate: formQMonthEndDate,
+              overwrite: true,
+            });
+          });
+          if (!returnMappedData && !isStaleAutofillRun()) {
+            mergeMappedIntoFormTable(mappedData, true);
+          }
+          console.warn(
+            `Form Q Maharashtra payroll: no rows for ${formQMonthCandidates.join(', ')} — Nil/date-only applied; fetch payroll on Payroll page first for wage columns`
           );
         }
         if (enrichOnlyPhase && !returnMappedData && !isStaleAutofillRun()) {
@@ -57472,6 +59431,10 @@ const Statutory = ({ userEmail, userRole }) => {
           );
         }
       }
+      if (formCRajasthanAutofillContext) {
+        mappedData = applyFormCRajasthanNilToMappedRows(mappedData, currentHeaders);
+        console.log('Applied NIL to Form C RJ deduction columns');
+      }
       if (formXXIAPFinesAutofillContext) {
         const skipHeaders = currentHeaders.filter((header) => isFormXXIAPSkipAutofillHeader(header));
         if (skipHeaders.length > 0) {
@@ -57734,6 +59697,20 @@ const Statutory = ({ userEmail, userRole }) => {
           currentHeaders
         );
       } else if (formQAutofillContext) {
+        scrubStatutoryPreJoinDayMarks(
+          mappedData,
+          employeesForMapping,
+          currentHeaders,
+          {
+            selectedMonth,
+            rowIndexOffset: employeePageOffset,
+            item: modalData?.item || formFileModalData?.item,
+            wagePeriodLine:
+              modalData?.parsedFormHeader?.wagePeriodText ||
+              formFileModalData?.parsedFormHeader?.wagePeriodText ||
+              '',
+          }
+        );
         tableDataToSet = mappedData;
       } else if (formPGJAutofillContext) {
         tableDataToSet = remapFormPGJRowsToHeaders(
@@ -57834,7 +59811,7 @@ const Statutory = ({ userEmail, userRole }) => {
               currentHeaders
             );
             console.log(
-              `Form O Gujarat approved leave autofill: ${formOGJApprovedLeaveHits}/${mappedData.length} row(s) (Leave Type, From, Till) for ${fromDate} to ${toDate}`
+              `Form O Gujarat approved leave autofill: ${formOGJApprovedLeaveHits}/${mappedData.length} row(s) (LeaveCount, From, Till) for ${fromDate} to ${toDate}`
             );
           } catch (formOApprovedApplyErr) {
             console.warn(
@@ -58099,6 +60076,12 @@ const Statutory = ({ userEmail, userRole }) => {
         }
         if (skipStatutoryOverlayForFormOGJ) {
           overlayRecords = filterStatutoryRecordsForFormOGJAutofill(
+            overlayRecords,
+            currentHeaders
+          );
+        }
+        if (skipStatutoryOverlayForFormDRJ) {
+          overlayRecords = filterStatutoryRecordsForFormDRJAutofill(
             overlayRecords,
             currentHeaders
           );
@@ -60764,7 +62747,7 @@ const Statutory = ({ userEmail, userRole }) => {
             wagePeriodText: formHeaderInfo?.wagePeriodText || ''
           };
         }
-        headersToUse = formQRebuild.expandedHeaders;
+        headersToUse = resolveFormQDisplayHeaders(formQRebuild.expandedHeaders, 31);
         const priorRows = tableData.map((row) => ({ ...row }));
         const formQStartCol = formQRebuild.startCol;
         const hasSubCols = Object.keys(subColumnsData).some((k) => (subColumnsData[k] || []).length > 0);
@@ -61065,7 +63048,15 @@ const Statutory = ({ userEmail, userRole }) => {
       const priorHeadersForRemap = [...headersToUse];
       const priorRowsForRemap = tableData.map((row) => ({ ...row }));
       const resolved = resolveFormQTableHeadersForWorkbook(workbook, 31);
-      const formQHeaders = resolved.headers;
+      const formQCanonical = stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(31));
+      const formQHeaders = resolveFormQDisplayHeaders(
+        headersToUse.length > resolved.headers.length
+          ? stripAndNormalizeFormQTableHeaders(headersToUse)
+          : resolved.headers.length >= formQCanonical.length
+            ? resolved.headers
+            : formQCanonical,
+        31
+      );
       let formQTableData = remapFormQRowsToHeaders(priorRowsForRemap, priorHeadersForRemap, formQHeaders);
       const formQFields = resolved.headerFields || [];
       const mergedFields = formQFields;
@@ -63203,6 +65194,35 @@ const Statutory = ({ userEmail, userRole }) => {
             resolvedSheetName = parsedRaw.sheetName || xixSheet;
           }
         }
+        const wantsFormDRajasthanView =
+          isFormDRajasthanContext(null, item, displayFileName, '', []) ||
+          isFormDRajasthanContext(null, item, resolvedFormFileName || '', '', []) ||
+          /form[\s._-]*d[\s._-]*rj|form_d_rj/i.test(
+            [displayFileName, resolvedFormFileName, item?.formName, item?.FormName]
+              .filter(Boolean)
+              .join(' ')
+          );
+        if (wantsFormDRajasthanView && workbook.SheetNames?.length > 1) {
+          const drjSheet = resolveFormDRajasthanWorkbookSheetName(workbook, {
+            ...viewParseHints,
+            item,
+            formHeader: parsedRaw?.formHeader,
+            fileName: displayFileName,
+            formFileName: resolvedFormFileName,
+            preferredSheetName: resolvedSheetName,
+          });
+          if (drjSheet && drjSheet !== resolvedSheetName) {
+            resolvedSheetName = drjSheet;
+            parsedRaw = parseExcelForm(workbook, {
+              ...viewParseHints,
+              preferredSheetName: drjSheet,
+              formHeaderTitle: undefined,
+              formHeaderSubtitle: undefined,
+              formHeader: undefined
+            });
+            resolvedSheetName = parsedRaw.sheetName || drjSheet;
+          }
+        }
         const wantsFormDGJGujaratView =
           isFormDGJGujaratContext(null, item, displayFileName, '', []) ||
           isFormDGJGujaratContext(null, item, resolvedFormFileName || '', '', []) ||
@@ -63398,6 +65418,47 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
 
+        const formDRajasthanFileOpen = isFormDRajasthanContext(
+          parsed.formHeader,
+          item,
+          displayFileName,
+          sheetTextForVariant,
+          parsed.headers
+        );
+        if (formDRajasthanFileOpen) {
+          const priorHeaders = parsed.headers || [];
+          const drjLayout = repairFormDRajasthanTableHeadersFromWorkbook(workbook, {
+            preferredSheetName: parsed.sheetName || resolvedSheetName,
+            fileName: displayFileName,
+            formFileName: resolvedFormFileName,
+            formName: item?.formName || item?.FormName,
+            item,
+            formHeader: parsed.formHeader,
+            parsedFormHeader: parsed.formHeader,
+          });
+          if (drjLayout?.headers?.length) {
+            parsed.headers = resolveFormDRajasthanTableHeaders(drjLayout.headers);
+            parsed.headerRowIndex = drjLayout.headerRowIndex;
+            parsed.dataStartIndex = drjLayout.dataStartIndex;
+            parsed.tableStartCol = drjLayout.tableStartCol ?? parsed.tableStartCol;
+            if (drjLayout.sheetName) parsed.sheetName = drjLayout.sheetName;
+            if (
+              isFormDRajasthanUsingWrongTable(priorHeaders) ||
+              priorHeaders.join('|') !== parsed.headers.join('|')
+            ) {
+              parsed.tableData = [];
+            }
+            parsed.formHeader = enrichFormDRajasthanDisplayHeader(
+              parsed.formHeader,
+              displayFileName,
+              item,
+              parsed.headers,
+              sheetTextForVariant
+            );
+            parsed.subColumns = buildFormDRJSubColumnsFromHeaders(parsed.headers);
+          }
+        }
+
         const formDGJGujaratFileOpen = isFormDGJGujaratContext(
           parsed.formHeader,
           item,
@@ -63469,6 +65530,43 @@ const Statutory = ({ userEmail, userRole }) => {
               parsed.tableData = [];
             }
             parsed.formHeader = enrichFormCGJGujaratDisplayHeader(
+              parsed.formHeader,
+              displayFileName,
+              item,
+              parsed.headers,
+              sheetTextForVariant
+            );
+          }
+        }
+
+        const formCRajasthanFileOpen = isFormCRajasthanContext(
+          parsed.formHeader,
+          item,
+          displayFileName,
+          sheetTextForVariant,
+          parsed.headers
+        );
+        if (formCRajasthanFileOpen) {
+          const priorHeaders = parsed.headers || [];
+          const crjLayout = repairFormCRajasthanTableHeadersFromWorkbook(workbook, {
+            preferredSheetName: parsed.sheetName || resolvedSheetName,
+            fileName: displayFileName,
+            formFileName: resolvedFormFileName,
+            formName: item?.formName || item?.FormName,
+            item,
+            formHeader: parsed.formHeader,
+            parsedFormHeader: parsed.formHeader,
+          });
+          if (crjLayout?.headers?.length) {
+            parsed.headers = crjLayout.headers;
+            parsed.headerRowIndex = crjLayout.headerRowIndex;
+            parsed.dataStartIndex = crjLayout.dataStartIndex;
+            parsed.tableStartCol = crjLayout.tableStartCol ?? parsed.tableStartCol;
+            if (crjLayout.sheetName) parsed.sheetName = crjLayout.sheetName;
+            if (priorHeaders.join('|') !== crjLayout.headers.join('|')) {
+              parsed.tableData = [];
+            }
+            parsed.formHeader = enrichFormCRajasthanDisplayHeader(
               parsed.formHeader,
               displayFileName,
               item,
@@ -63656,7 +65754,10 @@ const Statutory = ({ userEmail, userRole }) => {
           displayFileName
         );
         let tableHeadersForModal = formQFileOpen
-          ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
+          ? resolveFormQDisplayHeaders(
+              stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount)),
+              formQDayCount
+            )
           : formQKarnatakaFileOpen
             ? resolveFormQKarnatakaTableHeaders(parsed.headers || [])
             : formFKarnatakaFileOpen
@@ -64283,6 +66384,48 @@ const Statutory = ({ userEmail, userRole }) => {
           sheetTextForVariant,
           tableHeadersForModal
         );
+        const formDRajasthanModalOpen = isFormDRajasthanContext(
+          formHeaderForModal,
+          item,
+          displayFileName,
+          sheetTextForVariant,
+          tableHeadersForModal
+        );
+        if (formDRajasthanModalOpen && formHeaderForModal) {
+          formHeaderForModal = enrichFormDRajasthanDisplayHeader(
+            formHeaderForModal,
+            displayFileName,
+            item,
+            tableHeadersForModal,
+            sheetTextForVariant
+          );
+        }
+        if (
+          formDRajasthanModalOpen &&
+          isFormDRajasthanUsingWrongTable(tableHeadersForModal)
+        ) {
+          const drjModalLayout = repairFormDRajasthanTableHeadersFromWorkbook(workbook, {
+            preferredSheetName: resolvedSheetName,
+            fileName: displayFileName,
+            formFileName: resolvedFormFileName,
+            formName: item?.formName || item?.FormName,
+            item,
+            formHeader: formHeaderForModal,
+            parsedFormHeader: formHeaderForModal,
+          });
+          if (drjModalLayout?.headers?.length) {
+            tableHeadersForModal = resolveFormDRajasthanTableHeaders(drjModalLayout.headers);
+            parsed.headers = tableHeadersForModal;
+            parsed.headerRowIndex = drjModalLayout.headerRowIndex;
+            parsed.dataStartIndex = drjModalLayout.dataStartIndex;
+            parsed.tableStartCol = drjModalLayout.tableStartCol ?? parsed.tableStartCol;
+            parsed.tableData = [];
+          }
+        }
+        if (formDRajasthanModalOpen) {
+          tableHeadersForModal = resolveFormDRajasthanTableHeaders(tableHeadersForModal);
+          parsed.subColumns = buildFormDRJSubColumnsFromHeaders(tableHeadersForModal);
+        }
         const formDGJGujaratModalOpen = isFormDGJGujaratContext(
           formHeaderForModal,
           item,
@@ -65327,7 +67470,10 @@ const Statutory = ({ userEmail, userRole }) => {
                         headersForSaved = Array.isArray(prev.parsedTableHeaders) ? prev.parsedTableHeaders : [];
                       }
                       const normalizedSampleHeaders = formQSaved
-                        ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
+                        ? resolveFormQDisplayHeaders(
+                            stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount)),
+                            formQDayCount
+                          )
                         : formIISaved
                           ? normalizeFormIIMaharashtraTableHeaders(headersForSaved)
                           : formIWorkmenSaved
@@ -65373,7 +67519,10 @@ const Statutory = ({ userEmail, userRole }) => {
                     );
                     if (!skipPivotFormASampleRows) {
                     let hdrsForRows = formQSaved
-                      ? stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount))
+                      ? resolveFormQDisplayHeaders(
+                          stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount)),
+                          formQDayCount
+                        )
                       : formIISaved
                         ? normalizeFormIIMaharashtraTableHeaders(sampleHeaders)
                         : formIWorkmenSaved
@@ -66521,20 +68670,6 @@ const Statutory = ({ userEmail, userRole }) => {
       baseHeaders = normalizeFormIIMaharashtraTableHeaders(baseHeaders);
     }
     if (
-      isFormARajasthanContext(
-        displayFormHeader,
-        item,
-        fn || formFileModalData?.formFileName || '',
-        formFileModalData?.sheetText || '',
-        baseHeaders
-      ) ||
-      /form[\s._-]*a[\s._-]*rj|\bform_a_rj\b/i.test(
-        `${fn} ${formFileModalData?.formFileName || ''} ${item?.formName || ''} ${item?.FormName || ''}`
-      )
-    ) {
-      return resolveFormARajasthanTableHeaders(baseHeaders);
-    }
-    if (
       isForm11PeriodOfWorkContext(
         displayFormHeader,
         item,
@@ -66619,6 +68754,20 @@ const Statutory = ({ userEmail, userRole }) => {
       return resolveFormXIXRJTableHeaders(baseHeaders);
     }
     if (
+      isFormARajasthanContext(
+        displayFormHeader,
+        item,
+        fn || formFileModalData?.formFileName || '',
+        formFileModalData?.sheetText || '',
+        baseHeaders
+      ) ||
+      /form[\s._-]*a[\s._-]*rj|\bform_a_rj\b/i.test(
+        `${fn} ${formFileModalData?.formFileName || ''} ${item?.formName || ''} ${item?.FormName || ''}`
+      )
+    ) {
+      return resolveFormARajasthanTableHeaders(baseHeaders);
+    }
+    if (
       isFormQKarnatakaTableLayoutFormHeader(displayFormHeader) ||
       isFormQKarnatakaContext(
         displayFormHeader,
@@ -66662,7 +68811,10 @@ const Statutory = ({ userEmail, userRole }) => {
         formQMonthIdx >= 0
           ? new Date(new Date().getFullYear(), formQMonthIdx + 1, 0).getDate()
           : 31;
-      baseHeaders = stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount));
+      baseHeaders = resolveFormQDisplayHeaders(
+        stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount)),
+        formQDayCount
+      );
     }
     if (
       isFormPGJGujaratTableLayoutFormHeader(displayFormHeader) ||
@@ -67079,6 +69231,18 @@ const Statutory = ({ userEmail, userRole }) => {
       )
     ) {
       return remapFormPGJRowsToHeaders(rows, rawHeaders, hdrs);
+    }
+    if (
+      isFormDRajasthanAttendanceTableLayoutFormHeader(displayFormHeader) ||
+      isFormDRajasthanContext(
+        displayFormHeader,
+        item,
+        fn,
+        formFileModalData?.sheetText || '',
+        hdrs
+      )
+    ) {
+      return remapFormDRajasthanRowsToHeaders(rows, rawHeaders, hdrs);
     }
     if (!isFormQContext(displayFormHeader, item, fn, hdrs)) return rows;
     return remapFormQRowsToHeaders(rows, rawHeaders, hdrs);
@@ -67836,6 +70000,154 @@ const Statutory = ({ userEmail, userRole }) => {
       </>
     );
   }, [formLGJAutofillGrid, displayTableHeaders]);
+
+  const formDRJAutofillGrid = useMemo(() => {
+    const item = formFileModalData?.item;
+    const fn = formFileModalData?.fileName || '';
+    const sheetText = formFileModalData?.sheetText || '';
+    return (
+      isFormDRajasthanAttendanceTableLayoutFormHeader(displayFormHeader) ||
+      isFormDRajasthanContext(
+        displayFormHeader,
+        item,
+        fn,
+        sheetText,
+        displayTableHeaders
+      ) ||
+      headersIndicateFormDRajasthanAttendanceTable(displayTableHeaders)
+    );
+  }, [
+    displayFormHeader,
+    displayTableHeaders,
+    formFileModalData?.item,
+    formFileModalData?.fileName,
+    formFileModalData?.sheetText,
+  ]);
+
+  /** Form D Rajasthan: Date + day columns with IN / OUT sub-labels; one employee row with dual punch inputs. */
+  const formDRJGroupedThead = useMemo(() => {
+    if (!formDRJAutofillGrid) return null;
+    const hdrs = displayTableHeaders;
+    if (!Array.isArray(hdrs) || hdrs.length < 6) return null;
+    if (!headersIndicateFormDRajasthanAttendanceTable(hdrs)) return null;
+
+    const dateIndex = hdrs.findIndex((h) => isFormDRJDateHeader(h));
+    if (dateIndex < 0) return null;
+
+    const dayHeaders = listFormDRajasthanDayColumnHeaders(hdrs);
+    if (dayHeaders.length < 5) return null;
+
+    const dayStart = dateIndex + 1;
+    const dayEnd = dayStart + dayHeaders.length;
+    const left = hdrs.slice(0, dateIndex);
+    const dayCols = hdrs.slice(dayStart, dayEnd);
+    const right = hdrs.slice(dayEnd);
+    const dateLabel = hdrs[dateIndex];
+
+    const groupHeaderStyle = {
+      backgroundColor: STAT_FORM_FILE_ACCENT_BG,
+      color: 'white',
+      padding: '10px 12px',
+      textAlign: 'center',
+      fontWeight: '700',
+      fontSize: '13px',
+      border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
+      verticalAlign: 'middle',
+    };
+    const identityHeaderStyle = {
+      backgroundColor: STAT_FORM_FILE_ACCENT_BG,
+      color: 'white',
+      padding: '12px',
+      textAlign: 'center',
+      fontWeight: '600',
+      fontSize: '14px',
+      border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
+      verticalAlign: 'middle',
+    };
+    const subHeaderStyle = {
+      backgroundColor: STAT_FORM_FILE_ACCENT_BG,
+      color: 'white',
+      padding: '6px 4px',
+      textAlign: 'center',
+      fontWeight: '600',
+      fontSize: '11px',
+      border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
+      verticalAlign: 'middle',
+      minWidth: '48px',
+      position: 'sticky',
+      top: 0,
+      zIndex: 10,
+    };
+    const dayHeaderStyle = {
+      ...subHeaderStyle,
+      minWidth: '56px',
+      width: '60px',
+      maxWidth: '72px',
+      fontSize: '12px',
+      padding: '8px 4px',
+      fontWeight: '700',
+    };
+
+    return (
+      <>
+        <tr>
+          {left.map((h, i) => (
+            <th
+              key={`formdrj-left-${i}`}
+              rowSpan={3}
+              style={identityHeaderStyle}
+              title={h}
+            >
+              {formatStatutoryTableHeaderLabel(h)}
+            </th>
+          ))}
+          <th key="formdrj-date" rowSpan={1} colSpan={1} style={groupHeaderStyle} title={dateLabel}>
+            {formatStatutoryTableHeaderLabel(dateLabel)}
+          </th>
+          {dayCols.map((h, i) => (
+            <th
+              key={`formdrj-day-${i}`}
+              rowSpan={1}
+              style={dayHeaderStyle}
+              title={`${h} (IN / OUT)`}
+            >
+              {h}
+            </th>
+          ))}
+          {right.map((h, i) => (
+            <th
+              key={`formdrj-right-${i}`}
+              rowSpan={3}
+              style={identityHeaderStyle}
+              title={h}
+            >
+              {formatStatutoryTableHeaderLabel(h)}
+            </th>
+          ))}
+        </tr>
+        <tr>
+          <th key="formdrj-date-in" style={subHeaderStyle} title="IN">
+            IN
+          </th>
+          {dayCols.map((h, i) => (
+            <th key={`formdrj-day-in-${i}`} style={subHeaderStyle} title={`${h} IN`}>
+              IN
+            </th>
+          ))}
+        </tr>
+        <tr>
+          <th key="formdrj-date-out" style={subHeaderStyle} title="OUT">
+            OUT
+          </th>
+          {dayCols.map((h, i) => (
+            <th key={`formdrj-day-out-${i}`} style={subHeaderStyle} title={`${h} OUT`}>
+              OUT
+            </th>
+          ))}
+        </tr>
+      </>
+    );
+  }, [formDRJAutofillGrid, displayTableHeaders]);
 
   const formHLeaveBookThead = useMemo(() => {
     const wb = formFileModalData?.rawData;
@@ -70403,7 +72715,7 @@ const Statutory = ({ userEmail, userRole }) => {
               backgroundColor: 'white',
               borderRadius: '12px',
               width: '90%',
-              maxWidth: registerOfWagesMergedTheadRows || formVDailyHoursThead || formDRemunerationThead || form11PeriodOfWorkThead || form6APHumidityThead ? 'min(98vw, 1900px)' : '1200px',
+              maxWidth: registerOfWagesMergedTheadRows || formVDailyHoursThead || formDRJGroupedThead || formDRemunerationThead || form11PeriodOfWorkThead || form6APHumidityThead ? 'min(98vw, 1900px)' : '1200px',
               maxHeight: '90vh',
               minHeight: 0,
               display: 'flex',
@@ -71866,6 +74178,8 @@ const Statutory = ({ userEmail, userRole }) => {
                             registerOfWagesCumMusterRollThead
                           ) : formLGJGroupedThead ? (
                             formLGJGroupedThead
+                          ) : formDRJGroupedThead ? (
+                            formDRJGroupedThead
                           ) : formQGroupedThead ? (
                             formQGroupedThead
                           ) : form6APHumidityThead ? (
@@ -72120,6 +74434,141 @@ const Statutory = ({ userEmail, userRole }) => {
                                     </td>
                                   );
                                 }
+                                if (formDRJAutofillGrid && isFormDRJDateHeader(header)) {
+                                  return (
+                                    <td
+                                      key={colIndex}
+                                      style={{
+                                        padding: '4px 6px',
+                                        border: '1px solid #e5e7eb',
+                                        textAlign: 'center',
+                                        verticalAlign: 'middle',
+                                        minWidth: '56px',
+                                      }}
+                                    >
+                                      <div
+                                        style={{
+                                          display: 'flex',
+                                          flexDirection: 'column',
+                                          gap: '4px',
+                                          alignItems: 'stretch',
+                                        }}
+                                      >
+                                        <div
+                                          style={{
+                                            fontSize: '11px',
+                                            fontWeight: 600,
+                                            color: '#1d4ed8',
+                                            background: '#eff6ff',
+                                            border: '1px solid #bfdbfe',
+                                            borderRadius: '4px',
+                                            padding: '4px 2px',
+                                          }}
+                                        >
+                                          IN
+                                        </div>
+                                        <div
+                                          style={{
+                                            fontSize: '11px',
+                                            fontWeight: 600,
+                                            color: '#b45309',
+                                            background: '#fffbeb',
+                                            border: '1px solid #fde68a',
+                                            borderRadius: '4px',
+                                            padding: '4px 2px',
+                                          }}
+                                        >
+                                          OUT
+                                        </div>
+                                      </div>
+                                    </td>
+                                  );
+                                }
+                                if (formDRJAutofillGrid && isDayCol) {
+                                  const dayRaw = getFormDRajasthanRowValueForHeader(
+                                    row,
+                                    header,
+                                    actualRowIndex
+                                  );
+                                  const { inTime, outTime } = parseFormDRJInOutCell(dayRaw);
+                                  const updateFormDRJDayPunch = (nextIn, nextOut) => {
+                                    if (isFormFileReadOnly) return;
+                                    const baseRows = Array.isArray(formTableDataRef.current)
+                                      ? formTableDataRef.current
+                                      : [];
+                                    const newData = [...baseRows];
+                                    while (newData.length <= actualRowIndex) newData.push({});
+                                    const prevRow = newData[actualRowIndex] || {};
+                                    const prevEdited = Array.isArray(
+                                      prevRow[STATUTORY_DATA_EDITED_HEADERS_KEY]
+                                    )
+                                      ? prevRow[STATUTORY_DATA_EDITED_HEADERS_KEY]
+                                      : [];
+                                    newData[actualRowIndex] = {
+                                      ...prevRow,
+                                      [header]: formatFormDRJInOutCell(nextIn, nextOut),
+                                      [STATUTORY_DATA_TOUCH_KEY]: true,
+                                      [STATUTORY_DATA_EDITED_HEADERS_KEY]: Array.from(
+                                        new Set([...prevEdited, header])
+                                      ),
+                                    };
+                                    formTableDataRef.current = newData;
+                                    setFormTableData(newData);
+                                  };
+                                  const punchInputStyle = {
+                                    width: '100%',
+                                    minWidth: '52px',
+                                    padding: '3px 2px',
+                                    border: '1px solid #d1d5db',
+                                    borderRadius: '4px',
+                                    fontSize: '11px',
+                                    textAlign: 'center',
+                                    backgroundColor: isFormFileReadOnly ? '#f9fafb' : 'white',
+                                  };
+                                  return (
+                                    <td
+                                      key={colIndex}
+                                      style={{
+                                        padding: '4px 3px',
+                                        border: '1px solid #e5e7eb',
+                                        textAlign: 'center',
+                                        verticalAlign: 'middle',
+                                        minWidth: '56px',
+                                      }}
+                                    >
+                                      <div
+                                        style={{
+                                          display: 'flex',
+                                          flexDirection: 'column',
+                                          gap: '4px',
+                                        }}
+                                      >
+                                        <input
+                                          type="text"
+                                          value={inTime}
+                                          onChange={(e) =>
+                                            updateFormDRJDayPunch(e.target.value, outTime)
+                                          }
+                                          readOnly={isFormFileReadOnly}
+                                          placeholder="IN"
+                                          title={`Day ${header} check-in`}
+                                          style={punchInputStyle}
+                                        />
+                                        <input
+                                          type="text"
+                                          value={outTime}
+                                          onChange={(e) =>
+                                            updateFormDRJDayPunch(inTime, e.target.value)
+                                          }
+                                          readOnly={isFormFileReadOnly}
+                                          placeholder="OUT"
+                                          title={`Day ${header} check-out`}
+                                          style={punchInputStyle}
+                                        />
+                                      </div>
+                                    </td>
+                                  );
+                                }
                                 return (
                                 <td
                                   key={colIndex}
@@ -72150,6 +74599,8 @@ const Statutory = ({ userEmail, userRole }) => {
                                           ? getFormOGJRowValueForHeader(row, header)
                                         : formLGJAutofillGrid
                                           ? getFormLGJRowValueForHeader(row, header)
+                                        : formDRJAutofillGrid
+                                          ? getFormDRajasthanRowValueForHeader(row, header, actualRowIndex)
                                         : isXixRjGrid
                                           ? readFormXIXRJRowCell(row, header, colIndex, actualRowIndex)
                                           : row[header] === false || row[header] === 'false' || !row[header]
@@ -72196,6 +74647,8 @@ const Statutory = ({ userEmail, userRole }) => {
                                       width: '100%',
                                       minWidth: formFKarnatakaThead && (colIndex === 5 || colIndex === 6 || colIndex === 9)
                                         ? '118px'
+                                        : formDRJAutofillGrid && isDayCol
+                                          ? '72px'
                                         : isDayCol ? '32px' : isFormVIHolidayCol ? '28px' : undefined,
                                       padding: isDayCol ? '4px 2px' : isFormVIHolidayCol ? '4px 2px' : '6px 8px',
                                       border: '1px solid #d1d5db',

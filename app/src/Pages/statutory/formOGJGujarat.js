@@ -10,12 +10,12 @@ import {
   normalizePersonNameKey,
 } from './formFKarnataka';
 
-export const FORM_OGJ_PERIOD_PARENT = 'Period for which is accumulated leave';
+export const FORM_OGJ_PERIOD_PARENT = 'Period for which leave is accumulated';
 
 export const FORM_OGJ_GJ_CANONICAL_TABLE_HEADERS = [
   'Sr. No.',
   'Name of Workers',
-  'Name of accumulated leave',
+  'Number of accumulated leave',
   `${FORM_OGJ_PERIOD_PARENT}_From`,
   `${FORM_OGJ_PERIOD_PARENT}_Till`,
 ];
@@ -269,7 +269,9 @@ export function rebuildFormOGJGujaratTableHeadersFromSheet({
           const n = normHeaderLabel(h);
           if (/^sr\.?\s*no/.test(n)) return 'Sr. No.';
           if (/name\s+of\s+workers?/.test(n)) return 'Name of Workers';
-          if (/accumulated\s+leave/.test(n) && !/period|perod/.test(n)) return 'Name of accumulated leave';
+          if (/number\s+of\s+accumulated\s+leave/.test(n)) return 'Number of accumulated leave';
+          if (/name\s+of\s+accumulated\s+leave/.test(n)) return 'Name of accumulated leave';
+          if (/accumulated\s+leave/.test(n) && !/period|perod/.test(n)) return 'Number of accumulated leave';
           return h;
         })
       : canonical;
@@ -299,7 +301,9 @@ export function remapFormOGJGujaratRowsToHeaders(rows, sourceHeaders, targetHead
     const n = normHeaderLabel(header);
     if (/^sr\.?\s*no/.test(n)) return 'sno';
     if (/name\s+of\s+workers?/.test(n)) return 'workerName';
-    if (/accumulated\s+leave/.test(n) && !/period|perod/.test(n)) return 'leaveName';
+    if (/number\s+of\s+accumulated\s+leave/.test(n)) return 'leaveCount';
+    if (/name\s+of\s+accumulated\s+leave/.test(n)) return 'leaveName';
+    if (/accumulated\s+leave/.test(n) && !/period|perod/.test(n)) return 'leaveCount';
     if (/period|perod/.test(n) && /from/.test(n)) return 'periodFrom';
     if (/period|perod/.test(n) && /(till|to)/.test(n)) return 'periodTill';
     if (/^from$/i.test(String(header).split('_').pop() || '')) return 'periodFrom';
@@ -341,6 +345,16 @@ export function isFormOGJSerialHeader(header) {
 export function isFormOGJWorkerNameHeader(header) {
   const n = normHeaderLabel(header);
   return /name\s+of\s+workers?/.test(n);
+}
+
+export function isFormOGJAccumulatedLeaveCountHeader(header) {
+  const n = normHeaderLabel(header);
+  return /number\s+of\s+accumulated\s+leave/.test(n);
+}
+
+export function isFormOGJAccumulatedLeaveNameHeader(header) {
+  const n = normHeaderLabel(header);
+  return /name\s+of\s+accumulated\s+leave/.test(n);
 }
 
 export function isFormOGJAccumulatedLeaveHeader(header) {
@@ -552,7 +566,9 @@ export function getFormOGJRowValueForHeader(row, header) {
   const bucketFor = (h) => {
     if (isFormOGJSerialHeader(h)) return 'sno';
     if (isFormOGJWorkerNameHeader(h)) return 'workerName';
-    if (isFormOGJAccumulatedLeaveHeader(h)) return 'leaveName';
+    if (isFormOGJAccumulatedLeaveCountHeader(h)) return 'leaveCount';
+    if (isFormOGJAccumulatedLeaveNameHeader(h)) return 'leaveName';
+    if (isFormOGJAccumulatedLeaveHeader(h)) return 'leaveCount';
     if (isFormOGJPeriodFromHeader(h)) return 'periodFrom';
     if (isFormOGJPeriodTillHeader(h)) return 'periodTill';
     return normHeaderLabel(h);
@@ -596,18 +612,29 @@ export function applyFormOGJGujaratApprovedLeaveToRow(
   }
   const metrics = normalizeApprovedLeaveRecord(approvedRecord);
   const leaveType = readApprovedLeaveLeaveType(approvedRecord);
-  const till = metrics.to || metrics.from;
-  if (!leaveType && !metrics.from && !till) return 0;
+  const leaveCount = metrics.daysCount;
+  const periodFrom = metrics.from;
+  const periodTill = metrics.to;
+  if (!leaveCount && !leaveType && !periodFrom && !periodTill) return 0;
 
   const hdrs = resolveFormOGJGujaratTableHeaders(tableHeaders);
   let applied = 0;
   hdrs.forEach((header) => {
-    if (isFormOGJAccumulatedLeaveHeader(header) && leaveType) {
+    if (isFormOGJAccumulatedLeaveCountHeader(header) && leaveCount) {
+      if (setFormOGJRowCell(row, header, leaveCount, overwrite)) applied += 1;
+    } else if (isFormOGJAccumulatedLeaveNameHeader(header) && leaveType) {
       if (setFormOGJRowCell(row, header, leaveType, overwrite)) applied += 1;
-    } else if (isFormOGJPeriodFromHeader(header) && metrics.from) {
-      if (setFormOGJRowCell(row, header, metrics.from, overwrite)) applied += 1;
-    } else if (isFormOGJPeriodTillHeader(header) && till) {
-      if (setFormOGJRowCell(row, header, till, overwrite)) applied += 1;
+    } else if (
+      !isFormOGJAccumulatedLeaveCountHeader(header) &&
+      !isFormOGJAccumulatedLeaveNameHeader(header) &&
+      isFormOGJAccumulatedLeaveHeader(header) &&
+      leaveCount
+    ) {
+      if (setFormOGJRowCell(row, header, leaveCount, overwrite)) applied += 1;
+    } else if (isFormOGJPeriodFromHeader(header) && periodFrom) {
+      if (setFormOGJRowCell(row, header, periodFrom, overwrite)) applied += 1;
+    } else if (isFormOGJPeriodTillHeader(header) && periodTill) {
+      if (setFormOGJRowCell(row, header, periodTill, overwrite)) applied += 1;
     }
   });
 
@@ -699,7 +726,9 @@ function formOGJHeaderAliasBucket(n) {
   const norm = normHeaderLabel(n);
   if (/^sr\.?\s*no/.test(norm)) return 'sno';
   if (/name\s+of\s+workers?/.test(norm)) return 'workerName';
-  if (/accumulated\s+leave/.test(norm) && !/period|perod/.test(norm)) return 'leaveName';
+  if (/number\s+of\s+accumulated\s+leave/.test(norm)) return 'leaveCount';
+  if (/name\s+of\s+accumulated\s+leave/.test(norm)) return 'leaveName';
+  if (/accumulated\s+leave/.test(norm) && !/period|perod/.test(norm)) return 'leaveCount';
   if (/period|perod/.test(norm) && /accumulated/.test(norm) && /leave/.test(norm)) return 'periodBand';
   if (norm === 'from') return 'periodFrom';
   if (norm === 'till' || norm === 'to') return 'periodTill';

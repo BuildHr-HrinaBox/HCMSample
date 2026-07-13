@@ -8,11 +8,41 @@ import {
 
 const API_BASE = '/server/payroll_function';
 const EMPLOYEE_BATCH_SIZE = 25;
-const DETAIL_BATCH_SIZE = 1;
-const DETAIL_DELAY_MS = 800;
+/** Load salary breakdown: 25 employees per API call, one call per minute. */
+const DETAIL_BATCH_SIZE = 25;
+const DETAIL_BATCH_INTERVAL_MS = 60_000;
 const PAYROLL_FETCH_BATCH_DELAY_MS = 300;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function pickEmployeeId(row) {
+  if (!row || typeof row !== 'object') return '';
+  return String(
+    row.employee_id ||
+      row.employeeId ||
+      row.Employee_ID ||
+      row.id ||
+      ''
+  ).trim();
+}
+
+function mergeListAndDetailRow(listRow, detailRow) {
+  const listFlat = flattenPayrollEarningColumns(listRow || {});
+  const detailFlat = flattenPayrollEarningColumns(detailRow || {});
+  const merged = { ...listFlat, ...detailFlat };
+  const preserveKeys = ['net_pay', 'gross_pay', 'total_earnings', 'paid_days', 'total_deductions'];
+  for (let i = 0; i < preserveKeys.length; i += 1) {
+    const key = preserveKeys[i];
+    const listVal = listFlat[key];
+    const detailVal = detailFlat[key];
+    const listNum = Number(listVal);
+    const detailNum = Number(detailVal);
+    if ((!Number.isFinite(detailNum) || detailNum === 0) && Number.isFinite(listNum) && listNum !== 0) {
+      merged[key] = listVal;
+    }
+  }
+  return flattenPayrollEarningColumns(merged);
+}
 
 const getDefaultPayrollMonth = () => {
   const now = new Date();
@@ -153,55 +183,103 @@ const Payroll = ({ userRole, userEmail }) => {
           throw new Error('Fetch monthly payroll first, then load the earnings breakdown.');
         }
 
-        const merged = [];
-        for (let i = 0; i < baseRows.length; i += DETAIL_BATCH_SIZE) {
-          const slice = baseRows.slice(i, i + DETAIL_BATCH_SIZE);
-          const details = await Promise.all(
-            slice.map(async (row) => {
-              const employeeId = row.employee_id || row.employeeId;
-              if (!employeeId) return { ...row, fetch_error: true, error: 'missing_employee_id' };
-              try {
-                const qs = new URLSearchParams({
-                  organization_id: organizationId,
-                  payrun_employee_detail: '1',
-                  payroll_run_id: String(payrollRunId),
-                  employee_id: String(employeeId),
-                });
-                const json = await fetchPayrollJson(qs);
-                return flattenPayrollEarningColumns({
-                  ...row,
-                  ...(json.data || {}),
-                });
-              } catch (detailErr) {
-                return {
+        const updated = baseRows.map((row) => flattenPayrollEarningColumns(row));
+        const total = updated.length;
+        let enrichedCount = 0;
+
+        for (let i = 0; i < total; i += DETAIL_BATCH_SIZE) {
+          const batchStart = Date.now();
+          const slice = updated.slice(i, i + DETAIL_BATCH_SIZE);
+          const employeeIds = slice.map(pickEmployeeId).filter(Boolean);
+
+          if (employeeIds.length === 0) {
+            slice.forEach((row, idx) => {
+              updated[i + idx] = {
+                ...row,
+                fetch_error: true,
+                error: 'missing_employee_id',
+              };
+            });
+          } else {
+            try {
+              const qs = new URLSearchParams({
+                organization_id: organizationId,
+                payrun_employee_detail: '1',
+                payroll_run_id: String(payrollRunId),
+                employee_ids: employeeIds.join(','),
+              });
+              const json = await fetchPayrollJson(qs);
+              const details = Array.isArray(json.data)
+                ? json.data
+                : json.data && typeof json.data === 'object'
+                  ? [json.data]
+                  : [];
+              const byId = new Map();
+              details.forEach((detail) => {
+                const id = pickEmployeeId(detail);
+                if (id) byId.set(id, detail);
+              });
+
+              slice.forEach((row, idx) => {
+                const id = pickEmployeeId(row);
+                if (!id) {
+                  updated[i + idx] = { ...row, fetch_error: true, error: 'missing_employee_id' };
+                  return;
+                }
+                const detail = byId.get(id);
+                if (!detail) {
+                  updated[i + idx] = {
+                    ...row,
+                    fetch_error: true,
+                    error: 'detail_not_returned',
+                  };
+                  return;
+                }
+                updated[i + idx] = mergeListAndDetailRow(row, detail);
+                enrichedCount += 1;
+              });
+            } catch (detailErr) {
+              slice.forEach((row, idx) => {
+                updated[i + idx] = {
                   ...row,
                   fetch_error: true,
                   error: detailErr.message || 'detail_fetch_failed',
                 };
-              }
-            })
-          );
-          merged.push(...details);
-          if (i + DETAIL_BATCH_SIZE < baseRows.length) {
-            await sleep(DETAIL_DELAY_MS);
+              });
+            }
           }
+
+          const done = Math.min(i + DETAIL_BATCH_SIZE, total);
           setProgress(
-            `Loading salary components… ${merged.length} / ${baseRows.length} · saving to Payroll table…`
+            `Loading salary components… ${done} / ${total} (25 per call, 1 call/min) · saving…`
           );
-          setData([...merged]);
+          setData([...updated]);
+
           const saveResult = await savePayrollSnapshot({
             payrollMonth,
             organizationId,
             runMeta: runMetaRef.current,
-            records: merged,
+            records: updated,
             hasBreakdown: true,
-            totalExpected: baseRows.length,
-            breakdownComplete: merged.length >= baseRows.length,
+            totalExpected: total,
+            breakdownComplete: done >= total,
           });
-          const savedCount = saveResult?.data?.recordCount ?? merged.length;
+          const savedCount = saveResult?.data?.recordCount ?? updated.length;
           setSaveMessage(
-            `Stored ${savedCount} / ${baseRows.length} employee record(s) in Payroll table.`
+            `Stored ${savedCount} / ${total} employee record(s) in Payroll table` +
+              (enrichedCount > 0 ? ` · breakdown loaded for ${enrichedCount}.` : '.')
           );
+
+          if (done < total) {
+            const elapsed = Date.now() - batchStart;
+            const waitMs = Math.max(0, DETAIL_BATCH_INTERVAL_MS - elapsed);
+            if (waitMs > 0) {
+              setProgress(
+                `Loaded ${done} / ${total}. Waiting ${Math.ceil(waitMs / 1000)}s before next 25…`
+              );
+              await sleep(waitMs);
+            }
+          }
         }
       } else {
         const tableSnapshot = await loadPayrollTableSnapshot(payrollMonth);
@@ -315,7 +393,7 @@ const Payroll = ({ userRole, userEmail }) => {
         <p className="people-subtitle">
           Fetch month-wise payroll from Zoho Payroll pay runs. Basic, HRA, and allowances are loaded
           from each employee&apos;s pay-run earnings. Use Load salary breakdown to refresh rows
-          already fetched.
+          already fetched (25 employees per call, one call per minute).
         </p>
       </header>
 

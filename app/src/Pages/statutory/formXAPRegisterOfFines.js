@@ -1616,7 +1616,8 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
   parsedFormHeader,
   headerFormData,
   formFileName,
-  sheetNameHint = ''
+  sheetNameHint = '',
+  headerWriteMode = 'combined',
 }) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateArrayBuffer);
@@ -1734,7 +1735,8 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
     headerFormData: headerValues,
     parsedFormHeader,
     headerRowEnd: columnHeaderRow,
-    maxScanCols: 24
+    maxScanCols: 24,
+    writeMode: headerWriteMode,
   });
 
   const sourceHeaders = Array.isArray(headersToUse) ? headersToUse.filter(Boolean) : [];

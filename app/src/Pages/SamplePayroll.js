@@ -5,6 +5,10 @@ import { fetchZohoPayrollRowsForMonth } from '../utils/payrollTable';
 import { enrichPayrollRowsWithPeopleEmailFromApi } from '../utils/samplePayrollApi';
 
 const API_BASE = '/server/samplepayroll_function';
+const PAYROLL_API_BASE = '/server/payroll_function';
+/** Same rate limit as Payroll "Load salary breakdown": 25 employees per call, one call per minute. */
+const DETAIL_BATCH_SIZE = 25;
+const DETAIL_BATCH_INTERVAL_MS = 60_000;
 
 const TABLE_COLUMNS = [
   { key: 'employeeName', label: 'Employee Name' },
@@ -39,6 +43,19 @@ function pickFirstValue(row, keys) {
     if (value != null && String(value).trim() !== '') return value;
   }
   return '';
+}
+
+function amountPresent(value) {
+  if (value == null || value === '') return false;
+  const num = Number(String(value).replace(/,/g, '').trim());
+  return Number.isFinite(num) && num !== 0;
+}
+
+function rowHasBasicHra(row) {
+  const flat = flattenPayrollEarningColumns(row || {});
+  const hasBasic = amountPresent(flat.basic) || amountPresent(flat.earned_basic);
+  const hasHra = amountPresent(flat.hra) || amountPresent(flat.hra_fbp);
+  return hasBasic || hasHra;
 }
 
 function mapPayrollRowToTable(row) {
@@ -110,14 +127,66 @@ function mapSamplePayrollRecordToTable(record) {
   };
 }
 
-async function fetchAllPayrollRecordsForMonth(payrollMonth, { onProgress } = {}) {
+/** Prefer Payroll table when Load salary breakdown already filled Basic/HRA. */
+async function loadPayrollTableWithBreakdown(payrollMonth) {
+  const attempts = [
+    `${PAYROLL_API_BASE}/payroll?${new URLSearchParams({ payroll_month: payrollMonth })}`,
+    `${PAYROLL_API_BASE}?${new URLSearchParams({ payroll_table: '1', payroll_month: payrollMonth })}`,
+  ];
+  for (let i = 0; i < attempts.length; i += 1) {
+    try {
+      const res = await fetch(attempts[i], { cache: 'no-store' });
+      const json = await res.json().catch(() => ({}));
+      const records = Array.isArray(json?.data?.records) ? json.data.records : [];
+      if (!res.ok || !json?.success || records.length === 0) continue;
+      const withBreakdown = records.filter(rowHasBasicHra);
+      // Use Payroll table only when most rows already have Basic/HRA.
+      if (withBreakdown.length < Math.max(1, Math.floor(records.length * 0.5))) continue;
+      return {
+        records: records.map((row) => flattenPayrollEarningColumns(row)),
+        meta: json.data.meta || null,
+        payrollMonth: json.data.payrollMonth || payrollMonth,
+        source: 'payroll_table',
+      };
+    } catch (_) {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+async function fetchAllPayrollRecordsForMonth(payrollMonth, { onProgress, onRows } = {}) {
+  const fromPayrollTable = await loadPayrollTableWithBreakdown(payrollMonth);
+  if (fromPayrollTable) {
+    if (typeof onProgress === 'function') {
+      onProgress(
+        `Using Payroll table (${fromPayrollTable.records.length} rows with Basic/HRA)… matching emails…`
+      );
+    }
+    const withEmail = await enrichPayrollRowsWithPeopleEmailFromApi(fromPayrollTable.records);
+    const records = withEmail.map((row) => flattenPayrollEarningColumns(row));
+    if (typeof onRows === 'function') onRows(records);
+    return {
+      records,
+      meta: fromPayrollTable.meta || null,
+      payrollMonth: fromPayrollTable.payrollMonth || payrollMonth,
+      source: fromPayrollTable.source,
+    };
+  }
+
   const zohoLoad = await fetchZohoPayrollRowsForMonth(payrollMonth, {
     timeoutMs: 300000,
     includeEarningsDetail: true,
-    batchSize: 50,
-    detailConcurrency: 4,
+    batchSize: DETAIL_BATCH_SIZE,
+    detailBatchSize: DETAIL_BATCH_SIZE,
+    detailBatchIntervalMs: DETAIL_BATCH_INTERVAL_MS,
     detailMode: 'payrun',
     onProgress,
+    onDetailBatch: (rows) => {
+      if (typeof onRows === 'function') {
+        onRows(rows.map((row) => flattenPayrollEarningColumns(row)));
+      }
+    },
   });
 
   const records = Array.isArray(zohoLoad.rows) ? zohoLoad.rows : [];
@@ -131,16 +200,18 @@ async function fetchAllPayrollRecordsForMonth(payrollMonth, { onProgress } = {})
     onProgress('matching emails from People…');
   }
   const withEmail = await enrichPayrollRowsWithPeopleEmailFromApi(records);
+  const flattened = withEmail.map((row) => flattenPayrollEarningColumns(row));
+  if (typeof onRows === 'function') onRows(flattened);
 
   return {
-    records: withEmail.map((row) => flattenPayrollEarningColumns(row)),
+    records: flattened,
     meta: zohoLoad.meta || null,
     payrollMonth: zohoLoad.meta?.payrollMonth || payrollMonth,
     source: 'zoho_live',
   };
 }
 
-async function syncRecordsToSamplePayrollTable(payrollMonth, records) {
+async function syncRecordsToSamplePayrollTable(payrollMonth, records, { onProgress } = {}) {
   const slimRecords = records.map((row) => mapPayrollRowToTable(row));
   const chunkSize = 40;
   let lastJson = null;
@@ -148,6 +219,11 @@ async function syncRecordsToSamplePayrollTable(payrollMonth, records) {
   for (let offset = 0; offset < slimRecords.length; offset += chunkSize) {
     const chunk = slimRecords.slice(offset, offset + chunkSize);
     const isLast = offset + chunkSize >= slimRecords.length;
+    if (typeof onProgress === 'function') {
+      onProgress(
+        `Saving to SamplePayroll table… ${Math.min(offset + chunk.length, slimRecords.length)} / ${slimRecords.length}`
+      );
+    }
     const res = await fetch(`${API_BASE}/samplepayroll/sync-month`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -195,12 +271,19 @@ const SamplePayroll = () => {
     try {
       const result = await fetchAllPayrollRecordsForMonth(payrollMonth, {
         onProgress: (label) =>
-          setProgress(`Loading Basic, HRA, Net Pay… ${label} (keep this page open)`),
+          setProgress(
+            `Loading Basic, HRA… ${label} (25 per call, 1 call/min — keep this page open)`
+          ),
+        onRows: (rows) => {
+          setData(rows.map(mapPayrollRowToTable));
+        },
       });
+
       setProgress('Saving to SamplePayroll table…');
       const syncResult = await syncRecordsToSamplePayrollTable(
         result.payrollMonth || payrollMonth,
-        result.records
+        result.records,
+        { onProgress: setProgress }
       );
 
       const storedFromSync = Array.isArray(syncResult.data?.records)
@@ -208,16 +291,18 @@ const SamplePayroll = () => {
         : [];
       const storedFromFetch = result.records.map(mapPayrollRowToTable);
       const stored =
-        storedFromSync.length >= storedFromFetch.length
-          ? storedFromSync
-          : storedFromFetch;
+        storedFromSync.length >= storedFromFetch.length ? storedFromSync : storedFromFetch;
+
+      const withBasic = stored.filter((row) => amountPresent(row.basic) || amountPresent(row.hra));
 
       setData(stored);
       setMeta(result.meta || null);
       setSource(result.source || '');
       setSaveMessage(
-        syncResult.message ||
-          `Stored ${stored.length} employee record(s) in SamplePayroll table.`
+        (syncResult.message ||
+          `Stored ${stored.length} employee record(s) in SamplePayroll table for ${
+            result.payrollMonth || payrollMonth
+          }.`) + (withBasic.length > 0 ? ` Basic/HRA on ${withBasic.length} row(s).` : '')
       );
 
       if (stored.length === 0) {
@@ -245,7 +330,8 @@ const SamplePayroll = () => {
         <h1 className="people-title">Sample Payroll</h1>
         <p className="people-subtitle">
           Fetch month-wise payroll, store it in the SamplePayroll table, and view all employees below.
-          For large teams (1000+), keep the page open while Fetch Data runs — Basic and HRA load for every employee.
+          Basic and HRA load in batches of 25 employees per call (one call per minute). If Payroll
+          already has a breakdown for this month, those values are reused.
         </p>
       </header>
 
@@ -278,7 +364,9 @@ const SamplePayroll = () => {
         <p className="people-subtitle" style={{ marginTop: 8 }}>
           Pay run: {formatMonthLabel(payrollMonth)}
           {meta.payroll_run_id ? ` · Run ID ${meta.payroll_run_id}` : ''}
-          {meta.payDate ? ` · Pay date ${meta.payDate}` : ''}
+          {meta.payDate || meta.pay_date
+            ? ` · Pay date ${meta.payDate || meta.pay_date}`
+            : ''}
           {source ? ` · Source: ${source}` : ''}
         </p>
       )}
@@ -294,13 +382,13 @@ const SamplePayroll = () => {
       {loading && (
         <div className="people-loading">
           {progress ||
-            `Loading all employees for ${formatMonthLabel(payrollMonth)} (this may take several minutes)…`}
+            `Loading all employees for ${formatMonthLabel(payrollMonth)} (25 per call, 1 call/min)…`}
         </div>
       )}
 
-      {!loading && data !== null && (
+      {data !== null && (
         <div className="people-content">
-          {records.length === 0 && !error ? (
+          {records.length === 0 && !error && !loading ? (
             <p className="people-empty">
               No payroll records for {formatMonthLabel(payrollMonth)} in the SamplePayroll table.
             </p>
@@ -329,7 +417,8 @@ const SamplePayroll = () => {
             </div>
           ) : null}
           <p className="people-meta">
-            Showing {records.length} record(s) for {formatMonthLabel(payrollMonth)} from SamplePayroll table.
+            Showing {records.length} record(s) for {formatMonthLabel(payrollMonth)}
+            {loading ? ' (loading…)' : ' from SamplePayroll table'}.
           </p>
         </div>
       )}

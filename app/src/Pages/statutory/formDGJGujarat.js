@@ -81,6 +81,8 @@ export function isFormDGJGujaratContext(
     .join(' ')
     .toLowerCase();
 
+  if (/rajasthan|\b_rj\b|form[\s._-]*d[\s._-]*rj|form_d_rj/.test(parts)) return false;
+
   const hasGujarat = /gujarat|\b_gj\b|form[\s._-]*d[\s._-]*gj|form_d_gj/.test(parts);
   const hasFormD = /\bform[\s._-]*d\b/.test(parts);
 
@@ -246,6 +248,9 @@ export function resolveFormDGJGujaratTableLayout(workbook, hints = {}) {
     }
     if (/register\s+of\s+wages|rate\s+of\s+wage/.test(combinedText)) score -= 80;
     if (/register\s+of\s+deductions|damage\s+or\s+loss/.test(combinedText)) score -= 80;
+    if (/for\s+the\s+period\s+from/.test(combinedText) && !/relay\s+or\s+set/.test(combinedText)) {
+      score -= 200;
+    }
 
     score += cells.length * 2;
     if (score < 15) continue;
@@ -331,7 +336,7 @@ export function enrichFormDGJGujaratDisplayHeader(formHeader, fileName, item, ta
     .toLowerCase();
   const isFormD =
     isFormDGJGujaratContext(base, item, fileName, sheetText, tableHeaders) ||
-    /\bform[\s._-]*d\b/.test(parts);
+    (/\bform[\s._-]*d\b/.test(parts) && !/rajasthan|\b_rj\b|form_d_rj/.test(parts));
 
   if (!isFormD) return base;
 

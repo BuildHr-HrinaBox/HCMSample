@@ -2824,21 +2824,25 @@ export async function buildFormXIVMPPerEmployeeDownload({
   const isRajasthanTableLayout = parsedFormHeaderWithVariant.formXIVVariant === 'rj';
   const zipFilePrefix = isRajasthanTableLayout ? 'Form_X_RJ' : 'Form_XIV_MP';
 
-  if (exportRows.length <= 1) {
+  // Form X RJ: always ZIP (even for 0–1 employees). MP/GJ keep single .xlsx for ≤1.
+  if (!isRajasthanTableLayout && exportRows.length <= 1) {
     const rows = exportRows.length === 1 ? exportRows : [];
     return buildFormXIVMPWorkbookWithTemplateStyles({ ...workbookArgs, mappedData: rows });
   }
 
+  const zipExportRows =
+    isRajasthanTableLayout && exportRows.length === 0 ? [{}] : exportRows;
+
   const buildSlowZipDownload = async () => {
     const zip = new JSZip();
     const usedNames = new Map();
-    for (let i = 0; i < exportRows.length; i += 1) {
+    for (let i = 0; i < zipExportRows.length; i += 1) {
       const { blob } = await buildFormXIVMPWorkbookWithTemplateStyles({
         ...workbookArgs,
-        mappedData: [exportRows[i]],
+        mappedData: [zipExportRows[i]],
       });
       const xlsxBytes = new Uint8Array(await blob.arrayBuffer());
-      const baseName = resolveFormXIVMPEmployeeDownloadBaseName(exportRows[i], hdrs, i);
+      const baseName = resolveFormXIVMPEmployeeDownloadBaseName(zipExportRows[i], hdrs, i);
       zip.file(
         allocateUniqueFormXIVMPDownloadFileName(
           baseName,
@@ -2874,8 +2878,8 @@ export async function buildFormXIVMPPerEmployeeDownload({
 
     const zip = new JSZip();
     const usedNames = new Map();
-    for (let i = 0; i < exportRows.length; i += FORM_XIV_MP_FAST_ZIP_BATCH) {
-      const batch = exportRows.slice(i, i + FORM_XIV_MP_FAST_ZIP_BATCH);
+    for (let i = 0; i < zipExportRows.length; i += FORM_XIV_MP_FAST_ZIP_BATCH) {
+      const batch = zipExportRows.slice(i, i + FORM_XIV_MP_FAST_ZIP_BATCH);
       const batchBytes = await Promise.all(
         batch.map(async (exportRow, batchIndex) => {
           const index = i + batchIndex;

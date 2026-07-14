@@ -50,7 +50,7 @@ const COMPANY_LINK_DISPLAY_FIELDS = [
 
 function siteCompanyName(s) {
   if (!s || typeof s !== 'object') return '';
-  return String(s.companyName ?? s.CompanyName ?? '').trim();
+  return String(s.companyName ?? s.CompanyName ?? s.company ?? s.Company ?? '').trim();
 }
 
 function siteCompanyId(s) {
@@ -238,7 +238,9 @@ function sanitizeSiteFormField(name, raw) {
 function validateSiteFormValues(form) {
   const errors = {};
   if (!form.siteName.trim()) errors.siteName = 'Site name is required';
-  if (!String(form.companyId || '').trim()) errors.companyId = 'Company is required';
+  if (!String(form.companyId || '').trim() && !String(form.companyName || '').trim()) {
+    errors.companyId = 'Company is required';
+  }
   if (!form.siteCity.trim()) errors.siteCity = 'City is required';
   if (!form.siteState.trim()) errors.siteState = 'State is required';
   const pin = digitsOnly(form.sitePostalCode);
@@ -658,9 +660,32 @@ const SiteManagement = ({ userEmail, userRole }) => {
 
   const selectedCompanyDetails = useMemo(() => {
     const id = String(form.companyId || '').trim();
-    if (!id) return null;
-    return companies.find((c) => String(c.id) === id) || null;
-  }, [companies, form.companyId]);
+    if (id) {
+      const byId = companies.find((c) => String(c.id) === id);
+      if (byId) return byId;
+    }
+    const name = String(form.companyName || '').trim().toLowerCase();
+    if (!name) return null;
+    return companies.find((c) => String(c.companyName || '').trim().toLowerCase() === name) || null;
+  }, [companies, form.companyId, form.companyName]);
+
+  /** When Site.Company has only the name, match dropdown id from company_function list. */
+  useEffect(() => {
+    if (!showForm) return;
+    const name = String(form.companyName || '').trim();
+    if (!name || !companies.length) return;
+    const match = companies.find(
+      (c) => String(c.companyName || '').trim().toLowerCase() === name.toLowerCase()
+    );
+    if (!match) return;
+    const matchId = String(match.id);
+    if (String(form.companyId || '') === matchId) return;
+    setForm((prev) => ({
+      ...prev,
+      companyId: matchId,
+      companyName: match.companyName || prev.companyName
+    }));
+  }, [showForm, companies, form.companyId, form.companyName]);
 
   /** Company dropdown options; keep legacy linked name if company list has not loaded that id yet */
   const companySelectOptions = useMemo(() => {
@@ -904,6 +929,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
         siteName: form.siteName.trim(),
         companyId: String(form.companyId || '').trim(),
         companyName: form.companyName.trim(),
+        company: form.companyName.trim(),
         siteAddress: form.siteAddress.trim(),
         siteCity: form.siteCity.trim(),
         siteState: form.siteState.trim(),

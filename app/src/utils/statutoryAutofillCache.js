@@ -630,11 +630,12 @@ export function fetchAttendanceData(options = {}) {
   if (!force && cached) return Promise.resolve(cached);
 
   const inflightKey = attendanceCacheKey(sdate, edate);
-  if (!force && attendanceInflight.has(inflightKey)) {
+  // Reuse in-flight even when force — avoids duplicate Zoho calls (Form 25 prefetch + autofill).
+  if (attendanceInflight.has(inflightKey)) {
     return attendanceInflight.get(inflightKey);
   }
 
-  const timeoutMs = Math.max(30000, parseInt(options.timeoutMs, 10) || 60000);
+  const timeoutMs = Math.max(15000, parseInt(options.timeoutMs, 10) || 60000);
   const task = fetchAttendanceAll(sdate, edate, timeoutMs)
     .then((result) => {
       if (!result?.success) {

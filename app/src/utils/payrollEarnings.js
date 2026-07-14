@@ -494,11 +494,23 @@ export function payrollRowsHaveWageBreakdown(rows) {
   return rows.some((row) => row && !row.fetch_error && payrollRowHasWageBreakdown(row));
 }
 
-/** Form 10 — net_pay from Payroll table / Zoho pay run (Total earnings & Normal rate of pay). */
+/** Form 10 — net_pay from Payroll table / Zoho pay run (Total earnings). */
 export function readForm10NetPayAmount(payrollRow) {
   if (!payrollRow || payrollRow.fetch_error) return '';
   const flat = flattenPayrollEarningColumns(payrollRow);
   const candidates = [flat.net_pay, payrollRow.net_pay];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const n = Number(String(candidates[i] ?? '').replace(/,/g, '').trim());
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return '';
+}
+
+/** Form 10 — gross_pay from Payroll table / Zoho pay run (Normal earnings). */
+export function readForm10GrossPayAmount(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const candidates = [flat.gross_pay, payrollRow.gross_pay];
   for (let i = 0; i < candidates.length; i += 1) {
     const n = Number(String(candidates[i] ?? '').replace(/,/g, '').trim());
     if (Number.isFinite(n) && n > 0) return n;

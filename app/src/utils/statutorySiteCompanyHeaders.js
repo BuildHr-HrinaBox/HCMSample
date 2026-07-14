@@ -238,7 +238,20 @@ export function isNatureLocationHeaderLabel(label) {
 export function isRegistrationNoHeaderLabel(label) {
   const compact = normalizeStatutoryHeaderLabel(label);
   if (!compact) return false;
-  return /^registration\s+no/.test(compact);
+  return (
+    /^registration\s+no/.test(compact) ||
+    /registration\s+certificate\s+no/.test(compact) ||
+    (/registration/.test(compact) && /\bno\b/.test(compact) && !/already\s+registered/.test(compact))
+  );
+}
+
+export function isManagerInchargeHeaderLabel(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact) return false;
+  if (/name\s+of\s+the\s+manager/.test(compact) && /incharge|in\s*charge/.test(compact)) return true;
+  if (/name\s+of\s+the\s+manager/.test(compact)) return true;
+  if (/manager/.test(compact) && /incharge|in\s*charge/.test(compact)) return true;
+  return false;
 }
 
 export const STATUTORY_ESTABLISHMENT_NAME_HEADER_KEYS = new Set([
@@ -249,7 +262,8 @@ export const STATUTORY_ESTABLISHMENT_NAME_HEADER_KEYS = new Set([
   'form_t_establishment_name_address',
   'form_xxvi_ap_establishment',
   'statutory_establishment_name',
-  'statutory_establishment_name_shop'
+  'statutory_establishment_name_shop',
+  'statutory_establishment_name_address'
 ]);
 
 export const STATUTORY_ESTABLISHMENT_ADDRESS_HEADER_KEYS = new Set([
@@ -266,7 +280,8 @@ export const STATUTORY_PRINCIPAL_EMPLOYER_HEADER_KEYS = new Set([
   'form_xxiii_principal_employer',
   'form_q_ka_employer',
   'form_t_employer',
-  'statutory_principal_employer'
+  'statutory_principal_employer',
+  'statutory_employer_name_address'
 ]);
 
 export const STATUTORY_MONTH_YEAR_HEADER_KEYS = new Set(['form_t_month_year', 'form_xviii_month_year']);
@@ -286,6 +301,18 @@ export const STATUTORY_REGISTRATION_HEADER_KEYS = new Set([
 ]);
 
 export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
+  {
+    match: /name\s+and\s+address\s+of\s+(?:the\s+)?establishment/i,
+    label: 'Name and Address of the Establishment:',
+    key: 'statutory_establishment_name_address',
+    kind: 'establishment_name'
+  },
+  {
+    match: /name\s+and\s+address\s+of\s+(?:the\s+)?employer(?!\s+already)/i,
+    label: 'Name and Address of the Employer:',
+    key: 'statutory_employer_name_address',
+    kind: 'principal_employer'
+  },
   {
     match: /name\s+of\s+the\s+establishment(?!\s+already)/i,
     label: 'Name of the Establishment:',
@@ -338,9 +365,19 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     key: 'form_xxiii_establishment_contract_carried'
   },
   {
-    match: /^registration\s+no\.?/i,
-    label: 'Registration No.:',
+    match: /registration\s+(certificate\s+)?no\.?/i,
+    label: 'Registration Certificate No:',
     key: 'statutory_registration_no'
+  },
+  {
+    match: /name\s+of\s+the\s+manager/i,
+    label: 'Name of the Manager/Incharge:',
+    key: 'form_header_manager_incharge'
+  },
+  {
+    match: /manager\s*\/\s*incharge|manager.*in\s*charge/i,
+    label: 'Name of the Manager/Incharge:',
+    key: 'form_header_manager_incharge'
   },
   {
     match: /^month\s*\/\s*year$/i,
@@ -471,6 +508,10 @@ export function applySiteCompanyHeaderAutofill(
   if (registrationText) {
     STATUTORY_REGISTRATION_HEADER_KEYS.forEach((key) => fillKey(key, registrationText));
   }
+  const inchargeName = String(site?.inchargeName ?? site?.InchargeName ?? '').trim();
+  if (inchargeName) {
+    fillKey('form_header_manager_incharge', inchargeName);
+  }
 
   const fields = Array.isArray(formHeaderFields) ? formHeaderFields : [];
   for (const field of fields) {
@@ -482,6 +523,7 @@ export function applySiteCompanyHeaderAutofill(
     else if (isPrincipalEmployerHeaderLabel(field.label)) value = principalEmployerText;
     else if (isNatureLocationHeaderLabel(field.label)) value = locationText;
     else if (isRegistrationNoHeaderLabel(field.label)) value = registrationText;
+    else if (isManagerInchargeHeaderLabel(field.label)) value = inchargeName;
     fillKey(key, value);
   }
 
@@ -554,6 +596,9 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   }
   if (isRegistrationNoHeaderLabel(label)) {
     return tryKeys(['statutory_registration_no', 'form12_header_registration']);
+  }
+  if (isManagerInchargeHeaderLabel(label)) {
+    return tryKeys(['form_header_manager_incharge']);
   }
   if (/contractor/i.test(normalizeStatutoryHeaderLabel(label)) && !/principal/.test(normalizeStatutoryHeaderLabel(label))) {
     const contractorVal = tryKeys(['form_xxiii_contractor', 'form_xviii_contractor', 'form_xvii_contractor', 'form_xvi_contractor']);

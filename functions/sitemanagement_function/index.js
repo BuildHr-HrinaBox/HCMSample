@@ -35,66 +35,113 @@ function omitKeys(obj, keys) {
   return next;
 }
 
-/** Persist row; retry without Company or Audit columns if Site table schema is older. */
+const OPTIONAL_SITE_COLUMNS = [
+  'Audit',
+  'Company',
+  'ContractorName',
+  'ContractorAddress',
+  'ContractorEmail',
+  'ContractorPhone',
+  'ContractorCity',
+  'ContractorState',
+  'SandERCNumber',
+  'FactoryRCNumber',
+  'CLRARCNumber'
+];
+
+/**
+ * Persist Site row with progressive fallbacks.
+ * IMPORTANT: never drop `Company` when retrying for a missing `Audit` column —
+ * that was wiping company name on every save.
+ */
 async function insertSiteWithFallback(table, insertData) {
-  try {
-    return await table.insertRow(insertData);
-  } catch (err) {
-    if (!isMissingColumnError(err)) throw err;
-    console.warn('Site insert: retrying without Company*/Audit columns:', err.message || err);
+  const attempts = [
+    // Prefer saving Company; Audit is known-missing on many Site tables
+    omitKeys(insertData, ['Audit']),
+    insertData,
+    omitKeys(insertData, ['Audit', 'SandERCNumber', 'FactoryRCNumber', 'CLRARCNumber']),
+    omitKeys(insertData, [
+      'Audit',
+      'ContractorName',
+      'ContractorAddress',
+      'ContractorEmail',
+      'ContractorPhone',
+      'ContractorCity',
+      'ContractorState',
+      'SandERCNumber',
+      'FactoryRCNumber',
+      'CLRARCNumber'
+    ]),
+    // Last resort only — Company column itself missing
+    omitKeys(insertData, OPTIONAL_SITE_COLUMNS)
+  ];
+
+  let lastErr;
+  for (let i = 0; i < attempts.length; i += 1) {
     try {
-      return await table.insertRow(omitKeys(insertData, ['CompanyId', 'CompanyName', 'Audit']));
-    } catch (err2) {
-      if (!isMissingColumnError(err2)) throw err2;
-      console.warn('Site insert: retrying without contractor/RC/Company/Audit columns:', err2.message || err2);
-      return await table.insertRow(
-        omitKeys(insertData, [
-          'CompanyId',
-          'CompanyName',
-          'Audit',
-          'ContractorName',
-          'ContractorAddress',
-          'ContractorEmail',
-          'ContractorPhone',
-          'ContractorCity',
-          'ContractorState',
-          'SandERCNumber',
-          'FactoryRCNumber',
-          'CLRARCNumber'
-        ])
+      const payload = attempts[i];
+      console.log(
+        `Site insert attempt ${i + 1}/${attempts.length}; hasCompany=${Object.prototype.hasOwnProperty.call(payload, 'Company')}; company=${payload.Company || ''}`
       );
+      return await table.insertRow(payload);
+    } catch (err) {
+      lastErr = err;
+      if (!isMissingColumnError(err)) throw err;
+      console.warn(`Site insert attempt ${i + 1} failed (missing column):`, err.message || err);
     }
   }
+  throw lastErr;
 }
 
 async function updateSiteWithFallback(table, updateData) {
-  try {
-    return await table.updateRow(updateData);
-  } catch (err) {
-    if (!isMissingColumnError(err)) throw err;
-    console.warn('Site update: retrying without Company*/Audit columns:', err.message || err);
+  const attempts = [
+    omitKeys(updateData, ['Audit']),
+    updateData,
+    omitKeys(updateData, ['Audit', 'SandERCNumber', 'FactoryRCNumber', 'CLRARCNumber']),
+    omitKeys(updateData, [
+      'Audit',
+      'ContractorName',
+      'ContractorAddress',
+      'ContractorEmail',
+      'ContractorPhone',
+      'ContractorCity',
+      'ContractorState',
+      'SandERCNumber',
+      'FactoryRCNumber',
+      'CLRARCNumber'
+    ]),
+    omitKeys(updateData, OPTIONAL_SITE_COLUMNS)
+  ];
+
+  let lastErr;
+  for (let i = 0; i < attempts.length; i += 1) {
     try {
-      return await table.updateRow(omitKeys(updateData, ['CompanyId', 'CompanyName', 'Audit']));
-    } catch (err2) {
-      if (!isMissingColumnError(err2)) throw err2;
-      console.warn('Site update: retrying without contractor/RC/Company/Audit columns:', err2.message || err2);
-      return await table.updateRow(
-        omitKeys(updateData, [
-          'CompanyId',
-          'CompanyName',
-          'Audit',
-          'ContractorName',
-          'ContractorAddress',
-          'ContractorEmail',
-          'ContractorPhone',
-          'ContractorCity',
-          'ContractorState',
-          'SandERCNumber',
-          'FactoryRCNumber',
-          'CLRARCNumber'
-        ])
+      const payload = attempts[i];
+      console.log(
+        `Site update attempt ${i + 1}/${attempts.length}; hasCompany=${Object.prototype.hasOwnProperty.call(payload, 'Company')}; company=${payload.Company || ''}`
       );
+      return await table.updateRow(payload);
+    } catch (err) {
+      lastErr = err;
+      if (!isMissingColumnError(err)) throw err;
+      console.warn(`Site update attempt ${i + 1} failed (missing column):`, err.message || err);
     }
+  }
+  throw lastErr;
+}
+
+/** After insert, force-write Company if the row was created without it. */
+async function ensureSiteCompanySaved(table, rowId, companyName) {
+  const name = String(companyName || '').trim();
+  if (!rowId || !name) return;
+  try {
+    const row = await table.getRow(rowId);
+    const existing = String(row?.Company || '').trim();
+    if (existing === name) return;
+    console.log('Patching Site.Company after save:', { rowId, name, existing });
+    await table.updateRow({ ROWID: rowId, Company: name });
+  } catch (err) {
+    console.warn('Could not patch Site.Company:', err.message || err);
   }
 }
 
@@ -232,6 +279,7 @@ app.post('/sitemanagement', async (req, res) => {
       siteName,
       companyId,
       companyName,
+      company,
       siteAddress,
       siteCity,
       siteState,
@@ -255,11 +303,13 @@ app.post('/sitemanagement', async (req, res) => {
       audit
     } = req.body;
 
+    const companyNameToSave = String(companyName || company || '').trim();
+
     // Validate required fields
     if (!siteName || !String(siteName).trim()) {
       return res.status(400).send({ status: 'failure', message: 'Site Name is required.' });
     }
-    if (!companyId || !String(companyId).trim()) {
+    if (!companyNameToSave) {
       return res.status(400).send({ status: 'failure', message: 'Company is required.' });
     }
     if (!siteAddress || !String(siteAddress).trim()) {
@@ -297,11 +347,11 @@ app.post('/sitemanagement', async (req, res) => {
     
     const table = catalyst.datastore().table('Site');
     
-    // Insert all site data
+    // Insert all site data — Site table column is `Company` (company name)
+    // Do not send Audit (column often missing); it previously caused fallbacks that dropped Company.
     const insertData = {
       SiteName: siteName,
-      CompanyId: String(companyId || '').trim(),
-      CompanyName: companyName || '',
+      Company: companyNameToSave,
       SiteAddress: siteAddress,
       SiteCity: siteCity,
       SiteState: siteState,
@@ -321,14 +371,16 @@ app.post('/sitemanagement', async (req, res) => {
       SandERCNumber: sandERCNumber || '',
       FactoryRCNumber: factoryRCNumber || '',
       CLRARCNumber: clraRCNumber || '',
-      Location: location || '',
-      Audit: audit || 'false'
+      Location: location || ''
     };
     
     console.log('Inserting data to Site table:', JSON.stringify(insertData, null, 2));
+    console.log('Company name to persist:', companyNameToSave, 'companyId:', companyId || '');
     
     const insertResp = await insertSiteWithFallback(table, insertData);
     console.log('Insert response:', JSON.stringify(insertResp, null, 2));
+
+    await ensureSiteCompanySaved(table, insertResp.ROWID, companyNameToSave);
     
     const created = await table.getRow(insertResp.ROWID);
     console.log('Created record:', JSON.stringify(created, null, 2));
@@ -337,8 +389,9 @@ app.post('/sitemanagement', async (req, res) => {
     const siteDetail = {
       ROWID: created.ROWID,
       SiteName: created.SiteName || siteName,
-      CompanyId: created.CompanyId || companyId || '',
-      CompanyName: created.CompanyName || companyName || '',
+      Company: created.Company || companyNameToSave,
+      CompanyId: companyId || '',
+      CompanyName: created.Company || companyNameToSave,
       SiteAddress: created.SiteAddress || siteAddress,
       SiteCity: created.SiteCity || siteCity,
       SiteState: created.SiteState || siteState,
@@ -359,7 +412,7 @@ app.post('/sitemanagement', async (req, res) => {
       FactoryRCNumber: created.FactoryRCNumber || factoryRCNumber || '',
       CLRARCNumber: created.CLRARCNumber || clraRCNumber || '',
       Location: created.Location || location || '',
-      Audit: created.Audit || 'false',
+      Audit: created.Audit || audit || 'false',
       CREATEDTIME: created.CREATEDTIME,
       MODIFIEDTIME: created.MODIFIEDTIME
     };
@@ -383,6 +436,7 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
       siteName,
       companyId,
       companyName,
+      company,
       siteAddress,
       siteCity,
       siteState,
@@ -406,10 +460,12 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
       audit
     } = req.body;
 
+    const companyNameToSave = String(companyName || company || '').trim();
+
     if (!siteName || !String(siteName).trim()) {
       return res.status(400).send({ status: 'failure', message: 'Site Name is required.' });
     }
-    if (!companyId || !String(companyId).trim()) {
+    if (!companyNameToSave) {
       return res.status(400).send({ status: 'failure', message: 'Company is required.' });
     }
     if (!siteAddress || !String(siteAddress).trim()) {
@@ -449,8 +505,7 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
     const updateData = {
       ROWID,
       SiteName: siteName,
-      CompanyId: String(companyId || '').trim(),
-      CompanyName: companyName || '',
+      Company: companyNameToSave,
       SiteAddress: siteAddress,
       SiteCity: siteCity,
       SiteState: siteState,
@@ -470,19 +525,21 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
       SandERCNumber: sandERCNumber || '',
       FactoryRCNumber: factoryRCNumber || '',
       CLRARCNumber: clraRCNumber || '',
-      Location: location || '',
-      Audit: audit || 'false'
+      Location: location || ''
     };
 
     console.log('Updating Site row:', ROWID, JSON.stringify(updateData, null, 2));
+    console.log('Company name to persist:', companyNameToSave, 'companyId:', companyId || '');
     await updateSiteWithFallback(table, updateData);
+    await ensureSiteCompanySaved(table, ROWID, companyNameToSave);
     const updated = await table.getRow(ROWID);
 
     const siteDetail = {
       ROWID: updated.ROWID,
       SiteName: updated.SiteName || siteName,
-      CompanyId: updated.CompanyId || companyId || '',
-      CompanyName: updated.CompanyName || companyName || '',
+      Company: updated.Company || companyNameToSave,
+      CompanyId: companyId || '',
+      CompanyName: updated.Company || companyNameToSave,
       SiteAddress: updated.SiteAddress || siteAddress,
       SiteCity: updated.SiteCity || siteCity,
       SiteState: updated.SiteState || siteState,
@@ -537,7 +594,7 @@ app.get('/sitemanagement', async (req, res) => {
     
     console.log('Executing data query...');
     const siteSelectWithCompany =
-      'ROWID, SiteName, CompanyId, CompanyName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, SandERCNumber, FactoryRCNumber, CLRARCNumber, Location, CREATEDTIME, MODIFIEDTIME';
+      'ROWID, SiteName, Company, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, SandERCNumber, FactoryRCNumber, CLRARCNumber, Location, CREATEDTIME, MODIFIEDTIME';
     const siteSelectFull =
       'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, SandERCNumber, FactoryRCNumber, CLRARCNumber, Location, CREATEDTIME, MODIFIEDTIME';
     const siteSelectBase =
@@ -591,36 +648,47 @@ app.get('/sitemanagement', async (req, res) => {
       }
     }
     console.log('Raw rows from database:', JSON.stringify(rows, null, 2));
+    if (rows?.[0]?.Site) {
+      console.log('Site row keys:', Object.keys(rows[0].Site));
+      console.log('Site.Company sample:', rows[0].Site.Company, rows[0].Site.company);
+    }
     
-    const siteDetails = rows.map(r => ({
-      id: r.Site.ROWID,
-      siteName: r.Site.SiteName,
-      companyId: hasCompanyColumns ? (r.Site.CompanyId || '') : '',
-      companyName: hasCompanyColumns ? (r.Site.CompanyName || '') : '',
-      siteAddress: r.Site.SiteAddress,
-      siteCity: r.Site.SiteCity,
-      siteState: r.Site.SiteState,
-      sitePostalCode: r.Site.SitePostalCode,
-      unitNo: r.Site.UNITNO,
-      contractorName: hasContractorColumns ? r.Site.ContractorName : '',
-      contractorAddress: hasContractorColumns ? r.Site.ContractorAddress : '',
-      contractorEmail: hasContractorColumns ? r.Site.ContractorEmail : '',
-      contractorPhone: hasContractorColumns ? r.Site.ContractorPhone : '',
-      contractorCity: hasContractorColumns ? r.Site.ContractorCity : '',
-      contractorState: hasContractorColumns ? r.Site.ContractorState : '',
-      inchargeName: r.Site.InchargeName,
-      inchargePhone: r.Site.InchargePhone,
-      inchargeEmail: r.Site.InchargeEmail,
-      inchargeDesignation: r.Site.InchargeDesignation,
-      industry: r.Site.Industry,
-      sandERCNumber: hasRcNumberColumns ? r.Site.SandERCNumber : '',
-      factoryRCNumber: hasRcNumberColumns ? r.Site.FactoryRCNumber : '',
-      clraRCNumber: hasRcNumberColumns ? r.Site.CLRARCNumber : '',
-      location: r.Site.Location,
+    const siteDetails = rows.map(r => {
+      const site = r.Site || {};
+      const companyValue = hasCompanyColumns
+        ? String(site.Company ?? site.company ?? site.CompanyName ?? site.companyName ?? '').trim()
+        : '';
+      return {
+      id: site.ROWID,
+      siteName: site.SiteName,
+      companyId: '',
+      companyName: companyValue,
+      company: companyValue,
+      siteAddress: site.SiteAddress,
+      siteCity: site.SiteCity,
+      siteState: site.SiteState,
+      sitePostalCode: site.SitePostalCode,
+      unitNo: site.UNITNO,
+      contractorName: hasContractorColumns ? site.ContractorName : '',
+      contractorAddress: hasContractorColumns ? site.ContractorAddress : '',
+      contractorEmail: hasContractorColumns ? site.ContractorEmail : '',
+      contractorPhone: hasContractorColumns ? site.ContractorPhone : '',
+      contractorCity: hasContractorColumns ? site.ContractorCity : '',
+      contractorState: hasContractorColumns ? site.ContractorState : '',
+      inchargeName: site.InchargeName,
+      inchargePhone: site.InchargePhone,
+      inchargeEmail: site.InchargeEmail,
+      inchargeDesignation: site.InchargeDesignation,
+      industry: site.Industry,
+      sandERCNumber: hasRcNumberColumns ? site.SandERCNumber : '',
+      factoryRCNumber: hasRcNumberColumns ? site.FactoryRCNumber : '',
+      clraRCNumber: hasRcNumberColumns ? site.CLRARCNumber : '',
+      location: site.Location,
       audit: false, // Temporarily set to false since Audit column is commented out
-      createdTime: r.Site.CREATEDTIME,
-      modifiedTime: r.Site.MODIFIEDTIME
-    }));
+      createdTime: site.CREATEDTIME,
+      modifiedTime: site.MODIFIEDTIME
+    };
+    });
     
     console.log('Processed site details:', JSON.stringify(siteDetails, null, 2));
     res.status(200).send({ status: 'success', data: { siteDetails, total, hasMore: returnAll ? false : page * perPage < total } });

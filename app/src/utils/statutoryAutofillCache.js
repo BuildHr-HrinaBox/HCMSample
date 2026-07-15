@@ -134,6 +134,27 @@ export function prefetchCompanyDetails() {
   return fetchCompanyDetails().catch(() => null);
 }
 
+export async function ensureStatutoryCompanyDetailsList(existingList = null, { force = false } = {}) {
+  if (!force && Array.isArray(existingList) && existingList.length > 0) return existingList;
+  if (!force) {
+    const cached = readCompanyDetailsCache();
+    if (Array.isArray(cached) && cached.length > 0) return cached;
+  }
+  try {
+    const fetched = await fetchCompanyDetails({ force: !!force });
+    if (Array.isArray(fetched) && fetched.length > 0) {
+      writeCompanyDetailsCache(fetched);
+      return fetched;
+    }
+  } catch (_) {
+    /* fall through */
+  }
+  const cached = readCompanyDetailsCache();
+  if (Array.isArray(cached) && cached.length > 0) return cached;
+  if (Array.isArray(existingList) && existingList.length > 0) return existingList;
+  return [];
+}
+
 function readPeopleCacheRaw() {
   if (peopleMemory && Date.now() - peopleMemoryTs < PEOPLE_CACHE_TTL_MS) {
     return peopleMemory;

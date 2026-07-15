@@ -171,23 +171,305 @@ export function buildCompanyNameAndAddress(company) {
   return parts.join(', ').trim();
 }
 
-export function resolveCompanyRecordForStatutory(item, companyDetailsList) {
+/**
+ * Form B TN establishment: company legal name + site physical address (never siteName).
+ * e.g. "VAYONA ENERGY PRIVATE LIMITED, Vayona Energy Pvt Ltd, 274 A, …, Theni, TamilNadu"
+ */
+export function buildCompanyNameWithSiteAddress(company, site) {
+  const name = String(company?.companyName ?? company?.CompanyName ?? '').trim();
+  const siteAddr = buildSiteEstablishmentAddressOnly(site);
+  if (name && siteAddr) return `${name}, ${siteAddr}`;
+  if (name) return buildCompanyNameAndAddress(company);
+  if (siteAddr) return siteAddr;
+  return buildCompanyNameAndAddress(company);
+}
+
+/** True for sample/demo company values that should not stick as employer autofill. */
+export function looksLikeDemoCompanyHeaderValue(value) {
+  const s = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  if (!s) return false;
+  // e.g. "Company Name 2, 123, chamiers Road, Chennai..."
+  if (/^company\s*name(\s*\d+)?(\b|,|:|$)/.test(s)) return true;
+  // Excel template / Audit demo leftovers (not Company Details): "Delphi, Arumbakkam..."
+  if (/^delphi(\b|,|:|$)/.test(s)) return true;
+  return false;
+}
+
+/** Site/item companyName that is a sample brand — never use it to pick company_function. */
+export function looksLikePlaceholderCompanyLinkName(name) {
+  const s = String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  if (!s) return false;
+  if (/^company\s*name(\s*\d+)?$/.test(s)) return true;
+  if (/^delphi(\s|$)/.test(s) || s === 'delhi') return true;
+  return false;
+}
+
+function statutoryCompanyId(rec) {
+  return String(
+    rec?.ROWID ?? rec?.rowId ?? rec?.id ?? rec?.companyId ?? rec?.CompanyId ?? rec?.companyROWID ?? ''
+  ).trim();
+}
+
+function statutoryCompanyName(rec) {
+  return String(rec?.companyName ?? rec?.CompanyName ?? '').trim();
+}
+
+function findCompanyInListById(list, rawId) {
+  const id = String(rawId ?? '').trim();
+  if (!id || !Array.isArray(list)) return null;
+  return list.find((co) => statutoryCompanyId(co) === id) || null;
+}
+
+function findCompanyInListByName(list, rawName) {
+  const target = String(rawName ?? '').trim().toLowerCase();
+  if (!target || !Array.isArray(list)) return null;
+  const exact = list.find((co) => statutoryCompanyName(co).toLowerCase() === target);
+  if (exact) return exact;
+  // Partial: site "Vayona" ↔ "VAYONA ENERGY PRIVATE LIMITED"
+  return (
+    list.find((co) => {
+      const n = statutoryCompanyName(co).toLowerCase();
+      if (!n) return false;
+      return n.includes(target) || target.includes(n);
+    }) || null
+  );
+}
+
+/**
+ * Resolve the employer company for statutory headers.
+ * Prefer Site Management company link, then the statutory row, then the sole company.
+ * Never pick an arbitrary list[0] when multiple companies exist (avoids "Company Name 2").
+ * Ignore Delphi / demo site links so Form U never exports template sample employer text.
+ *
+ * @param {object|null|undefined} item Statutory row
+ * @param {array} companyDetailsList Company Details records
+ * @param {object|null|undefined} site Optional Site Management record for the form's establishment
+ */
+export function resolveCompanyRecordForStatutory(item, companyDetailsList, site = null) {
   const list = Array.isArray(companyDetailsList) ? companyDetailsList : [];
   if (list.length === 0) return null;
-  const target = String(item?.companyName ?? item?.CompanyName ?? '').trim().toLowerCase();
-  if (target) {
-    const match = list.find(
-      (co) => String(co?.companyName ?? co?.CompanyName ?? '').trim().toLowerCase() === target
+
+  const nonDemoList = list.filter((co) => !looksLikeDemoCompanyHeaderValue(statutoryCompanyName(co)));
+  const pickList = nonDemoList.length > 0 ? nonDemoList : list;
+
+  const acceptResolved = (rec) => {
+    if (!rec) return null;
+    if (looksLikeDemoCompanyHeaderValue(statutoryCompanyName(rec)) && pickList !== list) {
+      return null;
+    }
+    return rec;
+  };
+
+  if (site && typeof site === 'object') {
+    const siteLinkName = site.companyName ?? site.CompanyName ?? site.company ?? site.Company;
+    const fromSiteId = findCompanyInListById(
+      pickList,
+      site.companyId ?? site.CompanyId ?? site.companyROWID
     );
-    if (match) return match;
+    const fromSiteName = looksLikePlaceholderCompanyLinkName(siteLinkName)
+      ? null
+      : findCompanyInListByName(pickList, siteLinkName);
+    const fromSite = acceptResolved(fromSiteId || fromSiteName);
+    if (fromSite) return fromSite;
   }
-  return list[0] || null;
+
+  const itemLinkName = item?.companyName ?? item?.CompanyName;
+  const fromItemId = findCompanyInListById(pickList, item?.companyId ?? item?.CompanyId);
+  const fromItemName = looksLikePlaceholderCompanyLinkName(itemLinkName)
+    ? null
+    : findCompanyInListByName(pickList, itemLinkName);
+  const fromItem = acceptResolved(fromItemId || fromItemName);
+  if (fromItem) return fromItem;
+
+  // Prefer a single real company from company_function
+  if (pickList.length === 1) return pickList[0];
+  if (list.length === 1) return list[0];
+
+  return null;
+}
+
+/**
+ * Build employer "name, address" from company_function rows.
+ * Never returns site/Delphi text. Falls back to first real company if link is incomplete.
+ */
+export function buildStatutoryEmployerTextFromCompanies(companyDetailsList, item = null, site = null) {
+  const list = Array.isArray(companyDetailsList) ? companyDetailsList : [];
+  let company = resolveCompanyRecordForStatutory(item, list, site);
+  if (!company) {
+    const real = list.filter((co) => !looksLikeDemoCompanyHeaderValue(statutoryCompanyName(co)));
+    if (real.length === 1) company = real[0];
+    else if (real.length > 1) {
+      // Site GET often omits companyId; pick best name match if possible.
+      const siteHint = String(
+        site?.companyName ?? site?.CompanyName ?? site?.company ?? site?.Company ?? ''
+      ).trim();
+      if (siteHint && !looksLikePlaceholderCompanyLinkName(siteHint)) {
+        company = findCompanyInListByName(real, siteHint);
+      }
+      if (!company) {
+        company = real.find((co) => /vayona/i.test(statutoryCompanyName(co))) || real[0];
+      }
+    } else if (list.length === 1) {
+      company = list[0];
+    }
+  }
+  return buildCompanyNameAndAddress(company);
+}
+
+/** Write employer name/address onto Form U style header rows (label + adjacent value cell). */
+export function writeFormUEmployerNameAddressToWorksheet(worksheet, employerText, { maxRow = 12 } = {}) {
+  const text = String(employerText || '').trim();
+  if (!worksheet || !text) return false;
+  const rowLimit = Math.max(4, Math.min(30, Number(maxRow) || 12));
+  let wrote = false;
+  for (let r = 1; r <= rowLimit; r += 1) {
+    for (let c = 1; c <= 12; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      const labelOnly = raw.split(':')[0].trim();
+      if (!isPrincipalEmployerHeaderLabel(labelOnly) && !isPrincipalEmployerHeaderLabel(raw)) continue;
+      // Prefer template layout: label in A, value in B (adjacent). Also write combined on label.
+      const combined = formatStatutoryHeaderLabelValueExport(
+        'Name and Address of the Employer:',
+        raw,
+        text
+      );
+      worksheet.getCell(r, c).value = combined;
+      worksheet.getCell(r, c).alignment = {
+        ...(worksheet.getCell(r, c).alignment || {}),
+        wrapText: false,
+        vertical: 'middle',
+        horizontal: 'left'
+      };
+      // Also fill first empty adjacent cell (Form U often uses col B for the value).
+      for (let ac = c + 1; ac <= Math.min(c + 6, 20); ac += 1) {
+        const adj = excelCellValueToString(worksheet.getCell(r, ac)?.value).trim();
+        if (!adj || /^enter\b/i.test(adj) || looksLikeDemoCompanyHeaderValue(adj)) {
+          worksheet.getCell(r, ac).value = text;
+          break;
+        }
+        // Don't overwrite another labeled header field.
+        if (/:/.test(adj) && isPrincipalEmployerHeaderLabel(adj.split(':')[0])) break;
+        if (/name\s+and\s+address|manager|registration|establishment/i.test(adj.split(':')[0] || '')) {
+          break;
+        }
+      }
+      wrote = true;
+      break;
+    }
+    if (wrote) break;
+  }
+  return wrote;
+}
+
+/**
+ * Write Form U establishment name/address (company legal name + site address; never siteName alone).
+ * Always overwrites stale site-name values such as "Theni Site, …".
+ */
+export function writeFormUEstablishmentNameAddressToWorksheet(
+  worksheet,
+  establishmentText,
+  { maxRow = 12 } = {}
+) {
+  const text = String(establishmentText || '').trim();
+  if (!worksheet || !text) return false;
+  const rowLimit = Math.max(4, Math.min(30, Number(maxRow) || 12));
+  let wrote = false;
+  for (let r = 1; r <= rowLimit; r += 1) {
+    for (let c = 1; c <= 12; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      const labelOnly = raw.split(':')[0].trim();
+      if (!isEstablishmentNameHeaderLabel(labelOnly) && !isEstablishmentNameHeaderLabel(raw)) continue;
+      const combined = formatStatutoryHeaderLabelValueExport(
+        'Name and Address of the Establishment:',
+        raw,
+        text
+      );
+      worksheet.getCell(r, c).value = combined;
+      worksheet.getCell(r, c).alignment = {
+        ...(worksheet.getCell(r, c).alignment || {}),
+        wrapText: false,
+        vertical: 'middle',
+        horizontal: 'left'
+      };
+      for (let ac = c + 1; ac <= Math.min(c + 6, 20); ac += 1) {
+        const adj = excelCellValueToString(worksheet.getCell(r, ac)?.value).trim();
+        const adjLabel = adj.split(':')[0] || '';
+        if (/name\s+and\s+address|manager|registration|employer/i.test(adjLabel) && /:/.test(adj)) {
+          break;
+        }
+        // Force overwrite prior site-name autofill (e.g. "Theni Site, …").
+        if (
+          !adj ||
+          /^enter\b/i.test(adj) ||
+          looksLikeDemoCompanyHeaderValue(adj) ||
+          !/name\s+and\s+address\s+of\s+(?:the\s+)?employer|manager|registration/i.test(adj)
+        ) {
+          worksheet.getCell(r, ac).value = text;
+          break;
+        }
+      }
+      wrote = true;
+      break;
+    }
+    if (wrote) break;
+  }
+  return wrote;
+}
+
+/** Write Site Management Incharge Name onto Form U Manager/Incharge header rows. */
+export function writeFormUManagerInchargeToWorksheet(worksheet, inchargeName, { maxRow = 12 } = {}) {
+  const text = String(inchargeName || '').trim();
+  if (!worksheet || !text) return false;
+  const rowLimit = Math.max(4, Math.min(30, Number(maxRow) || 12));
+  let wrote = false;
+  for (let r = 1; r <= rowLimit; r += 1) {
+    for (let c = 1; c <= 12; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      const labelOnly = raw.split(':')[0].trim();
+      if (!isManagerInchargeHeaderLabel(labelOnly) && !isManagerInchargeHeaderLabel(raw)) continue;
+      const combined = formatStatutoryHeaderLabelValueExport(
+        'Name of the Manager/Incharge:',
+        raw,
+        text
+      );
+      worksheet.getCell(r, c).value = combined;
+      worksheet.getCell(r, c).alignment = {
+        ...(worksheet.getCell(r, c).alignment || {}),
+        wrapText: false,
+        vertical: 'middle',
+        horizontal: 'left'
+      };
+      for (let ac = c + 1; ac <= Math.min(c + 6, 20); ac += 1) {
+        const adj = excelCellValueToString(worksheet.getCell(r, ac)?.value).trim();
+        const adjLabel = adj.split(':')[0] || '';
+        if (/name\s+and\s+address|registration|establishment|employer/i.test(adjLabel)) break;
+        if (!adj || /^enter\b/i.test(adj) || !/name\s+of\s+the\s+manager|registration/i.test(adj)) {
+          worksheet.getCell(r, ac).value = text;
+          break;
+        }
+      }
+      wrote = true;
+      break;
+    }
+    if (wrote) break;
+  }
+  return wrote;
 }
 
 export function isEstablishmentNameHeaderLabel(label) {
   const compact = normalizeStatutoryHeaderLabel(label);
   if (!compact) return false;
-  if (/address\s+of\s+the\s+establishment/.test(compact)) return false;
+  // Address-only labels (not "Name and Address …").
+  if (/^address\s+of\s+the\s+establishment$/.test(compact)) return false;
   if (/already\s+registered/.test(compact)) return false;
   if (/principal\s+employer/.test(compact)) return false;
   if (/contractor/.test(compact)) return false;
@@ -197,8 +479,8 @@ export function isEstablishmentNameHeaderLabel(label) {
     /^name\s+of\s+establishment$/.test(compact) ||
     /name\s+of\s+establishment\s+shop/.test(compact) ||
     /name\s+of\s+the\s+establishment\s+shop/.test(compact) ||
-    /name\s+and\s+address\s+of\s+the\s+establishment$/.test(compact) ||
-    /name\s+address\s+of\s+the\s+establishment$/.test(compact)
+    /name\s+and\s+address\s+of\s+(?:the\s+)?establishment/.test(compact) ||
+    /name\s+address\s+of\s+(?:the\s+)?establishment/.test(compact)
   ) {
     return true;
   }
@@ -254,6 +536,46 @@ export function isManagerInchargeHeaderLabel(label) {
   return false;
 }
 
+/** Tamil Nadu Form X gratuity column - keep manual / blank during autofill & export. */
+export function isFormXLeaveGratuityHeader(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact) return false;
+  return /\bgratuit(?:y|ies)\b/.test(compact);
+}
+
+/** Form X leave register — separate "Month:" / "Year:" header labels (not "Month / Year"). */
+export function isFormXMonthOnlyHeaderLabel(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact) return false;
+  return /^month$/.test(compact);
+}
+
+export function isFormXYearOnlyHeaderLabel(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact) return false;
+  return /^year$/.test(compact);
+}
+
+/** Form V TN Register of Employment — National/Festival benefit + Remarks stay blank. */
+export function isFormVTamilNaduSkipAutofillHeader(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact) return false;
+  if (/^remarks?$/.test(compact)) return true;
+  if (/\bbenefit\b/.test(compact) && /\bnational\b/.test(compact) && /\bholiday\b/.test(compact)) {
+    return true;
+  }
+  if (/\bbenefit\b/.test(compact) && /\bfestival\b/.test(compact) && /\bholiday\b/.test(compact)) {
+    return true;
+  }
+  if (/\bavailed\b/.test(compact) && /\bnational\b/.test(compact) && /\bholiday\b/.test(compact)) {
+    return true;
+  }
+  if (/\bavailed\b/.test(compact) && /\bfestival\b/.test(compact) && /\bholiday\b/.test(compact)) {
+    return true;
+  }
+  return false;
+}
+
 export const STATUTORY_ESTABLISHMENT_NAME_HEADER_KEYS = new Set([
   'form_a_establishment_name',
   'form_q_establishment',
@@ -285,6 +607,9 @@ export const STATUTORY_PRINCIPAL_EMPLOYER_HEADER_KEYS = new Set([
 ]);
 
 export const STATUTORY_MONTH_YEAR_HEADER_KEYS = new Set(['form_t_month_year', 'form_xviii_month_year']);
+
+export const STATUTORY_FORM_X_MONTH_HEADER_KEYS = new Set(['form_x_month']);
+export const STATUTORY_FORM_X_YEAR_HEADER_KEYS = new Set(['form_x_year']);
 
 export const STATUTORY_NATURE_LOCATION_HEADER_KEYS = new Set([
   'form_xv_nature_location_work',
@@ -385,6 +710,16 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     key: 'form_t_month_year'
   },
   {
+    match: /^month\s*:?\s*$/i,
+    label: 'Month:',
+    key: 'form_x_month'
+  },
+  {
+    match: /^year\s*:?\s*$/i,
+    label: 'Year:',
+    key: 'form_x_year'
+  },
+  {
     match: /name\s+and\s+address\s+of\s+the\s+establishment/i,
     label: 'Name and address of the Establishment',
     key: 'form_t_establishment_name_address',
@@ -464,40 +799,91 @@ export function enrichEstablishmentPrincipalEmployerHeadersFromSheet(
 
 export function applySiteCompanyHeaderAutofill(
   headerData,
-  { site, company, formHeaderFields = [], onlyIfEmpty = true, isPlaceholder = () => false } = {}
+  {
+    site,
+    company,
+    formHeaderFields = [],
+    onlyIfEmpty = true,
+    isPlaceholder = () => false,
+    /** Form B TN: "Name and Address of the Establishment" uses company, not site. */
+    establishmentFromCompany = false,
+  } = {}
 ) {
   if (!headerData || typeof headerData !== 'object') return headerData;
-  const establishmentNameText = buildSiteEstablishmentNameAndAddress(site);
-  const establishmentAddressText = buildSiteEstablishmentAddressOnly(site);
-  const principalEmployerText = buildCompanyNameAndAddress(company);
+  const companyNameAndAddress = buildCompanyNameAndAddress(company);
+  const companyAddressOnly = (() => {
+    if (!company || typeof company !== 'object') return '';
+    const addr = String(company.companyAddress ?? company.CompanyAddress ?? '').trim();
+    const city = String(company.city ?? company.City ?? '').trim();
+    const state = String(company.state ?? company.State ?? '').trim();
+    const postal = String(company.postalcode ?? company.PostalCode ?? '').trim();
+    return [addr, city, state, postal].filter(Boolean).join(', ');
+  })();
+  const establishmentNameText = establishmentFromCompany
+    ? buildCompanyNameWithSiteAddress(company, site) || companyNameAndAddress
+    : buildSiteEstablishmentNameAndAddress(site);
+  const establishmentAddressText = establishmentFromCompany
+    ? buildSiteEstablishmentAddressOnly(site) || companyAddressOnly || companyNameAndAddress
+    : buildSiteEstablishmentAddressOnly(site);
+  // Employer always from company_function (Company Details) — never site address.
+  const principalEmployerText = companyNameAndAddress;
+  const establishmentFillOpts = establishmentFromCompany ? { force: true } : {};
 
   const out = { ...headerData };
   let changed = false;
 
-  const shouldFill = (current) => {
+  const fields = Array.isArray(formHeaderFields) ? formHeaderFields : [];
+
+  // Strip Excel-template sample employer text (e.g. "Delphi, Arumbakkam...") before fill.
+  const clearDemoEmployerKey = (key) => {
+    if (!key) return;
+    if (!looksLikeDemoCompanyHeaderValue(out[key])) return;
+    out[key] = '';
+    changed = true;
+  };
+  STATUTORY_PRINCIPAL_EMPLOYER_HEADER_KEYS.forEach((key) => clearDemoEmployerKey(key));
+  clearDemoEmployerKey('form_xxvi_ap_employer');
+  for (const field of fields) {
+    if (isPrincipalEmployerHeaderLabel(field?.label)) clearDemoEmployerKey(field.key);
+  }
+
+  const shouldFill = (current, { allowReplaceDemoCompany = false, force = false } = {}) => {
+    if (force) return true;
     const cur = String(current ?? '').trim();
     if (!onlyIfEmpty) return true;
-    return !cur || isPlaceholder(cur);
+    if (!cur || isPlaceholder(cur)) return true;
+    // Replace leftover demo employer text (e.g. "Company Name 2, ...") with the real company
+    if (allowReplaceDemoCompany && looksLikeDemoCompanyHeaderValue(cur)) return true;
+    return false;
   };
 
-  const fillKey = (key, value) => {
+  const fillKey = (key, value, opts = {}) => {
     if (!key || !value) return;
-    if (!shouldFill(out[key])) return;
+    if (!shouldFill(out[key], opts)) return;
+    if (String(out[key] ?? '').trim() === String(value).trim()) return;
     out[key] = value;
     changed = true;
   };
 
   if (establishmentNameText) {
-    STATUTORY_ESTABLISHMENT_NAME_HEADER_KEYS.forEach((key) => fillKey(key, establishmentNameText));
-    fillKey('form_xv_establishment_contract_carried', establishmentNameText);
-    fillKey('form25_establishment', establishmentNameText);
-    fillKey('form_xxiii_establishment_contract_carried', establishmentNameText);
+    STATUTORY_ESTABLISHMENT_NAME_HEADER_KEYS.forEach((key) =>
+      fillKey(key, establishmentNameText, establishmentFillOpts)
+    );
+    fillKey('form_xv_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
+    fillKey('form25_establishment', establishmentNameText, establishmentFillOpts);
+    fillKey('form_xxiii_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
   }
   if (establishmentAddressText) {
-    STATUTORY_ESTABLISHMENT_ADDRESS_HEADER_KEYS.forEach((key) => fillKey(key, establishmentAddressText));
+    STATUTORY_ESTABLISHMENT_ADDRESS_HEADER_KEYS.forEach((key) =>
+      fillKey(key, establishmentAddressText, establishmentFillOpts)
+    );
   }
+  // Always overwrite employer with company_function so forms stay consistent.
   if (principalEmployerText) {
-    STATUTORY_PRINCIPAL_EMPLOYER_HEADER_KEYS.forEach((key) => fillKey(key, principalEmployerText));
+    STATUTORY_PRINCIPAL_EMPLOYER_HEADER_KEYS.forEach((key) =>
+      fillKey(key, principalEmployerText, { force: true })
+    );
+    fillKey('form_xxvi_ap_employer', principalEmployerText, { force: true });
   }
 
   const locationText = buildSiteLocationText(site);
@@ -509,22 +895,32 @@ export function applySiteCompanyHeaderAutofill(
     STATUTORY_REGISTRATION_HEADER_KEYS.forEach((key) => fillKey(key, registrationText));
   }
   const inchargeName = String(site?.inchargeName ?? site?.InchargeName ?? '').trim();
+  // Always overwrite Manager/Incharge from Site Management Incharge Name.
   if (inchargeName) {
-    fillKey('form_header_manager_incharge', inchargeName);
+    fillKey('form_header_manager_incharge', inchargeName, { force: true });
   }
 
-  const fields = Array.isArray(formHeaderFields) ? formHeaderFields : [];
   for (const field of fields) {
     const key = field?.key;
     if (!key) continue;
     let value = '';
-    if (isEstablishmentNameHeaderLabel(field.label)) value = establishmentNameText;
-    else if (isEstablishmentAddressHeaderLabel(field.label)) value = establishmentAddressText;
-    else if (isPrincipalEmployerHeaderLabel(field.label)) value = principalEmployerText;
-    else if (isNatureLocationHeaderLabel(field.label)) value = locationText;
+    let fillOpts = {};
+    if (isEstablishmentNameHeaderLabel(field.label)) {
+      value = establishmentNameText;
+      fillOpts = establishmentFillOpts;
+    } else if (isEstablishmentAddressHeaderLabel(field.label)) {
+      value = establishmentAddressText;
+      fillOpts = establishmentFillOpts;
+    } else if (isPrincipalEmployerHeaderLabel(field.label)) {
+      value = principalEmployerText;
+      fillOpts = { force: true };
+    } else if (isNatureLocationHeaderLabel(field.label)) value = locationText;
     else if (isRegistrationNoHeaderLabel(field.label)) value = registrationText;
-    else if (isManagerInchargeHeaderLabel(field.label)) value = inchargeName;
-    fillKey(key, value);
+    else if (isManagerInchargeHeaderLabel(field.label)) {
+      value = inchargeName;
+      fillOpts = { force: true };
+    }
+    fillKey(key, value, fillOpts);
   }
 
   return changed ? out : headerData;
@@ -559,6 +955,7 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   if (direct) return direct;
   if (isEstablishmentNameHeaderLabel(label)) {
     return tryKeys([
+      'statutory_establishment_name_address',
       'statutory_establishment_name_shop',
       'statutory_establishment_name',
       'form_a_establishment_name',
@@ -577,6 +974,8 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   }
   if (isPrincipalEmployerHeaderLabel(label)) {
     return tryKeys([
+      'statutory_employer_name_address',
+      'form_xxvi_ap_employer',
       'form_t_employer',
       'form_q_ka_employer',
       'statutory_principal_employer',
@@ -590,6 +989,12 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   }
   if (isMonthYearHeaderLabel(label)) {
     return tryKeys(['form_t_month_year', 'form_xviii_month_year']);
+  }
+  if (isFormXMonthOnlyHeaderLabel(label) || STATUTORY_FORM_X_MONTH_HEADER_KEYS.has(key)) {
+    return tryKeys(['form_x_month']);
+  }
+  if (isFormXYearOnlyHeaderLabel(label) || STATUTORY_FORM_X_YEAR_HEADER_KEYS.has(key)) {
+    return tryKeys(['form_x_year']);
   }
   if (/for\s+the\s+period\s+from/i.test(normalizeStatutoryHeaderLabel(label))) {
     return tryKeys(['form_d_gj_period', 'statutory_period_from']);
@@ -744,7 +1149,15 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
     const rawNorm = normalize(String(rawLabelOnly).replace(/:+$/, ''));
     const labelNorm = normalize(String(label).replace(/:+$/, ''));
     if (!rawNorm || !labelNorm) return false;
-    return rawNorm === labelNorm || rawNorm.includes(labelNorm) || labelNorm.includes(rawNorm);
+    if (rawNorm === labelNorm) return true;
+    // Avoid matching short table headers like "Name" to "Name of the Establishment".
+    if (rawNorm.length <= 12 || labelNorm.length <= 12) {
+      const shorter = rawNorm.length <= labelNorm.length ? rawNorm : labelNorm;
+      const longer = rawNorm.length <= labelNorm.length ? labelNorm : rawNorm;
+      if (shorter.length < 8) return false;
+      return longer.startsWith(shorter + ' ') || longer.startsWith(shorter + ':');
+    }
+    return rawNorm.includes(labelNorm) || labelNorm.includes(rawNorm);
   };
 
   for (let r = 1; r <= rowEnd; r += 1) {
@@ -757,10 +1170,15 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
         const label = String(field?.label || '').trim();
         if (!label || !labelMatchesField(raw, label)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, field);
-        if (cellLooksLikeCompletedExport(raw, val) && !val) continue;
+        const existingAfterColon = String(raw.split(':').slice(1).join(':') || '').trim();
+        const existingIsDemoEmployer =
+          isPrincipalEmployerHeaderLabel(label) && looksLikeDemoCompanyHeaderValue(existingAfterColon);
+        if (cellLooksLikeCompletedExport(raw, val) && !val && !existingIsDemoEmployer) continue;
         if (val) {
           writeHeaderValue(r, c, label, raw, val);
           wrote = true;
+        } else if (existingIsDemoEmployer) {
+          // Leave label-only cell until company_function value is available (do not export empty employer).
         }
         break;
       }
@@ -769,8 +1187,15 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
       for (const spec of specs) {
         if (!spec.match.test(raw.split(':')[0])) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, { key: spec.key, label: spec.label });
-        if (cellLooksLikeCompletedExport(raw, val) && !val) continue;
-        if (val) writeHeaderValue(r, c, spec.label, raw, val);
+        const existingAfterColon = String(raw.split(':').slice(1).join(':') || '').trim();
+        const existingIsDemoEmployer =
+          spec.kind === 'principal_employer' && looksLikeDemoCompanyHeaderValue(existingAfterColon);
+        if (cellLooksLikeCompletedExport(raw, val) && !val && !existingIsDemoEmployer) continue;
+        if (val) {
+          writeHeaderValue(r, c, spec.label, raw, val);
+        } else if (existingIsDemoEmployer) {
+          // Leave label-only cell until company_function value is available.
+        }
         break;
       }
     }

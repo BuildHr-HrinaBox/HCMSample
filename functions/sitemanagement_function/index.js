@@ -661,7 +661,7 @@ app.get('/sitemanagement', async (req, res) => {
       return {
       id: site.ROWID,
       siteName: site.SiteName,
-      companyId: '',
+      companyId: String(site.CompanyId ?? site.companyId ?? '').trim(),
       companyName: companyValue,
       company: companyValue,
       siteAddress: site.SiteAddress,

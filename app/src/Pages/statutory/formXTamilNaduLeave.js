@@ -1,13 +1,24 @@
 /**
  * Tamil Nadu Form X — Register of Leave and Social Security Benefits.
  *
- * Earned Leave  → Zoho Earned Leave balance + approved LeaveCount
- * Medical Leave → Contingency Leave
+ * Earned Leave  → Leave Fetch "Leave earned / availed during the Period"
+ * Medical Leave → Contingency Leave (Leave API Balance / Booked for the month)
  * Other Leave   → Legacy Earned Leave
  *
- * Beginning of month = Leave API balance + approved LeaveCount for the month
- *   (so April balance 23 + 1 LeaveCount → beginning 24; May with 0 LeaveCount → 23).
- * Availed during month = sum of LeaveCount from approved leaves of that type.
+ * Earned Leave (Leave Fetch only):
+ *   Leave at the beginning of the Month = Leave earned during the Period + Leave availed during the Period
+ *   Leave earned during the Period      = 0
+ *   Leave availed during the Month      = Leave availed during the Period
+ *   Leave balance at the end of the Month = Leave earned during the Period
+ *
+ * Other:
+ *   Beginning of month = Leave API balance + approved LeaveCount for the month
+ *   Availed during month = sum of LeaveCount from approved leaves of that type.
+ *
+ * Medical (Contingency Leave) — Leave Fetch Balance/Booked only:
+ *   Leave at beginning of the Month = Balance + Booked
+ *   Leave availed during the Month  = Booked (corresponding month)
+ *   Leave balance at end of the Month = Balance
  */
 
 import {
@@ -126,9 +137,32 @@ function getLeaveTypeCell(leaveRecord, aliases, leaveTypeLabels = {}) {
   return null;
 }
 
+/** Parse Leave page display text like "Balance: 26, Booked: 2". */
+function parseBalanceBookedDisplayString(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s || (!/balance/i.test(s) && !/booked/i.test(s))) return null;
+  const bal = s.match(/balance\s*:\s*([-\d.]+)/i);
+  const book = s.match(/booked\s*:\s*([-\d.]+)/i);
+  if (!bal && !book) return null;
+  return {
+    balance: bal ? bal[1] : '',
+    booked: book ? book[1] : '',
+  };
+}
+
 function leaveMetricsFromTypeCell(raw) {
   const parsed = parseLeaveCellObject(raw);
   if (!parsed || typeof parsed !== 'object') {
+    const fromDisplay = parseBalanceBookedDisplayString(raw);
+    if (fromDisplay) {
+      const balance = sanitizeLeaveMetricDisplayValue(fromDisplay.balance);
+      const booked = sanitizeLeaveMetricDisplayValue(fromDisplay.booked);
+      return {
+        balance,
+        booked,
+        hasData: balance !== '' || booked !== '',
+      };
+    }
     // Plain numeric cell (e.g. Legacy Earned Leave = 0)
     const asNum = toFiniteNumber(raw);
     if (asNum != null) {
@@ -136,8 +170,19 @@ function leaveMetricsFromTypeCell(raw) {
     }
     return { balance: '', booked: '', hasData: false };
   }
-  const balanceRaw = parsed.paidBalance ?? parsed.balance ?? parsed.Balance;
-  const bookedRaw = parsed.paidBooked ?? parsed.booked ?? parsed.Booked;
+  // Contingency Leave often uses unpaidBalance / unpaidBooked (same as Leave page).
+  const balanceRaw =
+    parsed.paidBalance ??
+    parsed.balance ??
+    parsed.Balance ??
+    parsed.unpaidBalance ??
+    parsed.UnpaidBalance;
+  const bookedRaw =
+    parsed.paidBooked ??
+    parsed.booked ??
+    parsed.Booked ??
+    parsed.unpaidBooked ??
+    parsed.UnpaidBooked;
   return {
     balance: sanitizeLeaveMetricDisplayValue(balanceRaw),
     booked: sanitizeLeaveMetricDisplayValue(bookedRaw),
@@ -283,8 +328,14 @@ export function buildFormXLeaveSectionValues(leaveRecord, approvedAvailed, leave
     apiMetrics = getFormXOtherLeaveApiMetrics(leaveRecord, leaveTypeLabels);
   }
 
-  const availed =
-    approvedAvailed !== '' && approvedAvailed != null
+  // Earned / Medical: Leave Fetch Balance/Booked for the month.
+  // Other: approved LeaveCount remains the availed source.
+  const useLeaveFetchAvailed = section === 'earned' || section === 'medical';
+  const availed = useLeaveFetchAvailed
+    ? apiMetrics.booked !== '' && apiMetrics.booked != null
+      ? formatLeaveNumber(apiMetrics.booked)
+      : '0'
+    : approvedAvailed !== '' && approvedAvailed != null
       ? formatLeaveNumber(approvedAvailed)
       : '0';
   const beginning = computeFormXLeaveBeginning(apiMetrics.balance, availed);
@@ -292,7 +343,8 @@ export function buildFormXLeaveSectionValues(leaveRecord, approvedAvailed, leave
     apiMetrics.balance !== ''
       ? formatLeaveNumber(apiMetrics.balance)
       : computeFormXLeaveEndBalance(beginning, availed);
-  const earnedDuring = apiMetrics.balance !== '' ? formatLeaveNumber(apiMetrics.balance) : '';
+  // Form X Earned Leave column "Leave earned during the Period" is always 0.
+  const earnedDuring = section === 'earned' ? '0' : '';
 
   return {
     beginning,
@@ -352,6 +404,7 @@ export function applyFormXTamilNaduLeaveToRow(
     );
 
   let applied = 0;
+  // Medical last so Contingency Leave wins if duplicate header keys still collide.
   const sections = [
     {
       key: 'earned',
@@ -364,21 +417,21 @@ export function applyFormXTamilNaduLeaveToRow(
       },
     },
     {
-      key: 'medical',
-      aliases: FORM_X_MEDICAL_LEAVE_TYPE_ALIASES,
-      headers: {
-        beginning: sectionHeaders.medicalBeginning,
-        availed: sectionHeaders.medicalAvailed,
-        balance: sectionHeaders.medicalBalance,
-      },
-    },
-    {
       key: 'other',
       aliases: FORM_X_OTHER_LEAVE_TYPE_ALIASES,
       headers: {
         beginning: sectionHeaders.otherBeginning,
         availed: sectionHeaders.otherAvailed,
         balance: sectionHeaders.otherBalance,
+      },
+    },
+    {
+      key: 'medical',
+      aliases: FORM_X_MEDICAL_LEAVE_TYPE_ALIASES,
+      headers: {
+        beginning: sectionHeaders.medicalBeginning,
+        availed: sectionHeaders.medicalAvailed,
+        balance: sectionHeaders.medicalBalance,
       },
     },
   ];

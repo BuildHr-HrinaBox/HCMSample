@@ -8974,7 +8974,7 @@ function resolveFormXLeaveSectionHeaders(headers, groupLabels) {
       if (metric === 'availed' && !result.earnedAvailed) result.earnedAvailed = header;
       if (metric === 'balance' && !result.earnedBalance) result.earnedBalance = header;
     }
-    if (group.includes('medical leave')) {
+    if (group.includes('medical leave') || (group.includes('medical') && group.includes('leave'))) {
       if (metric === 'beginning' && !result.medicalBeginning) result.medicalBeginning = header;
       if (metric === 'availed' && !result.medicalAvailed) result.medicalAvailed = header;
       if (metric === 'balance' && !result.medicalBalance) result.medicalBalance = header;
@@ -11202,6 +11202,11 @@ const formatStatutoryTableHeaderLabel = (headerKey) => {
   if (isFormIILegacySpacerHeader(h)) return '';
   const form11Relay = h.match(/^(Men|Women)_([A-I])_([123])$/i);
   if (form11Relay) return form11Relay[3];
+  // Dedupe suffixes from Form X leave bands: "Leave at beginning… (2)" → leaf title only.
+  const dedupeLeaf = h.match(/^(.*)\s+\((\d+)\)$/);
+  if (dedupeLeaf && getLeaveColumnMetricType(dedupeLeaf[1])) {
+    return dedupeLeaf[1];
+  }
   const m = h.match(/^(.+)_(\d{1,2})$/);
   if (!m) return h;
   const day = parseInt(m[2], 10);
@@ -65644,6 +65649,17 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
      
+      const currentFormFileName = String(modalData?.fileName || formFileModalData?.fileName || '');
+      const parsedFormHeaderForAutofill = modalData?.parsedFormHeader || formHeader || null;
+      const currentFormTitle = String(parsedFormHeaderForAutofill?.title || '');
+      const currentFormSubtitle = String(parsedFormHeaderForAutofill?.subtitle || '');
+      const formXTamilNaduLeaveAutofillContext = isFormXLeaveSocialSecurityContext(
+        parsedFormHeaderForAutofill,
+        modalData?.item || formFileModalData?.item,
+        currentFormFileName || `${currentFormTitle} ${currentFormSubtitle}`,
+        modalData?.sheetText || formFileModalData?.sheetText || ''
+      );
+
       // Fetch leave data and populate "Leave Balance at end of the Month" column
       let leaveBalancePopulated = 0;
       let hasLeaveBalanceColumn = false;
@@ -65655,7 +65671,7 @@ const Statutory = ({ userEmail, userRole }) => {
       let hasOtherLeaveColumn = false;
 
       try {
-        if (!formXXIIIAutofillContext && !formXVIIIMPDownloadEnrich && !formFKarnatakaEarlyAutofill && !formXIVMPAutofillContext) {
+        if (!formXXIIIAutofillContext && !formXVIIIMPDownloadEnrich && !formFKarnatakaEarlyAutofill && !formXIVMPAutofillContext && !formXTamilNaduLeaveAutofillContext) {
         console.log('Fetching leave data...');
         const { fromDate, toDate } = zohoBookedBalanceRangeForUiMonth(selectedMonth);
         const unit = 'Day';
@@ -66396,16 +66412,6 @@ const Statutory = ({ userEmail, userRole }) => {
         // Don't throw error, just log it - employee data is still populated
       }
 
-      const currentFormFileName = String(modalData?.fileName || formFileModalData?.fileName || '');
-      const parsedFormHeaderForAutofill = modalData?.parsedFormHeader || formHeader || null;
-      const currentFormTitle = String(parsedFormHeaderForAutofill?.title || '');
-      const currentFormSubtitle = String(parsedFormHeaderForAutofill?.subtitle || '');
-      const formXTamilNaduLeaveAutofillContext = isFormXLeaveSocialSecurityContext(
-        parsedFormHeaderForAutofill,
-        modalData?.item || formFileModalData?.item,
-        currentFormFileName || `${currentFormTitle} ${currentFormSubtitle}`,
-        modalData?.sheetText || formFileModalData?.sheetText || ''
-      );
       if (
         formXTamilNaduLeaveAutofillContext &&
         Array.isArray(mappedData) &&
@@ -66451,6 +66457,33 @@ const Statutory = ({ userEmail, userRole }) => {
             );
           }
 
+          // Deduplicate repeated leave leaf headers so Medical Leave has its own keys.
+          const priorFormXHeaders = [...currentHeaders];
+          const dedupedFormXHeaders = dedupeStatutoryTableHeaders(currentHeaders);
+          const formXHeadersChanged = dedupedFormXHeaders.some(
+            (h, i) => h !== priorFormXHeaders[i]
+          );
+          if (formXHeadersChanged) {
+            currentHeaders = dedupedFormXHeaders;
+            mappedData.forEach((row) => {
+              if (!row || typeof row !== 'object') return;
+              dedupedFormXHeaders.forEach((header) => {
+                if (row[header] == null) row[header] = '';
+              });
+            });
+            if (!returnMappedData) {
+              setTableHeaders(dedupedFormXHeaders);
+              setFormFileModalData((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      parsedTableHeaders: dedupedFormXHeaders,
+                    }
+                  : prev
+              );
+            }
+          }
+
           const parsedGroupLabels =
             (Array.isArray(options.columnGroupLabels) &&
               options.columnGroupLabels.length === currentHeaders.length &&
@@ -66480,7 +66513,6 @@ const Statutory = ({ userEmail, userRole }) => {
               collectEmployeeIdCandidates: getEmployeeLookupIdCandidates,
             }
           );
-          tableDataToSet = mappedData;
           console.log(
             `Form X Tamil Nadu leave autofill: ${formXLeaveHits}/${mappedData.length} row(s) for ${fromDate} to ${toDate}`
           );
@@ -70284,6 +70316,33 @@ const Statutory = ({ userEmail, userRole }) => {
       if (isFormX || rowLooksLikeLeaveRegister || isLeaveCategoryBannerRow(joined)) {
         columnGroupLabels = rawGroups;
         if (!columnGroupLabels.some((x) => String(x || '').trim())) columnGroupLabels = null;
+        // Earned / Medical / Other repeat the same leaf titles — dedupe so each
+        // band maps to a distinct row key (otherwise Medical overwrites Earned).
+        if (Array.isArray(headersToUse) && headersToUse.length > 0) {
+          const priorHeaders = [...headersToUse];
+          const deduped = dedupeStatutoryTableHeaders(headersToUse);
+          const needsDedupe = deduped.some((h, i) => h !== priorHeaders[i]);
+          if (needsDedupe) {
+            headersToUse = deduped;
+            headers = deduped;
+            expandedHeaders = [...deduped];
+            tableData.length = 0;
+            for (let i = startIndex; i < jsonData.length; i++) {
+              const rowData = {};
+              for (let j = 0; j < headersToUse.length; j++) {
+                const header = headersToUse[j] || `Column ${j + 1}`;
+                const excelCol = tableStartCol + j;
+                rowData[header] = String(getMergedAwareCellText(i, excelCol) || '').trim();
+              }
+              if (Object.values(rowData).some((val) => val)) {
+                tableData.push(rowData);
+              }
+            }
+            if (columnGroupLabels && columnGroupLabels.length !== headersToUse.length) {
+              columnGroupLabels = null;
+            }
+          }
+        }
       }
     }
 

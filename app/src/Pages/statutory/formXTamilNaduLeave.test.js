@@ -29,17 +29,62 @@ describe('formXTamilNaduLeave', () => {
     };
     expect(getFormXEarnedLeaveApiMetrics(row).balance).toBe('72');
     expect(getFormXMedicalLeaveApiMetrics(row).balance).toBe('26');
+    expect(getFormXMedicalLeaveApiMetrics(row).booked).toBe('2');
     expect(getFormXOtherLeaveApiMetrics(row).balance).toBe('0');
   });
 
-  it('builds section values with approved LeaveCount as availed', () => {
+  it('Earned Leave uses Leave Fetch period columns (ignores approved LeaveCount)', () => {
     const leaveRecord = {
       'Earned Leave': { paidBalance: 23, paidBooked: 1 },
     };
-    const values = buildFormXLeaveSectionValues(leaveRecord, '1', {}, 'earned');
-    expect(values.beginning).toBe('24');
-    expect(values.availed).toBe('1');
-    expect(values.balance).toBe('23');
+    // approved LeaveCount ignored — Leave earned/availed during the Period drive the columns.
+    const values = buildFormXLeaveSectionValues(leaveRecord, '9', {}, 'earned');
+    expect(values.beginning).toBe('24'); // earned 23 + availed 1
+    expect(values.earnedDuring).toBe('0');
+    expect(values.availed).toBe('1'); // Leave availed during the Period
+    expect(values.balance).toBe('23'); // Leave earned during the Period
+  });
+
+  it('Earned Leave with zero availed still sets earnedDuring to 0', () => {
+    const leaveRecord = {
+      'Earned Leave': { paidBalance: 39, paidBooked: 0 },
+    };
+    const values = buildFormXLeaveSectionValues(leaveRecord, '', {}, 'earned');
+    expect(values.beginning).toBe('39');
+    expect(values.earnedDuring).toBe('0');
+    expect(values.availed).toBe('0');
+    expect(values.balance).toBe('39');
+  });
+
+  it('Medical Leave uses Contingency Balance+Booked (not approved LeaveCount)', () => {
+    const leaveRecord = {
+      'Contingency Leave': { balance: 26, booked: 2 },
+    };
+    // approved LeaveCount ignored for medical — Leave Fetch Booked drives availed.
+    const values = buildFormXLeaveSectionValues(leaveRecord, '9', {}, 'medical');
+    expect(values.beginning).toBe('28'); // Balance 26 + Booked 2
+    expect(values.availed).toBe('2');
+    expect(values.balance).toBe('26');
+  });
+
+  it('Medical Leave reads unpaidBalance / unpaidBooked from Contingency Leave', () => {
+    const leaveRecord = {
+      'Contingency Leave': { unpaidBalance: 26, unpaidBooked: 2 },
+    };
+    const values = buildFormXLeaveSectionValues(leaveRecord, '', {}, 'medical');
+    expect(values.beginning).toBe('28');
+    expect(values.availed).toBe('2');
+    expect(values.balance).toBe('26');
+  });
+
+  it('Medical Leave parses Balance/Booked display strings', () => {
+    const leaveRecord = {
+      'Contingency Leave': 'Balance: 26, Booked: 2',
+    };
+    const values = buildFormXLeaveSectionValues(leaveRecord, '', {}, 'medical');
+    expect(values.beginning).toBe('28');
+    expect(values.availed).toBe('2');
+    expect(values.balance).toBe('26');
   });
 
   it('sums LeaveCount from matching approved leave Days JSON', () => {

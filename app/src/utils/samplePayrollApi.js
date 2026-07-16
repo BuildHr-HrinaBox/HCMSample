@@ -185,12 +185,46 @@ export function isSamplePayrollApiSuccess(json) {
   return json?.status === 'success' || json?.success === true;
 }
 
+function pickSamplePayrollAmount(record, keys) {
+  if (!record || typeof record !== 'object') return '';
+  for (let i = 0; i < keys.length; i += 1) {
+    const value = record[keys[i]];
+    if (value == null || value === '') continue;
+    const n = Number(String(value).replace(/,/g, '').trim());
+    if (Number.isFinite(n)) return n;
+    const s = String(value).trim();
+    if (s) return s;
+  }
+  return '';
+}
+
 export function mapSamplePayrollRecordToPayrollRow(record) {
   if (!record || typeof record !== 'object') return null;
   const email = String(record.email || '').trim();
   const employeeName = String(record.employeeName || '').trim();
   const employeeId = String(record.employeeId || '').trim();
   const gidNumber = String(record.gidNumber || '').trim();
+  const basic = pickSamplePayrollAmount(record, [
+    'basic',
+    'Basic',
+    'earned_basic',
+    'basic_pay',
+    'Basic Earnings',
+  ]);
+  const hra = pickSamplePayrollAmount(record, [
+    'hra',
+    'HRA',
+    'hra_fbp',
+    'house_rent_allowance',
+    'House Rent Allowance',
+  ]);
+  const gross = pickSamplePayrollAmount(record, ['gross', 'Gross', 'gross_pay', 'total_earnings']);
+  const netpay = pickSamplePayrollAmount(record, ['netpay', 'Netpay', 'net_pay', 'netPay']);
+  const totalDeduction = pickSamplePayrollAmount(record, [
+    'totalDeduction',
+    'TotalDeduction',
+    'total_deductions',
+  ]);
   return flattenPayrollEarningColumns({
     employee_name: employeeName,
     full_name: employeeName,
@@ -207,16 +241,19 @@ export function mapSamplePayrollRecordToPayrollRow(record) {
     DateofBirth: record.dateofBirth,
     dateofBirth: record.dateofBirth,
     paid_days: record.paidDays,
-    basic: record.basic,
-    earned_basic: record.basic,
-    hra: record.hra,
-    hra_fbp: record.hra,
-    gross_pay: record.gross,
-    total_earnings: record.gross,
-    gross: record.gross,
-    net_pay: record.netpay,
-    netPay: record.netpay,
-    total_deductions: record.totalDeduction,
+    basic,
+    earned_basic: basic,
+    Basic: basic,
+    hra,
+    hra_fbp: hra,
+    HRA: hra,
+    house_rent_allowance: hra,
+    gross_pay: gross,
+    total_earnings: gross,
+    gross,
+    net_pay: netpay,
+    netPay: netpay,
+    total_deductions: totalDeduction,
     payrollMonth: record.payrollMonth,
   });
 }

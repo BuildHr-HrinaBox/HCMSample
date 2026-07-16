@@ -296,4 +296,41 @@ describe('Form V Tamil Nadu Excel day-column insert', () => {
     expect(summary.totalHoursWorked).toBe(6);
     expect(summary.lossOfPay).toBe(7);
   });
+
+  test('locates National/Festival/Remarks leave-blank columns after LOP', () => {
+    const ExcelJS = require('exceljs');
+    const {
+      locateFormVTamilNaduLeaveBlankExcelColumns,
+      locateFormVTamilNaduSummaryExcelColumns,
+    } = require('./formVTamilNadu');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM V');
+    ws.getCell(10, 37).value = 'Total Days Worked';
+    ws.getCell(10, 38).value = 'Total Hours Worked';
+    ws.getCell(10, 39).value = 'Number of days on Loss of Pay';
+    ws.getCell(10, 40).value = 'Benefit availed for working on National Holiday (**)';
+    ws.getCell(10, 41).value = 'Benefit availed for working on Festival Holiday (**)';
+    ws.getCell(10, 42).value = 'Remarks';
+    // Must not treat Approved Festival Holidays as a leave-blank data column.
+    ws.getCell(7, 12).value = 'Approved Festival Holidays:';
+
+    const summary = locateFormVTamilNaduSummaryExcelColumns(ws, {
+      headerRow: 10,
+      afterCol: 37,
+      cellText: (cell) => String(cell?.value ?? ''),
+    });
+    expect(summary.lossOfPay).toBe(39);
+    expect(summary.nationalHolidayBenefit).toBe(40);
+    expect(summary.festivalHolidayBenefit).toBe(41);
+    expect(summary.remarks).toBe(42);
+
+    const blankCols = locateFormVTamilNaduLeaveBlankExcelColumns(ws, {
+      headerRow: 10,
+      afterCol: 37,
+      lastDayCol: 36,
+      cellText: (cell) => String(cell?.value ?? ''),
+    });
+    expect(blankCols).toEqual([40, 41, 42]);
+    expect(blankCols).not.toContain(12);
+  });
 });

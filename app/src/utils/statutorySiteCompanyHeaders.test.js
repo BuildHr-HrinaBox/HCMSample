@@ -313,6 +313,68 @@ describe('resolveCompanyRecordForStatutory', () => {
     expect(wrote).toBe(true);
     expect(String(cells['4:1'].value)).toContain('VAYONA ENERGY PRIVATE LIMITED');
     expect(String(cells['4:1'].value)).not.toMatch(/Theni Site/);
+    // Default: combined on label only (no adjacent spill that caused "VAYONA ENERVAYONA" in Excel).
+    expect(String(cells['4:2'].value)).toBe('Theni Site, old address');
+  });
+
+  it('optionally writes Form U establishment into adjacent value cell', () => {
+    const cells = {
+      '4:1': {
+        value: 'Name and Address of the Establishment :',
+        alignment: {},
+      },
+      '4:2': { value: '', alignment: {} },
+    };
+    const worksheet = {
+      getCell: (r, c) => {
+        const key = `${r}:${c}`;
+        if (!cells[key]) cells[key] = { value: '', alignment: {} };
+        return cells[key];
+      },
+    };
+    const text = 'VAYONA ENERGY PRIVATE LIMITED, Site Address';
+    writeFormUEstablishmentNameAddressToWorksheet(worksheet, text, {
+      maxRow: 8,
+      writeAdjacent: true,
+    });
     expect(String(cells['4:2'].value)).toBe(text);
+  });
+
+  it('clears duplicated Form U employer/manager spill across header columns', () => {
+    const { clearDuplicatedStatutoryHeaderValueSpill } = require('./statutorySiteCompanyHeaders');
+    const cells = {
+      '5:1': {
+        value:
+          'Name and Address of the Employer: VAYONA ENERGY PRIVATE LIMITED, Vayona Energy Pvt Ltd',
+      },
+      '5:13': { value: 'VAYONA ENERGY PRIVATE LIMITED, Vayona Energy Pvt Ltd' },
+      '5:14': { value: 'VAYONA ENERVAYONA ENERGY PRIVATE LIMITED' },
+      '6:1': { value: 'Name of the Manager/Incharge: Nilakantan Govindan' },
+      '6:13': { value: 'Nilakantan Govindan' },
+      '6:14': { value: 'Nilakantan GovNilakantan Govindan' },
+    };
+    const worksheet = {
+      getCell: (r, c) => {
+        const key = `${r}:${c}`;
+        if (!cells[key]) cells[key] = { value: null };
+        return cells[key];
+      },
+    };
+    clearDuplicatedStatutoryHeaderValueSpill(worksheet, {
+      rowFrom: 5,
+      rowTo: 6,
+      colFrom: 2,
+      colTo: 20,
+      valueHints: [
+        'VAYONA ENERGY PRIVATE LIMITED, Vayona Energy Pvt Ltd',
+        'Nilakantan Govindan',
+      ],
+    });
+    expect(String(cells['5:1'].value)).toContain('Name and Address of the Employer');
+    expect(cells['5:13'].value).toBeNull();
+    expect(cells['5:14'].value).toBeNull();
+    expect(String(cells['6:1'].value)).toContain('Nilakantan Govindan');
+    expect(cells['6:13'].value).toBeNull();
+    expect(cells['6:14'].value).toBeNull();
   });
 });

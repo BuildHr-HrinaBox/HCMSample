@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
 
 const FORM_VI_TN_HOLIDAY_KEYWORDS = [
   'national and festival holidays',
@@ -695,6 +696,7 @@ export async function buildFormVITamilNaduWorkbookWithTemplateStyles({
   parsedFormHeader,
   formFileName,
   sheetNameHint,
+  headerFormData,
   ExcelJS: ExcelJSLib
 } = {}) {
   const ExcelJS = ExcelJSLib || require('exceljs');
@@ -907,6 +909,24 @@ export async function buildFormVITamilNaduWorkbookWithTemplateStyles({
     colTo: FORM_VI_TN_TABLE_COLS,
     headerRow
   });
+
+  if (headerFormData && typeof headerFormData === 'object') {
+    const fields = Array.isArray(parsedFormHeader?.fields) ? [...parsedFormHeader.fields] : [];
+    if (!fields.some((f) => /name\s+and\s+address\s+of\s+the\s+factory/i.test(String(f?.label || '')))) {
+      fields.push({
+        label: 'Name and Address of the Factory:',
+        key: 'statutory_factory_name_address',
+        value: ''
+      });
+    }
+    writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
+      headerFormData,
+      parsedFormHeader: { ...(parsedFormHeader || {}), fields },
+      headerRowEnd: Math.max(1, headerRow - 1),
+      maxScanCols: FORM_VI_TN_TABLE_COLS,
+      writeMode: 'both'
+    });
+  }
 
   const out = await workbook.xlsx.writeBuffer();
   const fileName =

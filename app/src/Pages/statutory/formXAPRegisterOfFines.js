@@ -239,6 +239,16 @@ export function isFormXIIIRegisterOfWorkmenContext(
     .join(' ')
     .toLowerCase();
 
+  // Tamil Nadu Form I/1 is the Register of Workmen under the Conferment of
+  // Permanent Status Act. Do not misclassify it as CLRA Form XIII merely
+  // because both forms contain "Register of Workmen".
+  if (
+    /tamil\s*nadu|tamilnadu/i.test(parts) &&
+    (/form[\s._-]*(?:i|1)(?:[\s._-]|$)/i.test(parts) ||
+      /conferment\s+of\s+permanent\s+status/i.test(parts))
+  ) {
+    return false;
+  }
   if (/form[\s._-]*xxiii(?![a-z])/i.test(parts)) return false;
   if (/register\s+of\s+overtime|overtime\s+register/i.test(parts)) return false;
   if (/register[\s._-]*of[\s._-]*wages[\s._-]*cum[\s._-]*muster/i.test(parts)) return false;
@@ -306,17 +316,52 @@ export function sheetBlobIndicatesFormXLeaveRegister(blob) {
   );
 }
 
+/**
+ * PW / Tamil Nadu Form I Register of Fines — must not be treated as AP Shops Form X.
+ * (Form_I_-_TamilNadu.xlsx often cites Payment/Minimum Wages Act, which previously
+ * tripped the soft Form X heuristic.)
+ */
+export function blobIndicatesFormIRegisterOfFinesNotFormX(blob) {
+  const text = String(blob || '').toLowerCase();
+  if (!text) return false;
+  // Explicit multi-X Romans / Form X / XXI always win.
+  if (MULTI_X_FORM_RE.test(text)) return false;
+  if (matchesFormXXIHint(text)) return false;
+  if (matchesFormXHint(text)) return false;
+
+  const formITamilFile =
+    /form[_\s.-]*i[_\s.-]*tamil/i.test(text) ||
+    /form_i_-_tamil/i.test(text) ||
+    (/form[_\s.-]*1[_\s.-]*tamil/i.test(text) && !/form[_\s.-]*1[0-9]/i.test(text));
+  const formILetter =
+    /\bform\s*[-–]?\s*i\b/i.test(text) ||
+    /(?:^|[^a-z0-9])form[_\s.-]*i(?:[_\s.-]|$)/i.test(text) ||
+    /pw\s+form\s*i\b/i.test(text);
+  const formIDigit =
+    /(?:^|[^a-z0-9])form[_\s.-]*1(?:[_\s.-]|$)/i.test(text) &&
+    !/form[_\s.-]*1[0-9]/i.test(text);
+
+  if (!(formITamilFile || formILetter || formIDigit)) return false;
+  return (
+    formITamilFile ||
+    /register\s+of\s+fines/i.test(text) ||
+    /tamil\s*nadu|tamilnadu/i.test(text)
+  );
+}
+
 /** AP Shops & Establishment Form X — Register of Fines. */
 export function sheetBlobIndicatesFormXAPRegisterOfFines(blob) {
   const text = String(blob || '').toLowerCase();
   if (sheetBlobIndicatesFormXXIRegisterOfFines(text)) return false;
   if (matchesFormXXIHint(text)) return false;
+  if (blobIndicatesFormIRegisterOfFinesNotFormX(text)) return false;
   if (matchesFormXHint(text) && /register\s+of\s+fines/i.test(text)) return true;
+  // Do not use bare "payment/minimum wages" — that also matches PW Form I Register of Fines.
   return (
     /register\s+of\s+fines/i.test(text) &&
     (/nature\s*&\s*date\s+of\s+offence|show\s+cause/i.test(text) ||
       /name\s+of\s+the\s+worker/i.test(text) ||
-      /payment\s+of\s+wages|minimum\s+wages|shops\s*(?:&|and)\s*establishment/i.test(text))
+      /shops\s*(?:&|and)\s*establishment/i.test(text))
   );
 }
 
@@ -437,6 +482,7 @@ export function isFormXAPRegisterOfFinesContext(
     .join(' ')
     .toLowerCase();
 
+  if (blobIndicatesFormIRegisterOfFinesNotFormX(parts)) return false;
   if (sheetBlobIndicatesFormXXIRegisterOfFines(parts)) return false;
   if (isFormXXIAPRegisterOfFinesContext(formHeader, rowItem, fileName, sheetText, tableHeaders)) {
     return false;

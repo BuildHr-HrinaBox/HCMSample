@@ -9,6 +9,7 @@ import {
   cloneFormITamilNaduWorkmenWorksheetClean,
   ensureFormITamilNaduDefaultEmployeeRows,
   ensureFormITamilNaduWorkmenTitleLayout,
+  isFormITamilNaduFinesNilDefaultHeader,
   isFormITamilNaduFinesOrWorkmenDefaultContext,
   isFormITamilNaduNilDefaultHeader,
   isFormITamilNaduSkipAutofillHeader,
@@ -63,6 +64,15 @@ describe('Form I Tamil Nadu NIL defaults', () => {
     ).toBe(true);
   });
 
+  it('detects the suspension workbook from SA Form 1 sheet naming', () => {
+    expect(
+      isFormITamilNaduSuspensionWorkbookContext({
+        fileName: 'Form I_TN - TamilNadu.xlsx',
+        sheetText: 'SA Form 1 Register of Employees Placed under suspension'
+      })
+    ).toBe(true);
+  });
+
   it('clears Monthly emoluments and fills blank NIL columns without overwriting real values', () => {
     const headers = [emolumentsHeader, ...nilHeaders];
     const rows = [
@@ -113,7 +123,8 @@ describe('Form I Tamil Nadu Form 1.xlsx default employees', () => {
     'Whether workman showed cause against fine or not and if so, date on which cause was shown',
     'Total wages for the wage-period in which fine imposed',
     'Amount of and Date on which fine imposed',
-    'Date on which fine realised'
+    'Date on which fine realised',
+    'Remarks'
   ];
 
   it('detects Register of Fines Tamil Nadu context for defaults', () => {
@@ -126,6 +137,14 @@ describe('Form I Tamil Nadu Form 1.xlsx default employees', () => {
     ).toBe(true);
   });
 
+  it('recognizes Register of Fines NIL columns', () => {
+    finesHeaders.slice(4).forEach((header) => {
+      expect(isFormITamilNaduFinesNilDefaultHeader(header)).toBe(true);
+    });
+    expect(isFormITamilNaduFinesNilDefaultHeader('Name')).toBe(false);
+    expect(isFormITamilNaduFinesNilDefaultHeader('Department of Gang')).toBe(false);
+  });
+
   it('builds default Register of Fines rows from Form 1 Tamilnadu.xlsx employees', () => {
     const rows = buildFormITamilNaduDefaultRows(finesHeaders);
     expect(rows).toHaveLength(FORM_I_TN_DEFAULT_EMPLOYEES.length);
@@ -133,7 +152,43 @@ describe('Form I Tamil Nadu Form 1.xlsx default employees', () => {
     expect(rows[0]['Department of Gang']).toBe('Service');
     expect(rows[1].Name).toBe('Vijayakumar');
     expect(rows[4].Name).toBe('Vinu Monikandan');
-    expect(rows[0]['Act or omission for which fine imposed']).toBe('');
+    expect(rows[0]['Act or omission for which fine imposed']).toBe(FORM_I_TAMIL_NADU_NIL_DEFAULT);
+    expect(rows[0]['Whether workman showed cause against fine or not and if so, date on which cause was shown']).toBe(
+      FORM_I_TAMIL_NADU_NIL_DEFAULT
+    );
+    expect(rows[0]['Total wages for the wage-period in which fine imposed']).toBe(
+      FORM_I_TAMIL_NADU_NIL_DEFAULT
+    );
+    expect(rows[0]['Amount of and Date on which fine imposed']).toBe(FORM_I_TAMIL_NADU_NIL_DEFAULT);
+    expect(rows[0]['Date on which fine realised']).toBe(FORM_I_TAMIL_NADU_NIL_DEFAULT);
+    expect(rows[0].Remarks).toBe(FORM_I_TAMIL_NADU_NIL_DEFAULT);
+  });
+
+  it('applies NIL to blank Register of Fines columns without overwriting names', () => {
+    const rows = [
+      {
+        Name: 'Avudaiappan',
+        'Act or omission for which fine imposed': '',
+        'Whether workman showed cause against fine or not and if so, date on which cause was shown':
+          'Enter Whether',
+        'Total wages for the wage-period in which fine imposed': '',
+        'Amount of and Date on which fine imposed': '',
+        'Date on which fine realised': '',
+        Remarks: ''
+      }
+    ];
+    expect(applyFormITamilNaduNilDefaultsToRows(rows, finesHeaders)).toEqual([
+      {
+        Name: 'Avudaiappan',
+        'Act or omission for which fine imposed': FORM_I_TAMIL_NADU_NIL_DEFAULT,
+        'Whether workman showed cause against fine or not and if so, date on which cause was shown':
+          FORM_I_TAMIL_NADU_NIL_DEFAULT,
+        'Total wages for the wage-period in which fine imposed': FORM_I_TAMIL_NADU_NIL_DEFAULT,
+        'Amount of and Date on which fine imposed': FORM_I_TAMIL_NADU_NIL_DEFAULT,
+        'Date on which fine realised': FORM_I_TAMIL_NADU_NIL_DEFAULT,
+        Remarks: FORM_I_TAMIL_NADU_NIL_DEFAULT
+      }
+    ]);
   });
 
   it('seeds empty Sl.No-only grids with Form 1 defaults on download', () => {

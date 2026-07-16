@@ -323,7 +323,11 @@ export function buildStatutoryEmployerTextFromCompanies(companyDetailsList, item
 }
 
 /** Write employer name/address onto Form U style header rows (label + adjacent value cell). */
-export function writeFormUEmployerNameAddressToWorksheet(worksheet, employerText, { maxRow = 12 } = {}) {
+export function writeFormUEmployerNameAddressToWorksheet(
+  worksheet,
+  employerText,
+  { maxRow = 12, writeAdjacent = false } = {}
+) {
   const text = String(employerText || '').trim();
   if (!worksheet || !text) return false;
   const rowLimit = Math.max(4, Math.min(30, Number(maxRow) || 12));
@@ -347,17 +351,20 @@ export function writeFormUEmployerNameAddressToWorksheet(worksheet, employerText
         vertical: 'middle',
         horizontal: 'left'
       };
-      // Also fill first empty adjacent cell (Form U often uses col B for the value).
-      for (let ac = c + 1; ac <= Math.min(c + 6, 20); ac += 1) {
-        const adj = excelCellValueToString(worksheet.getCell(r, ac)?.value).trim();
-        if (!adj || /^enter\b/i.test(adj) || looksLikeDemoCompanyHeaderValue(adj)) {
-          worksheet.getCell(r, ac).value = text;
-          break;
-        }
-        // Don't overwrite another labeled header field.
-        if (/:/.test(adj) && isPrincipalEmployerHeaderLabel(adj.split(':')[0])) break;
-        if (/name\s+and\s+address|manager|registration|establishment/i.test(adj.split(':')[0] || '')) {
-          break;
+      // Optional adjacent value — disabled by default (repeating adjacent fills caused
+      // "VAYONA ENERVAYONA ENI" spill across Form U header columns).
+      if (writeAdjacent) {
+        for (let ac = c + 1; ac <= Math.min(c + 2, 20); ac += 1) {
+          const adj = excelCellValueToString(worksheet.getCell(r, ac)?.value).trim();
+          if (!adj || /^enter\b/i.test(adj) || looksLikeDemoCompanyHeaderValue(adj)) {
+            worksheet.getCell(r, ac).value = text;
+            break;
+          }
+          // Don't overwrite another labeled header field.
+          if (/:/.test(adj) && isPrincipalEmployerHeaderLabel(adj.split(':')[0])) break;
+          if (/name\s+and\s+address|manager|registration|establishment/i.test(adj.split(':')[0] || '')) {
+            break;
+          }
         }
       }
       wrote = true;
@@ -375,7 +382,7 @@ export function writeFormUEmployerNameAddressToWorksheet(worksheet, employerText
 export function writeFormUEstablishmentNameAddressToWorksheet(
   worksheet,
   establishmentText,
-  { maxRow = 12 } = {}
+  { maxRow = 12, writeAdjacent = false } = {}
 ) {
   const text = String(establishmentText || '').trim();
   if (!worksheet || !text) return false;
@@ -399,21 +406,23 @@ export function writeFormUEstablishmentNameAddressToWorksheet(
         vertical: 'middle',
         horizontal: 'left'
       };
-      for (let ac = c + 1; ac <= Math.min(c + 6, 20); ac += 1) {
-        const adj = excelCellValueToString(worksheet.getCell(r, ac)?.value).trim();
-        const adjLabel = adj.split(':')[0] || '';
-        if (/name\s+and\s+address|manager|registration|employer/i.test(adjLabel) && /:/.test(adj)) {
-          break;
-        }
-        // Force overwrite prior site-name autofill (e.g. "Theni Site, …").
-        if (
-          !adj ||
-          /^enter\b/i.test(adj) ||
-          looksLikeDemoCompanyHeaderValue(adj) ||
-          !/name\s+and\s+address\s+of\s+(?:the\s+)?employer|manager|registration/i.test(adj)
-        ) {
-          worksheet.getCell(r, ac).value = text;
-          break;
+      if (writeAdjacent) {
+        for (let ac = c + 1; ac <= Math.min(c + 2, 20); ac += 1) {
+          const adj = excelCellValueToString(worksheet.getCell(r, ac)?.value).trim();
+          const adjLabel = adj.split(':')[0] || '';
+          if (/name\s+and\s+address|manager|registration|employer/i.test(adjLabel) && /:/.test(adj)) {
+            break;
+          }
+          // Force overwrite prior site-name autofill (e.g. "Theni Site, …").
+          if (
+            !adj ||
+            /^enter\b/i.test(adj) ||
+            looksLikeDemoCompanyHeaderValue(adj) ||
+            !/name\s+and\s+address\s+of\s+(?:the\s+)?employer|manager|registration/i.test(adj)
+          ) {
+            worksheet.getCell(r, ac).value = text;
+            break;
+          }
         }
       }
       wrote = true;
@@ -425,7 +434,11 @@ export function writeFormUEstablishmentNameAddressToWorksheet(
 }
 
 /** Write Site Management Incharge Name onto Form U Manager/Incharge header rows. */
-export function writeFormUManagerInchargeToWorksheet(worksheet, inchargeName, { maxRow = 12 } = {}) {
+export function writeFormUManagerInchargeToWorksheet(
+  worksheet,
+  inchargeName,
+  { maxRow = 12, writeAdjacent = false } = {}
+) {
   const text = String(inchargeName || '').trim();
   if (!worksheet || !text) return false;
   const rowLimit = Math.max(4, Math.min(30, Number(maxRow) || 12));
@@ -448,13 +461,15 @@ export function writeFormUManagerInchargeToWorksheet(worksheet, inchargeName, { 
         vertical: 'middle',
         horizontal: 'left'
       };
-      for (let ac = c + 1; ac <= Math.min(c + 6, 20); ac += 1) {
-        const adj = excelCellValueToString(worksheet.getCell(r, ac)?.value).trim();
-        const adjLabel = adj.split(':')[0] || '';
-        if (/name\s+and\s+address|registration|establishment|employer/i.test(adjLabel)) break;
-        if (!adj || /^enter\b/i.test(adj) || !/name\s+of\s+the\s+manager|registration/i.test(adj)) {
-          worksheet.getCell(r, ac).value = text;
-          break;
+      if (writeAdjacent) {
+        for (let ac = c + 1; ac <= Math.min(c + 2, 20); ac += 1) {
+          const adj = excelCellValueToString(worksheet.getCell(r, ac)?.value).trim();
+          const adjLabel = adj.split(':')[0] || '';
+          if (/name\s+and\s+address|registration|establishment|employer/i.test(adjLabel)) break;
+          if (!adj || /^enter\b/i.test(adj) || !/name\s+of\s+the\s+manager|registration/i.test(adj)) {
+            worksheet.getCell(r, ac).value = text;
+            break;
+          }
         }
       }
       wrote = true;
@@ -972,6 +987,20 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   if (isEstablishmentAddressHeaderLabel(label)) {
     return tryKeys(['statutory_establishment_address', 'form_a_establishment_address']);
   }
+  if (
+    /name\s+and\s+address\s+of\s+the\s+factory/.test(normalizeStatutoryHeaderLabel(label)) ||
+    /^name\s+of\s+the\s+factory$/.test(normalizeStatutoryHeaderLabel(label))
+  ) {
+    return tryKeys([
+      key,
+      'statutory_factory_name_address',
+      'form_vi_header_factory',
+      'form12_header_factory',
+      'form10_header_factory',
+      'form14_header_factory',
+      'form25_ap_header_factory'
+    ]);
+  }
   if (isPrincipalEmployerHeaderLabel(label)) {
     return tryKeys([
       'statutory_employer_name_address',
@@ -1079,14 +1108,20 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
     Number(colRightBound) > 0 ? Math.min(colLimit, Number(colRightBound)) : colLimit;
   const useCombined = writeMode === 'combined' || writeMode === 'both';
   const useAdjacent = writeMode === 'adjacent' || writeMode === 'both';
+  // Write each logical header field only once. Merged cells repeat the same label across
+  // many columns — rewriting each one spills "VAYONA…" / manager name across the row.
+  const writtenFieldKeys = new Set();
+  const writtenSpecKeys = new Set();
 
   const writeCombinedOnLabelRow = (row, startCol, label, rawLabel, value) => {
     const text = formatStatutoryHeaderLabelValueExport(label, rawLabel || label, value);
     if (!String(text).trim()) return;
+    // Prefer a short merge (label + a few value columns). Wide merges cause Excel to show
+    // truncated fragments ("VA" / "VAYONA ENER") in every column of the band.
     const mergeEndCol =
       Number(colRightBound) > startCol
         ? Number(colRightBound)
-        : Math.min(startCol + 11, scanColMax);
+        : Math.min(startCol + 3, scanColMax);
     if (mergeEndCol > startCol) {
       try {
         worksheet.mergeCells(row, startCol, row, mergeEndCol);
@@ -1111,10 +1146,8 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
   const writeAdjacentValue = (row, startCol, value) => {
     const val = String(value ?? '').trim();
     if (!val) return;
-    const adjMax =
-      Number(colRightBound) > 0
-        ? Math.min(startCol + 14, Number(colRightBound))
-        : startCol + 14;
+    // Only fill the immediate next empty cell — never walk far across the sheet.
+    const adjMax = Math.min(startCol + 2, scanColMax);
     for (let ac = startCol + 1; ac <= adjMax; ac += 1) {
       const adj = excelCellValueToString(worksheet.getCell(row, ac)?.value).trim();
       if (!adj || /^enter\b/i.test(adj)) {
@@ -1128,7 +1161,8 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
     const val = String(value ?? '').trim();
     if (!val) return;
     if (useCombined) writeCombinedOnLabelRow(row, startCol, label, rawLabel, val);
-    if (useAdjacent) writeAdjacentValue(row, startCol, val);
+    // Adjacent-only mode fills the value cell; combined already embeds Label : value.
+    if (useAdjacent && !useCombined) writeAdjacentValue(row, startCol, val);
   };
 
   const cellLooksLikeCompletedExport = (raw, newVal) => {
@@ -1169,6 +1203,8 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
       for (const field of fields) {
         const label = String(field?.label || '').trim();
         if (!label || !labelMatchesField(raw, label)) continue;
+        const fieldKey = String(field?.key || label).trim();
+        if (fieldKey && writtenFieldKeys.has(fieldKey)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, field);
         const existingAfterColon = String(raw.split(':').slice(1).join(':') || '').trim();
         const existingIsDemoEmployer =
@@ -1176,6 +1212,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
         if (cellLooksLikeCompletedExport(raw, val) && !val && !existingIsDemoEmployer) continue;
         if (val) {
           writeHeaderValue(r, c, label, raw, val);
+          if (fieldKey) writtenFieldKeys.add(fieldKey);
           wrote = true;
         } else if (existingIsDemoEmployer) {
           // Leave label-only cell until company_function value is available (do not export empty employer).
@@ -1186,6 +1223,8 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
 
       for (const spec of specs) {
         if (!spec.match.test(raw.split(':')[0])) continue;
+        const specKey = String(spec.key || spec.label || '').trim();
+        if (specKey && writtenSpecKeys.has(specKey)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, { key: spec.key, label: spec.label });
         const existingAfterColon = String(raw.split(':').slice(1).join(':') || '').trim();
         const existingIsDemoEmployer =
@@ -1193,6 +1232,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
         if (cellLooksLikeCompletedExport(raw, val) && !val && !existingIsDemoEmployer) continue;
         if (val) {
           writeHeaderValue(r, c, spec.label, raw, val);
+          if (specKey) writtenSpecKeys.add(specKey);
         } else if (existingIsDemoEmployer) {
           // Leave label-only cell until company_function value is available.
         }
@@ -1209,15 +1249,25 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
       for (const field of fields) {
         const label = String(field?.label || '').trim();
         if (!label || !labelMatchesField(raw, label)) continue;
+        const fieldKey = String(field?.key || label).trim();
+        if (fieldKey && writtenFieldKeys.has(fieldKey)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, field);
-        if (val) writeCombinedOnLabelRow(r, c, label, raw, val);
+        if (val) {
+          writeCombinedOnLabelRow(r, c, label, raw, val);
+          if (fieldKey) writtenFieldKeys.add(fieldKey);
+        }
         break;
       }
       if (/:/.test(raw)) continue;
       for (const spec of specs) {
         if (!spec.match.test(raw)) continue;
+        const specKey = String(spec.key || spec.label || '').trim();
+        if (specKey && writtenSpecKeys.has(specKey)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, { key: spec.key, label: spec.label });
-        if (val) writeCombinedOnLabelRow(r, c, spec.label, raw, val);
+        if (val) {
+          writeCombinedOnLabelRow(r, c, spec.label, raw, val);
+          if (specKey) writtenSpecKeys.add(specKey);
+        }
         break;
       }
     }
@@ -1242,6 +1292,100 @@ export function clearStatutoryHeaderCellsBeyondColumn(
       if (!raw) continue;
       if (spillRe.test(raw)) {
         worksheet.getCell(r, c).value = '';
+      }
+    }
+  }
+}
+
+/**
+ * Form U / Form V: clear duplicated employer / manager / registration value fragments
+ * that were spilled across header columns (shows as "VAYONA ENERVAYONA ENI" in Excel).
+ * Keeps the first (leftmost) completed "Label : value" cell on each row.
+ */
+export function clearDuplicatedStatutoryHeaderValueSpill(
+  worksheet,
+  {
+    rowFrom = 1,
+    rowTo = 12,
+    colFrom = 2,
+    colTo = 80,
+    valueHints = [],
+  } = {}
+) {
+  if (!worksheet) return;
+  const r0 = Math.max(1, Number(rowFrom) || 1);
+  const r1 = Math.max(r0, Number(rowTo) || r0);
+  const c0 = Math.max(1, Number(colFrom) || 2);
+  const c1 = Math.max(c0, Number(colTo) || c0);
+  const hints = (Array.isArray(valueHints) ? valueHints : [])
+    .map((h) => String(h || '').trim())
+    .filter((h) => h.length >= 4);
+  const hintPrefixes = hints.map((h) => h.slice(0, Math.min(16, h.length)).toLowerCase());
+
+  const looksLikeSpill = (raw) => {
+    const s = String(raw || '').trim();
+    if (!s) return false;
+    // Keep real Month:/Year: and short markers.
+    if (/^(month|year)\s*:/i.test(s) && s.length < 40) return false;
+    if (/^\d+$/.test(s)) return false;
+    const lower = s.toLowerCase();
+    // Repeated company/manager fragments without a proper leading label.
+    if (
+      !/name\s+and\s+address|name\s+of\s+the\s+manager|registration\s+(certificate\s+)?no/i.test(s) &&
+      hintPrefixes.some((p) => p && (lower.startsWith(p) || lower.includes(p)))
+    ) {
+      return true;
+    }
+    // Concatenated duplicates: "VAYONA ENERVAYONA" / "Nilakantan GovNilakantan"
+    if (/([A-Za-z]{4,})\1/i.test(s.replace(/\s+/g, ''))) return true;
+    return false;
+  };
+
+  for (let r = r0; r <= r1; r += 1) {
+    // Find leftmost keep cell (completed label:value for identity headers).
+    let keepCol = 0;
+    for (let c = 1; c <= Math.min(12, c1); c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (
+        /name\s+and\s+address\s+of\s+(?:the\s+)?(?:employer|establishment)|name\s+of\s+the\s+manager|registration\s+(certificate\s+)?no/i.test(
+          raw
+        ) &&
+        /:/.test(raw)
+      ) {
+        keepCol = c;
+        break;
+      }
+    }
+    for (let c = c0; c <= c1; c += 1) {
+      if (keepCol && c === keepCol) continue;
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      // Never clear another labeled header on the same row.
+      if (
+        keepCol &&
+        c !== keepCol &&
+        /name\s+and\s+address|name\s+of\s+the\s+manager|registration\s+(certificate\s+)?no|month\s*:|year\s*:/i.test(
+          raw.split(':')[0] || ''
+        ) &&
+        /:/.test(raw)
+      ) {
+        continue;
+      }
+      if (looksLikeSpill(raw) || (keepCol && c > keepCol && hintPrefixes.some((p) => p && raw.toLowerCase().includes(p)))) {
+        // Only clear unlabeled / duplicate value cells to the right of the keep label.
+        if (!keepCol || c > keepCol) {
+          if (
+            /name\s+and\s+address|name\s+of\s+the\s+manager|registration\s+(certificate\s+)?no/i.test(
+              raw.split(':')[0] || ''
+            ) &&
+            /:/.test(raw) &&
+            String(raw.split(':').slice(1).join(':') || '').trim().length >= 3
+          ) {
+            // Another complete labeled field — keep.
+            continue;
+          }
+          worksheet.getCell(r, c).value = null;
+        }
       }
     }
   }

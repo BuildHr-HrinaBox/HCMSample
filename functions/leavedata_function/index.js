@@ -11,8 +11,8 @@ const ZOHO_LEAVE_MAX_PAGES = 200;
  * Catalyst function to fetch Zoho People Leave data.
  *
  * Token model (ZOHOPEOPLE.leave.ALL, api_domain: https://www.zohoapis.in):
- *   - Use access_token when set (ZOHO_LEAVE_ACCESS_TOKEN or ZOHO_ACCESS_TOKEN).
- *   - Else use refresh_token (ZOHO_LEAVE_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET).
+ *   - Prefer refresh_token (ZOHO_LEAVE_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET).
+ *   - Use ZOHO_LEAVE_ACCESS_TOKEN only as a temporary override; access tokens expire in about 1 hour.
  *
  * Query:
  *   ?from=01-Apr-2026&to=31-Mar-2027&unit=Day
@@ -156,24 +156,40 @@ module.exports = async (req, res) => {
   }
 };
 
-async function getAccessToken() {
-  // 1) Short-lived access_token (ZOHOPEOPLE.leave.ALL)
-  const envAccessToken = process.env.ZOHO_LEAVE_ACCESS_TOKEN || process.env.ZOHO_ACCESS_TOKEN;
-  if (envAccessToken && String(envAccessToken).trim().length > 10) {
-    return envAccessToken.trim();
+const DEFAULT_ZOHO_CLIENT_ID = '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
+const DEFAULT_ZOHO_CLIENT_SECRET = 'b6d3935145d59974934b981d6291b40af69a3ab150';
+const DEFAULT_LEAVE_REFRESH_TOKEN =
+  '1000.6ed75bd62c19f8d1cc99fd351d25c6b8.9b2f018e582a8032e46d806cbf6d22e8';
+
+let cachedAccessToken = null;
+let cachedAccessTokenExpiresAt = 0;
+
+function envOr(name, fallback = '') {
+  const value = process.env[name];
+  if (value != null && String(value).trim() !== '') return String(value).trim();
+  return fallback;
+}
+
+function oauthCredentials() {
+  const refreshToken =
+    envOr('ZOHO_LEAVE_REFRESH_TOKEN') ||
+    envOr('ZOHO_REFRESH_TOKEN') ||
+    DEFAULT_LEAVE_REFRESH_TOKEN;
+  const clientId = envOr('ZOHO_CLIENT_ID', DEFAULT_ZOHO_CLIENT_ID);
+  const clientSecret = envOr('ZOHO_CLIENT_SECRET', DEFAULT_ZOHO_CLIENT_SECRET);
+  return { refreshToken, clientId, clientSecret };
+}
+
+async function refreshAccessToken() {
+  const now = Date.now();
+  if (cachedAccessToken && now < cachedAccessTokenExpiresAt - 60_000) {
+    return cachedAccessToken;
   }
 
-  // 2) Refresh token → access_token (same client as People / Attendance)
-  const refreshToken =
-    process.env.ZOHO_LEAVE_REFRESH_TOKEN ||
-    process.env.ZOHO_REFRESH_TOKEN ||
-    '1000.8fb87613a10e02dfb9c11c8b3d44309f.d6c54b4a484ad7022c70accb35c4cef8';
-  const clientId = process.env.ZOHO_CLIENT_ID || '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
-  const clientSecret = process.env.ZOHO_CLIENT_SECRET || 'b6d3935145d59974934b981d6291b40af69a3ab150';
-
+  const { refreshToken, clientId, clientSecret } = oauthCredentials();
   if (!refreshToken || !clientId || !clientSecret) {
     throw new Error(
-      'Missing Zoho OAuth env. Set ZOHO_LEAVE_ACCESS_TOKEN (access_token only) or ZOHO_LEAVE_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET.'
+      'Missing Zoho OAuth env. Set ZOHO_LEAVE_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET.'
     );
   }
 
@@ -193,7 +209,7 @@ async function getAccessToken() {
   } catch (err) {
     const zoho = err.response && err.response.data;
     if (zoho && (zoho.error === 'invalid_code' || zoho.error === 'invalid_token')) {
-      throw new Error('Invalid or expired leave refresh token. Set ZOHO_LEAVE_ACCESS_TOKEN to your access_token instead.');
+      throw new Error('Invalid or expired leave refresh token. Regenerate OAuth with ZOHOPEOPLE.leave.ALL scope in Zoho API Console (.in).');
     }
     throw new Error(
       zoho && (zoho.error || zoho.error_description)
@@ -203,10 +219,46 @@ async function getAccessToken() {
   }
 
   if (data && data.access_token) {
-    return data.access_token;
+    cachedAccessToken = data.access_token;
+    const expiresIn = parseInt(data.expires_in, 10) || 3600;
+    cachedAccessTokenExpiresAt = now + expiresIn * 1000;
+    return cachedAccessToken;
   }
   const errorMsg = data?.error || data?.error_description || 'Failed to obtain access token from Zoho.';
   throw new Error(`Token refresh failed: ${errorMsg}`);
+}
+
+async function getAccessToken(options = {}) {
+  const forceRefresh = options.forceRefresh === true;
+  if (forceRefresh) {
+    cachedAccessToken = null;
+    cachedAccessTokenExpiresAt = 0;
+    return refreshAccessToken();
+  }
+
+  const { refreshToken, clientId, clientSecret } = oauthCredentials();
+  if (refreshToken && clientId && clientSecret) {
+    return refreshAccessToken();
+  }
+
+  const directToken = envOr('ZOHO_LEAVE_ACCESS_TOKEN') || envOr('ZOHO_ACCESS_TOKEN');
+  if (directToken.length > 10) {
+    return directToken;
+  }
+
+  throw new Error(
+    'Missing Zoho OAuth env. Set ZOHO_LEAVE_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET.'
+  );
+}
+
+function isAuthError(status, data) {
+  if (status === 401 || status === 403) return true;
+  const text = JSON.stringify(data || '').toLowerCase();
+  return /7213|invalid oauth|invalid token|unauthorized|access denied/.test(text);
+}
+
+function zohoAuthHeader(accessToken) {
+  return `Zoho-oauthtoken ${accessToken}`;
 }
 
 /**
@@ -410,14 +462,22 @@ function toRecordsMap(raw, leaveRecords) {
   return records;
 }
 
-async function fetchLeavePage({ accessToken, fromDate, toDate, unit, startIndex = 0, limit = ZOHO_LEAVE_PAGE_SIZE }) {
+async function fetchLeavePage({
+  accessToken,
+  fromDate,
+  toDate,
+  unit,
+  startIndex = 0,
+  limit = ZOHO_LEAVE_PAGE_SIZE,
+  allowAuthRetry = true,
+}) {
   const base = process.env.ZOHO_PEOPLE_BASE_URL || 'https://people.zoho.in/people/api';
   const endpoint = `${base}/v2/leavetracker/reports/bookedAndBalance`;
 
   try {
     const response = await axios.get(endpoint, {
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: zohoAuthHeader(accessToken),
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
@@ -433,6 +493,21 @@ async function fetchLeavePage({ accessToken, fromDate, toDate, unit, startIndex 
     
     // Check if response has error status
     if (response.status >= 400) {
+      if (allowAuthRetry && isAuthError(response.status, response.data)) {
+        const freshToken = await getAccessToken({ forceRefresh: true });
+        if (freshToken && freshToken !== accessToken) {
+          return fetchLeavePage({
+            accessToken: freshToken,
+            fromDate,
+            toDate,
+            unit,
+            startIndex,
+            limit,
+            allowAuthRetry: false,
+          });
+        }
+      }
+
       let errorMessage;
       
       // Try to extract error message from response
@@ -452,7 +527,7 @@ async function fetchLeavePage({ accessToken, fromDate, toDate, unit, startIndex 
       if (response.status === 401) {
         console.error('401 Unauthorized - Access token may be invalid or missing required leave scope (e.g. ZOHOPEOPLE.leave.ALL)');
         console.error('Response data:', JSON.stringify(response.data));
-        errorMessage = `Unauthorized (401): ${errorMessage}. Please check: 1) Access token is valid, 2) Token has ZOHO People leave scope, 3) Token is not expired.`;
+        errorMessage = `Unauthorized (401): ${errorMessage}. Regenerate OAuth with ZOHOPEOPLE.leave.ALL scope at https://api-console.zoho.in/`;
       }
       
       throw new Error(`Zoho People API error: ${errorMessage}`);

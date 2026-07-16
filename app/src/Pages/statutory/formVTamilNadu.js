@@ -546,6 +546,9 @@ export function locateFormVTamilNaduSummaryExcelColumns(
     totalDaysWorked: null,
     totalHoursWorked: null,
     lossOfPay: null,
+    nationalHolidayBenefit: null,
+    festivalHolidayBenefit: null,
+    remarks: null,
   };
   if (!worksheet) return out;
   const fromRow = Math.max(1, Math.min(headerRow, dayRow > 0 ? dayRow : headerRow) - 5);
@@ -565,6 +568,30 @@ export function locateFormVTamilNaduSummaryExcelColumns(
     }
     if (!out.lossOfPay && /loss/.test(t) && /pay/.test(t)) {
       out.lossOfPay = c;
+      return;
+    }
+    // Skip "Approved Festival Holidays" / approval proceedings header boxes.
+    if (/approved\s+festival|approval\s+proceedings/.test(t)) return;
+    if (
+      !out.nationalHolidayBenefit &&
+      /national/.test(t) &&
+      /holiday/.test(t) &&
+      (/benefit/.test(t) || /availed/.test(t) || /working/.test(t))
+    ) {
+      out.nationalHolidayBenefit = c;
+      return;
+    }
+    if (
+      !out.festivalHolidayBenefit &&
+      /festival/.test(t) &&
+      /holiday/.test(t) &&
+      (/benefit/.test(t) || /availed/.test(t) || /working/.test(t))
+    ) {
+      out.festivalHolidayBenefit = c;
+      return;
+    }
+    if (!out.remarks && /^remarks?$/.test(t)) {
+      out.remarks = c;
     }
   };
 
@@ -584,5 +611,47 @@ export function locateFormVTamilNaduSummaryExcelColumns(
       classifyJoined(cellText(worksheet.getCell(r, c)), c);
     }
   }
+
+  // Template layout: after LOP come National / Festival / Remarks in order.
+  if (out.lossOfPay > 0) {
+    if (!out.nationalHolidayBenefit) out.nationalHolidayBenefit = out.lossOfPay + 1;
+    if (!out.festivalHolidayBenefit) out.festivalHolidayBenefit = out.lossOfPay + 2;
+    if (!out.remarks) out.remarks = out.lossOfPay + 3;
+  }
   return out;
+}
+
+/**
+ * Excel columns that must stay blank on Form V TN download
+ * (National Holiday benefit, Festival Holiday benefit, Remarks).
+ * @returns {number[]}
+ */
+export function locateFormVTamilNaduLeaveBlankExcelColumns(
+  worksheet,
+  {
+    headerRow = 10,
+    dayRow = -1,
+    afterCol = 0,
+    lastDayCol = 0,
+    maxScanCols = 80,
+    cellText = (cell) => String(cell?.value ?? ''),
+  } = {}
+) {
+  const summary = locateFormVTamilNaduSummaryExcelColumns(worksheet, {
+    headerRow,
+    dayRow,
+    afterCol,
+    maxScanCols,
+    cellText,
+  });
+  const cols = new Set();
+  [summary.nationalHolidayBenefit, summary.festivalHolidayBenefit, summary.remarks].forEach((c) => {
+    if (Number.isFinite(c) && c > 0) cols.add(c);
+  });
+  // Hard fallback when labels were not found (day-30 template: 40/41/42).
+  if (cols.size === 0) {
+    const anchor = lastDayCol > 0 ? lastDayCol : afterCol > 0 ? afterCol - 1 : 36;
+    [anchor + 4, anchor + 5, anchor + 6].forEach((c) => cols.add(c));
+  }
+  return [...cols].sort((a, b) => a - b);
 }

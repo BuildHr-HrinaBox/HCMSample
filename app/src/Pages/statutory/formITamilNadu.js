@@ -163,6 +163,38 @@ function classifyFormITnDefaultColumn(header) {
   return '';
 }
 
+/** Register of Fines fine/cause/wage columns — autofill as NIL when no fine was imposed. */
+export function isFormITamilNaduFinesNilDefaultHeader(header) {
+  const bare = formITnHeaderBare(header);
+  if (!bare) return false;
+  if (/^(s\.?\s*no\.?|sl\.?\s*no\.?|serial(\s+number)?)$/.test(bare)) return false;
+  if (bare === 'name') return false;
+  if (/father|husband|spouse/.test(bare)) return false;
+  if (/department\s+of\s+gang|^department$/.test(bare) && !/workshop\s+departmental/.test(bare)) {
+    return false;
+  }
+  if (
+    /name\s+and\s+address\s+of\s+the\s+workman/.test(bare) ||
+    (/name/.test(bare) && /workman|workmen|employee|worker/.test(bare))
+  ) {
+    return false;
+  }
+  // Workmen-register-only columns — never NIL from this helper.
+  if (/whether\s+temporary|signature|480\s+days|made\s+permanent|first\s+entry|designation/.test(bare)) {
+    return false;
+  }
+  return (
+    /act\s+or\s+omission/.test(bare) ||
+    /whether\s+workman/.test(bare) ||
+    /showed\s+cause/.test(bare) ||
+    /total\s+wages/.test(bare) ||
+    /amount\s+of\s+and\s+date/.test(bare) ||
+    /fine\s+imposed/.test(bare) ||
+    /fine\s+realis/.test(bare) ||
+    bare === 'remarks'
+  );
+}
+
 /** Build one row object for Register of Fines or Register of Workmen headers. */
 export function buildFormITamilNaduDefaultRow(emp, headers, index = 0) {
   const row = {};
@@ -180,7 +212,12 @@ export function buildFormITamilNaduDefaultRow(emp, headers, index = 0) {
     else if (kind === 'dateOfFirstEntry') row[header] = emp.dateOfFirstEntry || '';
     else if (kind === 'dateCompleted480Days') row[header] = emp.dateCompleted480Days || '';
     else if (kind === 'dateMadePermanent') row[header] = emp.dateMadePermanent || '';
-    else if (kind === 'father' || kind === 'leaveBlank') row[header] = '';
+    else if (kind === 'father') row[header] = '';
+    else if (isFormITamilNaduFinesNilDefaultHeader(header)) {
+      row[header] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+    } else if (kind === 'leaveBlank') {
+      row[header] = '';
+    }
   });
   row.__employeeLookupName = emp.name || '';
   row.__employeeLookupId = emp.empId || '';
@@ -305,7 +342,9 @@ export function isFormITamilNaduSuspensionWorkbookContext({
     blob.includes('exoncrated') ||
     blob.includes('awaerded') ||
     blob.includes('kept under suspension') ||
-    blob.includes('employees placed under suspension');
+    blob.includes('employees placed under suspension') ||
+    // Sheet / workbook naming for Form_I_-_TamilNadu.xlsx (SA Form 1).
+    /\bsa\s*form\s*1\b/.test(blob);
 
   return looksLikeFormI && looksLikeTamilNadu && looksLikeSuspensionRegister;
 }
@@ -328,7 +367,9 @@ export function applyFormITamilNaduNilDefaultsToRows(rows, headers, { overwriteN
         }
         return;
       }
-      if (!isFormITamilNaduNilDefaultHeader(header)) return;
+      const isNilCol =
+        isFormITamilNaduNilDefaultHeader(header) || isFormITamilNaduFinesNilDefaultHeader(header);
+      if (!isNilCol) return;
       if (!overwriteNil && !isBlankLikeFormITamilNaduValue(next[header])) return;
       if (next[header] === FORM_I_TAMIL_NADU_NIL_DEFAULT) return;
       next[header] = FORM_I_TAMIL_NADU_NIL_DEFAULT;

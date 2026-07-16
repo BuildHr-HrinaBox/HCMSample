@@ -572,6 +572,16 @@ export function readFormPGJShiftEndFromEmployee(emp) {
   ]);
 }
 
+export function readFormPGJShiftNameFromEmployee(emp) {
+  return readScalarFromEmployee(emp, [
+    'ShiftName',
+    'Shift_Name',
+    'shiftName',
+    'Shift Name',
+    'Shift',
+  ]);
+}
+
 export function isFormPGJWorkingHoursFromHeader(header) {
   const n = normHeaderLabel(header);
   return n === 'working hours from' || (n.includes('working hours') && n.includes('from'));

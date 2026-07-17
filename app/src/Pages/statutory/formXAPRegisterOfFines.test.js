@@ -1,8 +1,12 @@
 import {
+  cloneFormXIIIAPWorksheetClean,
   isFormXIIIRegisterOfWorkmenContext,
   isFormXAPRegisterOfFinesContext,
   blobIndicatesFormIRegisterOfFinesNotFormX,
   sheetBlobIndicatesFormXAPRegisterOfFines,
+  FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT,
+  isFormXXAPDeductionNilHeader,
+  applyFormXXAPDeductionsNilToMappedRows,
 } from './formXAPRegisterOfFines';
 
 describe('Form XIII Register of Workmen detection', () => {
@@ -28,6 +32,77 @@ describe('Form XIII Register of Workmen detection', () => {
         { state: 'Andhra Pradesh', act: 'Contract Labour' },
         'Form_XIII.xlsx',
         'Register of Workmen (Contract Labour)'
+      )
+    ).toBe(true);
+  });
+
+  it('detects AP Form XIII from Rule 75 / workmen surname headers', () => {
+    expect(
+      isFormXIIIRegisterOfWorkmenContext(
+        {
+          title: 'FORM - XIII REGISTER OF WORKMEN EMPLOYED BY CONTRACTOR',
+          subtitle: '[Vide Rule 75 Contract Labour (Regulation and Abolition) Central/A.P Rules)'
+        },
+        { state: 'Andhra Pradesh', formName: 'Form XIII' },
+        'Form XIII - Andhra Pradesh.xlsx',
+        'Name and Surname of Workmen Age and Sex Local address Permanent House address'
+      )
+    ).toBe(true);
+  });
+});
+
+describe('Form XIII AP clean workbook clone', () => {
+  it('dedupes repeated title text and applies a single A3:K3 merge', async () => {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM 1');
+    for (let c = 1; c <= 11; c += 1) {
+      ws.getCell(3, c).value =
+        'FORM - XIII REGISTER OF WORKMEN EMPLOYED BY CONTRACTOR [Vide Rule 75 Contract Labour (Regulation and Abolition) Central/A.P Rules)';
+      ws.getCell(4, c).value =
+        '[Vide Rule 75 Contract Labour (Regulation and Abolition) Central/A.P Rules)';
+      ws.getCell(13, c).value = c === 1 ? 'S.No' : c === 2 ? 'Name and Surname of Workmen' : `Col ${c}`;
+      ws.getCell(14, c).value = ws.getCell(13, c).value;
+    }
+    ws.getCell(5, 1).value = 'Name and address of Contractor : VAYONA ENERGY';
+    ws.getCell(5, 2).value = 'Name and Address of Contractor. : VAYONA ENERGY PRIVATE LIMITED';
+    ws.getCell(9, 1).value = 'Nature and location of work : AP-Gurvepalli';
+    ws.getCell(9, 2).value = 'Nature and location of work. : AP-Gurvepalli';
+    ws.getCell(5, 9).value = 'Name and address of Establishemnt in/ under which contract is carried on:';
+    ws.getCell(5, 10).value = 'Name and addr Establishemnt i contract is carri';
+    ws.getCell(15, 1).value = '1';
+    ws.getCell(15, 2).value = '2';
+
+    const { workbook, worksheet } = cloneFormXIIIAPWorksheetClean(ws, 'FORM 1');
+    expect(workbook.worksheets).toHaveLength(1);
+    expect(String(worksheet.name)).toMatch(/XIII/i);
+    expect(String(worksheet.getCell(3, 1).value)).toMatch(/FORM\s*[-–]?\s*XIII/i);
+    expect(String(worksheet.getCell(3, 1).value)).not.toMatch(/Vide Rule 75/i);
+    expect(String(worksheet.getCell(4, 1).value)).toMatch(/Vide Rule 75/i);
+    const merges = Array.isArray(worksheet.model?.merges) ? worksheet.model.merges : [];
+    expect(merges).toEqual(expect.arrayContaining(['A3:K3', 'A4:K4', 'A13:A14']));
+    expect(String(worksheet.getCell(13, 1).value)).toMatch(/S\.?\s*No/i);
+    // Columns A and I must be cleared; combined text stays in B / J only.
+    expect(String(worksheet.getCell(5, 1).value || '')).toBe('');
+    expect(String(worksheet.getCell(9, 1).value || '')).toBe('');
+    expect(String(worksheet.getCell(5, 9).value || '')).toBe('');
+    expect(String(worksheet.getCell(5, 2).value)).toMatch(/VAYONA ENERGY PRIVATE LIMITED/i);
+    expect(String(worksheet.getCell(9, 2).value)).toMatch(/AP-Gurvepalli/i);
+  });
+});
+
+describe('Form I Tamil Nadu vs Form XIII AP', () => {
+  it('does not classify CLRA Form XIII as Tamil Nadu Form I workmen', () => {
+    // isFormIRegisterOfWorkmenContext lives in Statutory.js; verify Form XIII detector wins.
+    expect(
+      isFormXIIIRegisterOfWorkmenContext(
+        {
+          title: 'FORM - XIII REGISTER OF WORKMEN EMPLOYED BY CONTRACTOR',
+          subtitle: '[Vide Rule 75 Contract Labour (Regulation and Abolition) Central/A.P Rules)'
+        },
+        { state: 'Andhra Pradesh', formName: 'Form XIII' },
+        'Form XIII - Andhra Pradesh.xlsx',
+        'REGISTER OF WORKMEN EMPLOYED BY CONTRACTOR'
       )
     ).toBe(true);
   });
@@ -66,5 +141,55 @@ describe('Form I Tamil Nadu vs Form X AP Register of Fines', () => {
         'Form X Register of Fines Name of the worker Nature & date of offence'
       )
     ).toBe(true);
+  });
+});
+
+describe('Form XX AP Register of Deductions NIL columns', () => {
+  const headers = [
+    'S.No',
+    'Name of workmen',
+    'Father/Husband',
+    'Particulars of Damage or Loss',
+    'Date of Damage or Loss',
+    'Whether workman showed cause against deduction',
+    "Name of Person in whose presence Employee's explanation was heard",
+    'Amount of deduction imposed',
+    'No. of instalments',
+    'First instalment',
+    'Last instalment',
+    'Remarks',
+  ];
+
+  it('recognizes damage / recovery columns for NIL', () => {
+    expect(isFormXXAPDeductionNilHeader('Particulars of Damage or Loss')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('Date of Damage or Loss')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('Whether workman showed cause against deduction')).toBe(true);
+    expect(
+      isFormXXAPDeductionNilHeader(
+        "Name of Person in whose presence Employee's explanation was heard"
+      )
+    ).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('Amount of deduction imposed')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('No. of instalments')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('First instalment')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('Last instalment')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('Remarks')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('Name of workmen')).toBe(false);
+    expect(isFormXXAPDeductionNilHeader('S.No')).toBe(false);
+  });
+
+  it('fills blank damage / recovery columns with NIL', () => {
+    const rows = applyFormXXAPDeductionsNilToMappedRows(
+      [{ 'Name of workmen': 'Ravi', 'Particulars of Damage or Loss': '' }],
+      headers
+    );
+    expect(rows[0]['Name of workmen']).toBe('Ravi');
+    expect(rows[0]['Particulars of Damage or Loss']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+    expect(rows[0]['Date of Damage or Loss']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+    expect(rows[0]['Amount of deduction imposed']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+    expect(rows[0]['No. of instalments']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+    expect(rows[0]['First instalment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+    expect(rows[0]['Last instalment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+    expect(rows[0]['Remarks']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
   });
 });

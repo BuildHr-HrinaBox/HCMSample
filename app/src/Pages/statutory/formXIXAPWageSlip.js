@@ -1,4 +1,6 @@
 import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import { labelMatchScore } from './form18APAccidentNotice';
 import { blobIndicatesRegisterOfDeductionsForDamage } from './formXAPRegisterOfFines';
 
@@ -123,20 +125,88 @@ export function isFormXIXAPWageSlipContext(formHeader, rowItem, fileName, sheetT
   }
   if (
     matchesFormXIXHint(parts) &&
-    !/register\s+of\s+(fines|advances|workmen|wages|employment|over[\s-]*time)/i.test(parts)
+    !/register\s+of\s+(fines|advances|workmen|wages|employment|over[\s-]*time|deductions)/i.test(parts) &&
+    !/deductions?\s+for\s+damage|damage\s+or\s+loss/i.test(parts)
   ) {
-    return true;
+    const fileIdentity = [rowItem?.formFileName, rowItem?.FormFileName, fileName]
+      .filter((x) => x != null && String(x).trim() !== '')
+      .join(' ')
+      .toLowerCase();
+    if (
+      /wage\s+slip/i.test(fileIdentity) ||
+      /rule\s+78\s*\(\s*1\s*\)\s*\(\s*b\s*\)/i.test(fileIdentity) ||
+      /andhra\s+pradesh|form[\s._-]*xix[\s._-]*ap/.test(fileIdentity) ||
+      matchesFormXIXHint(fileIdentity)
+    ) {
+      return true;
+    }
   }
   return false;
+}
+
+/**
+ * Andhra Pradesh Form XIX — contractor/header fields + tabular wage particulars (1–7).
+ * Distinct from MP/GJ/TN/KA state-specific wage-slip variants.
+ */
+export function isFormXIXAPTableWageSlipContext(formHeader, rowItem, fileName, sheetText = '') {
+  if (!isFormXIXAPWageSlipContext(formHeader, rowItem, fileName, sheetText)) return false;
+  if (formHeader?.formXIXMPTableLayout && !formHeader?.formXIXAPTableLayout) return false;
+  if (formHeader?.formXIXKarnatakaTableLayout) return false;
+  const parts = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    rowItem?.formFileName,
+    rowItem?.FormFileName,
+    rowItem?.state,
+    rowItem?.State,
+    fileName,
+    formHeader?.title,
+    sheetText,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+  if (/madhya\s+pradesh|form[\s._-]*xix[\s._-]*mp/.test(parts)) return false;
+  if (/karnataka|form[\s._-]*xix[\s._-]*(?:ka|karnataka)/.test(parts)) return false;
+  if (/gujarat|form[\s._-]*xix[\s._-]*gj/.test(parts)) return false;
+  if (/tamil[\s._-]*nadu|form[\s._-]*xix[\s._-]*tamil/.test(parts)) return false;
+  return true;
+}
+
+/** @deprecated Use isFormXIXAPTableWageSlipContext — AP wage particulars are tabular. */
+export function isFormXIXAPHeaderOnlyWageSlipContext(formHeader, rowItem, fileName, sheetText = '') {
+  return isFormXIXAPTableWageSlipContext(formHeader, rowItem, fileName, sheetText);
 }
 
 export function isFormXIXAPHeaderFieldLayoutFormHeader(formHeader) {
   return !!formHeader?.formXIXAPHeaderFieldLayout;
 }
 
+export function isFormXIXAPTableLayoutFormHeader(formHeader) {
+  return !!formHeader?.formXIXAPTableLayout;
+}
+
+/** Modal/export wage grid — workman + official Form XIX particulars 1–7. */
+export const FORM_XIX_AP_WAGE_TABLE_HEADERS = [
+  "Name and Father's/Husband's Name of the workman",
+  '1. No. of days worked',
+  '2. No. of units worked in case of piece-rate Workers',
+  '3. Rate of daily wages/piece-rate',
+  '4. Amount of overtime wages',
+  '5. Gross wages payable',
+  '6. Deductions, if any',
+  '7. Net amount of wages paid',
+];
+
+export function resolveFormXIXAPWageTableHeaders(tableHeaders) {
+  const list = Array.isArray(tableHeaders) ? tableHeaders.filter(Boolean) : [];
+  if (list.length >= FORM_XIX_AP_WAGE_TABLE_HEADERS.length - 1) return list;
+  return [...FORM_XIX_AP_WAGE_TABLE_HEADERS];
+}
+
+/** Header/footer only — wage particulars 1–7 render in the employee table. */
 export const FORM_XIX_AP_FIELD_GROUPS = [
   { id: 'header', title: 'Wage slip — workman & contractor' },
-  { id: 'wages', title: 'Wage particulars' },
   { id: 'footer', title: 'Certification' }
 ];
 
@@ -440,11 +510,15 @@ export function resolveFormXIXAPHeaderFieldLayout(parsed, workbook, hints = {}) 
   const fileName = hints.fileName || hints.formFileName || '';
   const sheetText = hints.sheetText || '';
   if (!isFormXIXAPWageSlipContext(formHeader, item, fileName, sheetText)) return null;
+  // MP/GJ/TN/KA use their own tabular resolvers first via resolveFormXIXCombinedHeaderFieldLayout.
+  if (!isFormXIXAPTableWageSlipContext(formHeader, item, fileName, sheetText)) return null;
 
   const accessor = buildWorkbookMergedCellAccessor(workbook, hints);
   const getMergedAwareCellText = accessor?.getMergedAwareCellText ?? null;
   const effectiveSheetCols = accessor?.effectiveSheetCols ?? 20;
-  const finalFields = buildFormXIXAPTemplateFields(getMergedAwareCellText, effectiveSheetCols);
+  const allFields = buildFormXIXAPTemplateFields(getMergedAwareCellText, effectiveSheetCols);
+  // Wage particulars live in the table — keep contractor / period / certification in header fields.
+  const finalFields = allFields.filter((f) => f.group !== 'wages');
   const title =
     formHeader?.title ||
     (String(sheetText).toLowerCase().includes('wage slip') ? 'Form XIX – Wage Slip' : 'Form XIX');
@@ -453,16 +527,18 @@ export function resolveFormXIXAPHeaderFieldLayout(parsed, workbook, hints = {}) 
     formHeader: {
       title,
       subtitle: formHeader?.subtitle || 'Wage Slip (Contract Labour)',
-      reference: formHeader?.reference || '',
+      reference: formHeader?.reference || '[Rule 78(1)(b)]',
       formXIXAPHeaderFieldLayout: true,
+      formXIXAPTableLayout: true,
       textRows: [],
       fields: finalFields
     },
-    headers: [],
+    headers: resolveFormXIXAPWageTableHeaders(parsed?.headers || hints.tableHeaders || null),
     tableData: [],
     headerRowIndex: -1,
     dataStartIndex: 0,
-    tableStartCol: 0
+    tableStartCol: 0,
+    sheetName: accessor?.sheetName || hints.preferredSheetName || null
   };
 }
 
@@ -524,6 +600,48 @@ export function applyFormXIXAPAutofillFromSiteAndPayroll(headerData, context = {
   return out;
 }
 
+/** Map modal wage-table row cells onto form_xix_ap_* header keys for Excel export. */
+export function mergeFormXIXAPWageTableRowIntoHeaderData(headerData, row, headers = FORM_XIX_AP_WAGE_TABLE_HEADERS) {
+  const out = headerData && typeof headerData === 'object' ? { ...headerData } : {};
+  const hdrs = resolveFormXIXAPWageTableHeaders(headers);
+  const read = (pred) => {
+    const header = hdrs.find(pred);
+    if (!header || !row || typeof row !== 'object') return '';
+    return String(row[header] ?? '').trim();
+  };
+  const setIf = (key, value) => {
+    const text = String(value ?? '').trim();
+    if (!text || !key) return;
+    out[key] = text;
+  };
+  const norm = (h) =>
+    String(h || '')
+      .replace(/^\d+[\.\)]\s*/, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  setIf(
+    'form_xix_ap_workman',
+    read((h) => {
+      const s = norm(h);
+      return (s.includes('workman') || s.includes('workmen')) && (s.includes('name') || s.includes('father'));
+    })
+  );
+  setIf('form_xix_ap_days_worked', read((h) => /days\s+worked/.test(norm(h))));
+  setIf('form_xix_ap_units_worked', read((h) => /units\s+worked/.test(norm(h))));
+  setIf('form_xix_ap_rate', read((h) => {
+    const s = norm(h);
+    // Do not match "piece-rate Workers" on the units column.
+    if (/units\s+worked/.test(s)) return false;
+    return /rate\s+of\s+(?:daily\s+)?wages|daily\s+wages|piece[\s/-]*rate/.test(s);
+  }));
+  setIf('form_xix_ap_overtime', read((h) => /overtime/.test(norm(h))));
+  setIf('form_xix_ap_gross', read((h) => /gross\s+wages/.test(norm(h))));
+  setIf('form_xix_ap_deductions', read((h) => /deduction/.test(norm(h))));
+  setIf('form_xix_ap_net', read((h) => /net\s+amount/.test(norm(h))));
+  return out;
+}
+
 export function importFormXIXAPHeaderFieldsFromWorkbook(workbook, hints = {}) {
   const accessor = buildWorkbookMergedCellAccessor(workbook, hints);
   if (!accessor) return null;
@@ -561,9 +679,39 @@ export function writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, headerFormData
       return '';
     });
   const normalize = (txt) => formXIXAPHeaderNorm(txt);
-  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  const isPlaceholderCell = (txt) => {
+    const t = String(txt || '').trim();
+    if (!t) return true;
+    if (t === ':') return true;
+    // Template dotted lines (.….) must be overwritten with wage values.
+    if (/^[.\u2026…_\-\s]+$/.test(t)) return true;
+    if (/^enter\b/i.test(t)) return true;
+    return false;
+  };
+  const isDottedPlaceholder = (txt) => {
+    const t = String(txt || '').trim();
+    return t.length > 0 && /^[.\u2026…_\-\s]+$/.test(t);
+  };
+  // Always include wage particulars 1–7 for export — modal layout may omit them from fields[].
+  const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  const fieldsByKey = new Map();
+  FORM_XIX_AP_TEMPLATE_SPECS.forEach((spec) => {
+    fieldsByKey.set(spec.key, {
+      key: spec.key,
+      label: spec.label,
+      group: spec.group,
+      fieldType: spec.fieldType || 'text',
+      match: spec.match,
+    });
+  });
+  parsedFields.forEach((field) => {
+    if (!field?.key) return;
+    const prev = fieldsByKey.get(field.key) || {};
+    fieldsByKey.set(field.key, { ...prev, ...field });
+  });
+  const fields = Array.from(fieldsByKey.values());
   const maxScanRows = Math.max(200, worksheet.rowCount + 10);
-  const maxScanCols = 24;
+  const maxScanCols = Math.max(24, worksheet.columnCount || 0, 16);
 
   const writeAt = (row, col, value) => {
     const text = String(value ?? '').trim();
@@ -571,34 +719,250 @@ export function writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, headerFormData
     worksheet.getCell(row, col).value = text;
   };
 
+  /** Template stores wage values on dotted lines in cols H–L; avoid writing into empty B–G. */
+  const pickValueCol = (row, labelCol, preferValueBand) => {
+    let bestCol = null;
+    let bestScore = -1;
+    const scanEnd = Math.min(labelCol + 14, Math.max(maxScanCols + 4, 14));
+    for (let nc = labelCol + 1; nc <= scanEnd; nc += 1) {
+      const neighbor = excelCellValueToString(worksheet.getCell(row, nc)?.value);
+      if (!isPlaceholderCell(neighbor)) continue;
+      let score = 10;
+      if (isDottedPlaceholder(neighbor)) score += 100;
+      if (nc >= 8 && nc <= 14) score += preferValueBand ? 80 : 40;
+      if (preferValueBand && nc < 8) score -= 60;
+      if (score > bestScore) {
+        bestScore = score;
+        bestCol = nc;
+      }
+    }
+    return bestCol;
+  };
+
   fields.forEach((field) => {
     const val = headerFormData[field.key];
     if (val == null || String(val).trim() === '') return;
 
-    if (field.labelRow != null && field.valueCol != null) {
+    const spec = FORM_XIX_AP_TEMPLATE_SPECS.find((s) => s.key === field.key);
+    const isWageField = (field.group || spec?.group) === 'wages';
+
+    // Header/footer fields may use parsed coords; wage particulars always locate dotted value band.
+    if (!isWageField && field.labelRow != null && field.valueCol != null) {
       const targetRow = (field.valueRow ?? field.labelRow) + 1;
       writeAt(targetRow, field.valueCol + 1, val);
       return;
     }
 
-    const spec = FORM_XIX_AP_TEMPLATE_SPECS.find((s) => s.key === field.key);
     const labelNorm = normalize(String(field.label || spec?.label || '').replace(/:+$/, ''));
     if (!labelNorm) return;
+    const matchRe = spec?.match || null;
     for (let r = 1; r <= maxScanRows; r += 1) {
       for (let c = 1; c <= maxScanCols; c += 1) {
         const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
-        const score = labelMatchScore(labelNorm, normalize(raw.replace(/:+$/, '')));
-        if (score < 45) continue;
-        for (let nc = c + 1; nc <= Math.min(c + 12, maxScanCols + 4); nc += 1) {
-          const nt = normalize(excelCellValueToString(worksheet.getCell(r, nc)?.value));
-          if (!nt || nt === ':') {
-            writeAt(r, nc, val);
+        const rawNorm = normalize(raw.replace(/:+$/, ''));
+        const score = labelMatchScore(labelNorm, rawNorm);
+        const regexHit = matchRe && (matchRe.test(raw) || matchRe.test(rawNorm));
+        if (score < 45 && !regexHit) continue;
+        const col = pickValueCol(r, c, isWageField);
+        if (col != null) {
+          writeAt(r, col, val);
+          return;
+        }
+        // Fall back: first placeholder in the H–L value band on this / next rows.
+        for (let r2 = r; r2 <= Math.min(r + 2, maxScanRows); r2 += 1) {
+          const bandCol = pickValueCol(r2, 7, true);
+          if (bandCol != null && bandCol >= 8) {
+            writeAt(r2, bandCol, val);
             return;
           }
         }
-        writeAt(r + 1, c, val);
+        writeAt(r, Math.min(Math.max(c + 7, 8), maxScanCols), val);
         return;
       }
     }
   });
+}
+
+function formXIXAPRowHasExportData(row, headers) {
+  if (!row || typeof row !== 'object') return false;
+  const hdrs = resolveFormXIXAPWageTableHeaders(headers);
+  return hdrs.some((h) => String(row[h] ?? '').trim() !== '');
+}
+
+function sanitizeFormXIXAPHeaderFormData(headerFormData) {
+  const out = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
+  Object.keys(out).forEach((key) => {
+    if (out[key] == null) return;
+    out[key] = String(out[key]).trim();
+  });
+  return out;
+}
+
+function applyFormXIXAPExportWageRulesToHeaderData(headerData) {
+  const out = sanitizeFormXIXAPHeaderFormData(headerData);
+  out.form_xix_ap_overtime = 'NIL';
+  const gross = Number(String(out.form_xix_ap_gross ?? '').replace(/,/g, '').trim());
+  const net = Number(String(out.form_xix_ap_net ?? '').replace(/,/g, '').trim());
+  if (Number.isFinite(gross) && Number.isFinite(net)) {
+    const diff = Math.round((gross - net) * 100) / 100;
+    out.form_xix_ap_deductions = String(diff >= 0 ? diff : 0);
+  }
+  return out;
+}
+
+export { applyFormXIXAPExportWageRulesToHeaderData };
+
+function resolveFormXIXAPEmployeeDownloadBaseName(row, headers, index) {
+  const hdrs = resolveFormXIXAPWageTableHeaders(headers);
+  const workmanHeader = hdrs.find((h) => {
+    const s = formXIXAPHeaderNorm(h);
+    return (s.includes('workman') || s.includes('workmen')) && (s.includes('name') || s.includes('father'));
+  });
+  const raw = workmanHeader ? String(row?.[workmanHeader] ?? '').split(/\r?\n/)[0].trim() : '';
+  const safe = String(raw || `Employee_${index + 1}`)
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 60);
+  return safe || `Employee_${index + 1}`;
+}
+
+function allocateUniqueFormXIXAPDownloadFileName(baseName, usedNames) {
+  const root = String(baseName || 'Employee').replace(/\.xlsx?$/i, '');
+  const count = usedNames.get(root) || 0;
+  usedNames.set(root, count + 1);
+  const suffix = count > 0 ? `_${count + 1}` : '';
+  return `Form_XIX_AP_${root}${suffix}.xlsx`;
+}
+
+export async function buildFormXIXAPWorkbookWithTemplateStyles({
+  templateArrayBuffer,
+  parsedFormHeader,
+  headerFormData,
+  formFileName,
+  sheetNameHint,
+}) {
+  if (!templateArrayBuffer) {
+    throw new Error('Original form template buffer is required for Form XIX AP export.');
+  }
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateArrayBuffer);
+  const sheetCandidates = Array.isArray(workbook.worksheets) ? workbook.worksheets : [];
+  const preferred = String(sheetNameHint || '').trim();
+  const worksheet =
+    (preferred && sheetCandidates.find((ws) => String(ws?.name || '').trim() === preferred)) ||
+    sheetCandidates.find((ws) => /wage\s+slip|form\s*xix/i.test(String(ws?.name || ''))) ||
+    sheetCandidates.find((ws) => /xix/i.test(String(ws?.name || ''))) ||
+    sheetCandidates[0] ||
+    null;
+  if (!worksheet) throw new Error('Template worksheet not found.');
+
+  writeFormXIXAPFieldsToExcelJsWorksheet(
+    worksheet,
+    applyFormXIXAPExportWageRulesToHeaderData(headerFormData),
+    parsedFormHeader
+  );
+
+  const out = await workbook.xlsx.writeBuffer();
+  const fileName =
+    formFileName ||
+    parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+    'Form_XIX_AP.xlsx';
+  return {
+    blob: new Blob([out], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }),
+    fileName,
+  };
+}
+
+export function triggerFormXIXAPZipDownload(blob, fileName) {
+  if (!blob || !fileName) return;
+  const downloadUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = downloadUrl;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(downloadUrl);
+}
+
+/** One wage-slip XLSX per employee, packaged as ZIP (same pattern as Form XIX MP). */
+export async function buildFormXIXAPPerEmployeeDownload({
+  templateArrayBuffer,
+  mappedData,
+  headersToUse,
+  parsedFormHeader,
+  formFileName,
+  headerFormData,
+  sheetNameHint,
+}) {
+  if (!templateArrayBuffer) {
+    throw new Error('Original form template buffer is required for Form XIX AP ZIP export.');
+  }
+
+  const hdrs = resolveFormXIXAPWageTableHeaders(headersToUse);
+  const exportRows = (Array.isArray(mappedData) ? mappedData : []).filter((row) =>
+    formXIXAPRowHasExportData(row, hdrs)
+  );
+  const rowsForZip = exportRows.length > 0 ? exportRows : [null];
+  const baseHeaderData = sanitizeFormXIXAPHeaderFormData(headerFormData);
+  // Export must include wage particulars 1–7 (modal UI keeps them only in the table).
+  const formXIXFields = FORM_XIX_AP_TEMPLATE_SPECS.map((spec) => {
+    const fromParsed = Array.isArray(parsedFormHeader?.fields)
+      ? parsedFormHeader.fields.find((f) => f?.key === spec.key)
+      : null;
+    return {
+      key: spec.key,
+      label: spec.label,
+      group: spec.group,
+      fieldType: spec.fieldType || 'text',
+      ...(fromParsed || {}),
+      key: spec.key,
+      label: fromParsed?.label || spec.label,
+      group: spec.group,
+    };
+  });
+  const headerForWrite = {
+    ...(parsedFormHeader || {}),
+    fields: formXIXFields,
+    formXIXAPHeaderFieldLayout: true,
+    formXIXAPTableLayout: true,
+  };
+
+  const zip = new JSZip();
+  const usedNames = new Map();
+  for (let i = 0; i < rowsForZip.length; i += 1) {
+    const row = rowsForZip[i];
+    const mergedHeaderData = applyFormXIXAPExportWageRulesToHeaderData(
+      mergeFormXIXAPWageTableRowIntoHeaderData(baseHeaderData, row, hdrs)
+    );
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const sheetCandidates = Array.isArray(workbook.worksheets) ? workbook.worksheets : [];
+    const preferred = String(sheetNameHint || '').trim();
+    const worksheet =
+      (preferred && sheetCandidates.find((ws) => String(ws?.name || '').trim() === preferred)) ||
+      sheetCandidates.find((ws) => /wage\s+slip|form\s*xix/i.test(String(ws?.name || ''))) ||
+      sheetCandidates.find((ws) => /xix/i.test(String(ws?.name || ''))) ||
+      sheetCandidates[0] ||
+      null;
+    if (!worksheet) throw new Error('Template worksheet not found.');
+    writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, mergedHeaderData, headerForWrite);
+    const out = await workbook.xlsx.writeBuffer();
+    const xlsxBytes = out instanceof Uint8Array ? out : new Uint8Array(out);
+    const baseName = resolveFormXIXAPEmployeeDownloadBaseName(row, hdrs, i);
+    zip.file(allocateUniqueFormXIXAPDownloadFileName(baseName, usedNames), xlsxBytes);
+    if (i > 0 && i % 15 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_XIX_AP')
+    .replace(/\.xlsx?$/i, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return {
+    blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
+    fileName: `${zipBase}_Employees.zip`,
+  };
 }

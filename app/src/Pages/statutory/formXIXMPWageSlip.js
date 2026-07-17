@@ -7,6 +7,7 @@ import {
   applyFormXIXAPAutofillFromSiteAndPayroll,
   formXIXAPHeaderNorm,
   formatWorkmanNameAndGuardian,
+  isFormXIXAPTableWageSlipContext,
   isFormXIXAPWageSlipContext,
   matchesFormXIXHint,
   resolveFormXIXAPHeaderFieldLayout as resolveFormXIXAPHeaderFieldLayoutInner,
@@ -217,12 +218,19 @@ export function resolveFormXIXMPPayrollHelpers(contextHints = {}) {
   const sheetText = contextHints.sheetText || '';
   const gujarat = isFormXIXGJGujaratWageSlipContext(formHeader, item, fileName, sheetText);
   const tamilNadu = isFormXIXTamilNaduWageSlipContext(formHeader, item, fileName, sheetText);
+  const andhraPradesh =
+    !!formHeader?.formXIXAPTableLayout ||
+    isFormXIXAPTableWageSlipContext(formHeader, item, fileName, sheetText);
   const madhyaPradesh =
-    isFormXIXMPWageSlipContext(formHeader, item, fileName, sheetText) && !gujarat && !tamilNadu;
+    isFormXIXMPWageSlipContext(formHeader, item, fileName, sheetText) &&
+    !gujarat &&
+    !tamilNadu &&
+    !andhraPradesh;
   return {
     gujaratPayrollRules: gujarat,
     useMonthlyWageRateDefault: gujarat || tamilNadu,
     madhyaPradeshPayrollRules: madhyaPradesh,
+    andhraPradeshPayrollRules: andhraPradesh,
   };
 }
 
@@ -1038,7 +1046,7 @@ export function resolveFormXIXMPPayrollFields(payrollRow, options = {}) {
         daysWorked: options.madhyaPradeshPayrollRules ? FORM_XIX_MP_DEFAULT_DAYS_WORKED : '',
         unitsWorked: '',
         rate: options.useMonthlyWageRateDefault ? FORM_XIX_TN_RATE_DEFAULT : '',
-        overtimeWages: '',
+        overtimeWages: options.andhraPradeshPayrollRules ? 'NIL' : '',
         grossWages: '',
         deductions: '',
         netWages: '',
@@ -1049,40 +1057,51 @@ export function resolveFormXIXMPPayrollFields(payrollRow, options = {}) {
     return applyFormXIXGJFixedTharunWages(base, options);
   }
   const row = flattenPayrollEarningColumns(payrollRow);
+  const grossWages = pickPayrollField(
+    row,
+    payrollRow,
+    FORM_XIX_MP_GROSS_KEYS,
+    [/^gross_pay$/, /^total_earnings$/]
+  );
+  const netWages = pickPayrollField(row, payrollRow, FORM_XIX_MP_NET_KEYS, [/^net_pay$/]);
+
   let deductions = pickPayrollField(
     row,
     payrollRow,
     FORM_XIX_MP_DEDUCTIONS_KEYS,
     [/^total_deductions?$/, /^total_employee_deductions$/]
   );
-  if (options.gujaratPayrollRules) {
-    const totalBenefits = pickPayrollField(
-      row,
-      payrollRow,
-      ['total_benefits', 'Total Benefits', 'totalBenefits'],
-      [/^total_benefits$/]
-    );
-    const totalTaxes = pickPayrollField(
-      row,
-      payrollRow,
-      ['total_taxes', 'Total Taxes', 'totalTaxes'],
-      [/^total_taxes$/]
-    );
-    const summed = sumPayrollScalars([deductions, totalBenefits, totalTaxes]);
-    if (summed !== '') deductions = summed;
-  }
-  if (deductions === '') deductions = sumPayrollDeductionLines(payrollRow);
-  if (deductions === '') {
-    const gross = pickPayrollField(
-      row,
-      payrollRow,
-      FORM_XIX_MP_GROSS_KEYS,
-      [/^gross_pay$/, /^total_earnings$/]
-    );
-    const net = pickPayrollField(row, payrollRow, FORM_XIX_MP_NET_KEYS, [/^net_pay$/]);
-    if (gross !== '' && net !== '') {
-      const diff = Number(gross) - Number(net);
-      if (Number.isFinite(diff) && diff >= 0) deductions = Math.round(diff * 100) / 100;
+  if (options.andhraPradeshPayrollRules) {
+    // AP Form XIX — deductions = gross_pay − net_pay
+    if (grossWages !== '' && netWages !== '') {
+      const diff = Number(String(grossWages).replace(/,/g, '')) - Number(String(netWages).replace(/,/g, ''));
+      if (Number.isFinite(diff) && diff >= 0) {
+        deductions = Math.round(diff * 100) / 100;
+      }
+    }
+  } else {
+    if (options.gujaratPayrollRules) {
+      const totalBenefits = pickPayrollField(
+        row,
+        payrollRow,
+        ['total_benefits', 'Total Benefits', 'totalBenefits'],
+        [/^total_benefits$/]
+      );
+      const totalTaxes = pickPayrollField(
+        row,
+        payrollRow,
+        ['total_taxes', 'Total Taxes', 'totalTaxes'],
+        [/^total_taxes$/]
+      );
+      const summed = sumPayrollScalars([deductions, totalBenefits, totalTaxes]);
+      if (summed !== '') deductions = summed;
+    }
+    if (deductions === '') deductions = sumPayrollDeductionLines(payrollRow);
+    if (deductions === '') {
+      if (grossWages !== '' && netWages !== '') {
+        const diff = Number(grossWages) - Number(netWages);
+        if (Number.isFinite(diff) && diff >= 0) deductions = Math.round(diff * 100) / 100;
+      }
     }
   }
 
@@ -1100,20 +1119,18 @@ export function resolveFormXIXMPPayrollFields(payrollRow, options = {}) {
       rate: options.useMonthlyWageRateDefault
         ? FORM_XIX_TN_RATE_DEFAULT
         : resolveFormXIXMPDailyWageRate(row, payrollRow),
-      overtimeWages: pickPayrollField(
-        row,
-        payrollRow,
-        ['overtime', 'Overtime', 'overtime_wages', 'overtimeWages', 'ot'],
-        [/overtime/]
-      ),
-      grossWages: pickPayrollField(
-        row,
-        payrollRow,
-        FORM_XIX_MP_GROSS_KEYS,
-        [/^gross_pay$/, /^total_earnings$/]
-      ),
+      // AP Form XIX — overtime wages always NIL
+      overtimeWages: options.andhraPradeshPayrollRules
+        ? 'NIL'
+        : pickPayrollField(
+            row,
+            payrollRow,
+            ['overtime', 'Overtime', 'overtime_wages', 'overtimeWages', 'ot'],
+            [/overtime/]
+          ),
+      grossWages,
       deductions,
-      netWages: pickPayrollField(row, payrollRow, FORM_XIX_MP_NET_KEYS, [/^net_pay$/]),
+      netWages,
     },
     options.emp,
     options
@@ -1151,6 +1168,7 @@ export function applyFormXIXMPEmployeeToRow(row, emp, headers, helpers = {}) {
     useMonthlyWageRateDefault = false,
     gujaratPayrollRules = false,
     madhyaPradeshPayrollRules = false,
+    andhraPradeshPayrollRules = false,
     monthCandidates = null,
   } = helpers;
   const hasPayroll = payrollRow && !payrollRow.fetch_error;
@@ -1160,10 +1178,12 @@ export function applyFormXIXMPEmployeeToRow(row, emp, headers, helpers = {}) {
     gujaratPayrollRules,
     useMonthlyWageRateDefault,
     madhyaPradeshPayrollRules,
+    andhraPradeshPayrollRules,
   });
   const wageValue = (value, current = '') => {
     if (hasPayroll) return value !== '' ? sanitizeValue(value) : '';
     if (madhyaPradeshPayrollRules && value !== '') return sanitizeValue(value);
+    if (andhraPradeshPayrollRules && value !== '') return sanitizeValue(value);
     return value !== '' ? sanitizeValue(value) : String(current ?? '').trim();
   };
 
@@ -1192,6 +1212,10 @@ export function applyFormXIXMPEmployeeToRow(row, emp, headers, helpers = {}) {
       return;
     }
     if (isFormXIXMPOvertimeHeader(header)) {
+      if (andhraPradeshPayrollRules) {
+        out[header] = 'NIL';
+        return;
+      }
       out[header] = wageValue(payroll.overtimeWages, out[header]);
       return;
     }
@@ -1207,7 +1231,42 @@ export function applyFormXIXMPEmployeeToRow(row, emp, headers, helpers = {}) {
       out[header] = wageValue(payroll.netWages, out[header]);
     }
   });
+  if (andhraPradeshPayrollRules) {
+    applyFormXIXAPWageParticularsToRow(out, hdrs);
+  }
   return out;
+}
+
+/** AP Form XIX — force overtime NIL and deductions = gross − net from row cells. */
+export function applyFormXIXAPWageParticularsToRow(row, headers) {
+  if (!row || typeof row !== 'object') return row;
+  const hdrs = Array.isArray(headers) ? headers : resolveFormXIXMPWageTableHeaders(headers);
+  let gross = null;
+  let net = null;
+  hdrs.forEach((header) => {
+    if (isFormXIXMPOvertimeHeader(header)) {
+      row[header] = 'NIL';
+      return;
+    }
+    if (isFormXIXMPGrossHeader(header)) {
+      const n = Number(String(row[header] ?? '').replace(/,/g, '').trim());
+      if (Number.isFinite(n)) gross = n;
+      return;
+    }
+    if (isFormXIXMPNetHeader(header)) {
+      const n = Number(String(row[header] ?? '').replace(/,/g, '').trim());
+      if (Number.isFinite(n)) net = n;
+    }
+  });
+  if (gross != null && net != null) {
+    const diff = Math.round((gross - net) * 100) / 100;
+    hdrs.forEach((header) => {
+      if (isFormXIXMPDeductionsHeader(header)) {
+        row[header] = diff >= 0 ? String(diff) : '0';
+      }
+    });
+  }
+  return row;
 }
 
 /** Gujarat Form XIX — fill separate "Name of the workman" header row on export/autofill. */
@@ -1235,6 +1294,7 @@ export function enrichFormXIXMPPayrollRows(mappedData, employees, headers, helpe
     gujaratPayrollRules = false,
     useMonthlyWageRateDefault = false,
     madhyaPradeshPayrollRules = false,
+    andhraPradeshPayrollRules = false,
     monthCandidates = null,
   } = helpers;
   if (!Array.isArray(mappedData) || mappedData.length === 0) {
@@ -1246,13 +1306,14 @@ export function enrichFormXIXMPPayrollRows(mappedData, employees, headers, helpe
     const emp = empItem?.Employee || empItem?.employee || empItem;
     const payrollRow =
       typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, row, rowIndex) : null;
-    if (!payrollRow && !madhyaPradeshPayrollRules) return;
+    if (!payrollRow && !madhyaPradeshPayrollRules && !andhraPradeshPayrollRules) return;
     const merged = applyFormXIXMPEmployeeToRow(row, emp, hdrs, {
       sanitizeValue,
       payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
       gujaratPayrollRules,
       useMonthlyWageRateDefault,
       madhyaPradeshPayrollRules,
+      andhraPradeshPayrollRules,
       monthCandidates,
     });
     if (!overwrite) {
@@ -1263,16 +1324,20 @@ export function enrichFormXIXMPPayrollRows(mappedData, employees, headers, helpe
       });
     }
     Object.assign(row, merged);
+    if (andhraPradeshPayrollRules) {
+      applyFormXIXAPWageParticularsToRow(row, hdrs);
+    }
     const hasWageData = hdrs.some((header) => {
       if (
         !isFormXIXMPGrossHeader(header) &&
         !isFormXIXMPDeductionsHeader(header) &&
         !isFormXIXMPNetHeader(header) &&
-        !isFormXIXMPDaysWorkedHeader(header)
+        !isFormXIXMPDaysWorkedHeader(header) &&
+        !(andhraPradeshPayrollRules && isFormXIXMPOvertimeHeader(header))
       ) {
         return false;
       }
-      return String(merged[header] ?? '').trim() !== '';
+      return String(row[header] ?? '').trim() !== '';
     });
     if (hasWageData) hits += 1;
   });

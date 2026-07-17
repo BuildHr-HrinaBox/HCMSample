@@ -1,13 +1,21 @@
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
-import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
+import {
+  formatStatutoryHeaderLabelValueExport,
+  normalizeStatutoryHeaderLabel,
+  statutoryHeaderLabelMatchKey,
+  writeStatutoryHeaderFieldsToExcelJsWorksheet,
+} from '../../utils/statutorySiteCompanyHeaders';
 
 /** AP Shops Form X — Register of Fines (Rules under Payment of Wages / Minimum Wages / S&E). */
 
 export const FORM_X_AP_FINES_NIL_OF_MONTH_TEXT = 'Nill of the month';
 
 export const FORM_XX_AP_DEDUCTIONS_NIL_OF_MONTH_TEXT = 'Nill of the month';
+
+/** Default cell value for Form XX damage / recovery columns when no deduction case exists. */
+export const FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT = 'NIL';
 
 export const FORM_X_AP_TEMPLATE_MISMATCH_MESSAGE =
   'This row is Form X (Shops & Establishment — Register of Fines) but the template file is Form XXI (Contract Labour — Register of Fines). Upload the correct Form X template in Form Master.';
@@ -102,6 +110,68 @@ export function isFormXXAPRegisterOfDeductionsContext(
 
   if (matchesFormXXHint(parts)) return true;
   return blobIndicatesRegisterOfDeductionsForDamage(parts, tableHeaders);
+}
+
+function formXXAPHeaderBare(header) {
+  return String(header || '')
+    .toLowerCase()
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^\(?\d+\)?\s*/, '')
+    .replace(/\s*\(\d+\)\s*$/, '')
+    .trim();
+}
+
+/**
+ * Form XX damage / cause / recovery columns that default to NIL when no case exists
+ * (Particulars, Date of damage, showed cause, explanation witness, amount, instalments, remarks).
+ */
+export function isFormXXAPDeductionNilHeader(header) {
+  const bare = formXXAPHeaderBare(header);
+  if (!bare) return false;
+  if (/particulars\s+of\s+damage|date\s+of\s+damage|amount\s+of\s+deduction/.test(bare)) return true;
+  if (/date\s+of\s+recovery/.test(bare)) return true;
+  if (
+    /show\s+cause|showed\s+cause|whether\s+work\s*man|whether\s+workman|against\s+deduction|total\s+amount|instalment|remarks?/.test(
+      bare
+    )
+  ) {
+    return true;
+  }
+  if (/name\s+of\s+person.*presence|presence.*explanation|explanation\s+was\s+heard/.test(bare)) {
+    return true;
+  }
+  if (/^first\s+instalment|^last\s+instalment|^no\.?\s*of\s+instalment/.test(bare)) return true;
+  return false;
+}
+
+export function applyFormXXAPDeductionsNilToRow(row, headers, helpers = {}) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const out = row && typeof row === 'object' ? { ...row } : {};
+  const nilText =
+    helpers.nilText != null ? String(helpers.nilText) : FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT;
+  const { overwrite = false } = helpers;
+
+  hdrs.forEach((header) => {
+    if (!isFormXXAPDeductionNilHeader(header)) return;
+    const existing = String(out[header] ?? '').trim();
+    if (!overwrite && existing && !/^enter\b/i.test(existing) && !/^nil+$/i.test(existing)) return;
+    out[header] = nilText;
+  });
+  return out;
+}
+
+export function applyFormXXAPDeductionsNilToMappedRows(
+  mappedData,
+  headers,
+  nilText = FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT,
+  helpers = {}
+) {
+  if (!Array.isArray(mappedData)) return [];
+  const { overwrite = false } = helpers;
+  return mappedData.map((row) =>
+    applyFormXXAPDeductionsNilToRow(row, headers, { nilText, overwrite })
+  );
 }
 
 export function matchesFormXIIIHint(blob) {
@@ -1910,3 +1980,847 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
 
 /** Form XXI CLRA fines register — same Excel write path as Form XX deductions. */
 export const buildFormXXIAPWorkbookWithTemplateStyles = buildFormXXAPWorkbookWithTemplateStyles;
+
+function scoreFormXIIISheet(sheetName, sheetText, blob) {
+  const sheetBlob = `${sheetName} ${sheetText}`.toLowerCase();
+  let score = 0;
+  const sheetToken = extractClraSheetFormRomanToken(sheetBlob);
+  if (sheetToken === 'xiii') score += 140;
+  if (sheetToken === 'xiv') score -= 200;
+  if (sheetToken === 'xxi') score -= 180;
+  if (matchesFormXIIIHint(blob) || matchesFormXIIIHint(sheetBlob)) score += 50;
+  if (blobIndicatesRegisterOfWorkmen(sheetBlob, null)) score += 80;
+  if (/register\s+of\s+workmen\s+employed\s+by\s+contractor/i.test(sheetBlob)) score += 60;
+  if (REGISTER_OF_WORKMEN_SURNAME_HEADER_RE.test(sheetBlob)) score += 50;
+  if (/age\s+and\s+sex/i.test(sheetBlob) && /local\s+address/i.test(sheetBlob)) score += 40;
+  if (/employment\s+card/i.test(sheetBlob)) score -= 120;
+  if (/register\s+of\s+fines|register\s+of\s+deductions/i.test(sheetBlob)) score -= 100;
+  return score;
+}
+
+/** Pick CLRA Form XIII Register of Workmen worksheet from a multi-tab AP workbook. */
+export function resolveFormXIIIWorkbookSheetName(workbook, hints = {}) {
+  const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
+  if (names.length <= 1) return names[0] || null;
+
+  const blob = [
+    hints.fileName,
+    hints.formFileName,
+    hints.formName,
+    hints.item?.formName,
+    hints.item?.FormName,
+    hints.formHeaderTitle,
+    hints.formHeader?.title,
+    hints.formHeaderSubtitle,
+    hints.formHeader?.subtitle
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  let best = null;
+  let bestScore = -Infinity;
+  for (const name of names) {
+    const sheetText = buildSheetTextBlob(workbook, name);
+    const score = scoreFormXIIISheet(name, sheetText, blob);
+    if (score > bestScore) {
+      bestScore = score;
+      best = name;
+    }
+  }
+  if (bestScore > 0 && best) return best;
+
+  const xiiiSheet = names.find((n) => {
+    const sheetText = buildSheetTextBlob(workbook, n);
+    return (
+      matchesFormXIIIHint(`${n} ${sheetText}`) ||
+      blobIndicatesRegisterOfWorkmen(`${n} ${sheetText}`, null)
+    );
+  });
+  return xiiiSheet || null;
+}
+
+function formXIIIExcelCellText(val) {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'object') {
+    if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+    if (val.text != null) return String(val.text);
+    if (val.result != null) return String(val.result);
+  }
+  return '';
+}
+
+function isFormXIIITitleBandText(text) {
+  const s = String(text || '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return false;
+  return (
+    /form\s*[-–]?\s*xiii\b/i.test(s) ||
+    /register\s+of\s+workmen\s+employed\s+by\s+contractor/i.test(s) ||
+    (/vide\s+rule\s*75/i.test(s) && /contract\s+labou?r/i.test(s))
+  );
+}
+
+/** AP CLRA Form XIII — canonical A–K layout (11 columns). */
+export const FORM_XIII_AP_TABLE_COLS = 11;
+export const FORM_XIII_AP_COL_WIDTHS = [6, 22, 10, 18, 18, 28, 18, 14, 14, 14, 16];
+export const FORM_XIII_AP_MERGES = [
+  'A3:K3',
+  'A4:K4',
+  'A5:A8',
+  'B5:G8',
+  'I5:I8',
+  'J5:K8',
+  'A9:A12',
+  'B9:G12',
+  'I9:I12',
+  'J9:K12',
+  'A13:A14',
+  'B13:B14',
+  'C13:C14',
+  'D13:D14',
+  'E13:E14',
+  'F13:F14',
+  'G13:G14',
+  'H13:H14',
+  'I13:I14',
+  'J13:J14',
+  'K13:K14',
+];
+export const FORM_XIII_AP_ROW_HEIGHTS = { 3: 30, 4: 18, 13: 42, 14: 42 };
+
+function normalizeFormXIIITitleText(raw) {
+  return String(raw || '')
+    .replace(/_x000d_/gi, '\n')
+    .replace(/\u000d/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cloneFormXIIICellStyle(style) {
+  if (!style) return null;
+  try {
+    const cloned = JSON.parse(JSON.stringify(style));
+    if (cloned.font?.color && cloned.font.color.indexed != null) {
+      delete cloned.font.color.indexed;
+      if (!cloned.font.color.argb && !cloned.font.color.theme) {
+        cloned.font.color = { argb: 'FF000000' };
+      }
+    }
+    return cloned;
+  } catch (_) {
+    return null;
+  }
+}
+
+function copyFormXIIIExcelCellValue(raw) {
+  if (raw == null) return null;
+  if (typeof raw === 'string') return normalizeFormXIIITitleText(raw);
+  if (typeof raw === 'number' || typeof raw === 'boolean') return raw;
+  if (raw instanceof Date) return raw;
+  if (typeof raw === 'object' && Array.isArray(raw.richText)) {
+    return {
+      richText: raw.richText.map((rt) => ({
+        text: normalizeFormXIIITitleText(rt?.text || ''),
+        font: rt?.font ? JSON.parse(JSON.stringify(rt.font)) : undefined,
+      })),
+    };
+  }
+  return raw;
+}
+
+function dedupeFormXIIITitleRow(worksheet, row, maxCol = FORM_XIII_AP_TABLE_COLS) {
+  let masterCol = 0;
+  let masterText = '';
+  for (let c = 1; c <= maxCol; c += 1) {
+    const text = formXIIIExcelCellText(worksheet.getCell(row, c)?.value).trim();
+    if (!isFormXIIITitleBandText(text)) continue;
+    if (!masterCol || text.length > masterText.length) {
+      masterCol = c;
+      masterText = text;
+    }
+  }
+  if (!masterCol) return;
+  for (let c = 1; c <= maxCol; c += 1) {
+    const cell = worksheet.getCell(row, c);
+    if (c === masterCol) {
+      cell.value = masterText;
+      continue;
+    }
+    const text = formXIIIExcelCellText(cell?.value).trim();
+    if (isFormXIIITitleBandText(text)) cell.value = null;
+  }
+}
+
+/**
+ * Rebuild a clean A–K workbook so Excel does not repair phantom columns / broken merges
+ * from the Form Master template (same strategy as TN Form I workmen register).
+ */
+export function cloneFormXIIIAPWorksheetClean(sourceWs, sheetName = 'FORM XIII') {
+  const outWb = new ExcelJS.Workbook();
+  const safeName = String(sheetName || 'FORM XIII')
+    .replace(/[\\/*?[\]:]/g, ' ')
+    .trim()
+    .slice(0, 31) || 'FORM XIII';
+  // Prefer a stable Form XIII sheet name — never keep a misleading "FORM 1" tab label.
+  const outName =
+    /form\s*1\b/i.test(safeName) && !matchesFormXIIIHint(safeName)
+      ? 'FORM XIII'
+      : matchesFormXIIIHint(safeName) || /workmen/i.test(safeName)
+        ? safeName
+        : 'FORM XIII';
+  const outWs = outWb.addWorksheet(outName);
+  const maxCol = FORM_XIII_AP_TABLE_COLS;
+  const maxRow = Math.min(
+    Math.max(sourceWs?.actualRowCount || 0, sourceWs?.rowCount || 0, 30),
+    200
+  );
+
+  const FORM_XIII_TITLE =
+    'FORM - XIII REGISTER OF WORKMEN EMPLOYED BY CONTRACTOR';
+  const FORM_XIII_RULE =
+    '[Vide Rule 75 Contract Labour (Regulation and Abolition) Central/A.P Rules)';
+
+  // Copy only body/meta cells — title + stacked header masters are rewritten below.
+  for (let r = 1; r <= maxRow; r += 1) {
+    const srcRow = sourceWs.getRow(r);
+    const dstRow = outWs.getRow(r);
+    if (srcRow.height != null) dstRow.height = srcRow.height;
+    for (let c = 1; c <= maxCol; c += 1) {
+      const src = sourceWs.getCell(r, c);
+      const dst = outWs.getCell(r, c);
+      // Skip title band + stacked header slave row — rewritten canonically below.
+      if (r === 3 || r === 4 || r === 14) continue;
+      const copied = copyFormXIIIExcelCellValue(src.value);
+      if (copied != null) {
+        // Drop duplicated title fragments that leaked into contractor/header rows.
+        if (isFormXIIITitleBandText(formXIIIExcelCellText(copied))) continue;
+        dst.value = copied;
+      }
+      const cloned = cloneFormXIIICellStyle(src.style);
+      if (cloned) dst.style = cloned;
+    }
+  }
+
+  FORM_XIII_AP_COL_WIDTHS.forEach((w, i) => {
+    outWs.getColumn(i + 1).width = w;
+  });
+  Object.entries(FORM_XIII_AP_ROW_HEIGHTS).forEach(([row, height]) => {
+    outWs.getRow(Number(row)).height = height;
+  });
+
+  // Absolute single-title band: clear every cell then write once in A3 / A4.
+  for (let r = 3; r <= 4; r += 1) {
+    for (let c = 1; c <= maxCol; c += 1) {
+      outWs.getCell(r, c).value = null;
+    }
+  }
+  let titleText = '';
+  let ruleText = '';
+  for (let c = 1; c <= Math.max(maxCol, 16); c += 1) {
+    const t3 = formXIIIExcelCellText(sourceWs.getCell(3, c)?.value).trim();
+    const t4 = formXIIIExcelCellText(sourceWs.getCell(4, c)?.value).trim();
+    if (isFormXIIITitleBandText(t3) && t3.length > titleText.length) titleText = t3;
+    if (isFormXIIITitleBandText(t4) && t4.length > ruleText.length) ruleText = t4;
+    // Some templates put title+rule in one cell on row 3.
+    if (/form\s*[-–]?\s*xiii/i.test(t3) && /vide\s+rule\s*75/i.test(t3) && !ruleText) {
+      const parts = t3.split(/\[Vide/i);
+      if (parts.length >= 2) {
+        titleText = parts[0].trim();
+        ruleText = `[Vide${parts.slice(1).join('[Vide')}`.trim();
+      }
+    }
+  }
+  if (!titleText) titleText = FORM_XIII_TITLE;
+  if (!ruleText) ruleText = FORM_XIII_RULE;
+  // Prefer short title without embedded rule when both were glued together.
+  if (/form\s*[-–]?\s*xiii/i.test(titleText) && /vide\s+rule\s*75/i.test(titleText) && ruleText) {
+    titleText = titleText.replace(/\s*\[Vide[\s\S]*$/i, '').trim() || FORM_XIII_TITLE;
+  }
+
+  outWs.getCell(3, 1).value = titleText;
+  outWs.getCell(3, 1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  outWs.getCell(3, 1).font = { bold: true, size: 12 };
+  outWs.getCell(4, 1).value = ruleText;
+  outWs.getCell(4, 1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  outWs.getCell(4, 1).font = { bold: false, size: 10 };
+
+  // Stacked column headers: keep values only on row 13 (merge master); clear row 14.
+  for (let c = 1; c <= maxCol; c += 1) {
+    const headerLabel =
+      formXIIIExcelCellText(sourceWs.getCell(13, c)?.value).trim() ||
+      formXIIIExcelCellText(sourceWs.getCell(14, c)?.value).trim();
+    outWs.getCell(13, c).value = headerLabel || null;
+    outWs.getCell(14, c).value = null;
+    const headerStyle =
+      cloneFormXIIICellStyle(sourceWs.getCell(13, c)?.style) ||
+      cloneFormXIIICellStyle(sourceWs.getCell(14, c)?.style);
+    if (headerStyle) {
+      outWs.getCell(13, c).style = headerStyle;
+      outWs.getCell(14, c).style = headerStyle;
+    }
+    outWs.getCell(13, c).alignment = {
+      wrapText: true,
+      vertical: 'middle',
+      horizontal: 'center',
+    };
+    outWs.getCell(13, c).font = {
+      ...(outWs.getCell(13, c).font || {}),
+      bold: true,
+    };
+  }
+
+  FORM_XIII_AP_MERGES.forEach((range) => {
+    try {
+      outWs.mergeCells(range);
+    } catch (_) {
+      /* ignore overlapping template merges */
+    }
+  });
+
+  // Template / prior drafts often copy "Label : value" into both A and B (and I and J).
+  dedupeFormXIIIMetaHeaderBand(outWs);
+
+  return { workbook: outWb, worksheet: outWs };
+}
+
+function labelMatchesFormXIIIHeaderField(raw, label) {
+  const rawLabelOnly = String(raw).split(':')[0].trim();
+  const rawKey = statutoryHeaderLabelMatchKey(rawLabelOnly);
+  const labelKey = statutoryHeaderLabelMatchKey(label);
+  if (rawKey && labelKey && rawKey === labelKey) return true;
+  const rawNorm = normalizeStatutoryHeaderLabel(String(rawLabelOnly).replace(/:+$/, ''));
+  const labelNorm = normalizeStatutoryHeaderLabel(String(label).replace(/:+$/, ''));
+  if (!rawNorm || !labelNorm) return false;
+  if (rawNorm === labelNorm) return true;
+  return rawNorm.includes(labelNorm) || labelNorm.includes(rawNorm);
+}
+
+function splitFormXIIILabelAndValue(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { label: '', value: '' };
+  const idx = text.indexOf(':');
+  if (idx < 0) return { label: text.replace(/\.+$/, '').trim(), value: '' };
+  return {
+    label: text.slice(0, idx).replace(/\.+$/, '').trim(),
+    value: text.slice(idx + 1).trim(),
+  };
+}
+
+function isFormXIIIMetaHeaderLabelText(text) {
+  const s = normalizeStatutoryHeaderLabel(String(text || '').split(':')[0]);
+  if (!s) return false;
+  return (
+    /name\s+and\s+address\s+of\s+contractor/.test(s) ||
+    /(?:name|nature)\s+and\s+location\s+of\s+work/.test(s) ||
+    /establishment\s+in.*under\s+which\s+contract/.test(s) ||
+    /name\s+and\s+address\s+of\s+principal\s+employer/.test(s) ||
+    /name\s+and\s+addr/.test(s)
+  );
+}
+
+/**
+ * Meta band (rows 5–12): keep one "Label : value" line in value columns B / J only.
+ * Clear duplicate combined text from narrow label columns A / I (user-visible double display).
+ */
+function dedupeFormXIIIMetaHeaderBand(worksheet) {
+  if (!worksheet) return;
+
+  const blocks = [
+    { labelRow: 5, labelCol: 1, valueCol: 2 }, // Contractor — A / B
+    { labelRow: 9, labelCol: 1, valueCol: 2 }, // Nature/location — A / B
+    { labelRow: 5, labelCol: 9, valueCol: 10 }, // Establishment — I / J
+    { labelRow: 9, labelCol: 9, valueCol: 10 }, // Principal employer — I / J
+  ];
+
+  for (const block of blocks) {
+    const labelCell = worksheet.getCell(block.labelRow, block.labelCol);
+    const valueCell = worksheet.getCell(block.labelRow, block.valueCol);
+    const labelRaw = formXIIIExcelCellText(labelCell?.value).trim();
+    const valueRaw = formXIIIExcelCellText(valueCell?.value).trim();
+
+    let bestLabel = '';
+    let bestValue = '';
+
+    const fromLabel = splitFormXIIILabelAndValue(labelRaw);
+    const fromValue = splitFormXIIILabelAndValue(valueRaw);
+
+    if (isFormXIIIMetaHeaderLabelText(fromLabel.label) || isFormXIIIMetaHeaderLabelText(labelRaw)) {
+      bestLabel = fromLabel.label || String(labelRaw).split(':')[0].trim();
+      if (fromLabel.value) bestValue = fromLabel.value;
+    }
+    if (isFormXIIIMetaHeaderLabelText(fromValue.label) || isFormXIIIMetaHeaderLabelText(valueRaw)) {
+      if (!bestLabel) bestLabel = fromValue.label || String(valueRaw).split(':')[0].trim();
+      if (fromValue.value) bestValue = fromValue.value;
+      else if (!bestValue && valueRaw && !isFormXIIIMetaHeaderLabelText(valueRaw)) {
+        bestValue = valueRaw;
+      }
+    } else if (valueRaw && !bestValue) {
+      bestValue = valueRaw;
+    }
+
+    // Always clear narrow label columns A / I — combined text belongs only in B / J.
+    labelCell.value = null;
+
+    if (bestLabel || bestValue) {
+      valueCell.value = bestValue
+        ? `${bestLabel || 'Details'} : ${bestValue}`
+        : bestLabel
+          ? `${bestLabel} :`
+          : null;
+      valueCell.alignment = {
+        ...(valueCell.alignment || {}),
+        wrapText: true,
+        vertical: 'top',
+        horizontal: 'left',
+      };
+    }
+  }
+
+  // Clear any leftover duplicate fragments in A/I across the full meta band.
+  for (let r = 5; r <= 12; r += 1) {
+    for (const c of [1, 9]) {
+      const cell = worksheet.getCell(r, c);
+      const text = formXIIIExcelCellText(cell?.value).trim();
+      if (!text) continue;
+      if (isFormXIIIMetaHeaderLabelText(text) || /:/i.test(text)) {
+        cell.value = null;
+      }
+    }
+  }
+}
+
+/** Write contractor / establishment values once into columns B / J (never into A / I). */
+function writeFormXIIIAPHeaderFieldsToWorksheet(
+  worksheet,
+  { headerFormData, parsedFormHeader, headerRowEnd = 12 } = {}
+) {
+  if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
+  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  if (fields.length === 0) {
+    dedupeFormXIIIMetaHeaderBand(worksheet);
+    return;
+  }
+  const written = new Set();
+
+  for (let r = 1; r <= headerRowEnd; r += 1) {
+    for (let c = 1; c <= FORM_XIII_AP_TABLE_COLS; c += 1) {
+      const raw = formXIIIExcelCellText(worksheet.getCell(r, c)?.value).trim();
+      if (!raw || isFormXIIITitleBandText(raw)) continue;
+      for (const field of fields) {
+        const key = String(field?.key || '').trim();
+        const label = String(field?.label || '').trim();
+        if (!key || !label || written.has(key)) continue;
+        if (!labelMatchesFormXIIIHeaderField(raw, label)) continue;
+        const val = String(headerFormData[key] ?? field?.value ?? '').trim();
+        if (!val) continue;
+
+        const labelOnly = String(raw).split(':')[0].trim().replace(/\.+$/, '');
+        // Official layout: labels sit in A/I merges; values belong in B/J.
+        // Never write combined text into A (1) or I (9) — that duplicates B/J.
+        const isLabelCol = c === 1 || c === 9;
+        const valueCol = isLabelCol ? c + 1 : c;
+        const labelCol = isLabelCol ? c : c === 2 || c === 10 ? c - 1 : 0;
+
+        if (labelCol === 1 || labelCol === 9) {
+          worksheet.getCell(r, labelCol).value = null;
+        }
+        worksheet.getCell(r, valueCol).value = formatStatutoryHeaderLabelValueExport(
+          label,
+          labelOnly,
+          val
+        );
+        worksheet.getCell(r, valueCol).alignment = {
+          ...(worksheet.getCell(r, valueCol).alignment || {}),
+          wrapText: true,
+          vertical: 'top',
+          horizontal: 'left',
+        };
+        written.add(key);
+        break;
+      }
+    }
+  }
+
+  dedupeFormXIIIMetaHeaderBand(worksheet);
+}
+
+function rowLooksLikeFormXIIIIndexRow(worksheet, row, startCol, colCount = FORM_XIII_AP_TABLE_COLS) {
+  let hits = 0;
+  for (let i = 0; i < colCount; i += 1) {
+    const t = String(formXIIIExcelCellText(worksheet.getCell(row, startCol + i)?.value) || '').trim();
+    if (t === String(i + 1)) hits += 1;
+  }
+  return hits >= 6;
+}
+
+function resolveFormXIIIAPTableLayout(worksheet, parsedHeaderRowIndex, parsedDataStartIndex, parsedTableStartCol) {
+  const startCol =
+    parsedTableStartCol != null && parsedTableStartCol >= 0 ? parsedTableStartCol + 1 : 1;
+  let columnHeaderRow = parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0
+    ? parsedHeaderRowIndex + 1
+    : 13;
+  let dataStartRow =
+    parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? parsedDataStartIndex + 1 : 16;
+
+  const titleText = formXIIIExcelCellText(worksheet.getCell(3, 1)?.value);
+  if (isFormXIIITitleBandText(titleText) && excelCellLooksLikeSerialHeader(formXIIIExcelCellText(worksheet.getCell(13, 1)?.value))) {
+    columnHeaderRow = 13;
+    dataStartRow = rowLooksLikeFormXIIIIndexRow(worksheet, 15, startCol) ? 16 : 15;
+    while (
+      dataStartRow <= columnHeaderRow + 3 &&
+      (rowTextLooksLikeFormXIIITableHeader(
+        (txt) => String(txt || '').replace(/\s+/g, ' ').trim().toLowerCase(),
+        worksheet,
+        dataStartRow,
+        startCol
+      ) ||
+        rowLooksLikeFormXIIIIndexRow(worksheet, dataStartRow, startCol))
+    ) {
+      dataStartRow += 1;
+    }
+    return { startCol, columnHeaderRow, dataStartRow };
+  }
+
+  return null;
+}
+
+function rowTextLooksLikeFormXIIITableHeader(normalize, worksheet, row, startCol, colCount = 11) {
+  const parts = [];
+  for (let j = 0; j < colCount; j += 1) {
+    parts.push(normalize(formXIIIExcelCellText(worksheet.getCell(row, startCol + j)?.value)));
+  }
+  const joined = parts.join(' ');
+  if (!joined.trim()) return false;
+  return (
+    excelCellLooksLikeSerialHeader(parts[0]) ||
+    REGISTER_OF_WORKMEN_SURNAME_HEADER_RE.test(joined) ||
+    (/age\s+and\s+sex/.test(joined) && /local\s+address/.test(joined)) ||
+    (/father|husband/.test(joined) && /nature\s+of\s+employ/.test(joined)) ||
+    (/permanent\s+house\s+address/.test(joined) && /date\s+of\s+commencement/.test(joined))
+  );
+}
+
+function locateFormXIIIColumnHeaderRow(worksheet, hintHeaderRow, startCol, normalize) {
+  let bestRow = Math.max(1, hintHeaderRow);
+  let bestScore = -1;
+  for (let r = Math.max(1, hintHeaderRow - 2); r <= hintHeaderRow + 6; r += 1) {
+    let score = 0;
+    for (let c = startCol; c <= startCol + 14; c += 1) {
+      const raw = formXIIIExcelCellText(worksheet.getCell(r, c)?.value);
+      if (excelCellLooksLikeSerialHeader(raw)) score += 50;
+    }
+    const joined = [];
+    for (let c = startCol; c <= startCol + 14; c += 1) {
+      joined.push(normalize(formXIIIExcelCellText(worksheet.getCell(r, c)?.value)));
+    }
+    const text = joined.join(' ');
+    if (REGISTER_OF_WORKMEN_SURNAME_HEADER_RE.test(text)) score += 50;
+    if (/age\s+and\s+sex/.test(text)) score += 25;
+    if (/father|husband/.test(text)) score += 20;
+    if (/nature\s+of\s+employ|designation/.test(text)) score += 20;
+    if (/permanent\s+house\s+address/.test(text)) score += 20;
+    if (/local\s+address/.test(text)) score += 15;
+    if (/date\s+of\s+commencement/.test(text)) score += 15;
+    if (/signature|thumb/.test(text)) score += 10;
+    if (/reasons?\s+for\s+termination/.test(text)) score += 10;
+    if (score > bestScore) {
+      bestScore = score;
+      bestRow = r;
+    }
+  }
+  return bestRow;
+}
+
+function locateFormXIIIDataStartRow(worksheet, columnHeaderRow, startCol, hdrCount, normalize) {
+  let dataStartRow = columnHeaderRow + 1;
+  for (let guard = 0; guard < 4; guard += 1) {
+    if (rowTextLooksLikeFormXIIITableHeader(normalize, worksheet, dataStartRow, startCol)) {
+      dataStartRow += 1;
+      continue;
+    }
+    let seqHits = 0;
+    for (let i = 0; i < Math.min(hdrCount, 12); i += 1) {
+      const t = String(formXIIIExcelCellText(worksheet.getCell(dataStartRow, startCol + i)?.value) || '').trim();
+      if (t === String(i + 1)) seqHits += 1;
+    }
+    if (seqHits >= 3) {
+      dataStartRow += 1;
+      continue;
+    }
+    break;
+  }
+  return dataStartRow;
+}
+
+/** Canonical Form XIII column widths so wrapped headers stay readable. */
+function applyFormXIIIColumnLayout(worksheet, startCol, headerRow, dataStartRow) {
+  if (!worksheet) return;
+  for (let i = 0; i < FORM_XIII_AP_COL_WIDTHS.length; i += 1) {
+    const col = worksheet.getColumn(startCol + i);
+    const next = FORM_XIII_AP_COL_WIDTHS[i];
+    const cur = Number(col.width) || 0;
+    if (cur < next * 0.85) col.width = next;
+  }
+  for (let r = headerRow; r < dataStartRow; r += 1) {
+    const rowObj = worksheet.getRow(r);
+    const curH = Number(rowObj.height) || 15;
+    if (curH < 36) rowObj.height = 42;
+    for (let c = startCol; c < startCol + FORM_XIII_AP_COL_WIDTHS.length; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      cell.alignment = {
+        ...(cell.alignment || {}),
+        wrapText: true,
+        vertical: 'middle',
+        horizontal: 'center',
+      };
+    }
+  }
+}
+
+function clearFormXIIIWorksheetDataRange(worksheet, startRow, rowCount, colFrom, colTo) {
+  if (!worksheet || rowCount < 1) return;
+  for (let r = startRow; r < startRow + rowCount; r += 1) {
+    for (let c = colFrom; c <= colTo; c += 1) {
+      worksheet.getCell(r, c).value = null;
+    }
+  }
+}
+
+function pickFormXIIIAPSourceWorksheet(workbook, sheetNameHint = '') {
+  let worksheet = pickFormXXAPWorksheet(workbook, sheetNameHint);
+  if (!workbook.worksheets?.length) return worksheet;
+  if (workbook.worksheets.length === 1) return worksheet || workbook.worksheets[0];
+
+  let best = worksheet || workbook.worksheets[0];
+  let bestScore = -1;
+  for (const ws of workbook.worksheets) {
+    let score = 0;
+    const name = String(ws?.name || '');
+    if (sheetNameHint && name === String(sheetNameHint)) score += 200;
+    if (matchesFormXIIIHint(name)) score += 40;
+    if (/xiv|employment\s+card/i.test(name)) score -= 80;
+    for (let r = 1; r <= 18; r += 1) {
+      for (let c = 1; c <= FORM_XIII_AP_TABLE_COLS; c += 1) {
+        const t = formXIIIExcelCellText(ws.getCell(r, c)?.value);
+        if (isFormXIIITitleBandText(t)) score += 30;
+        if (REGISTER_OF_WORKMEN_SURNAME_HEADER_RE.test(t)) score += 40;
+        if (excelCellLooksLikeSerialHeader(t)) score += 10;
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = ws;
+    }
+  }
+  return best;
+}
+
+/**
+ * Preserve Form XIII AP template styling (ExcelJS) while writing header fields + workmen rows.
+ * Rebuilds a clean A–K sheet so Excel does not repair phantom columns / broken merges.
+ */
+export async function buildFormXIIIAPWorkbookWithTemplateStyles({
+  templateArrayBuffer,
+  mappedData,
+  mappedRowMatrix,
+  headersToUse,
+  parsedHeaderRowIndex,
+  parsedDataStartIndex,
+  parsedTableStartCol,
+  parsedFormHeader,
+  headerFormData,
+  formFileName,
+  sheetNameHint = '',
+}) {
+  const templateWb = new ExcelJS.Workbook();
+  await templateWb.xlsx.load(templateArrayBuffer);
+  const sourceWs = pickFormXIIIAPSourceWorksheet(templateWb, sheetNameHint);
+  if (!sourceWs) throw new Error('Template worksheet not found.');
+
+  const cleaned = cloneFormXIIIAPWorksheetClean(sourceWs, sourceWs.name || sheetNameHint || 'FORM XIII');
+  const workbook = cleaned.workbook;
+  const worksheet = cleaned.worksheet;
+
+  const normalize = (txt) =>
+    String(txt || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+  const hdrCount = Math.max(FORM_XIII_AP_TABLE_COLS, Array.isArray(headersToUse) ? headersToUse.length : 0);
+  const canonicalLayout = resolveFormXIIIAPTableLayout(
+    worksheet,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedTableStartCol
+  );
+
+  let startCol = 1;
+  let columnHeaderRow = 13;
+  let dataStartRow = 16;
+
+  if (canonicalLayout) {
+    ({ startCol, columnHeaderRow, dataStartRow } = canonicalLayout);
+  } else {
+    let hintHeaderRow =
+      parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0 ? parsedHeaderRowIndex + 1 : 13;
+    startCol =
+      parsedTableStartCol != null && parsedTableStartCol >= 0 ? parsedTableStartCol + 1 : 1;
+    if (parsedTableStartCol == null || parsedTableStartCol < 0) {
+      for (let c = 1; c <= FORM_XIII_AP_TABLE_COLS; c += 1) {
+        const raw = formXIIIExcelCellText(worksheet.getCell(hintHeaderRow, c)?.value);
+        if (excelCellLooksLikeSerialHeader(raw)) {
+          startCol = c;
+          break;
+        }
+      }
+    }
+    columnHeaderRow = locateFormXIIIColumnHeaderRow(worksheet, hintHeaderRow, startCol, normalize);
+    dataStartRow = locateFormXIIIDataStartRow(
+      worksheet,
+      columnHeaderRow,
+      startCol,
+      hdrCount,
+      normalize
+    );
+    const parsedDataStartRow =
+      parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? parsedDataStartIndex + 1 : 0;
+    if (parsedDataStartRow > dataStartRow && parsedDataStartRow > columnHeaderRow) {
+      dataStartRow = parsedDataStartRow;
+    }
+    if (dataStartRow <= columnHeaderRow) dataStartRow = columnHeaderRow + 1;
+    while (
+      dataStartRow <= columnHeaderRow + 3 &&
+      (rowTextLooksLikeFormXIIITableHeader(normalize, worksheet, dataStartRow, startCol) ||
+        rowLooksLikeFormXIIIIndexRow(worksheet, dataStartRow, startCol))
+    ) {
+      dataStartRow += 1;
+    }
+  }
+
+  writeFormXIIIAPHeaderFieldsToWorksheet(worksheet, {
+    headerFormData,
+    parsedFormHeader,
+    headerRowEnd: columnHeaderRow - 1,
+  });
+
+  const sourceHeaders = Array.isArray(headersToUse) ? headersToUse.filter(Boolean) : [];
+  const writableCols =
+    sourceHeaders.length > 0
+      ? sourceHeaders.map((label, idx) => ({
+          col: startCol + idx,
+          label: String(label || ''),
+        }))
+      : Array.from({ length: hdrCount }, (_, idx) => ({
+          col: startCol + idx,
+          label: formXIIIExcelCellText(worksheet.getCell(columnHeaderRow, startCol + idx)?.value),
+        }));
+
+  const rowValuesForExport = (row) => exportFormXXAPRowValuesByHeaders(row, sourceHeaders);
+
+  const rowLooksMeaningful = (row) => {
+    if (Array.isArray(row)) return row.some((v) => String(v ?? '').trim() !== '');
+    if (row && typeof row === 'object') {
+      return Object.entries(row).some(([key, v]) => {
+        if (String(key || '').startsWith('__')) return false;
+        return v != null && String(v).trim() !== '';
+      });
+    }
+    return false;
+  };
+
+  const sourcePrimary =
+    Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : Array.isArray(mappedRowMatrix)
+        ? mappedRowMatrix
+        : [];
+  const sourceRows = sourcePrimary.filter((row) => rowLooksMeaningful(row));
+
+  const tableColMax =
+    writableCols.length > 0 ? writableCols[writableCols.length - 1].col : startCol + hdrCount - 1;
+  const countTemplateBodyRows = () => {
+    let rows = 0;
+    for (let r = dataStartRow; r < dataStartRow + 120; r += 1) {
+      let hasBorder = false;
+      for (let c = startCol; c <= tableColMax; c += 1) {
+        const b = worksheet.getCell(r, c)?.border;
+        if (b && (b.top?.style || b.bottom?.style || b.left?.style || b.right?.style)) {
+          hasBorder = true;
+          break;
+        }
+      }
+      if (hasBorder) rows += 1;
+      else if (rows > 0) break;
+    }
+    return Math.max(rows, 1);
+  };
+
+  if (sourceRows.length > 0) {
+    clearFormXIIIWorksheetDataRange(
+      worksheet,
+      dataStartRow,
+      Math.max(sourceRows.length, countTemplateBodyRows()),
+      startCol,
+      tableColMax
+    );
+    ensureExcelJSDataRowsWithBorders(worksheet, {
+      dataStartRow,
+      dataRowCount: sourceRows.length,
+      colFrom: startCol,
+      colTo: tableColMax,
+      templateRow: dataStartRow,
+      templateBodyRows: countTemplateBodyRows(),
+    });
+  }
+
+  for (let i = 0; i < sourceRows.length; i += 1) {
+    const row = sourceRows[i];
+    const rowValues = rowValuesForExport(row);
+    for (let j = 0; j < writableCols.length; j += 1) {
+      const { col: targetCol } = writableCols[j];
+      let value = rowValues[j];
+      if (
+        (value == null || value === '') &&
+        j === 0 &&
+        excelCellLooksLikeSerialHeader(writableCols[j]?.label || sourceHeaders[0])
+      ) {
+        value = i + 1;
+      }
+      if (value == null || value === '') continue;
+      const cell = worksheet.getCell(dataStartRow + i, targetCol);
+      if (
+        j === 0 &&
+        (typeof value === 'number' ||
+          (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))
+      ) {
+        cell.value = Number(value);
+      } else {
+        cell.value = String(value);
+      }
+      cell.alignment = {
+        ...(cell.alignment || {}),
+        wrapText: true,
+        vertical: 'top',
+        horizontal: j === 0 ? 'center' : 'left',
+      };
+    }
+  }
+
+  applyFormXIIIColumnLayout(worksheet, startCol, columnHeaderRow, dataStartRow);
+
+  const out = await workbook.xlsx.writeBuffer();
+  const fileName =
+    formFileName ||
+    parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+    `Form_XIII_${Date.now()}.xlsx`;
+  const blob = new Blob([out], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  return { blob, fileName };
+}

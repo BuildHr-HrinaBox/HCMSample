@@ -2473,6 +2473,67 @@ function statutoryDonorBelongsToTargetSite(row, targetSiteSingle, { allowEmptySi
   return resolvedSiteMatchesSingleTarget(explicit, t);
 }
 
+/**
+ * Keep ChecklistBulk form lines visible for every site in the same state.
+ * If this row belongs to another site, clear draft/sent/proof so Site B still shows all forms empty.
+ */
+function clearStatutoryWorkflowForOtherSite(item, targetSiteName) {
+  const site = String(targetSiteName || '').trim();
+  const keepSyntheticId =
+    item?.isBulkImported ||
+    isSyntheticStatutoryRowId(item?.id) ||
+    String(item?.id ?? '').startsWith('bulk_');
+  const nextId = keepSyntheticId
+    ? item.id
+    : `bulk_resite_${squashStatutoryKeyPart(site) || 'site'}_${checklistBulkRowIdentityKey(item) || String(item?.id ?? '')}`;
+  return {
+    ...item,
+    id: nextId,
+    site: site || null,
+    Site: site || null,
+    isBulkImported: true,
+    draftFile: null,
+    DraftFile: null,
+    draftFileName: null,
+    DraftFileName: null,
+    draft: '',
+    Draft: '',
+    proofSubmissionFile: null,
+    ProofSubmissionFile: null,
+    proofSubmissionFileName: null,
+    ProofSubmissionFileName: null,
+    sendForApproval: '',
+    SendForApproval: '',
+    approval: '',
+    Approval: '',
+    status: '',
+    Status: '',
+    remarks: '',
+    Remarks: '',
+    submittedDate: '',
+    SubmittedDate: '',
+    approvedDate: '',
+    ApprovedDate: '',
+    draftStatutoryRowIdForFile: null
+  };
+}
+
+/** True when row Site is missing or matches the active single-site context. */
+function statutoryRowMatchesActiveSite(item, targetSiteSingle) {
+  const t = String(targetSiteSingle || '').trim().toLowerCase();
+  if (!t) return true;
+  const explicit = pickSingleSiteNameToken(item?.site ?? item?.Site ?? '');
+  if (!explicit) {
+    // Empty Site with draft/sent is legacy/other-site data — keep the form, but not as this site's save.
+    const hasWorkflow =
+      hasStatutoryDraftFileRef(item) ||
+      statutorySendForApprovalIsSent(item) ||
+      !!(item?.proofSubmissionFile ?? item?.ProofSubmissionFile);
+    return !hasWorkflow;
+  }
+  return explicit.toLowerCase() === t;
+}
+
 function hasStatutoryDraftFileRef(row) {
   const d = row?.draftFile ?? row?.DraftFile;
   return d != null && String(d).trim() !== '' && String(d).trim() !== 'null';
@@ -10690,16 +10751,16 @@ function preserveStatutoryDraftFieldsAfterFetch(prevRows, nextRows) {
   const preserved = new Map();
   prevRows.forEach((row) => {
     if (!hasStatutoryDraftFileRef(row)) return;
-    const bulkKey = checklistBulkRowIdentityKey(row);
     const lineKey = statutorySubmittedDatePreserveKey(row);
     const payload = {
       draftFile: row.draftFile ?? row.DraftFile,
       draftFileName: row.draftFileName ?? row.DraftFileName,
       draftStatutoryRowIdForFile: row.draftStatutoryRowIdForFile,
       id: row.id,
+      site: pickSingleSiteNameToken(row?.site ?? row?.Site ?? '') || '',
       monthFilter: row.monthFilter ?? row.MonthFilter ?? row.monthfilter
     };
-    if (bulkKey && bulkKey !== '\x1f\x1f\x1f\x1f') preserved.set(`bulk:${bulkKey}`, payload);
+    // Site-aware only — never restore Site A draft onto Site B via bare bulk identity.
     if (lineKey) preserved.set(`line:${lineKey}`, payload);
     if (/^\d+$/.test(String(row?.id ?? '').trim())) {
       preserved.set(`id:${String(row.id).trim()}`, payload);
@@ -10708,13 +10769,14 @@ function preserveStatutoryDraftFieldsAfterFetch(prevRows, nextRows) {
   if (preserved.size === 0) return nextRows;
   return nextRows.map((row) => {
     if (hasStatutoryDraftFileRef(row)) return row;
-    const bulkKey = checklistBulkRowIdentityKey(row);
     const lineKey = statutorySubmittedDatePreserveKey(row);
     const kept =
-      (bulkKey && bulkKey !== '\x1f\x1f\x1f\x1f' ? preserved.get(`bulk:${bulkKey}`) : null) ||
       (lineKey ? preserved.get(`line:${lineKey}`) : null) ||
       (/^\d+$/.test(String(row?.id ?? '').trim()) ? preserved.get(`id:${String(row.id).trim()}`) : null);
     if (!kept) return row;
+    const rowSite = pickSingleSiteNameToken(row?.site ?? row?.Site ?? '') || '';
+    const keptSite = pickSingleSiteNameToken(kept.site || '') || '';
+    if (rowSite && keptSite && rowSite.toLowerCase() !== keptSite.toLowerCase()) return row;
     const nextId =
       isNumericStatutoryBackendId(kept.id) && !isNumericStatutoryBackendId(row?.id) ? kept.id : row.id;
     return {
@@ -23546,15 +23608,22 @@ const Statutory = ({ userEmail, userRole }) => {
           if (!formDonor || !hasFormRef(formDonor)) {
             formDonor = scoredAllForFormFile.find(hasFormRef) || formDonor;
           }
-          const alignedSiteName = resolveSingleSiteNameForStatutorySave(
-            monthDonor || formDonor || bulkRow,
-            urlSiteForAlign,
-            ''
-          );
-          const withAlignedSite = (row) =>
-            alignedSiteName
-              ? { ...row, site: alignedSiteName, Site: alignedSiteName }
-              : row;
+          // Prefer ?site=; otherwise stamp the donor's Site so other-site views can clear workflow
+          // without deleting the ChecklistBulk form line.
+          const alignedSiteName =
+            urlSiteForAlign ||
+            pickSingleSiteNameToken(monthDonor?.site ?? monthDonor?.Site ?? '') ||
+            '';
+          const withAlignedSite = (row, workflowDonor = null) => {
+            const siteName =
+              alignedSiteName ||
+              pickSingleSiteNameToken(workflowDonor?.site ?? workflowDonor?.Site ?? '') ||
+              '';
+            if (!siteName) {
+              return { ...row, site: '', Site: '' };
+            }
+            return { ...row, site: siteName, Site: siteName };
+          };
           const uiMonthOnlyLabel =
             resolveToFullMonthName(String(selectedMonth || '').trim()) ||
             String(selectedMonth || '').trim() ||
@@ -23567,7 +23636,8 @@ const Statutory = ({ userEmail, userRole }) => {
             const fmExactNoDonor =
               formmasterFileByMatchKey.get(buildFormmasterMatchKey(bulkRow)) ||
               formmasterFileByMatchKey.get(checklistBulkRowIdentityKey(bulkRow));
-            return withAlignedSite({
+            return withAlignedSite(
+              {
               ...bulkRow,
               id: bulkRow.id,
               formFile: fmExactNoDonor?.formFile ?? formDonor?.formFile ?? formDonor?.FormFile ?? bulkRow.formFile ?? null,
@@ -23598,7 +23668,9 @@ const Statutory = ({ userEmail, userRole }) => {
                 : null,
               checklistId: bulkRow.checklistId ?? formDonor?.checklistId ?? null,
               isFromChecklist: !!formDonor?.isFromChecklist && !!monthDonor
-            });
+            },
+              draftOnlyDonor
+            );
           }
           const donor = monthDonor;
           const fmExact =
@@ -76352,17 +76424,12 @@ const Statutory = ({ userEmail, userRole }) => {
     const rows = Array.isArray(statutoryData) ? statutoryData : [];
     const urlSite = String(siteFromUrl || '').trim();
     if (!urlSite) return rows;
-    const target = urlSite.toLowerCase();
-    return rows.filter((item) => {
-      const explicit = pickSingleSiteNameToken(item?.site ?? item?.Site ?? '');
-      if (explicit) return explicit.toLowerCase() === target;
-      // Legacy rows with no Site must not appear in every site of the same state.
-      const hasWorkflow =
-        hasStatutoryDraftFileRef(item) ||
-        statutorySendForApprovalIsSent(item) ||
-        !!(item?.proofSubmissionFile ?? item?.ProofSubmissionFile);
-      return !hasWorkflow;
-    });
+    // Keep all checklist forms; callers should use display filter that clears other-site workflow.
+    return rows.map((item) =>
+      statutoryRowMatchesActiveSite(item, urlSite)
+        ? item
+        : clearStatutoryWorkflowForOtherSite(item, urlSite)
+    );
   }, [statutoryData, siteFromUrl]);
 
   // Filter statutory data by month and ensure forms are properly separated by act
@@ -76393,23 +76460,27 @@ const Statutory = ({ userEmail, userRole }) => {
       });
     }
 
-    // Site login: show only corresponding site rows (never share another site's saved data in the same state).
-    if (siteFromUrl && data && data.length > 0) {
-      const targetSite = String(siteFromUrl).trim().toLowerCase();
-      data = data.filter((item) => {
-        const explicit = pickSingleSiteNameToken(item?.site ?? item?.Site ?? '');
-        if (explicit) return explicit.toLowerCase() === targetSite;
-        const hasWorkflow =
-          hasStatutoryDraftFileRef(item) ||
-          statutorySendForApprovalIsSent(item) ||
-          !!(item?.proofSubmissionFile ?? item?.ProofSubmissionFile);
-        // Unsaved ChecklistBulk placeholder can show under ?site=; legacy no-Site submissions stay hidden.
-        if (hasWorkflow) return false;
-        const resolved = String(resolveSiteForDisplay(item, data) || '').trim().toLowerCase();
-        return resolved === targetSite || resolvedSiteMatchesSingleTarget(resolved, targetSite);
-      });
-    } else if (Array.isArray(allowedSiteNameList) && allowedSiteNameList.length > 0 && data && data.length > 0) {
-      const allowedSites = new Set(allowedSiteNameList.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean));
+    // Single-site view: keep ALL Madhya Pradesh (etc.) checklist forms.
+    // If a form was saved for another site, show it empty — do not remove the form row.
+    const singleSiteContext =
+      urlSite ||
+      (Array.isArray(allowedSiteNameList) && allowedSiteNameList.length === 1
+        ? String(allowedSiteNameList[0] || '').trim()
+        : '');
+    if (singleSiteContext && data && data.length > 0) {
+      data = data.map((item) =>
+        statutoryRowMatchesActiveSite(item, singleSiteContext)
+          ? {
+              ...item,
+              site: pickSingleSiteNameToken(item?.site ?? item?.Site ?? '') || singleSiteContext,
+              Site: pickSingleSiteNameToken(item?.site ?? item?.Site ?? '') || singleSiteContext
+            }
+          : clearStatutoryWorkflowForOtherSite(item, singleSiteContext)
+      );
+    } else if (Array.isArray(allowedSiteNameList) && allowedSiteNameList.length > 1 && data && data.length > 0) {
+      const allowedSites = new Set(
+        allowedSiteNameList.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean)
+      );
       data = data.filter((item) => {
         const explicit = pickSingleSiteNameToken(item?.site ?? item?.Site ?? '');
         if (explicit) return allowedSites.has(explicit.toLowerCase());

@@ -217,6 +217,8 @@ import {
   applyFormXVIIIMPPeopleField,
   applyFormXVIIIMPPayrollToRow,
   applyFormXVIIIMPLeaveToRow,
+  applyFormXVIIIMPNilDefaultsToMappedRows,
+  applyFormXVIIIMPLeaveCategoryToRow,
   buildFormXVIIIMPPayrollRowResolver,
   buildFormXVIIIWorkbookWithTemplateStyles,
   enrichFormXVIIIMPEmployeeRows,
@@ -239,6 +241,8 @@ import {
   formXVIIIMPDownloadHasSubstantiveRows,
   formXVIIIMPRowsNeedPayrollEnrich,
   enrichFormXVIIIMPPayrollRowsFromCache,
+  FORM_XVIII_MP_NIL,
+  FORM_XVIII_MP_LEAVE_CATEGORY,
 } from './statutory/formXVIIIMPCombinedRegister';
 import {
   buildFormXXIIAPWorkbookWithTemplateStyles,
@@ -556,7 +560,11 @@ import {
   resolveFormQKarnatakaTotalWageForEmployee,
 } from './statutory/formQKarnataka';
 import {
+  FORM_XXIII_MP_OT_NIL,
+  applyFormXXIIIMPOtNilToMappedRows,
+  applyFormXXIIIMPOtNilToRow,
   isFormXXIIIMPContext,
+  isFormXXIIIMPOtNilHeader,
   resolveFormXXIIIMPAprilDefaultNormalRate,
   resolveFormXXIIIMPNormalRateForEmployee,
 } from './statutory/formXXIIIMP';
@@ -34164,6 +34172,21 @@ const Statutory = ({ userEmail, userRole }) => {
     if (isOvertimeExport && exportRowsBase.length > 0 && exportHdrs.length > 0) {
       exportRowsBase = prepareFormXXIIIOvertimeExportRows(exportRowsBase, exportHdrs);
       exportRowsBase = normalizeFormXXIIIOvertimeRowsForExport(exportRowsBase, exportHdrs);
+      if (
+        isFormXXIIIMPContext(
+          parsedFormHeader,
+          parseHints?.item,
+          formFileName,
+          String(sheetNameHint || '')
+        )
+      ) {
+        exportRowsBase = applyFormXXIIIMPOtNilToMappedRows(
+          exportRowsBase,
+          exportHdrs,
+          FORM_XXIII_MP_OT_NIL,
+          { overwrite: true }
+        );
+      }
     }
     const overtimeExportRows = exportRowsBase.filter(
       (row) => row && typeof row === 'object' && formTableRowHasMeaningfulData(row)
@@ -36134,18 +36157,22 @@ const Statutory = ({ userEmail, userRole }) => {
           headersToUse,
           parsed?.sheetText || formFileModalData?.sheetText || ''
         );
-      const isFormXVIIIDownload = isFormXVIIIMPCombinedRegisterContext(
-        parsed?.formHeader,
-        item,
-        templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
-        parsed?.sheetText || formFileModalData?.sheetText || ''
-      );
       const isFormTSEDownload = isFormTSEContext(
         parsed?.formHeader || {},
         item,
         templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
         parsed?.sheetText || formFileModalData?.sheetText || ''
       );
+      // Form T Karnataka shares "muster roll cum register of wages" wording with MP Form XVIII —
+      // never route Form T through the Form XVIII workbook builder.
+      const isFormXVIIIDownload =
+        !isFormTSEDownload &&
+        isFormXVIIIMPCombinedRegisterContext(
+          parsed?.formHeader,
+          item,
+          templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
+          parsed?.sheetText || formFileModalData?.sheetText || ''
+        );
       const isForm11Download = isForm11EsicAccidentBookContext(
         parsed?.formHeader,
         item,
@@ -39163,6 +39190,9 @@ const Statutory = ({ userEmail, userRole }) => {
             { label: 'Name of the Establishment:', key: 'statutory_establishment_name' },
             { label: 'Name and Address of the Factory:', key: 'statutory_factory_name_address' },
             { label: 'Name of the Manager/Incharge:', key: 'form_header_manager_incharge' },
+            { label: 'Name and address of Principal Employer:', key: 'statutory_principal_employer' },
+            { label: 'Name and address of Principal Employer/ Manager:', key: 'form_xviii_principal_employer' },
+            { label: '4. Name and address of Principal Employer.', key: 'form_xviii_principal_employer' },
           ],
           item,
           companiesForHeaderDownload,
@@ -39193,6 +39223,9 @@ const Statutory = ({ userEmail, userRole }) => {
             statutory_employer_name_address: employerForceText,
             statutory_principal_employer: employerForceText,
             form_t_employer: employerForceText,
+            form_xviii_principal_employer: employerForceText,
+            form_xvii_principal_employer: employerForceText,
+            form25_principal_employer: employerForceText,
           };
         }
         const siteForManagerHeaders = findSiteDetailByName(
@@ -40190,6 +40223,24 @@ const Statutory = ({ userEmail, userRole }) => {
         if (Array.isArray(mappedData) && mappedData.length > 0) {
           mappedData = prepareFormXXIIIOvertimeExportRows(mappedData, headersToUse);
           mappedData = normalizeFormXXIIIOvertimeRowsForExport(mappedData, headersToUse);
+          if (
+            isFormXXIIIMPContext(
+              parsed?.formHeader,
+              lineItem,
+              fn,
+              sheetTextForDownload || ''
+            ) ||
+            /madhya[\s._-]*pradesh|\bxxiii[\s._-]*mp\b/i.test(
+              `${fn} ${templateMeta.formFileName || ''} ${resolvedFormFileItem?.formFileName || ''}`
+            )
+          ) {
+            mappedData = applyFormXXIIIMPOtNilToMappedRows(
+              mappedData,
+              headersToUse,
+              FORM_XXIII_MP_OT_NIL,
+              { overwrite: true }
+            );
+          }
         }
         savedDraftRowMatrix = null;
       }
@@ -40918,8 +40969,7 @@ const Statutory = ({ userEmail, userRole }) => {
       if (
         isFormXVIIIDownload &&
         Array.isArray(mappedData) &&
-        mappedData.length > 0 &&
-        formXVIIIMPRowsNeedPayrollEnrich(mappedData, headersToUse)
+        mappedData.length > 0
       ) {
         const mpDownloadMonth = resolvePayrollMonthIsoCandidates(
           selectedMonth,
@@ -40936,15 +40986,41 @@ const Statutory = ({ userEmail, userRole }) => {
             formatStatutoryDateDisplay,
           }
         );
-        enrichFormXVIIIMPPayrollRowsFromCache(
+        const mpDownloadPayrollHelpers = {
+          sanitizeValue: (v) => String(v ?? '').trim(),
+          flattenPayrollEarningColumns,
+          resolvePayrollAmounts: (payload) =>
+            resolveApShopsRegisterPayrollAmounts(payload, null, null),
+        };
+        let mpDownloadHits = enrichFormXVIIIMPPayrollRowsFromCache(
           mappedData,
           employeesForMpDownload.length > 0 ? employeesForMpDownload : mappedData.map(() => ({})),
           headersToUse,
           mpDownloadMonth,
-          {
-            sanitizeValue: (v) => String(v ?? '').trim(),
-          }
+          mpDownloadPayrollHelpers
         );
+        if (mpDownloadHits === 0) {
+          try {
+            const mpLoadedRows = await loadFormXVIIIMPPayrollRowsForAutofill(mpDownloadMonth, {
+              timeoutMs: 12000,
+            });
+            if (Array.isArray(mpLoadedRows) && mpLoadedRows.length > 0) {
+              mpDownloadHits = enrichFormXVIIIMPPayrollRows(
+                mappedData,
+                employeesForMpDownload.length > 0
+                  ? employeesForMpDownload
+                  : mappedData.map(() => ({})),
+                headersToUse,
+                {
+                  ...mpDownloadPayrollHelpers,
+                  payrollRows: mpLoadedRows,
+                }
+              );
+            }
+          } catch (mpDlErr) {
+            console.warn('Form XVIII MP download payroll reload skipped:', mpDlErr?.message || mpDlErr);
+          }
+        }
       }
       if (isFormXVIIIDownload) {
         await yieldToMain();
@@ -42968,23 +43044,6 @@ const Statutory = ({ userEmail, userRole }) => {
                           parsed.sheetName ||
                           ''
                       })
-                  : isFormXVIIIDownload
-                    ? await buildFormXVIIIWorkbookWithTemplateStyles({
-                        templateArrayBuffer: arrayBuffer,
-                        mappedData,
-                        mappedRowMatrix: savedDraftRowMatrix,
-                        headersToUse,
-                        headerExcelCols: formXVIIIDownloadExcelCols,
-                        parsedHeaderRowIndex: downloadHeaderRowIndex,
-                        parsedDataStartIndex: downloadDataStartIndex,
-                        parsedFormHeader: parsed.formHeader,
-                        headerFormData: downloadHeaderFormData,
-                        formFileName:
-                          templateMeta.formFileName ||
-                          resolvedFormFileItem.formFileName ||
-                          'form-draft.xlsx',
-                        currentItem: item
-                      })
                   : isFormTSEDownload
                     ? await buildFormTSEWorkbookWithTemplateStyles({
                         templateArrayBuffer: arrayBuffer,
@@ -43006,6 +43065,23 @@ const Statutory = ({ userEmail, userRole }) => {
                           formFileModalData?.sheetName ||
                           parsed.sheetName ||
                           ''
+                      })
+                  : isFormXVIIIDownload
+                    ? await buildFormXVIIIWorkbookWithTemplateStyles({
+                        templateArrayBuffer: arrayBuffer,
+                        mappedData,
+                        mappedRowMatrix: savedDraftRowMatrix,
+                        headersToUse,
+                        headerExcelCols: formXVIIIDownloadExcelCols,
+                        parsedHeaderRowIndex: downloadHeaderRowIndex,
+                        parsedDataStartIndex: downloadDataStartIndex,
+                        parsedFormHeader: parsed.formHeader,
+                        headerFormData: downloadHeaderFormData,
+                        formFileName:
+                          templateMeta.formFileName ||
+                          resolvedFormFileItem.formFileName ||
+                          'form-draft.xlsx',
+                        currentItem: item
                       })
         : buildDraftWorkbook({
             currentItem: item,
@@ -44915,12 +44991,20 @@ const Statutory = ({ userEmail, userRole }) => {
           headersToUse,
           formFileModalData?.sheetText || ''
         );
-      const formXVIIISave = isFormXVIIIMPCombinedRegisterContext(
+      const formTSESave = isFormTSEContext(
         parsedFormHeaderForSave || formHeader,
         currentItem,
         draftFileNameForSave || draftFileNameForSaveEarly,
         formFileModalData?.sheetText || ''
       );
+      const formXVIIISave =
+        !formTSESave &&
+        isFormXVIIIMPCombinedRegisterContext(
+          parsedFormHeaderForSave || formHeader,
+          currentItem,
+          draftFileNameForSave || draftFileNameForSaveEarly,
+          formFileModalData?.sheetText || ''
+        );
       let blob;
       let fileName;
       if (form12Save && templateWb) {
@@ -46679,6 +46763,73 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           headerFormData: headerDataForSave,
           formFileName: draftFileNameForSave,
+          sheetNameHint: resolvedSaveSheetNameForBuild || formFileModalData?.sheetName || ''
+        }));
+      } else if (formTSESave && templateWb) {
+        const formTSEHeaders =
+          Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [];
+        const formTSERows = prepareFormTSEExportRows(
+          filterStatutoryTemplateColumnIndexRows(
+            (Array.isArray(tableDataForSave) ? tableDataForSave : []).filter((row) =>
+              formTableRowHasMeaningfulData(row)
+            ),
+            formTSEHeaders
+          ),
+          formTSEHeaders,
+          formTSEHeaders
+        );
+        const templateArrayBuffer =
+          saveTemplateArrayBuffer || XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const stateHintForTSave = String(currentItem?.state ?? currentItem?.State ?? '').trim();
+        const sitesForTSave =
+          Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+            ? siteDetailsList
+            : readSiteDetailsCache() || [];
+        const resolvedSiteForTSave = resolveStatutorySiteNameForContractorAutofill(currentItem, {
+          siteFromUrl,
+          allowedSiteNameList,
+          allRows: statutoryData,
+          resolveSiteFn: typeof resolveSiteDisplayName === 'function' ? resolveSiteDisplayName : null,
+        });
+        const siteForTSave = findSiteDetailByName(sitesForTSave, resolvedSiteForTSave, stateHintForTSave);
+        const companiesForTSave =
+          Array.isArray(companyDetailsList) && companyDetailsList.length > 0
+            ? companyDetailsList
+            : readCompanyDetailsCache() || [];
+        const companyForTSave = resolveCompanyRecordForStatutory(
+          currentItem,
+          companiesForTSave,
+          siteForTSave
+        );
+        const { fullMonth: tSaveFullMonth, year: tSaveYear } = resolveForm25PeriodMonthYear(
+          selectedMonth,
+          currentItem,
+          parsedFormHeaderForSave?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        const formTSESaveSiteContext = {
+          monthYearText:
+            tSaveFullMonth && tSaveYear
+              ? `${tSaveFullMonth} ${tSaveYear}`
+              : String(tSaveFullMonth || '').trim(),
+          establishmentText: siteForTSave
+            ? buildSiteEstablishmentNameAndAddress(siteForTSave)
+            : '',
+          employerText: buildCompanyNameAndAddress(companyForTSave),
+        };
+        ({ blob, fileName } = await buildFormTSEWorkbookWithTemplateStyles({
+          templateArrayBuffer,
+          mappedData: formTSERows,
+          headersToUse: formTSEHeaders,
+          parsedHeaderRowIndex: headerRowIndex,
+          parsedDataStartIndex: dataStartIndex,
+          parsedTableStartCol: formFileModalData?.tableStartCol ?? tableStartCol ?? 0,
+          parsedFormHeader: parsedFormHeaderForSave || formHeader,
+          headerFormData: headerDataForSave,
+          headerSiteContext: formTSESaveSiteContext,
+          formFileName: draftFileNameForSave,
+          currentItem,
           sheetNameHint: resolvedSaveSheetNameForBuild || formFileModalData?.sheetName || ''
         }));
       } else if (formXVIIISave && templateWb) {
@@ -53451,6 +53602,18 @@ const Statutory = ({ userEmail, userRole }) => {
           normalRate = resolveFormXXIIINetPayAmount(payrollRow);
         }
         if (normalRate !== '') setCellsForHeaderPredicate(isFormXXIIINormalRateOfWagesHeader, normalRate);
+        // Form XXIII MP: OT date / total / rate / earnings / paid date always NIL.
+        if (mpXxiii) {
+          (Array.isArray(headers) ? headers : []).forEach((header) => {
+            if (!isFormXXIIIMPOtNilHeader(header)) return;
+            if (!overwrite && !cellIsEmpty(header) && !/^nil+$/i.test(String(row[header] || '').trim())) {
+              return;
+            }
+            row[header] = FORM_XXIII_MP_OT_NIL;
+          });
+          const normalRateHeader = findFormXXIIINormalRateOfWagesHeader(headers);
+          return Boolean(normalRateHeader && normalRate !== '');
+        }
         if (!payrollRow || payrollRow.fetch_error) {
           const normalRateHeader = findFormXXIIINormalRateOfWagesHeader(headers);
           return Boolean(normalRateHeader && normalRate !== '');
@@ -53824,9 +53987,10 @@ const Statutory = ({ userEmail, userRole }) => {
               );
             }
           }
-          // RJ Form XIX puts "Nil" in OT date/wages — do not overwrite from attendance OT.
+          // RJ Form XIX / MP Form XXIII put NIL in OT columns — do not overwrite from attendance OT.
           if (
             !formXIXRJOvertimeAutofillContext &&
+            !formXXIIIMPAutofillContext &&
             !payrollOnly &&
             applyFormXXIIIAttendanceOTToRow(row, emp, { overwrite })
           ) {
@@ -59423,6 +59587,11 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
+          if (formXXIIIMPAutofillContext && isFormXXIIIMPOtNilHeader(header)) {
+            row[header] = FORM_XXIII_MP_OT_NIL;
+            return;
+          }
+
           if (formXXIIIAutofillContext && isFormXXIIITotalOvertimeWorkedHeader(header)) {
             row[header] = '';
             return;
@@ -62854,6 +63023,11 @@ const Statutory = ({ userEmail, userRole }) => {
             xxiiiEarlyHits += 1;
           });
         }
+        if (formXXIIIMPAutofillContext) {
+          mappedData = applyFormXXIIIMPOtNilToMappedRows(mappedData, currentHeaders, FORM_XXIII_MP_OT_NIL, {
+            overwrite: true,
+          });
+        }
         if (!returnMappedData && !isStaleAutofillRun() && xxiiiEarlyHits > 0) {
           mergeMappedIntoFormTable(mappedData, true);
         }
@@ -62877,6 +63051,14 @@ const Statutory = ({ userEmail, userRole }) => {
             overwrite: true,
             payrollOnly: false,
           });
+          if (formXXIIIMPAutofillContext) {
+            mappedData = applyFormXXIIIMPOtNilToMappedRows(
+              mappedData,
+              currentHeaders,
+              FORM_XXIII_MP_OT_NIL,
+              { overwrite: true }
+            );
+          }
           if (!returnMappedData && !isStaleAutofillRun()) {
             mergeMappedIntoFormTable(mappedData, true);
           }
@@ -64750,15 +64932,30 @@ const Statutory = ({ userEmail, userRole }) => {
               setTableHeaders(currentHeaders);
             }
           }
+          if (formXXIIIMPAutofillContext) {
+            mappedData = applyFormXXIIIMPOtNilToMappedRows(
+              mappedData,
+              currentHeaders,
+              FORM_XXIII_MP_OT_NIL,
+              { overwrite: true }
+            );
+          }
           const totalOtHeaderAfterEnrich = findFormXXIIITotalOvertimeWorkedHeader(currentHeaders);
           const hasOtHourValues =
             totalOtHeaderAfterEnrich &&
             mappedData.some((row) => String(row[totalOtHeaderAfterEnrich] || '').trim());
-          if (formXXIIIPayrollFilled > 0 || hasOtHourValues || formXIXRJOvertimeAutofillContext) {
+          if (
+            formXXIIIPayrollFilled > 0 ||
+            hasOtHourValues ||
+            formXIXRJOvertimeAutofillContext ||
+            formXXIIIMPAutofillContext
+          ) {
             console.log(
               formXIXRJOvertimeAutofillContext
                 ? `Form XIX RJ overtime enrich after attendance: payroll=${formXXIIIPayrollFilled} row(s)`
-                : `Form XXIII overtime enrich after attendance: payroll=${formXXIIIPayrollFilled} row(s), otHours=${hasOtHourValues ? 'yes' : 'no'}`
+                : formXXIIIMPAutofillContext
+                  ? `Form XXIII MP overtime enrich: payroll=${formXXIIIPayrollFilled} row(s), OT cols=NIL`
+                  : `Form XXIII overtime enrich after attendance: payroll=${formXXIIIPayrollFilled} row(s), otHours=${hasOtHourValues ? 'yes' : 'no'}`
             );
             if (!returnMappedData) mergeMappedIntoFormTable(mappedData, true);
           }
@@ -65615,12 +65812,25 @@ const Statutory = ({ userEmail, userRole }) => {
                 resolveApShopsRegisterPayrollAmounts(payload, null, null),
             }
           );
+          mappedData.forEach((row) => {
+            applyFormXVIIIMPLeaveCategoryToRow(row, currentHeaders, { sanitizeValue });
+          });
+          applyFormXVIIIMPNilDefaultsToMappedRows(mappedData, currentHeaders, FORM_XVIII_MP_NIL, {
+            overwrite: true,
+          });
           if (!returnMappedData && !isStaleAutofillRun()) {
             mergeMappedIntoFormTable(mappedData, true);
           }
           console.log(
             `Form XVIII MP payroll final pass: ${mpPayrollHits}/${mappedData.length} row(s)`
           );
+        } else {
+          mappedData.forEach((row) => {
+            applyFormXVIIIMPLeaveCategoryToRow(row, currentHeaders, { sanitizeValue });
+          });
+          applyFormXVIIIMPNilDefaultsToMappedRows(mappedData, currentHeaders, FORM_XVIII_MP_NIL, {
+            overwrite: true,
+          });
         }
       }
 
@@ -67440,22 +67650,32 @@ const Statutory = ({ userEmail, userRole }) => {
                 mpEmpIdHdr,
                 mpEmpNameHdr
               );
-              if (!leaveRec) return;
               if (
                 applyFormXVIIIMPLeaveToRow(row, leaveRec, mpLeaveHeaders, {
                   leaveTypeLabels,
                   sanitizeValue,
+                  headers: normalizedCurrentHeaders,
                 })
               ) {
                 mpLeaveHits += 1;
               }
             });
+            applyFormXVIIIMPNilDefaultsToMappedRows(mappedData, normalizedCurrentHeaders, FORM_XVIII_MP_NIL, {
+              overwrite: true,
+            });
             if (mpLeaveHits > 0 && !returnMappedData && !isStaleAutofillRun()) {
               mergeMappedIntoFormTable(mappedData, true);
             }
             console.log(
-              `Form XVIII MP leave API enrich: ${mpLeaveHits}/${mappedData.length} row(s) (booked → leaves availed, balance → total balance leaves)`
+              `Form XVIII MP leave API enrich: ${mpLeaveHits}/${mappedData.length} row(s) (booked → leaves availed, balance → total balance leaves; category=${FORM_XVIII_MP_LEAVE_CATEGORY})`
             );
+          } else if (formXVIIMPAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
+            mappedData.forEach((row) => {
+              applyFormXVIIIMPLeaveCategoryToRow(row, normalizedCurrentHeaders, { sanitizeValue });
+            });
+            applyFormXVIIIMPNilDefaultsToMappedRows(mappedData, normalizedCurrentHeaders, FORM_XVIII_MP_NIL, {
+              overwrite: true,
+            });
           }
         } else {
           console.warn('⚠️ Failed to fetch leave data or no data received');
@@ -67609,6 +67829,12 @@ const Statutory = ({ userEmail, userRole }) => {
       if (formCRajasthanAutofillContext) {
         mappedData = applyFormCRajasthanNilToMappedRows(mappedData, currentHeaders);
         console.log('Applied NIL to Form C RJ deduction columns');
+      }
+      if (formXXIIIMPAutofillContext && Array.isArray(mappedData)) {
+        mappedData = applyFormXXIIIMPOtNilToMappedRows(mappedData, currentHeaders, FORM_XXIII_MP_OT_NIL, {
+          overwrite: true,
+        });
+        console.log('Applied NIL to Form XXIII MP overtime columns');
       }
       if (formITamilNaduSuspensionAutofillContext && Array.isArray(mappedData)) {
         mappedData = applyFormITamilNaduNilDefaultsToRows(mappedData, currentHeaders, {
@@ -68086,8 +68312,20 @@ const Statutory = ({ userEmail, userRole }) => {
       if (formXXIIIAutofillContext && Array.isArray(mappedData)) {
         try {
           const formXXIIIRefilled = await enrichFormXXIIIOvertimePayrollRows({ overwrite: true });
-          if (formXXIIIRefilled > 0) {
-            console.log(`Form XXIII overtime re-applied before grid update: ${formXXIIIRefilled} row(s)`);
+          if (formXXIIIMPAutofillContext) {
+            mappedData = applyFormXXIIIMPOtNilToMappedRows(
+              mappedData,
+              currentHeaders,
+              FORM_XXIII_MP_OT_NIL,
+              { overwrite: true }
+            );
+          }
+          if (formXXIIIRefilled > 0 || formXXIIIMPAutofillContext) {
+            console.log(
+              formXXIIIMPAutofillContext
+                ? `Form XXIII MP overtime re-applied before grid update: ${formXXIIIRefilled} row(s), OT cols=NIL`
+                : `Form XXIII overtime re-applied before grid update: ${formXXIIIRefilled} row(s)`
+            );
           }
         } catch (formXXIIIFinalEnrichErr) {
           console.warn(
@@ -68142,6 +68380,12 @@ const Statutory = ({ userEmail, userRole }) => {
               resolveApShopsRegisterPayrollAmounts(payload, null, null),
           });
         }
+        mappedData.forEach((row) => {
+          applyFormXVIIIMPLeaveCategoryToRow(row, currentHeaders, { sanitizeValue });
+        });
+        applyFormXVIIIMPNilDefaultsToMappedRows(mappedData, currentHeaders, FORM_XVIII_MP_NIL, {
+          overwrite: true,
+        });
         tableDataToSet = mappedData;
       }
       if (formXAPFinesAutofillContext && Array.isArray(mappedData)) {
@@ -69999,6 +70243,11 @@ const Statutory = ({ userEmail, userRole }) => {
           );
           addHeaderFieldIfMissing(
             '4. Name and address of Principal Employer.',
+            'form_xviii_principal_employer',
+            principalEmployerField?.value || ''
+          );
+          addHeaderFieldIfMissing(
+            'Name and address of Principal Employer/ Manager',
             'form_xviii_principal_employer',
             principalEmployerField?.value || ''
           );
@@ -83279,7 +83528,22 @@ const Statutory = ({ userEmail, userRole }) => {
                           displayTableHeaders.forEach(header => {
                             newRow[header] = '';
                           });
-                          const nextRows = [...formTableData, newRow];
+                          const mpXxiiiAddRow = isFormXXIIIMPContext(
+                            displayFormHeader,
+                            formFileModalData?.item || null,
+                            String(
+                              formFileModalData?.fileName ||
+                                formFileModalData?.formFileName ||
+                                ''
+                            ),
+                            formFileModalData?.sheetText || ''
+                          );
+                          const rowWithDefaults = mpXxiiiAddRow
+                            ? applyFormXXIIIMPOtNilToRow(newRow, displayTableHeaders, {
+                                overwrite: true,
+                              })
+                            : newRow;
+                          const nextRows = [...formTableData, rowWithDefaults];
                           formTableDataRef.current = nextRows;
                           setFormTableData(nextRows);
                         }}

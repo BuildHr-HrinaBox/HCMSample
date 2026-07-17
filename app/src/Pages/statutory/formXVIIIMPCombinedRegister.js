@@ -10,9 +10,13 @@ import {
 import {
   flattenPayrollEarningColumns,
   mergePayrollRunEmployeePayload,
+  readPayrollForm15WageAmounts,
   readPayrollScalar,
 } from '../../utils/payrollEarnings';
-import { sumLeaveRecordBookedAndBalance } from '../../utils/leaveMetrics';
+import {
+  parseLeaveCellObject,
+  sanitizeLeaveMetricDisplayValue,
+} from '../../utils/leaveMetrics';
 import { getCachedForm15PayrollTableRows, getLatestCachedPayrollTableRows, yieldToMain } from '../../utils/statutoryAutofillCache';
 import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
 import {
@@ -24,6 +28,7 @@ import {
   resolveFormXIXMPPayrollRowsForAutofill,
   resolvePayrollRowByNameAndGid,
 } from './formXIXMPWageSlip';
+import { leaveTypeLabelMatchesAliases } from './formXTamilNaduLeave';
 
 export const resolveFormXVIIIMPPayrollRowsForAutofill = resolveFormXIXMPPayrollRowsForAutofill;
 export const loadFormXVIIIMPPayrollRowsForAutofill = loadFormXIXMPPayrollRowsForAutofill;
@@ -130,8 +135,33 @@ export function mpCombinedRegisterHeaderNorm(txt) {
     .toLowerCase();
 }
 
+/**
+ * Karnataka Form T ("COMBINED MUSTER ROLL CUM REGISTER OF WAGES") shares wording with
+ * MP Form XVIII — never treat Form T as the Madhya Pradesh combined register.
+ */
+export function looksLikeKarnatakaFormTSheet(blob) {
+  const s = String(blob || '').toLowerCase();
+  if (/\bform[\s._-]*xviii\b|\bform_xviii\b|\bform-xviii\b/.test(s)) return false;
+  if (/\bmadhya\s+pradesh\b/.test(s)) return false;
+  // Matches "Form T", "Form_T", "Form___T_-_Karnataka.xlsx", etc.
+  const namedFormT =
+    /\bform[\s._-]*t\b/.test(s) ||
+    /form[_-]{1,}t(?:[_-]|$)/.test(s) ||
+    /form_{2,}t/.test(s);
+  if (!namedFormT) return false;
+  return (
+    /karnataka/.test(s) ||
+    /rule\s+24\s*\(\s*9[\s-]*b/.test(s) ||
+    /shops?\s*.{0,24}commercial/.test(s) ||
+    /combined\s+muster\s+roll/.test(s) ||
+    /muster[\s._-]*roll[\s._-]*cum[\s._-]*register[\s._-]*of[\s._-]*wages/.test(s) ||
+    (/s[\s&._-]*e\b/.test(s) && /form[\s._-]*t/.test(s))
+  );
+}
+
 export function looksLikeMPCombinedRegisterSheet(blob) {
   const s = String(blob || '').toLowerCase();
+  if (looksLikeKarnatakaFormTSheet(s)) return false;
   return (
     /muster[\s._-]*roll[\s._-]*cum[\s._-]*register[\s._-]*of[\s._-]*wages/i.test(s) ||
     /register[\s._-]*of[\s._-]*wages[\s._-]*cum[\s._-]*muster/i.test(s) ||
@@ -158,6 +188,7 @@ export function isFormXVIIIMPCombinedRegisterContext(formHeader, rowItem, fileNa
   ]
     .join(' ')
     .toLowerCase();
+  if (looksLikeKarnatakaFormTSheet(parts)) return false;
   return (
     /\bform\s*xviii\b|\bform_xviii\b|\bform-xviii\b/i.test(parts) ||
     looksLikeMPCombinedRegisterSheet(parts)
@@ -519,8 +550,47 @@ export function formatEducationSkillFromEmployee(emp) {
 /** MP Combined Register — default total days worked when payroll lacks paid_days. */
 export const FORM_XVIII_MP_DEFAULT_DAYS_WORKED = '30';
 
+/** Fixed Category of Leave text for Form XVIII MP. */
+export const FORM_XVIII_MP_LEAVE_CATEGORY =
+  'Earned Leave,Legacy Earned Leave,Paternity Leave,Contingency Leave';
+
+/** NIL defaults for OT / maternity / advances / fines / other amount columns. */
+export const FORM_XVIII_MP_NIL = 'NIL';
+
+/** Leave types whose booked/balance feed Leaves availed + Total Balance Leaves. */
+export const FORM_XVIII_MP_LEAVE_METRIC_ALIASES = [
+  'earned leave',
+  'earned leave (test)',
+  'earned leave(test)',
+  'legacy earned leave',
+  'legacy earned',
+  'contingency leave',
+  'contingency',
+];
+
 const mpPeopleHeaderNorm = (header) =>
   mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+
+function parseFormXVIIIMPMoney(value) {
+  if (value === '' || value == null) return NaN;
+  const n = Number(String(value).replace(/,/g, '').trim());
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** Other allowances = gross_pay − basic − hra (requires basic and/or hra so it never dumps full gross). */
+export function computeFormXVIIIMPOtherAllowances(grossPay, basic, hra) {
+  const g = parseFormXVIIIMPMoney(grossPay);
+  if (!Number.isFinite(g)) return '';
+  const b = parseFormXVIIIMPMoney(basic);
+  const h = parseFormXVIIIMPMoney(hra);
+  const hasBasic = Number.isFinite(b);
+  const hasHra = Number.isFinite(h);
+  if (!hasBasic && !hasHra) return '';
+  const known = (hasBasic ? b : 0) + (hasHra ? h : 0);
+  const other = Math.round((g - known) * 100) / 100;
+  if (!Number.isFinite(other) || other < 0) return '';
+  return other;
+}
 
 export function isFormXVIIIMPEmpIdHeader(header) {
   const s = mpPeopleHeaderNorm(header);
@@ -782,6 +852,59 @@ export function isFormXVIIIMPLeaveBalanceHeader(header) {
   return s.includes('total') && s.includes('balance') && s.includes('leave');
 }
 
+export function isFormXVIIIMPOvertimeHoursHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header)
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\bover\s+time\b/g, 'overtime')
+    .trim();
+  return s.includes('overtime') && (s.includes('hour') || s.includes('worked'));
+}
+
+export function isFormXVIIIMPOvertimeWagesHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header)
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\bover\s+time\b/g, 'overtime')
+    .trim();
+  if (s.includes('hour') || s.includes('worked')) return false;
+  return s.includes('overtime') && (s.includes('wage') || s.includes('amount'));
+}
+
+export function isFormXVIIIMPMaternityBenefitHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.includes('maternity');
+}
+
+export function isFormXVIIIMPAnyOtherAmountHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return (
+    (s.includes('any') && s.includes('other') && s.includes('amount')) ||
+    (s.includes('other') && s.includes('amount') && s.includes('mention'))
+  );
+}
+
+export function isFormXVIIIMPAdvancesHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.includes('advance') || s.includes('loan');
+}
+
+export function isFormXVIIIMPFinesHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.includes('fine');
+}
+
+export function isFormXVIIIMPNilDefaultHeader(header) {
+  return (
+    isFormXVIIIMPOvertimeHoursHeader(header) ||
+    isFormXVIIIMPOvertimeWagesHeader(header) ||
+    isFormXVIIIMPMaternityBenefitHeader(header) ||
+    isFormXVIIIMPAnyOtherAmountHeader(header) ||
+    isFormXVIIIMPAdvancesHeader(header) ||
+    isFormXVIIIMPFinesHeader(header)
+  );
+}
+
 /** PF/ESIC/PT/LWF deduction amount columns — not EPF/UAN registration columns. */
 export function isFormXVIIIMPPayrollDeductionHeader(header) {
   const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -864,7 +987,7 @@ export function readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers = {}) {
     });
     if (has) gross = sum;
   }
-  const other_allowance =
+  const other_allowance_raw =
     flat.other_allowance ??
     flat['other_allowance'] ??
     p.other_allowance ??
@@ -872,6 +995,59 @@ export function readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers = {}) {
     readPayrollScalar(flat, ['other_allowance', 'Other Allowance', 'otherAllowance'], [/other_allowance/]) ??
     readPayrollScalar(p, ['other_allowance', 'Other Allowance', 'otherAllowance'], [/other_allowance/]) ??
     '';
+  const wageParts = readPayrollForm15WageAmounts(payrollPayload);
+  let basic =
+    wageParts.basic !== '' && wageParts.basic != null
+      ? wageParts.basic
+      : flat.earned_basic ??
+        flat.basic ??
+        flat['earned_basic'] ??
+        flat['basic'] ??
+        p.earned_basic ??
+        p.basic ??
+        readPayrollScalar(flat, ['earned_basic', 'basic', 'Basic', 'Basic Pay'], [/^earned_basic$/, /^basic$/]) ??
+        readPayrollScalar(p, ['earned_basic', 'basic', 'Basic', 'Basic Pay'], [/^earned_basic$/, /^basic$/]) ??
+        '';
+  let hra =
+    wageParts.hra !== '' && wageParts.hra != null
+      ? wageParts.hra
+      : flat.hra_fbp ??
+        flat.hra ??
+        flat['hra_fbp'] ??
+        flat['hra'] ??
+        p.hra_fbp ??
+        p.hra ??
+        readPayrollScalar(flat, ['hra_fbp', 'hra', 'HRA', 'House Rent Allowance'], [/^hra_fbp$/, /^hra$/]) ??
+        readPayrollScalar(p, ['hra_fbp', 'hra', 'HRA', 'House Rent Allowance'], [/^hra_fbp$/, /^hra$/]) ??
+        '';
+  if ((basic === '' || basic == null || hra === '' || hra == null) && typeof helpers.findEarningAmount === 'function') {
+    const earnings = helpers.getEarningsArray ? helpers.getEarningsArray(p) : [];
+    if (basic === '' || basic == null) {
+      basic =
+        helpers.findEarningAmount(
+          earnings,
+          (t, n) =>
+            t === 'basic' ||
+            t === 'earned_basic' ||
+            n === 'basic' ||
+            n.includes('earned basic') ||
+            n.includes('basic pay') ||
+            n.includes('basic wage')
+        ) || basic;
+    }
+    if (hra === '' || hra == null) {
+      hra =
+        helpers.findEarningAmount(
+          earnings,
+          (t, n) =>
+            t === 'hra' ||
+            t === 'hra_fbp' ||
+            n === 'hra' ||
+            n.includes('house rent') ||
+            n.includes('hra')
+        ) || hra;
+    }
+  }
   const paid_days =
     flat.paid_days ??
     flat['paid_days'] ??
@@ -907,9 +1083,14 @@ export function readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers = {}) {
       ? net
       : readPayrollScalar(flat, ['net_pay', 'Net Pay', 'netPay', 'monthly_salary'], [/^net_pay$/]) ||
         readPayrollScalar(p, ['net_pay', 'Net Pay', 'netPay', 'monthly_salary'], [/^net_pay$/]);
+  const otherFromFormula = computeFormXVIIIMPOtherAllowances(grossResolved, basic, hra);
+  const other_allowance =
+    otherFromFormula !== '' && otherFromFormula != null ? otherFromFormula : other_allowance_raw;
   return {
     gross: grossResolved,
     net: netResolved,
+    basic,
+    hra,
     other_allowance,
     paid_days,
     flat,
@@ -939,15 +1120,27 @@ export function resolveFormXVIIIMPTableHeaders(headers) {
       if (s.includes('total') && s.includes('gross')) return true;
       return s.includes('total') && s.includes('wage') && s.includes('earning');
     }),
-    overtimeWages: findHeader((s) => s.includes('overtime') && s.includes('wage')),
-    overtimeHours: findHeader((s) => s.includes('overtime') && s.includes('hour')),
+    overtimeWages: findHeader((s) => {
+      const t = s.replace(/\bover\s+time\b/g, 'overtime');
+      return t.includes('overtime') && (t.includes('wage') || t.includes('amount')) && !t.includes('hour') && !t.includes('worked');
+    }),
+    overtimeHours: findHeader((s) => {
+      const t = s.replace(/\bover\s+time\b/g, 'overtime');
+      return t.includes('overtime') && (t.includes('hour') || t.includes('worked'));
+    }),
     otherAllowances: findHeader((s) => s.includes('other') && s.includes('allowance')),
     pf: findHeader((s) => s === 'pf' || s.startsWith('pf ') || s.includes('provident')),
     esic: findHeader((s) => s.includes('esic') || (s.includes('employee') && s.includes('insurance'))),
     pt: findHeader((s) => s === 'pt' || s.startsWith('pt ') || s.includes('professional tax')),
     lwf: findHeader((s) => s.includes('lwf') || s.includes('labour welfare') || s.includes('labor welfare')),
-    fines: findHeader((s) => s.includes('fine') && s.includes('deduction')),
+    fines: findHeader((s) => s.includes('fine')),
     advances: findHeader((s) => s.includes('advance') || s.includes('loan')),
+    maternityBenefit: findHeader((s) => s.includes('maternity')),
+    anyOtherAmount: findHeader(
+      (s) =>
+        (s.includes('any') && s.includes('other') && s.includes('amount')) ||
+        (s.includes('other') && s.includes('amount') && s.includes('mention'))
+    ),
     netPayable: findHeader((s) => s.includes('net') && (s.includes('payable') || s.includes('paid'))),
     bankUtr: findHeader((s) => s.includes('bank') && s.includes('utr')),
     educationSkill: findHeader((s) => s.includes('education') && (s.includes('skill') || s.includes('skil'))),
@@ -1116,6 +1309,11 @@ export function enrichFormXVIIIMPEmployeeRows(mappedData, employees, headers, he
     ) {
       hits += 1;
     }
+    applyFormXVIIIMPLeaveCategoryToRow(row, headerList, helpers);
+    applyFormXVIIIMPNilDefaultsToRow(row, headerList, {
+      nilText: FORM_XVIII_MP_NIL,
+      overwrite: true,
+    });
   });
   return hits;
 }
@@ -1123,7 +1321,7 @@ export function enrichFormXVIIIMPEmployeeRows(mappedData, employees, headers, he
 export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, helpers = {}) {
   if (!row || !payrollPayload) return false;
   const sanitizeValue = helpers.sanitizeValue || ((v) => v);
-  const { gross, net, other_allowance, paid_days, flat, p } = readFormXVIIIMPPayrollGrossNet(
+  const { gross, net, other_allowance, paid_days, p } = readFormXVIIIMPPayrollGrossNet(
     payrollPayload,
     helpers
   );
@@ -1144,7 +1342,7 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
     if (isFormXVIIIMPOtherAllowanceHeader(h)) writeAmount(h, other_allowance);
     if (isFormXVIIIMPWageRateHeader(h)) writeAmount(h, gross);
     if (isFormXVIIIMPDaysWorkedHeader(h)) writeAmount(h, daysValue);
-    if (isFormXVIIIMPLeaveCategoryHeader(h)) writeAmount(h, daysValue);
+    if (isFormXVIIIMPLeaveCategoryHeader(h)) writeAmount(h, FORM_XVIII_MP_LEAVE_CATEGORY);
   });
 
   if (mpHeaders) {
@@ -1153,25 +1351,17 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
     writeAmount(mpHeaders.otherAllowances, other_allowance);
     writeAmount(mpHeaders.wageRate, gross);
     writeAmount(mpHeaders.daysWorked, daysValue);
-    writeAmount(mpHeaders.leaveCategory, daysValue);
+    writeAmount(mpHeaders.leaveCategory, FORM_XVIII_MP_LEAVE_CATEGORY);
   }
 
-  const findEarningAmount = helpers.findEarningAmount;
   const findDeductionAmount = helpers.findDeductionAmount;
-  if (typeof findEarningAmount !== 'function' || typeof findDeductionAmount !== 'function') {
+  if (typeof findDeductionAmount !== 'function') {
+    applyFormXVIIIMPNilDefaultsToRow(row, headers, { nilText: FORM_XVIII_MP_NIL, overwrite: true });
     return hit;
   }
 
-  const earnings = helpers.getEarningsArray ? helpers.getEarningsArray(p) : [];
   const deductions = helpers.getDeductionsArray ? helpers.getDeductionsArray(p) : [];
-  const ot =
-    findEarningAmount(earnings, (t, n) => t === 'overtime' || t === 'ot' || n.includes('overtime')) || '';
-  const otherAllowFromLines =
-    findEarningAmount(
-      earnings,
-      (t, n) => n.includes('other') && (n.includes('allowance') || n.includes('allowances'))
-    ) || '';
-  const otherAllow = other_allowance !== '' && other_allowance != null ? other_allowance : otherAllowFromLines;
+  const otherAllow = other_allowance;
   const pf =
     findDeductionAmount(
       deductions,
@@ -1210,7 +1400,6 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
   };
 
   set('grossWages', gross);
-  set('overtimeWages', ot);
   set('otherAllowances', otherAllow);
   set('pf', pf);
   set('esic', esic);
@@ -1219,7 +1408,8 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
   set('netPayable', net);
   set('wageRate', gross);
   set('daysWorked', paid_days);
-  set('leaveCategory', paid_days);
+  set('leaveCategory', FORM_XVIII_MP_LEAVE_CATEGORY);
+  applyFormXVIIIMPNilDefaultsToRow(row, headers, { nilText: FORM_XVIII_MP_NIL, overwrite: true });
   return hit;
 }
 
@@ -1252,6 +1442,8 @@ export function mapFormXVIIIMPRowsFromEmployees(employees, headers, helpers = {}
       formatStatutoryDateDisplay,
       headers: headerList,
     });
+    applyFormXVIIIMPLeaveCategoryToRow(row, headerList, { sanitizeValue });
+    applyFormXVIIIMPNilDefaultsToRow(row, headerList, { nilText: FORM_XVIII_MP_NIL, overwrite: true });
     const emp = unwrapFormXVIIIMPEmployee(empItem);
     const payrollRow =
       typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, rowIndex) : null;
@@ -1330,7 +1522,7 @@ export function formXVIIIMPDownloadHasSubstantiveRows(mappedData, headers) {
   });
 }
 
-/** True when any row is missing gross/net/wage-rate/other-allowance values. */
+/** True when any row is missing gross/net/wage-rate, or other-allowance equals gross (bad formula). */
 export function formXVIIIMPRowsNeedPayrollEnrich(mappedData, headers) {
   if (!Array.isArray(mappedData) || mappedData.length === 0) return false;
   const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
@@ -1341,9 +1533,19 @@ export function formXVIIIMPRowsNeedPayrollEnrich(mappedData, headers) {
     mpHeaders.otherAllowances,
   ].filter(Boolean);
   if (targets.length === 0) return false;
-  return mappedData.some((row) =>
-    targets.every((header) => !String(row?.[header] ?? '').trim())
-  );
+  return mappedData.some((row) => {
+    if (!row || typeof row !== 'object') return false;
+    if (targets.every((header) => !String(row?.[header] ?? '').trim())) return true;
+    const otherHdr = mpHeaders.otherAllowances;
+    const grossHdr = mpHeaders.grossWages || mpHeaders.wageRate;
+    if (!otherHdr || !grossHdr) return false;
+    const otherVal = String(row[otherHdr] ?? '').replace(/,/g, '').trim();
+    const grossVal = String(row[grossHdr] ?? '').replace(/,/g, '').trim();
+    if (!otherVal || !grossVal) return !otherVal && !!grossVal;
+    const otherNum = Number(otherVal);
+    const grossNum = Number(grossVal);
+    return Number.isFinite(otherNum) && Number.isFinite(grossNum) && otherNum === grossNum && grossNum !== 0;
+  });
 }
 
 /** Fast download enrich — Payroll table session cache (sync); use loadFormXVIIIMPPayrollRowsForAutofill for real-time. */
@@ -1367,21 +1569,143 @@ export function enrichFormXVIIIMPPayrollRowsFromCache(
   });
 }
 
+/** Apply NIL to Form XVIII MP OT / maternity / advances / fines / other-amount columns. */
+export function applyFormXVIIIMPNilDefaultsToRow(row, headers, helpers = {}) {
+  if (!row || typeof row !== 'object') return false;
+  const hdrs = Array.isArray(headers) ? headers : Object.keys(row);
+  const nilText = helpers.nilText != null ? String(helpers.nilText) : FORM_XVIII_MP_NIL;
+  const { overwrite = true } = helpers;
+  let hit = false;
+  hdrs.forEach((header) => {
+    if (!isFormXVIIIMPNilDefaultHeader(header)) return;
+    const existing = String(row[header] ?? '').trim();
+    if (
+      !overwrite &&
+      existing &&
+      !/^enter\b/i.test(existing) &&
+      !/^nil+$/i.test(existing) &&
+      existing.toLowerCase() !== 'n/a' &&
+      existing !== '-' &&
+      existing !== '—'
+    ) {
+      return;
+    }
+    row[header] = nilText;
+    hit = true;
+  });
+  return hit;
+}
+
+export function applyFormXVIIIMPNilDefaultsToMappedRows(
+  mappedData,
+  headers,
+  nilText = FORM_XVIII_MP_NIL,
+  helpers = {}
+) {
+  if (!Array.isArray(mappedData)) return [];
+  const { overwrite = true } = helpers;
+  mappedData.forEach((row) => {
+    applyFormXVIIIMPNilDefaultsToRow(row, headers, { nilText, overwrite });
+  });
+  return mappedData;
+}
+
+/** Apply fixed Category of Leave text on Form XVIII MP rows. */
+export function applyFormXVIIIMPLeaveCategoryToRow(row, headers, helpers = {}) {
+  if (!row || typeof row !== 'object') return false;
+  const hdrs = Array.isArray(headers) ? headers : Object.keys(row);
+  const categoryText =
+    helpers.categoryText != null ? String(helpers.categoryText) : FORM_XVIII_MP_LEAVE_CATEGORY;
+  const sanitizeValue = helpers.sanitizeValue || ((v) => v);
+  let hit = false;
+  hdrs.forEach((header) => {
+    if (!isFormXVIIIMPLeaveCategoryHeader(header)) return;
+    row[header] = sanitizeValue(categoryText);
+    hit = true;
+  });
+  return hit;
+}
+
+/**
+ * Sum booked/balance for Earned Leave + Legacy Earned Leave + Contingency Leave only.
+ * (Category of Leave also lists Paternity Leave, but availed/balance exclude it.)
+ */
+export function sumFormXVIIIMPLeaveBookedAndBalance(leaveRecord, leaveTypeLabels = {}) {
+  if (!leaveRecord || typeof leaveRecord !== 'object') {
+    return { booked: '', balance: '' };
+  }
+  let bookedTotal = 0;
+  let balanceTotal = 0;
+  let hasBooked = false;
+  let hasBalance = false;
+  const skipKeys = new Set([
+    's.no',
+    'sno',
+    'employeeid',
+    'employee_id',
+    'employee',
+    'employeename',
+    'zohoid',
+    'zoho_id',
+    'zoho.id',
+  ]);
+
+  Object.entries(leaveRecord).forEach(([key, value]) => {
+    const kl = String(key || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (skipKeys.has(kl.replace(/\s+/g, '')) || skipKeys.has(kl)) return;
+    const label = String(leaveTypeLabels?.[key] || key || '').trim();
+    if (!leaveTypeLabelMatchesAliases(label, FORM_XVIII_MP_LEAVE_METRIC_ALIASES)) return;
+    const obj = parseLeaveCellObject(value) ?? (value && typeof value === 'object' ? value : null);
+    if (!obj || typeof obj !== 'object') {
+      const plain = Number(String(value ?? '').trim());
+      if (Number.isFinite(plain)) {
+        // Plain numeric cells (e.g. Legacy Earned Leave = 0) count as balance when present.
+        balanceTotal += plain;
+        hasBalance = true;
+      }
+      return;
+    }
+    const bookRaw = obj.paidBooked ?? obj.booked ?? obj.Booked ?? obj.unpaidBooked;
+    const balRaw = obj.paidBalance ?? obj.balance ?? obj.Balance ?? obj.unpaidBalance;
+    const bookNum = Number(String(sanitizeLeaveMetricDisplayValue(bookRaw) || '').trim());
+    const balNum = Number(String(sanitizeLeaveMetricDisplayValue(balRaw) || '').trim());
+    if (Number.isFinite(bookNum)) {
+      bookedTotal += bookNum;
+      hasBooked = true;
+    }
+    if (Number.isFinite(balNum)) {
+      balanceTotal += balNum;
+      hasBalance = true;
+    }
+  });
+
+  return {
+    booked: hasBooked ? String(bookedTotal) : '',
+    balance: hasBalance ? String(balanceTotal) : '',
+  };
+}
+
 /** Apply leave API booked/balance totals to Form XVIII MP leave columns. */
-export function applyFormXVIIIMPLeaveToRow(row, leaveRecord, mpHeaders, { leaveTypeLabels = {}, sanitizeValue = (v) => v } = {}) {
-  if (!row || !leaveRecord || !mpHeaders) return false;
-  const { booked, balance, categoryLabels } = sumLeaveRecordBookedAndBalance(leaveRecord, leaveTypeLabels);
+export function applyFormXVIIIMPLeaveToRow(row, leaveRecord, mpHeaders, { leaveTypeLabels = {}, sanitizeValue = (v) => v, headers = [] } = {}) {
+  if (!row || !mpHeaders) return false;
   let hit = false;
   const write = (header, val) => {
     if (!header || val === '' || val == null) return;
     row[header] = sanitizeValue(val);
     hit = true;
   };
+
+  write(mpHeaders.leaveCategory, FORM_XVIII_MP_LEAVE_CATEGORY);
+  const headerList = Array.isArray(headers) && headers.length ? headers : Object.keys(row);
+  applyFormXVIIIMPLeaveCategoryToRow(row, headerList, { sanitizeValue });
+
+  if (!leaveRecord) return hit;
+  const { booked, balance } = sumFormXVIIIMPLeaveBookedAndBalance(leaveRecord, leaveTypeLabels);
   write(mpHeaders.leavesAvailed, booked);
   write(mpHeaders.totalBalanceLeaves, balance);
-  if (mpHeaders.leaveCategory && categoryLabels.length > 0 && !String(row[mpHeaders.leaveCategory] ?? '').trim()) {
-    write(mpHeaders.leaveCategory, categoryLabels.join(', '));
-  }
   return hit;
 }
 

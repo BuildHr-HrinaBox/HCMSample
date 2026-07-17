@@ -1408,6 +1408,14 @@ export function prepareFormTSEExportRows(liveRows, exportHeaders, sourceHeaders)
   const rows = Array.isArray(liveRows) ? liveRows : [];
   if (!hdrs.length) return rows.map((row) => ({ ...row }));
 
+  const normalize = (txt) =>
+    String(txt || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9 ]/g, '');
+
   if (rows.length > 0 && rows[0] && typeof rows[0] === 'object' && !Array.isArray(rows[0])) {
     const rowKeys = Object.keys(rows[0]).filter((k) => !String(k).startsWith('__'));
     const keysMatchExport =
@@ -1426,22 +1434,37 @@ export function prepareFormTSEExportRows(liveRows, exportHeaders, sourceHeaders)
       ? remapRowsToRebuiltTableHeaders(rows, srcHdrs, hdrs)
       : rows;
 
+  const pickRowValue = (row, header, colIndex) => {
+    if (!row || typeof row !== 'object') {
+      return Array.isArray(row) && colIndex < row.length ? row[colIndex] : '';
+    }
+    if (Array.isArray(row)) {
+      return colIndex < row.length ? row[colIndex] : '';
+    }
+    if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
+    const srcKey = srcHdrs[colIndex];
+    if (srcKey && Object.prototype.hasOwnProperty.call(row, srcKey)) return row[srcKey];
+    const target = normalize(header);
+    if (!target) return '';
+    const rowKeys = Object.keys(row).filter((k) => !String(k || '').startsWith('__'));
+    const exact = rowKeys.filter((k) => normalize(k) === target);
+    if (exact.length === 1) return row[exact[0]];
+    if (exact.length > 1) {
+      const occur =
+        hdrs.slice(0, colIndex + 1).filter((h) => normalize(h) === target).length - 1;
+      return row[exact[Math.min(Math.max(occur, 0), exact.length - 1)]];
+    }
+    const fuzzy = rowKeys.find((k) => {
+      const nk = normalize(k);
+      return nk && (nk.includes(target) || target.includes(nk));
+    });
+    return fuzzy ? row[fuzzy] : '';
+  };
+
   return alignedRows.map((row, rowIndex) => {
     const out = {};
     hdrs.forEach((header, colIndex) => {
-      let value = '';
-      if (row && typeof row === 'object' && !Array.isArray(row)) {
-        if (Object.prototype.hasOwnProperty.call(row, header)) {
-          value = row[header];
-        } else {
-          const srcKey = srcHdrs[colIndex];
-          if (srcKey && Object.prototype.hasOwnProperty.call(row, srcKey)) {
-            value = row[srcKey];
-          }
-        }
-      } else if (Array.isArray(row) && colIndex < row.length) {
-        value = row[colIndex];
-      }
+      let value = pickRowValue(row, header, colIndex);
       if (
         (value == null || String(value).trim() === '') &&
         /s\.?\s*no|serial|sl\.?\s*no/i.test(String(header || ''))

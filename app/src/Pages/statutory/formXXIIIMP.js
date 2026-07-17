@@ -123,3 +123,104 @@ export function resolveFormXXIIIMPNormalRateForEmployee(emp, payrollRow = null, 
   }
   return '';
 }
+
+/** Form XXIII MP overtime columns that always default to NIL (no attendance/payroll OT). */
+export const FORM_XXIII_MP_OT_NIL = 'NIL';
+
+const normFormXXIIIMPHeader = (h) =>
+  String(h || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+/** Dates on which overtime worked */
+export function isFormXXIIIMPOtWorkedDatesHeader(h) {
+  const s = normFormXXIIIMPHeader(h);
+  if (!s) return false;
+  if (/payment|paid|rate|wage|earning/.test(s) && !/worked/.test(s)) return false;
+  return (
+    /dates?\s+on\s+which\s+over[\s-]*time\s+worked/.test(s) ||
+    (s.includes('date') && s.includes('overtime') && s.includes('worked') && !/paid|payment/.test(s))
+  );
+}
+
+/** Total overtime worked or production in case of piece rate */
+export function isFormXXIIIMPTotalOvertimeWorkedHeader(h) {
+  const s = normFormXXIIIMPHeader(h);
+  if (!s) return false;
+  return (
+    (s.includes('total') && s.includes('overtime') && (s.includes('worked') || s.includes('production'))) ||
+    (s.includes('overtime') && s.includes('piece') && s.includes('rate'))
+  );
+}
+
+/** Overtime rate of wages */
+export function isFormXXIIIMPOvertimeRateHeader(h) {
+  const s = normFormXXIIIMPHeader(h);
+  if (!s || /normal/.test(s)) return false;
+  return s.includes('overtime') && s.includes('rate') && (s.includes('wage') || s.includes('pay'));
+}
+
+/** Overtime earnings */
+export function isFormXXIIIMPOvertimeEarningsHeader(h) {
+  const s = normFormXXIIIMPHeader(h);
+  return s.includes('overtime') && s.includes('earning');
+}
+
+/** Date on which overtime wages paid */
+export function isFormXXIIIMPOtWagesPaidDateHeader(h) {
+  const s = normFormXXIIIMPHeader(h);
+  return (
+    (s.includes('overtime') && s.includes('paid')) ||
+    /dates?\s+on\s+which\s+overtime\s+wage/.test(s)
+  );
+}
+
+export function isFormXXIIIMPOtNilHeader(header) {
+  return (
+    isFormXXIIIMPOtWorkedDatesHeader(header) ||
+    isFormXXIIIMPTotalOvertimeWorkedHeader(header) ||
+    isFormXXIIIMPOvertimeRateHeader(header) ||
+    isFormXXIIIMPOvertimeEarningsHeader(header) ||
+    isFormXXIIIMPOtWagesPaidDateHeader(header)
+  );
+}
+
+export function applyFormXXIIIMPOtNilToRow(row, headers, helpers = {}) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const out = row && typeof row === 'object' ? { ...row } : {};
+  const nilText = helpers.nilText != null ? String(helpers.nilText) : FORM_XXIII_MP_OT_NIL;
+  const { overwrite = true } = helpers;
+
+  hdrs.forEach((header) => {
+    if (!isFormXXIIIMPOtNilHeader(header)) return;
+    const existing = String(out[header] ?? '').trim();
+    if (
+      !overwrite &&
+      existing &&
+      !/^enter\b/i.test(existing) &&
+      !/^nil+$/i.test(existing) &&
+      existing.toLowerCase() !== 'n/a' &&
+      existing !== '-' &&
+      existing !== '—'
+    ) {
+      return;
+    }
+    out[header] = nilText;
+  });
+  return out;
+}
+
+export function applyFormXXIIIMPOtNilToMappedRows(
+  mappedData,
+  headers,
+  nilText = FORM_XXIII_MP_OT_NIL,
+  helpers = {}
+) {
+  if (!Array.isArray(mappedData)) return [];
+  const { overwrite = true } = helpers;
+  return mappedData.map((row) =>
+    applyFormXXIIIMPOtNilToRow(row, headers, { nilText, overwrite })
+  );
+}

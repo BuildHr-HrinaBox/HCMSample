@@ -26,7 +26,10 @@ export function statutoryHeaderLabelMatchKey(label) {
   if (/establishment\s+in.*under\s+which\s+contract/.test(compact)) {
     return 'statutory_establishment_contract';
   }
-  if (/name\s+and\s+address\s+of\s+principal\s+employer/.test(compact)) {
+  if (/name\s+and\s+address\s+of\s+principal\s+employer/.test(compact) ||
+      /name\s+and\s+addressof\s+pricipal\s+employer/.test(compact) ||
+      /name\s+and\s+address\s+of\s+pricipal\s+employer/.test(compact) ||
+      (/principal\s+employer/.test(compact) && /name/.test(compact) && /address/.test(compact))) {
     return 'statutory_principal_employer';
   }
   if (/for\s+the\s+period\s+from/.test(compact)) {
@@ -511,12 +514,17 @@ export function isEstablishmentAddressHeaderLabel(label) {
 export function isPrincipalEmployerHeaderLabel(label) {
   const compact = normalizeStatutoryHeaderLabel(label);
   if (!compact) return false;
+  // Tolerate "addressof", "Pricipal", and "Employer/Manager" template variants.
+  const normalized = compact
+    .replace(/\baddressof\b/g, 'address of')
+    .replace(/\bpricipal\b/g, 'principal');
   return (
-    /name\s+and\s+address\s+of\s+principal\s+employer/.test(compact) ||
-    /name\s+address\s+of\s+the\s+employer/.test(compact) ||
-    /name\s+and\s+address\s+of\s+the\s+employer/.test(compact) ||
-    /name\s+and\s+address\s+of\s+employer/.test(compact) ||
-    /^employer$/.test(compact)
+    /name\s+and\s+address\s+of\s+principal\s+employer/.test(normalized) ||
+    /name\s+address\s+of\s+the\s+employer/.test(normalized) ||
+    /name\s+and\s+address\s+of\s+the\s+employer/.test(normalized) ||
+    /name\s+and\s+address\s+of\s+employer/.test(normalized) ||
+    /principal\s+employer\s*(?:manager)?/.test(normalized) ||
+    /^employer$/.test(normalized)
   );
 }
 
@@ -676,6 +684,18 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     label: 'Address of the Establishment:',
     key: 'statutory_establishment_address',
     kind: 'establishment_address'
+  },
+  {
+    match: /name\s+and\s+address\s*of\s+pr(?:i|in)cipal\s+employer/i,
+    label: 'Name and address of Principal Employer:',
+    key: 'statutory_principal_employer',
+    kind: 'principal_employer'
+  },
+  {
+    match: /name\s+and\s+addressof\s+pr(?:i|in)cipal\s+employer/i,
+    label: 'Name and address of Principal Employer:',
+    key: 'statutory_principal_employer',
+    kind: 'principal_employer'
   },
   {
     match: /name\s+and\s+address\s+of\s+principal\s+employer/i,

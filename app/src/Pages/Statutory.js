@@ -2311,6 +2311,7 @@ function buildSampleDataDownloadApplyOptions(options = {}) {
     isFormXVIIIMPDownload = false,
     isFormXXIIDownload = false,
     isFormXVIDownload = false,
+    isFormXDownload = false,
     usedLiveModalGrid = false
   } = options;
   const forceOverlay =
@@ -2324,13 +2325,15 @@ function buildSampleDataDownloadApplyOptions(options = {}) {
     isFormXVIDownload ||
     usedLiveModalGrid;
   return {
-    preferSampleOnly: !forceOverlay,
+    // Form X: never prefer SampleData alone — May/empty months often store template "1 2 3 4" model rows.
+    preferSampleOnly: !forceOverlay && !isFormXDownload,
     forceOverlay,
     rejectNonSubstantiveSample:
       isFormXXIIIDownload ||
       isFormXVIIDownload ||
       isFormXVIIIMPDownload ||
-      isFormXXIIDownload
+      isFormXXIIDownload ||
+      isFormXDownload
   };
 }
 
@@ -2430,6 +2433,44 @@ function statutoryDonorSitePreferenceScore(row, targetSiteSingle) {
   if (!explicit) return 0;
   if (resolvedSiteMatchesSingleTarget(explicit, t)) return 3000;
   return -4000;
+}
+
+/**
+ * Single site name only — never comma-joined multi-site labels.
+ * Statutory must store Site + State + Sector so one state's sites stay separate.
+ */
+function pickSingleSiteNameToken(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!raw.includes(',')) return raw;
+  const tokens = raw
+    .split(/\s*,\s*/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return tokens.length === 1 ? tokens[0] : '';
+}
+
+/** Resolve one concrete site for Catalyst Site column (URL site wins). */
+function resolveSingleSiteNameForStatutorySave(item, siteFromUrl, resolvedDisplayName = '') {
+  const fromUrl = pickSingleSiteNameToken(siteFromUrl);
+  if (fromUrl) return fromUrl;
+  const explicit = pickSingleSiteNameToken(
+    item?.site ?? item?.Site ?? item?.siteName ?? item?.SiteName ?? ''
+  );
+  if (explicit) return explicit;
+  return pickSingleSiteNameToken(resolvedDisplayName);
+}
+
+/**
+ * When ?site= is active, only overlay workflow metadata from rows that belong to that site.
+ * Rows with a different explicit Site must never bleed across sites in the same state.
+ */
+function statutoryDonorBelongsToTargetSite(row, targetSiteSingle, { allowEmptySite = false } = {}) {
+  const t = String(targetSiteSingle || '').trim().toLowerCase();
+  if (!t) return true;
+  const explicit = String(row?.site ?? row?.Site ?? row?.siteName ?? row?.SiteName ?? '').trim();
+  if (!explicit) return !!allowEmptySite;
+  return resolvedSiteMatchesSingleTarget(explicit, t);
 }
 
 function hasStatutoryDraftFileRef(row) {
@@ -5069,10 +5110,19 @@ function isFormIRegisterOfWorkmenContext(item, fileName, formHeader, tableHeader
     return false;
   }
 
+  // Form_XV_-_TamilNadu.xlsx is CLRA Service Certificate — never Form I Register of Workmen,
+  // even when the catalog row title says "Form 1 Register of Workmen".
+  if (/form[\s._-]*xv(?![a-z])/i.test(blob)) return false;
+  if (/service\s+certificate/i.test(blob) && /\b(?:rule\s*77|see\s+rule\s*77)\b/i.test(blob)) {
+    return false;
+  }
+
   if (/register\s+of\s+workmen/.test(blob)) {
     if (matchesFormXIVHint(blob)) return false;
     if (/employment\s+card/i.test(blob)) return false;
     if (/see\s+rule\s+76/i.test(blob)) return false;
+    if (/see\s+rule\s+77/i.test(blob)) return false;
+    if (/service\s+certificate/i.test(blob)) return false;
     return true;
   }
   if (/conferment\s+of\s+permanent\s+status|register\s+of\s+conferment/.test(blob)) {
@@ -5098,7 +5148,10 @@ function isFormIRegisterOfWorkmenContext(item, fileName, formHeader, tableHeader
     if (/date\s+of\s+suspension|subsistence\s+allowance|nature\s+of\s+offence/.test(joined)) {
       return false;
     }
-    if (/name\s+and\s+address\s+of\s+the\s+workman/.test(joined)) return true;
+    if (/name\s+and\s+address\s+of\s+the\s+workman/.test(joined)) {
+      if (/form[\s._-]*xv(?![a-z])/i.test(blob) || /service\s+certificate/i.test(blob)) return false;
+      return true;
+    }
     if (/emp\s*id/.test(joined) && /480\s+days/.test(joined)) return true;
   }
   return false;
@@ -9000,6 +9053,31 @@ function resolveFormXLeaveSectionHeaders(headers, groupLabels) {
   return result;
 }
 
+/** True when Form X download rows are still template model data (serial digits / empty leave). */
+function formXLeaveDownloadRowsNeedRefresh(rows, headers = []) {
+  if (!Array.isArray(rows) || rows.length === 0) return true;
+  const hdrs = Array.isArray(headers) ? headers.filter(Boolean) : [];
+  const nameHdr =
+    hdrs.find((h) => /name\s+of\s+the\s+employee|employee\s+name/i.test(String(h || ''))) ||
+    'Name of the employee';
+  const leaveHdrs = hdrs.filter((h) => getLeaveColumnMetricType(h));
+  const realNameCount = rows.filter((row) => {
+    if (!row || typeof row !== 'object') return false;
+    if (isStatutoryTemplateColumnIndexRow(row, hdrs)) return false;
+    const n = String(row[nameHdr] ?? row.__employeeLookupName ?? '').trim();
+    return n && !/^\d{1,4}$/.test(n) && /[a-zA-Z]/.test(n);
+  }).length;
+  if (realNameCount === 0) return true;
+  if (leaveHdrs.length === 0) return false;
+  const anyLeaveFilled = rows.some((row) =>
+    leaveHdrs.some((h) => {
+      const v = String(row?.[h] ?? '').trim();
+      return v !== '' && !/^\d{10,}$/.test(v);
+    })
+  );
+  return !anyLeaveFilled;
+}
+
 /** Tamil Nadu Form X — Register of Leave and Social Security Benefits (not Form X AP fines / RJ / XIV…). */
 function isFormXLeaveSocialSecurityContext(formHeader, rowItem, fileName, sheetText = '') {
   const blob = [
@@ -10509,10 +10587,11 @@ function resolveStatutoryApprovedDateStored(row) {
 
 function statutorySubmittedDatePreserveKey(row) {
   if (!row) return '';
+  const site = squashStatutoryKeyPart(pickSingleSiteNameToken(row?.site || row?.Site || '') || '');
   const identity = checklistBulkRowIdentityKey(row);
-  if (identity) return `bulk:${identity}`;
+  // Include site so Madhya Pradesh Site A submitted dates do not restore onto Site B.
+  if (identity) return `bulk:${identity}|site:${site || 'nosite'}`;
   const month = statutoryDedupeMonthNorm(row, '');
-  const site = squashStatutoryKeyPart(row?.site || row?.Site || '');
   const act = String(row?.act || row?.Act || '')
     .trim()
     .toLowerCase();
@@ -10556,8 +10635,6 @@ function preserveStatutorySendForApprovalAfterFetch(prevRows, nextRows) {
     if (!statutorySendForApprovalIsSent(row)) return;
     const lineKey = statutorySubmittedDatePreserveKey(row);
     if (lineKey) preserved.set(`line:${lineKey}`, 'Sent');
-    const bulkKey = checklistBulkRowIdentityKey(row);
-    if (bulkKey && bulkKey !== '\x1f\x1f\x1f\x1f') preserved.set(`bulk:${bulkKey}`, 'Sent');
     const id = String(row?.id ?? '').trim();
     if (/^\d+$/.test(id)) preserved.set(`id:${id}`, 'Sent');
   });
@@ -10567,8 +10644,6 @@ function preserveStatutorySendForApprovalAfterFetch(prevRows, nextRows) {
     const keys = [];
     const lineKey = statutorySubmittedDatePreserveKey(row);
     if (lineKey) keys.push(`line:${lineKey}`);
-    const bulkKey = checklistBulkRowIdentityKey(row);
-    if (bulkKey && bulkKey !== '\x1f\x1f\x1f\x1f') keys.push(`bulk:${bulkKey}`);
     const id = String(row?.id ?? '').trim();
     if (/^\d+$/.test(id)) keys.push(`id:${id}`);
     const sentVal = keys.map((k) => preserved.get(k)).find(Boolean);
@@ -13405,6 +13480,27 @@ const isFormXVMPContext = (formHeader, rowItem, fileName, sheetText = '') => {
     /\bxv[\s._-]*mp\b/.test(parts) ||
     /form_xv_mp/.test(parts)
   );
+};
+
+/** Tamil Nadu Form XV — Service Certificate (stacked A/B labels; never AP col-G boxes). */
+const isFormXVTamilNaduContext = (formHeader, rowItem, fileName, sheetText = '') => {
+  if (!isFormXVContext(formHeader, rowItem, fileName)) return false;
+  const parts = [
+    rowItem?.state,
+    rowItem?.State,
+    rowItem?.siteState,
+    rowItem?.SiteState,
+    rowItem?.formName,
+    rowItem?.FormName,
+    fileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    sheetText,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+  return /tamil\s*nadu|tamilnadu|form_xv_-_tamil|form[\s._-]*xv[\s._-]*tamil/i.test(parts);
 };
 
 const isFormXVGJContext = (formHeader, rowItem, fileName, sheetText = '') => {
@@ -17214,12 +17310,13 @@ const formatFormXVCellForXmlPatch = (value, header) => {
   return String(coerced).trim();
 };
 
-const resolveFormXVStackedExportCellPositions = (worksheet, layout, hdrs) => {
+const resolveFormXVStackedExportCellPositions = (worksheet, layout, hdrs, { preferTamilNadu = false } = {}) => {
   if (!worksheet || !layout) return [];
   const { headerRow, dataStartRow, columnByHeader, hdrs: exportHdrs, allHdrs } = layout;
   const fullHdrs = Array.isArray(allHdrs) && allHdrs.length > 0 ? allHdrs : hdrs;
   const positions = [];
   const seenRefs = new Set();
+  const valueCol = resolveFormXVStackedValueColumn(worksheet, headerRow, { preferTamilNadu });
 
   const pushPos = (row, col, headerKey) => {
     const cellRef = formXVMPToCellRef(row, col);
@@ -17228,17 +17325,11 @@ const resolveFormXVStackedExportCellPositions = (worksheet, layout, hdrs) => {
     positions.push({ row, col, headerKey, cellRef });
   };
 
-  for (let r = 1; r < headerRow; r += 1) {
-    for (let c = 1; c <= 12; c += 1) {
-      const cellStr = String(formXVExcelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
-      if (!cellStr) continue;
-      for (const spec of FORM_XV_WORKMAN_HEADER_LABEL_SPECS) {
-        if (!looksLikeFormXVWorkmanLabelCell(cellStr, spec)) continue;
-        const headerKey = fullHdrs.find((h) => spec.rowTest(h));
-        if (headerKey) pushPos(r, FORM_XV_MP_STACKED_VALUE_COL, headerKey);
-        break;
-      }
-    }
+  for (const spec of FORM_XV_WORKMAN_HEADER_LABEL_SPECS) {
+    const label = findFormXVMasterLabelCell(worksheet, headerRow, spec.match, 12);
+    if (!label) continue;
+    const headerKey = fullHdrs.find((h) => spec.rowTest(h));
+    if (headerKey) pushPos(label.row, valueCol, headerKey);
   }
 
   const tableHdrs = Array.isArray(exportHdrs) && exportHdrs.length > 0 ? exportHdrs : getFormXVExportTableHeaders(fullHdrs);
@@ -17254,7 +17345,8 @@ const prepareFormXVMPFastZipTemplate = async ({
   parsedHeaderRowIndex,
   parsedDataStartIndex,
   parsedFormHeader,
-  headerFormData
+  headerFormData,
+  preferTamilNadu = false
 }) => {
   const hdrs =
     Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [...FORM_XV_TABLE_HEADERS];
@@ -17269,16 +17361,20 @@ const prepareFormXVMPFastZipTemplate = async ({
     headersToUse: hdrs
   });
 
-  clearFormXVStackedCertificateValueBand(worksheet, layout.headerRow);
+  clearFormXVStackedCertificateValueBand(worksheet, layout.headerRow, { preferTamilNadu });
   clearFormXVDataRows(worksheet, layout, 1);
 
   writeFormXVHeaderFieldsToWorksheet(worksheet, layout, {
     parsedFormHeader,
     headerFormData,
     includeStaticBoxes: true,
-    includeNatureBox: false
+    includeNatureBox: false,
+    preferTamilNadu,
+    forceStacked: preferTamilNadu
   });
-  const positions = resolveFormXVStackedExportCellPositions(worksheet, layout, hdrs);
+  const positions = resolveFormXVStackedExportCellPositions(worksheet, layout, hdrs, {
+    preferTamilNadu
+  });
 
   const preparedBuffer = await workbook.xlsx.writeBuffer();
   const templateZip = await JSZip.loadAsync(preparedBuffer);
@@ -17496,75 +17592,216 @@ const splitFormXVHeaderBoxLines = (text) => {
   return parts;
 };
 
-/** MP Form XV — labels stack in one column; values sit on the same row (not AP two-column boxes). */
-const detectFormXVStackedCertificateLayout = (worksheet, headerRow) => {
-  if (!worksheet || headerRow < 2) return false;
-  let hasStackedWorkmanLabel = false;
-  let hasNatureLocationLabel = false;
-  let contractorCol = -1;
-  let establishmentCol = -1;
+/** Master cell only — merge slaves echo the same label and falsely push the value column to G. */
+const formXVCellIsMergeSlave = (cell) =>
+  !!(cell && cell.isMerged && cell.master && cell.master !== cell);
+
+const formXVMergeEndCol = (worksheet, row, col) => {
+  if (!worksheet || row < 1 || col < 1) return col;
+  try {
+    const cell = worksheet.getCell(row, col);
+    const master = cell?.isMerged && cell.master ? cell.master : cell;
+    if (!master) return col;
+    const masterRow = master.row || row;
+    const masterCol = master.col || col;
+    let endCol = masterCol;
+    // Walk right while still in the same merge.
+    for (let c = masterCol + 1; c <= masterCol + 12; c += 1) {
+      const next = worksheet.getCell(masterRow, c);
+      if (next?.isMerged && next.master && next.master === master) {
+        endCol = c;
+        continue;
+      }
+      break;
+    }
+    return endCol;
+  } catch (_) {
+    return col;
+  }
+};
+
+/** Leftmost master cell matching a header label above the employment table. */
+const findFormXVMasterLabelCell = (worksheet, headerRow, matchRe, maxCol = 8) => {
+  if (!worksheet || headerRow < 2 || !matchRe) return null;
+  let best = null;
   for (let r = 1; r < headerRow; r += 1) {
-    for (let c = 1; c <= 8; c += 1) {
-      const cellStr = String(formXVExcelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
-      if (!cellStr) continue;
-      if (/name\s+and\s+address\s+of\s+the\s+workm[ae]n/i.test(cellStr)) hasStackedWorkmanLabel = true;
-      if (/nature\s+and\s+location/i.test(cellStr)) hasNatureLocationLabel = true;
-      if (/name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i.test(cellStr)) contractorCol = c;
-      if (/establishment[\s\S]*contract/i.test(cellStr)) establishmentCol = c;
+    for (let c = 1; c <= maxCol; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      if (formXVCellIsMergeSlave(cell)) continue;
+      const cellStr = String(formXVExcelCellValueToString(cell?.value) || '').trim();
+      if (!cellStr || !matchRe.test(cellStr)) continue;
+      if (!best || c < best.col || (c === best.col && r < best.row)) {
+        best = { row: r, col: c };
+      }
     }
   }
-  if (!hasStackedWorkmanLabel || hasNatureLocationLabel) return false;
-  if (contractorCol > 0 && establishmentCol > 0 && contractorCol === establishmentCol) return true;
-  return hasStackedWorkmanLabel;
+  return best;
+};
+
+/** MP/TN Form XV — labels stack in one column; values sit on the same row (not AP two-column boxes). */
+const detectFormXVStackedCertificateLayout = (worksheet, headerRow, forceStacked = false) => {
+  if (forceStacked) return true;
+  if (!worksheet || headerRow < 2) return false;
+  const contractor = findFormXVMasterLabelCell(
+    worksheet,
+    headerRow,
+    /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i
+  );
+  const establishment = findFormXVMasterLabelCell(
+    worksheet,
+    headerRow,
+    /establishment[\s\S]*contract/i
+  );
+  const nature = findFormXVMasterLabelCell(worksheet, headerRow, /nature\s+and\s+location/i);
+  const principal = findFormXVMasterLabelCell(
+    worksheet,
+    headerRow,
+    /name\s+and\s+address\s+of\s+(?:the\s+)?principal\s+employer|principal\s+employer/i
+  );
+  const workman = findFormXVMasterLabelCell(
+    worksheet,
+    headerRow,
+    /name\s+and\s+address\s+of\s+the\s+workm[ae]n/i
+  );
+
+  const labelCols = [contractor, establishment, nature, principal, workman]
+    .filter(Boolean)
+    .map((x) => x.col);
+  // Tamil Nadu / MP: several certificate labels share one column (usually A).
+  if (labelCols.length >= 3 && labelCols.every((c) => c === labelCols[0])) return true;
+  if (contractor && establishment && contractor.col === establishment.col) return true;
+  // MP stacked certificate — workman label without a separate nature/location header row.
+  if (workman && !nature) return true;
+  return false;
 };
 
 /** MP stacked certificate — values align in column E beside labels in column B. */
 const FORM_XV_MP_STACKED_VALUE_COL = 5;
-const FORM_XV_MP_STACKED_VALUE_COL_TO = 14;
+const FORM_XV_MP_STACKED_VALUE_COL_TO = 6;
 
-const resolveFormXVStackedValueColumn = () => FORM_XV_MP_STACKED_VALUE_COL;
+/**
+ * Value column beside stacked labels.
+ * Never use column G for TN (form body is A–F); full-width A:F label merges write into the label cell.
+ */
+const resolveFormXVStackedValueColumn = (worksheet, headerRow, { preferTamilNadu = false } = {}) => {
+  const contractor = findFormXVMasterLabelCell(
+    worksheet,
+    headerRow,
+    /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i
+  );
+  if (!contractor) return preferTamilNadu ? 2 : FORM_XV_MP_STACKED_VALUE_COL;
+  const mergeEnd = formXVMergeEndCol(worksheet, contractor.row, contractor.col);
+  // Label occupies the whole A–F band — caller writes value into the label master cell.
+  if (mergeEnd >= 6 && contractor.col <= 1) return contractor.col;
+  const nextCol = mergeEnd + 1;
+  if (preferTamilNadu) {
+    // Keep values inside the A–F certificate body (never column G).
+    if (nextCol >= 1 && nextCol <= 6) return nextCol;
+    return Math.min(Math.max(contractor.col + 1, 2), 6);
+  }
+  if (contractor.col === 2) return FORM_XV_MP_STACKED_VALUE_COL;
+  if (nextCol >= 1 && nextCol <= 14) return nextCol;
+  return FORM_XV_MP_STACKED_VALUE_COL;
+};
 
-const clearFormXVStackedCertificateValueBand = (worksheet, headerRow) => {
+const clearFormXVStackedCertificateValueBand = (
+  worksheet,
+  headerRow,
+  { preferTamilNadu = false } = {}
+) => {
   if (!worksheet || headerRow < 2) return;
+  const valueCol = resolveFormXVStackedValueColumn(worksheet, headerRow, { preferTamilNadu });
+  const clearFrom = preferTamilNadu ? Math.min(valueCol, 2) : valueCol;
+  const clearTo = preferTamilNadu ? FORM_XV_MP_STACKED_VALUE_COL_TO : Math.max(valueCol, FORM_XV_MP_STACKED_VALUE_COL_TO);
   for (let r = 1; r < headerRow; r += 1) {
-    for (let c = FORM_XV_MP_STACKED_VALUE_COL; c <= FORM_XV_MP_STACKED_VALUE_COL_TO; c += 1) {
-      worksheet.getCell(r, c).value = '';
+    for (let c = clearFrom; c <= clearTo; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      if (formXVCellIsMergeSlave(cell)) continue;
+      // Do not wipe label master cells when valueCol === labelCol (full-width merge case).
+      const text = String(formXVExcelCellValueToString(cell?.value) || '').trim();
+      if (
+        /name\s+and\s+address\s+of\s+(?:the\s+)?contractor|nature\s+and\s+location|establishment[\s\S]*contract|principal\s+employer|name\s+and\s+address\s+of\s+the\s+workm[ae]n|age\s+or\s+date\s+of\s+birth|identification\s+marks|father.*husband/i.test(
+          text
+        )
+      ) {
+        continue;
+      }
+      cell.value = '';
+    }
+    // Clear stray AP exports that landed in column G outside the A–F form body.
+    if (preferTamilNadu) {
+      for (let c = 7; c <= 14; c += 1) {
+        worksheet.getCell(r, c).value = '';
+      }
     }
   }
 };
 
-const writeFormXVStackedHeaderValue = (worksheet, matchRe, value, headerRow, preferredCol = FORM_XV_MP_STACKED_VALUE_COL) => {
+const writeFormXVStackedHeaderValue = (
+  worksheet,
+  matchRe,
+  value,
+  headerRow,
+  preferredCol = FORM_XV_MP_STACKED_VALUE_COL,
+  { preferTamilNadu = false } = {}
+) => {
   const text = String(value || '').trim();
   if (!text || !worksheet) return false;
-  for (let r = 1; r < headerRow; r += 1) {
-    for (let c = 1; c <= 8; c += 1) {
-      const cellStr = String(formXVExcelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
-      if (!cellStr || !matchRe.test(cellStr)) continue;
-      const cell = worksheet.getCell(r, preferredCol);
-      const lines = splitFormXVHeaderBoxLines(text);
-      cell.value = lines.length > 1 ? lines.join('\n') : text;
-      cell.alignment = {
-        ...(cell.alignment || {}),
-        horizontal: 'left',
-        vertical: 'top',
-        wrapText: true,
-        shrinkToFit: false
-      };
-      return true;
-    }
+  const label = findFormXVMasterLabelCell(worksheet, headerRow, matchRe);
+  if (!label) return false;
+  const lines = splitFormXVHeaderBoxLines(text);
+  const valueText = lines.length > 1 ? lines.join('\n') : text;
+  const mergeEnd = formXVMergeEndCol(worksheet, label.row, label.col);
+  const writeIntoLabelCell =
+    preferTamilNadu && mergeEnd >= 6 && label.col <= 1 && preferredCol <= label.col;
+
+  if (writeIntoLabelCell) {
+    const master = worksheet.getCell(label.row, label.col);
+    const labelText = String(formXVExcelCellValueToString(master?.value) || '').trim();
+    // Keep the statutory label; put the filled value on the next line inside A–F.
+    const labelOnly = labelText.split(/\r?\n/)[0].trim() || labelText;
+    master.value = `${labelOnly}\n${valueText}`;
+    master.alignment = {
+      ...(master.alignment || {}),
+      horizontal: 'left',
+      vertical: 'top',
+      wrapText: true,
+      shrinkToFit: false
+    };
+    return true;
   }
-  return false;
+
+  const valueCol = preferredCol > label.col ? preferredCol : Math.min(mergeEnd + 1, 6);
+  const cell = worksheet.getCell(label.row, valueCol);
+  cell.value = valueText;
+  cell.alignment = {
+    ...(cell.alignment || {}),
+    horizontal: 'left',
+    vertical: 'top',
+    wrapText: true,
+    shrinkToFit: false
+  };
+  return true;
 };
 
-const clearFormXVStackedHeaderValueCells = (worksheet, headerRow) => {
+const clearFormXVStackedHeaderValueCells = (worksheet, headerRow, opts = {}) => {
   if (!worksheet || headerRow < 2) return;
-  clearFormXVStackedCertificateValueBand(worksheet, headerRow);
+  clearFormXVStackedCertificateValueBand(worksheet, headerRow, opts);
 };
 
 const writeFormXVHeaderFieldsToWorksheet = (
   worksheet,
   layout,
-  { parsedFormHeader, headerFormData, employeeRow = null, hdrs = null, includeStaticBoxes = true, includeNatureBox = true }
+  {
+    parsedFormHeader,
+    headerFormData,
+    employeeRow = null,
+    hdrs = null,
+    includeStaticBoxes = true,
+    includeNatureBox = true,
+    preferTamilNadu = false,
+    forceStacked = false
+  }
 ) => {
   const { headerRow } = layout;
   const headerFields = parsedFormHeader?.fields;
@@ -17586,13 +17823,23 @@ const writeFormXVHeaderFieldsToWorksheet = (
     return fromField && !isStatutoryHeaderPlaceholderValue(fromField) ? fromField : '';
   };
 
-  const stackedLayout = detectFormXVStackedCertificateLayout(worksheet, headerRow);
+  const stackedLayout =
+    detectFormXVStackedCertificateLayout(worksheet, headerRow, forceStacked || preferTamilNadu) ||
+    preferTamilNadu;
   if (stackedLayout) {
+    const stackedValueCol = resolveFormXVStackedValueColumn(worksheet, headerRow, {
+      preferTamilNadu
+    });
     const stackedSiteSpecs = [
       {
         key: 'form_xv_contractor',
         match: /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i,
         static: true
+      },
+      {
+        key: 'form_xv_nature_location_work',
+        match: /nature\s+and\s+location/i,
+        static: false
       },
       {
         key: 'form_xv_establishment_contract_carried',
@@ -17607,48 +17854,40 @@ const writeFormXVHeaderFieldsToWorksheet = (
     ];
     for (const spec of stackedSiteSpecs) {
       if (spec.static && !includeStaticBoxes) continue;
-      const value = resolveHeaderValue(spec.key, spec.match);
-      writeFormXVStackedHeaderValue(worksheet, spec.match, value, headerRow);
-    }
-    if (includeNatureBox) {
-      for (let r = 1; r < headerRow; r += 1) {
-        for (let c = 1; c <= 8; c += 1) {
-          const cellStr = String(formXVExcelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
-          if (!cellStr || !/nature\s+and\s+location/i.test(cellStr)) continue;
-          const locationLine = resolveHeaderValue('form_xv_nature_location_work', /nature\s+and\s+location/i);
-          const natureHeader = allHdrs.find(isFormXVNatureOfWorkHeader);
-          const natureLine =
-            employeeRow && natureHeader
-              ? String(getFormXVRowValueForHeader(employeeRow, natureHeader) ?? '').trim()
-              : '';
-          writeFormXVStackedHeaderValue(
-            worksheet,
-            /nature\s+and\s+location/i,
-            [locationLine, natureLine].filter(Boolean).join('\n'),
-            headerRow
-          );
-          break;
-        }
+      if (!spec.static && !includeNatureBox) continue;
+      let value = resolveHeaderValue(spec.key, spec.match);
+      if (spec.key === 'form_xv_nature_location_work') {
+        const natureHeader = allHdrs.find(isFormXVNatureOfWorkHeader);
+        const natureLine =
+          employeeRow && natureHeader
+            ? String(getFormXVRowValueForHeader(employeeRow, natureHeader) ?? '').trim()
+            : '';
+        value = [value, natureLine].filter(Boolean).join('\n');
       }
+      writeFormXVStackedHeaderValue(worksheet, spec.match, value, headerRow, stackedValueCol, {
+        preferTamilNadu
+      });
     }
     return;
   }
 
   const findFormXVSiteLabel = (matchRe) => {
-    for (let r = 1; r < headerRow; r += 1) {
-      for (let c = 1; c <= 12; c += 1) {
-        const cellStr = String(formXVExcelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
-        if (cellStr && matchRe.test(cellStr)) return { labelRow: r, labelCol: c };
-      }
-    }
-    return null;
+    const found = findFormXVMasterLabelCell(worksheet, headerRow, matchRe, 12);
+    return found ? { labelRow: found.row, labelCol: found.col } : null;
   };
 
   const resolveFormXVSiteBoxAnchor = (spec) => {
     const label = findFormXVSiteLabel(spec.match);
     if (label) {
       const interiorRow = label.labelRow + 1;
-      const interiorCol = spec.side === 'right' ? (label.labelCol >= 6 ? label.labelCol : 7) : label.labelCol <= 5 ? label.labelCol : 2;
+      const interiorCol =
+        spec.side === 'right'
+          ? label.labelCol >= 6
+            ? label.labelCol
+            : 7
+          : label.labelCol <= 5
+            ? label.labelCol
+            : 2;
       return { row: interiorRow, col: interiorCol };
     }
     if (spec.key === 'form_xv_nature_location_work') {
@@ -17835,11 +18074,12 @@ const clearFormXVStaleBelowRowValue = (worksheet, row, col, value) => {
   }
 };
 
-const clearFormXVWorkmanValueCells = (worksheet, layout) => {
+const clearFormXVWorkmanValueCells = (worksheet, layout, opts = {}) => {
   if (!worksheet || !layout) return;
   const { headerRow } = layout;
-  if (detectFormXVStackedCertificateLayout(worksheet, headerRow)) {
-    clearFormXVStackedHeaderValueCells(worksheet, headerRow);
+  const preferTamilNadu = !!opts.preferTamilNadu;
+  if (detectFormXVStackedCertificateLayout(worksheet, headerRow, preferTamilNadu) || preferTamilNadu) {
+    clearFormXVStackedHeaderValueCells(worksheet, headerRow, { preferTamilNadu });
     return;
   }
   const valueCol = resolveFormXVWorkmanValueColumn(worksheet, headerRow);
@@ -17848,44 +18088,47 @@ const clearFormXVWorkmanValueCells = (worksheet, layout) => {
   }
 };
 
-const writeFormXVWorkmanFieldsToWorksheet = (worksheet, layout, row, hdrs) => {
+const writeFormXVWorkmanFieldsToWorksheet = (
+  worksheet,
+  layout,
+  row,
+  hdrs,
+  { preferTamilNadu = false } = {}
+) => {
   if (!worksheet || !row || typeof row !== 'object') return;
   const { headerRow } = layout;
   const allHdrs = Array.isArray(hdrs) && hdrs.length > 0 ? hdrs : [...FORM_XV_TABLE_HEADERS];
-  const maxScanCols = 20;
   const filledSpecs = new Set();
-  const stackedLayout = detectFormXVStackedCertificateLayout(worksheet, headerRow);
+  const stackedLayout =
+    detectFormXVStackedCertificateLayout(worksheet, headerRow, preferTamilNadu) || preferTamilNadu;
   const defaultValueCol = resolveFormXVWorkmanValueColumn(worksheet, headerRow);
+  const stackedValueCol = stackedLayout
+    ? resolveFormXVStackedValueColumn(worksheet, headerRow, { preferTamilNadu })
+    : defaultValueCol;
 
-  for (let r = 1; r < headerRow; r += 1) {
-    for (let c = 1; c <= maxScanCols; c += 1) {
-      const cellStr = String(formXVExcelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
-      if (!cellStr) continue;
-      for (const spec of FORM_XV_WORKMAN_HEADER_LABEL_SPECS) {
-        if (filledSpecs.has(spec.key)) continue;
-        if (!looksLikeFormXVWorkmanLabelCell(cellStr, spec)) continue;
-        const headerKey = allHdrs.find((h) => spec.rowTest(h));
-        let rawValue = headerKey ? getFormXVRowValueForHeader(row, headerKey) : '';
-        if (!String(rawValue ?? '').trim()) {
-          rawValue = resolveFormXVExportRowValue(row, headerKey || spec.label, allHdrs);
-        }
-        const value = dedupeFormXVRepeatedText(rawValue);
-        if (!value) break;
-        const valueCol = stackedLayout ? resolveFormXVStackedValueColumn() : defaultValueCol;
-        const valueRow = r;
-        if (!stackedLayout) resetFormXVWorkmanLabelCell(worksheet, r, c, spec);
-        if (stackedLayout) {
-          for (let vc = FORM_XV_MP_STACKED_VALUE_COL; vc <= FORM_XV_MP_STACKED_VALUE_COL_TO; vc += 1) {
-            worksheet.getCell(valueRow, vc).value = '';
-          }
-        } else {
-          clearFormXVStaleBelowRowValue(worksheet, r, valueCol, value);
-        }
-        setFormXVWorkmanCellValue(worksheet, valueRow, valueCol, value);
-        filledSpecs.add(spec.key);
-        break;
-      }
+  for (const spec of FORM_XV_WORKMAN_HEADER_LABEL_SPECS) {
+    if (filledSpecs.has(spec.key)) continue;
+    const label = findFormXVMasterLabelCell(worksheet, headerRow, spec.match, 20);
+    if (!label) continue;
+    const headerKey = allHdrs.find((h) => spec.rowTest(h));
+    let rawValue = headerKey ? getFormXVRowValueForHeader(row, headerKey) : '';
+    if (!String(rawValue ?? '').trim()) {
+      rawValue = resolveFormXVExportRowValue(row, headerKey || spec.label, allHdrs);
     }
+    const value = dedupeFormXVRepeatedText(rawValue);
+    if (!value) continue;
+
+    if (stackedLayout) {
+      writeFormXVStackedHeaderValue(worksheet, spec.match, value, headerRow, stackedValueCol, {
+        preferTamilNadu
+      });
+    } else {
+      const valueCol = defaultValueCol;
+      resetFormXVWorkmanLabelCell(worksheet, label.row, label.col, spec);
+      clearFormXVStaleBelowRowValue(worksheet, label.row, valueCol, value);
+      setFormXVWorkmanCellValue(worksheet, label.row, valueCol, value);
+    }
+    filledSpecs.add(spec.key);
   }
 };
 
@@ -23248,6 +23491,15 @@ const Statutory = ({ userEmail, userRole }) => {
           score += statutoryDonorSitePreferenceScore(row, siteFromUrl);
           return score;
         };
+        const urlSiteForAlign = String(siteFromUrl || '').trim();
+        const filterWorkflowDonors = (rows) =>
+          (rows || []).filter((row) =>
+            statutoryDonorBelongsToTargetSite(row, urlSiteForAlign, { allowEmptySite: false })
+          );
+        const filterFormFileDonors = (rows) =>
+          (rows || []).filter((row) =>
+            statutoryDonorBelongsToTargetSite(row, urlSiteForAlign, { allowEmptySite: true })
+          );
         mergedData = canonicalBulkRows.map((bulkRow) => {
           const identityKey = checklistBulkRowIdentityKey(bulkRow);
           const formNameKey = baseFormNameKey(bulkRow.formName || bulkRow.FormName);
@@ -23256,10 +23508,9 @@ const Statutory = ({ userEmail, userRole }) => {
           // Keep draft/proof/approval metadata strict to the same statutory line.
           // Allow a second-level fallback by (form + act + description) only, because
           // bulk rows can have slight sector/state differences across sources.
-          const norm = (v) => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
           const formActDescMatches = formMatches.filter((row) => statutoryLineMetadataMatches(bulkRow, row));
-          const strictDonorCandidates = [...identityMatches, ...formActDescMatches];
-          const formFileDonorCandidates = [...identityMatches, ...formMatches];
+          const strictDonorCandidates = filterWorkflowDonors([...identityMatches, ...formActDescMatches]);
+          const formFileDonorCandidates = filterFormFileDonors([...identityMatches, ...formMatches]);
           const bulkMonthNorm = statutoryDedupeMonthNorm(bulkRow, selectedMonth);
           const uiMonthNormForAlign = statutoryDedupeMonthNorm(
             { monthFilter: selectedMonth, MonthFilter: selectedMonth },
@@ -23273,7 +23524,7 @@ const Statutory = ({ userEmail, userRole }) => {
           const scoredSameMonth = [...sameMonthDonors].sort((a, b) => donorScore(b) - donorScore(a));
           let monthDonor = scoredSameMonth[0] || null;
           if (!monthDonor) {
-            const draftDonorPool = [...strictDonorCandidates, ...formActDescMatches, ...formMatches]
+            const draftDonorPool = [...strictDonorCandidates, ...filterWorkflowDonors(formActDescMatches), ...filterWorkflowDonors(formMatches)]
               .filter((row, idx, arr) => arr.indexOf(row) === idx)
               .filter((row) => hasStatutoryDraftFileRef(row) && statutoryLineMetadataMatches(bulkRow, row));
             monthDonor =
@@ -23295,19 +23546,28 @@ const Statutory = ({ userEmail, userRole }) => {
           if (!formDonor || !hasFormRef(formDonor)) {
             formDonor = scoredAllForFormFile.find(hasFormRef) || formDonor;
           }
+          const alignedSiteName = resolveSingleSiteNameForStatutorySave(
+            monthDonor || formDonor || bulkRow,
+            urlSiteForAlign,
+            ''
+          );
+          const withAlignedSite = (row) =>
+            alignedSiteName
+              ? { ...row, site: alignedSiteName, Site: alignedSiteName }
+              : row;
           const uiMonthOnlyLabel =
             resolveToFullMonthName(String(selectedMonth || '').trim()) ||
             String(selectedMonth || '').trim() ||
             null;
           if (!monthDonor) {
-            const draftOnlyDonor = [...strictDonorCandidates, ...formActDescMatches, ...formMatches]
+            const draftOnlyDonor = [...strictDonorCandidates, ...filterWorkflowDonors(formActDescMatches), ...filterWorkflowDonors(formMatches)]
               .filter((row, idx, arr) => arr.indexOf(row) === idx)
               .filter((row) => hasStatutoryDraftFileRef(row) && statutoryLineMetadataMatches(bulkRow, row))
               .sort((a, b) => donorScore(b) - donorScore(a))[0] || null;
             const fmExactNoDonor =
               formmasterFileByMatchKey.get(buildFormmasterMatchKey(bulkRow)) ||
               formmasterFileByMatchKey.get(checklistBulkRowIdentityKey(bulkRow));
-            return {
+            return withAlignedSite({
               ...bulkRow,
               id: bulkRow.id,
               formFile: fmExactNoDonor?.formFile ?? formDonor?.formFile ?? formDonor?.FormFile ?? bulkRow.formFile ?? null,
@@ -23338,13 +23598,13 @@ const Statutory = ({ userEmail, userRole }) => {
                 : null,
               checklistId: bulkRow.checklistId ?? formDonor?.checklistId ?? null,
               isFromChecklist: !!formDonor?.isFromChecklist && !!monthDonor
-            };
+            });
           }
           const donor = monthDonor;
           const fmExact =
             formmasterFileByMatchKey.get(buildFormmasterMatchKey(bulkRow)) ||
             formmasterFileByMatchKey.get(checklistBulkRowIdentityKey(bulkRow));
-          return {
+          return withAlignedSite({
             ...bulkRow,
             // Keep canonical bulk id so each ChecklistBulk row remains distinct in UI grouping/deduping.
             id: bulkRow.id,
@@ -23401,7 +23661,7 @@ const Statutory = ({ userEmail, userRole }) => {
             MonthFilter: donor?.monthFilter ?? donor?.MonthFilter ?? donor?.monthfilter ?? bulkRow.MonthFilter ?? null,
             monthfilter: donor?.monthFilter ?? donor?.MonthFilter ?? donor?.monthfilter ?? bulkRow.monthfilter ?? null,
             draftStatutoryRowIdForFile: donor?.id ?? null
-          };
+          });
         });
         console.log(
           `📌 Statutory aligned 1:1 with ChecklistBulk (${parsedBulkDataCache.length} master rows): ${beforeAlign} -> ${mergedData.length} displayed rows`
@@ -24074,7 +24334,7 @@ const Statutory = ({ userEmail, userRole }) => {
         description: form.description || null,
         sector: form.sector || null,
         state: form.state || null,
-        site: form.site || siteFromUrl || null,
+        site: resolveSingleSiteNameForStatutorySave(form, siteFromUrl, '') || null,
         formFile: formFileId != null ? String(formFileId) : null,
         formFileName: formFileName || null,
         formName: form.formName.trim(),
@@ -24200,7 +24460,13 @@ const Statutory = ({ userEmail, userRole }) => {
         description: source.description || '',
         sector: source.sector || '',
         state: source.state || '',
-        site: source.site || source.Site || source.siteName || source.SiteName || '',
+        site:
+          resolveSingleSiteNameForStatutorySave(source, siteFromUrl, '') ||
+          source.site ||
+          source.Site ||
+          source.siteName ||
+          source.SiteName ||
+          '',
         formFile: source.formFile ?? source.FormFile ?? null,
         formFileName: source.formFileName ?? source.FormFileName ?? null,
         formName: source.formName ?? source.FormName ?? '',
@@ -24595,17 +24861,13 @@ const Statutory = ({ userEmail, userRole }) => {
 
   /** Site/act/form context for approval + Returned table sync (UI site may not be on DB row yet). */
   const buildStatutoryRowSyncPayload = (item) => {
-    const resolvedSite = String(
-      (typeof resolveSiteDisplayName === 'function'
+    const resolvedSite = resolveSingleSiteNameForStatutorySave(
+      item,
+      siteFromUrl,
+      typeof resolveSiteDisplayName === 'function'
         ? resolveSiteDisplayName(item, statutoryData)
-        : '') ||
-        item?.site ||
-        item?.Site ||
-        item?.siteName ||
-        item?.SiteName ||
-        siteFromUrl ||
-        ''
-    ).trim();
+        : ''
+    );
     const payload = {
       ...buildMonthFilterPayload(item),
       act: item?.act || item?.Act || null,
@@ -24614,6 +24876,16 @@ const Statutory = ({ userEmail, userRole }) => {
       dueDate: item?.dueDate || item?.DueDate || null
     };
     if (resolvedSite) payload.site = resolvedSite;
+    const sector = String(item?.sector || item?.Sector || '').trim();
+    const state = String(item?.state || item?.State || '').trim();
+    if (sector) {
+      payload.sector = sector;
+      payload.Sector = sector;
+    }
+    if (state) {
+      payload.state = state;
+      payload.State = state;
+    }
     return payload;
   };
 
@@ -24776,9 +25048,12 @@ const Statutory = ({ userEmail, userRole }) => {
         Array.isArray(prev)
           ? (() => {
               const baseForm = baseFormNameKey(rowItem?.formName || rowItem?.FormName);
-              const siteNorm = String(
+              const resolvedSiteForSent = resolveSingleSiteNameForStatutorySave(
+                rowItem,
+                siteFromUrl,
                 resolveSiteDisplayName(rowItem, prev) || rowItem?.site || rowItem?.Site || ''
-              )
+              );
+              const siteNorm = String(resolvedSiteForSent || '')
                 .trim()
                 .toLowerCase();
               const clickedRowId = String(rowItem?.id ?? '');
@@ -24790,18 +25065,29 @@ const Statutory = ({ userEmail, userRole }) => {
                   clickedIdentityKey && checklistBulkRowIdentityKey(row) === clickedIdentityKey;
                 const sameBaseForm = baseFormNameKey(row?.formName || row?.FormName) === baseForm;
                 const rowSiteNorm = String(
-                  resolveSiteDisplayName(row, prev) || row?.site || row?.Site || ''
+                  resolveSingleSiteNameForStatutorySave(
+                    row,
+                    '',
+                    resolveSiteDisplayName(row, prev) || row?.site || row?.Site || ''
+                  )
                 )
                   .trim()
                   .toLowerCase();
+                const sameSite =
+                  !!siteNorm &&
+                  !!rowSiteNorm &&
+                  (siteNorm === rowSiteNorm || resolvedSitesOverlap(siteNorm, rowSiteNorm));
+                // Never propagate Sent across different sites in the same state.
                 const sameSiteFormSibling =
-                  !!siteNorm && sameBaseForm && resolvedSitesOverlap(siteNorm, rowSiteNorm);
-                if (!sameId && !sameSiteFormSibling && !sameClickedRow && !sameIdentity) return row;
+                  sameSite && sameBaseForm && (sameIdentity || sameClickedRow);
+                if (!sameId && !sameClickedRow && !sameSiteFormSibling) return row;
                 const targetRow = sameId ? row : prev.find((r) => String(r?.id ?? '') === String(targetId));
                 const syncDraftFile = targetRow?.draftFile ?? targetRow?.DraftFile ?? null;
                 const syncDraftFileName = targetRow?.draftFileName ?? targetRow?.DraftFileName ?? null;
                 return {
                   ...row,
+                  site: resolvedSiteForSent || row.site || row.Site || '',
+                  Site: resolvedSiteForSent || row.Site || row.site || '',
                   sendForApproval: 'Sent',
                   SendForApproval: 'Sent',
                   submittedDate: submitDateIso,
@@ -24837,7 +25123,7 @@ const Statutory = ({ userEmail, userRole }) => {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...buildMonthFilterPayload(rowItem),
+          ...buildStatutoryRowSyncPayload(rowItem),
           SendForApproval: 'Sent',
           sendForApproval: 'Sent',
           submittedDate: submitDateIso,
@@ -24976,7 +25262,14 @@ const Statutory = ({ userEmail, userRole }) => {
           description: rowItem.description || rowItem.Description || null,
           sector: rowItem.sector || rowItem.Sector || null,
           state: rowItem.state || rowItem.State || null,
-          site: rowItem.site || rowItem.Site || rowItem.siteName || rowItem.SiteName || null,
+          site:
+            resolveSingleSiteNameForStatutorySave(
+              rowItem,
+              siteFromUrl,
+              typeof resolveSiteDisplayName === 'function'
+                ? resolveSiteDisplayName(rowItem, statutoryData)
+                : ''
+            ) || null,
           formFile: formFileId != null && String(formFileId).trim() !== '' && String(formFileId).trim() !== 'null' ? String(formFileId).trim() : null,
           formFileName: formFileNameVal || null,
           formName: formNameTrim,
@@ -29332,19 +29625,36 @@ const Statutory = ({ userEmail, userRole }) => {
     const worksheet = workbook.worksheets[0];
     if (!worksheet) throw new Error('Template worksheet not found.');
 
+    const preferTamilNadu = isFormXVTamilNaduContext(
+      parsedFormHeader,
+      null,
+      formFileName || '',
+      ''
+    );
+
     const layout = resolveFormXVWorksheetExportLayout(worksheet, {
       parsedHeaderRowIndex,
       parsedDataStartIndex,
       headersToUse
     });
+    if (preferTamilNadu && Array.isArray(layout.columnByHeader)) {
+      layout.columnByHeader = layout.columnByHeader.map((c, j) =>
+        c >= 1 && c <= 6 ? c : Math.min(j + 1, 6)
+      );
+      layout.usedExportCols = [...new Set(layout.columnByHeader)];
+    }
     const { hdrs, columnByHeader, dataStartRow, allHdrs } = layout;
 
     const sourceRows = (Array.isArray(mappedData) ? mappedData : []).filter(
       (row) => row && typeof row === 'object' && Object.values(row).some((v) => String(v ?? '').trim() !== '')
     );
 
-    if (detectFormXVStackedCertificateLayout(worksheet, layout.headerRow)) {
-      clearFormXVStackedCertificateValueBand(worksheet, layout.headerRow);
+    const useStacked =
+      preferTamilNadu ||
+      detectFormXVStackedCertificateLayout(worksheet, layout.headerRow, preferTamilNadu);
+
+    if (useStacked) {
+      clearFormXVStackedCertificateValueBand(worksheet, layout.headerRow, { preferTamilNadu });
     }
 
     writeFormXVHeaderFieldsToWorksheet(worksheet, layout, {
@@ -29353,11 +29663,15 @@ const Statutory = ({ userEmail, userRole }) => {
       employeeRow: sourceRows.length === 1 ? sourceRows[0] : null,
       hdrs: allHdrs || hdrs,
       includeStaticBoxes: true,
-      includeNatureBox: sourceRows.length === 1
+      includeNatureBox: sourceRows.length === 1,
+      preferTamilNadu,
+      forceStacked: preferTamilNadu
     });
 
     if (sourceRows.length === 1) {
-      writeFormXVWorkmanFieldsToWorksheet(worksheet, layout, sourceRows[0], allHdrs || hdrs);
+      writeFormXVWorkmanFieldsToWorksheet(worksheet, layout, sourceRows[0], allHdrs || hdrs, {
+        preferTamilNadu
+      });
     }
     const clearToRow = Math.max(dataStartRow + sourceRows.length + 20, dataStartRow + 20);
     const { usedExportCols } = layout;
@@ -29368,8 +29682,13 @@ const Statutory = ({ userEmail, userRole }) => {
     }
     writeFormXVDataRowsToWorksheet(worksheet, layout, sourceRows);
 
+    // TN Form XV body is A–F — do not autofit past col F (avoids stretching into G).
     if (!skipAutofit) {
-      const maxCol = columnByHeader.length > 0 ? Math.max(...columnByHeader, hdrs.length) : hdrs.length;
+      const maxCol = preferTamilNadu
+        ? 6
+        : columnByHeader.length > 0
+          ? Math.max(...columnByHeader, hdrs.length)
+          : hdrs.length;
       autofitExcelJSColumns(worksheet, 1, maxCol, 1, dataStartRow + sourceRows.length + 2);
     }
 
@@ -29378,10 +29697,20 @@ const Statutory = ({ userEmail, userRole }) => {
         dataStartRow,
         dataRowCount: sourceRows.length,
         colFrom: Math.min(...usedExportCols),
-        colTo: Math.max(...usedExportCols),
+        colTo: preferTamilNadu ? Math.min(6, Math.max(...usedExportCols)) : Math.max(...usedExportCols),
         templateRow: dataStartRow,
         templateBodyRows: 1
       });
+    }
+
+    // Final sweep: remove any values that still leaked into column G+ on TN templates.
+    if (preferTamilNadu) {
+      const maxClearRow = Math.max(layout.headerRow + 40, dataStartRow + sourceRows.length + 10);
+      for (let r = 1; r <= maxClearRow; r += 1) {
+        for (let c = 7; c <= 20; c += 1) {
+          worksheet.getCell(r, c).value = '';
+        }
+      }
     }
 
     const out = await workbook.xlsx.writeBuffer();
@@ -29448,6 +29777,12 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     let useFastZip = false;
+    const preferTamilNaduZip = isFormXVTamilNaduContext(
+      parsedFormHeader,
+      null,
+      formFileName || '',
+      ''
+    );
     try {
       const probeWb = new ExcelJS.Workbook();
       await probeWb.xlsx.load(templateArrayBuffer);
@@ -29458,7 +29793,9 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedDataStartIndex,
           headersToUse: hdrs
         });
-        useFastZip = detectFormXVStackedCertificateLayout(probeWs, probeLayout.headerRow);
+        useFastZip =
+          preferTamilNaduZip ||
+          detectFormXVStackedCertificateLayout(probeWs, probeLayout.headerRow, preferTamilNaduZip);
       }
     } catch (_) {
       useFastZip = false;
@@ -29471,7 +29808,8 @@ const Statutory = ({ userEmail, userRole }) => {
         parsedHeaderRowIndex,
         parsedDataStartIndex,
         parsedFormHeader,
-        headerFormData
+        headerFormData,
+        preferTamilNadu: preferTamilNaduZip
       });
       return buildFormXVMPFastZipDownload({
         exportRows,
@@ -30275,7 +30613,9 @@ const Statutory = ({ userEmail, userRole }) => {
     const maxScanRows = Math.max(200, worksheet.rowCount + 20);
     const getMergedAwareText = createExcelJsMergedAwareGetter(worksheet, excelCellValueToString);
 
-    // Prefer the LEAF header row (has Gender + leave detail labels). Group row lacks Gender.
+    // Prefer the LEAF header row (Gender + "beginning/availed/balance" labels).
+    // Do NOT treat group labels like "Earned Leave" as leaf metrics — that wrongly anchors
+    // on the group band and leaves the template 1/2/3 model rows visible below.
     const findFormXLeafHeaderAnchor = () => {
       let best = null;
       let bestScore = -1;
@@ -30284,7 +30624,8 @@ const Statutory = ({ userEmail, userRole }) => {
         let nameCol = null;
         let idCol = null;
         let genderCol = null;
-        let leaveDetailHits = 0;
+        let leafMetricHits = 0;
+        let groupBandHits = 0;
         for (let c = 1; c <= 45; c += 1) {
           const t = normalize(getMergedAwareText(r - 1, c - 1));
           if (!t) continue;
@@ -30306,9 +30647,16 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           if (
             /\bleave\b/.test(t) &&
-            (/beginning/.test(t) || /availed/.test(t) || /balance/.test(t) || /earned/.test(t))
+            (/beginning/.test(t) || /availed/.test(t) || (/balance/.test(t) && /end|month|return/.test(t)))
           ) {
-            leaveDetailHits += 1;
+            leafMetricHits += 1;
+          } else if (
+            /^(earned|medical|other)\s+leave$/.test(t) ||
+            (/\bleave\b/.test(t) && /earned|medical|other/.test(t) && !/beginning|availed|balance|period/.test(t))
+          ) {
+            groupBandHits += 1;
+          } else if (/\bleave\b/.test(t) && /earned/.test(t) && /period|during/.test(t)) {
+            leafMetricHits += 1;
           }
         }
         if (snoCol == null) continue;
@@ -30316,10 +30664,13 @@ const Statutory = ({ userEmail, userRole }) => {
         if (nameCol != null) score += 3;
         if (idCol != null) score += 3;
         if (genderCol != null) score += 8;
-        score += Math.min(6, leaveDetailHits);
+        score += Math.min(12, leafMetricHits * 3);
+        score -= Math.min(6, groupBandHits * 2);
+        // Strongly prefer true leaf rows that carry beginning/availed/balance.
+        if (leafMetricHits >= 3) score += 10;
         if (score > bestScore) {
           bestScore = score;
-          best = { headerRow: r, startCol: snoCol, nameCol, idCol, genderCol };
+          best = { headerRow: r, startCol: snoCol, nameCol, idCol, genderCol, leafMetricHits };
         }
       }
       return bestScore >= 6 ? best : null;
@@ -30330,7 +30681,22 @@ const Statutory = ({ userEmail, userRole }) => {
 
     // Always trust the leaf-row scan for Form X — modal indices often point at the group band
     // or shift startCol so Name/Gender receive serial numbers.
-    const headerRow = anchor.headerRow;
+    let headerRow = anchor.headerRow;
+    // If we still landed on the group band, step down to the next row when it has leaf metrics.
+    if ((anchor.leafMetricHits || 0) < 3 && headerRow + 1 <= maxScanRows) {
+      let nextLeafHits = 0;
+      for (let c = 1; c <= 45; c += 1) {
+        const t = normalize(getMergedAwareText(headerRow, c - 1));
+        if (
+          t &&
+          /\bleave\b/.test(t) &&
+          (/beginning/.test(t) || /availed/.test(t) || (/balance/.test(t) && /month|end|return/.test(t)) || (/earned/.test(t) && /period|during/.test(t)))
+        ) {
+          nextLeafHits += 1;
+        }
+      }
+      if (nextLeafHits >= 3) headerRow += 1;
+    }
     const startCol = anchor.startCol;
     const nameCol = anchor.nameCol || startCol + 1;
     const idCol = anchor.idCol || startCol + 2;
@@ -30349,8 +30715,26 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       return filled >= 4 && hits >= 4;
     };
+    // Template model stub: S.No/Name/Gender all hold the same small serial (1,1,1…), not column indices.
+    const rowLooksLikeSerialModelStub = (row1) => {
+      const sno = normalize(excelCellValueToString(worksheet.getCell(row1, startCol)?.value));
+      const name = normalize(excelCellValueToString(worksheet.getCell(row1, nameCol)?.value));
+      const gender = normalize(excelCellValueToString(worksheet.getCell(row1, genderCol)?.value));
+      if (!/^\d{1,4}$/.test(sno)) return false;
+      const nameIsSerial = !name || /^\d{1,4}$/.test(name);
+      const genderIsSerial = !gender || /^\d{1,4}$/.test(gender);
+      return nameIsSerial && genderIsSerial;
+    };
     // If the row under headers is NOT the number strip, keep looking one more row.
     if (!rowLooksLikeColumnNumbers(dataStartRow) && rowLooksLikeColumnNumbers(dataStartRow + 1)) {
+      dataStartRow += 1;
+    }
+    // Skip a non-data spacer row so we land on the model stub / first employee row.
+    if (
+      !rowLooksLikeColumnNumbers(dataStartRow) &&
+      !rowLooksLikeSerialModelStub(dataStartRow) &&
+      rowLooksLikeSerialModelStub(dataStartRow + 1)
+    ) {
       dataStartRow += 1;
     }
 
@@ -30614,9 +30998,15 @@ const Statutory = ({ userEmail, userRole }) => {
         return physicalHeaders.map((physHeader) => {
           const cls = classifyFormXPhysicalHeader(physHeader);
           if (cls.kind === 'serial') return serialVal;
-          if (cls.kind === 'name') return nameVal;
+          if (cls.kind === 'name') {
+            const n = String(nameVal ?? '').trim();
+            return /^\d{1,4}$/.test(n) ? '' : nameVal;
+          }
           if (cls.kind === 'empId') return idVal;
-          if (cls.kind === 'gender') return genderVal;
+          if (cls.kind === 'gender') {
+            const g = String(genderVal ?? '').trim();
+            return /^\d{1,4}$/.test(g) ? '' : genderVal;
+          }
           if (cls.kind === 'gratuity') return '';
 
           let fromHeader = getRowValueForHeader(row, physHeader);
@@ -30648,16 +31038,9 @@ const Statutory = ({ userEmail, userRole }) => {
         });
       });
 
-    // If grid rows still lack real names but People employees are available, rebuild identity from employees.
-    if (
-      employeeList.length > 0 &&
-      (sourceRows.length === 0 ||
-        sourceRows.every((arr) => {
-          const nameIdx = physicalHeaders.findIndex((h) => classifyFormXPhysicalHeader(h).kind === 'name');
-          const name = nameIdx >= 0 ? String(arr[nameIdx] ?? '').trim() : '';
-          return !name || /^\d{1,4}$/.test(name);
-        }))
-    ) {
+    // Always rebuild identity from People when available — May SampleData/Draft often keeps
+    // template serial stubs (Name/Gender = 1,2,3…) even after a partial autofill.
+    if (employeeList.length > 0) {
       const leaveTemplateRows = sourceRows.length > 0 ? sourceRows : [];
       const rebuilt = employeeList.map((empItem, idx) => {
         const identity = readEmployeeIdentity(empItem, idx);
@@ -30669,7 +31052,12 @@ const Statutory = ({ userEmail, userRole }) => {
           if (cls.kind === 'empId') return identity.id;
           if (cls.kind === 'gender') return identity.gender;
           if (cls.kind === 'gratuity') return '';
-          return base[colIndex] ?? '';
+          const prior = base[colIndex];
+          // Drop leftover template serial digits from leave/other cells.
+          if (prior != null && /^\d{1,4}$/.test(String(prior).trim()) && cls.kind !== 'leave') {
+            return '';
+          }
+          return prior ?? '';
         });
       });
       sourceRows.length = 0;
@@ -30711,10 +31099,12 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
 
-    const clearFromRow = Math.max(1, effectiveDataStartRow);
+    // Clear from the row under headers (not only detected dataStart) so group-band mis-anchors
+    // cannot leave the visible template 1/2/3 model strip in place.
+    const clearFromRow = Math.max(1, Math.min(effectiveDataStartRow, headerRow + 1));
     const clearToRow = Math.min(
       maxScanRows,
-      Math.max(effectiveDataStartRow + sourceRows.length + 40, clearFromRow + 40)
+      Math.max(effectiveDataStartRow + Math.max(sourceRows.length, 8) + 60, clearFromRow + 80)
     );
     for (let r = clearFromRow; r <= clearToRow; r++) {
       for (let j = 0; j < orderedCols.length; j++) {
@@ -30725,6 +31115,15 @@ const Statutory = ({ userEmail, userRole }) => {
         }
         clearCell.value = '';
       }
+      // Also clear scanned identity columns in case they sit outside orderedCols (merged name band).
+      [startCol, nameCol, idCol, genderCol].filter(Boolean).forEach((c) => {
+        const clearCell = worksheet.getCell(r, c);
+        const current = clearCell?.value;
+        if (current && typeof current === 'object' && Object.prototype.hasOwnProperty.call(current, 'formula')) {
+          return;
+        }
+        clearCell.value = '';
+      });
     }
 
     for (let i = 0; i < sourceRows.length; i++) {
@@ -35195,6 +35594,7 @@ const Statutory = ({ userEmail, userRole }) => {
       );
       const isFormIDownload =
         !isFormIIDownload &&
+        !isFormXVContext(parsed?.formHeader, item, templateMeta.formFileName || resolvedFormFileItem.formFileName || fn) &&
         (isFormIRegisterOfFinesContext(
           item,
           templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
@@ -36319,6 +36719,7 @@ const Statutory = ({ userEmail, userRole }) => {
               isFormXVIIIMPDownload: isFormXVIIIDownload && !hasAutofillGridForSameLine,
               isFormXXIIDownload,
               isFormXVIDownload: isFormXVIAPMusterDownload,
+              isFormXDownload,
               usedLiveModalGrid
             })
           );
@@ -36327,6 +36728,19 @@ const Statutory = ({ userEmail, userRole }) => {
           if (appliedSample.usedSnapshot) usedSnapshot = true;
           if (appliedSample.headerFormData && Object.keys(appliedSample.headerFormData).length > 0) {
             downloadHeaderFormData = { ...downloadHeaderFormData, ...appliedSample.headerFormData };
+          }
+          // Form X: SampleData for empty months often stores the Excel model strip (1,2,3,4…).
+          if (isFormXDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+            const filteredFormXSample = filterStatutoryTemplateColumnIndexRows(mappedData, headersToUse);
+            if (
+              filteredFormXSample.length === 0 ||
+              formXLeaveDownloadRowsNeedRefresh(filteredFormXSample, headersToUse)
+            ) {
+              mappedData = [];
+              usedSnapshot = false;
+            } else {
+              mappedData = filteredFormXSample;
+            }
           }
           if (isFormXVDownload && Array.isArray(cachedSampleBlockForDownload.headers) && cachedSampleBlockForDownload.headers.length > 0) {
             headersToUse = [...FORM_XV_TABLE_HEADERS];
@@ -36407,6 +36821,22 @@ const Statutory = ({ userEmail, userRole }) => {
           } catch (draftErr) {
             console.warn('Could not read saved draft file data for template download:', draftErr);
           }
+        }
+      }
+
+      // Form X: saved Draft / SampleData for empty months often still holds the Excel model strip.
+      if (isFormXDownload && Array.isArray(mappedData) && mappedData.length > 0) {
+        const filteredFormXDraft = filterStatutoryTemplateColumnIndexRows(mappedData, headersToUse);
+        if (
+          filteredFormXDraft.length === 0 ||
+          formXLeaveDownloadRowsNeedRefresh(filteredFormXDraft, headersToUse)
+        ) {
+          mappedData = [];
+          usedSnapshot = false;
+          usedSavedDraftFile = false;
+          savedDraftRowMatrix = null;
+        } else {
+          mappedData = filteredFormXDraft;
         }
       }
 
@@ -36661,6 +37091,24 @@ const Statutory = ({ userEmail, userRole }) => {
                     item: lineItem,
                     fileName: fn,
                     parsedFormHeader: parsed.formHeader
+                  }
+                : {}),
+              ...(isFormXDownload
+                ? {
+                    item: lineItem || item,
+                    fileName: fn,
+                    parsedFormHeader: parsed.formHeader,
+                    columnGroupLabels: parsed?.columnGroupLabels ?? null,
+                    formFileModalData: {
+                      ...(formFileModalData || {}),
+                      item: lineItem || item,
+                      parsedTableHeaders: headersToUse,
+                      parsedFormHeader: parsed.formHeader,
+                      parsedColumnGroupLabels: parsed?.columnGroupLabels ?? null,
+                      fileName: fn,
+                      formFileName: templateMeta.formFileName,
+                      sheetText: parsed?.sheetText || formFileModalData?.sheetText || ''
+                    }
                   }
                 : {}),
               ...(isClraOvertimeRegisterExcelExport
@@ -37115,32 +37563,40 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
       if (isFormXDownload) {
-        const formXNameHdr =
-          (headersToUse || []).find((h) =>
-            /name\s+of\s+the\s+employee|employee\s+name/i.test(String(h || ''))
-          ) || 'Name of the employee';
-        const formXNamesBroken =
-          !Array.isArray(mappedData) ||
-          mappedData.length === 0 ||
-          mappedData.every((row) => {
-            if (!row || typeof row !== 'object') return true;
-            const n = String(row[formXNameHdr] ?? row.__employeeLookupName ?? '').trim();
-            return !n || /^\d{1,4}$/.test(n);
-          });
-        if (formXNamesBroken) {
-          try {
-            const refreshedFormXRows = await fetchAndPopulateEmployeeData(headersToUse, {
-              returnMappedData: true
-            });
-            if (Array.isArray(refreshedFormXRows) && refreshedFormXRows.length > 0) {
-              mappedData = refreshedFormXRows;
-              savedDraftRowMatrix = null;
-              usedSnapshot = false;
-              usedSavedDraftFile = false;
+        // Always re-autofill Form X on download. May SampleData/Draft keeps template serial stubs
+        // (Name/Gender = 1,2,3…) and empty leave — never trust that as export-ready.
+        try {
+          const refreshedFormXRows = await fetchAndPopulateEmployeeData(headersToUse, {
+            returnMappedData: true,
+            fileName: fn,
+            parsedFormHeader: parsed.formHeader,
+            item: lineItem || item,
+            columnGroupLabels: parsed?.columnGroupLabels ?? null,
+            formFileModalData: {
+              ...(formFileModalData || {}),
+              item: lineItem || item,
+              parsedTableHeaders: headersToUse,
+              parsedFormHeader: parsed.formHeader,
+              parsedColumnGroupLabels:
+                parsed?.columnGroupLabels ??
+                formFileModalData?.parsedColumnGroupLabels ??
+                null,
+              fileName: fn,
+              formFileName: templateMeta.formFileName,
+              sheetText: parsed?.sheetText || formFileModalData?.sheetText || ''
             }
-          } catch (_) {
-            // keep existing mappedData if refresh fails
+          });
+          if (Array.isArray(refreshedFormXRows) && refreshedFormXRows.length > 0) {
+            mappedData = refreshedFormXRows;
+            savedDraftRowMatrix = null;
+            usedSnapshot = false;
+            usedSavedDraftFile = false;
           }
+        } catch (formXEarlyRefreshErr) {
+          console.warn(
+            'Form X download autofill refresh failed:',
+            formXEarlyRefreshErr?.message || formXEarlyRefreshErr
+          );
         }
       }
       if (isFormCDownload && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
@@ -41380,23 +41836,8 @@ const Statutory = ({ userEmail, userRole }) => {
                         if (Array.isArray(modalHdrsX) && modalHdrsX.length > 0) {
                           formXHeadersForWrite = [...modalHdrsX];
                         }
-                        const formXNameHeader =
-                          (formXHeadersForWrite || []).find((h) =>
-                            /name\s+of\s+the\s+employee|employee\s+name/i.test(String(h || ''))
-                          ) || 'Name of the employee';
-                        const formXRowNameLooksBroken = (row) => {
-                          if (!row || typeof row !== 'object') return true;
-                          const n = String(
-                            row[formXNameHeader] ?? row.__employeeLookupName ?? ''
-                          ).trim();
-                          return !n || /^\d{1,4}$/.test(n);
-                        };
-                        const gridNamesLookBroken =
-                          formXRowsForWrite.length === 0 ||
-                          formXRowsForWrite.every(formXRowNameLooksBroken);
-                        // Re-run Autofill when grid still has template serial leftovers in Name.
-                        if (gridNamesLookBroken) {
-                          try {
+                        // Always re-run Autofill on Form X Excel write so May leave columns are filled.
+                        try {
                             const refreshedFormXRows = await fetchAndPopulateEmployeeData(
                               formXHeadersForWrite,
                               {
@@ -41404,12 +41845,18 @@ const Statutory = ({ userEmail, userRole }) => {
                                 fileName: fn,
                                 parsedFormHeader: parsed.formHeader,
                                 item: lineItem || item,
+                                columnGroupLabels:
+                                  parsed?.columnGroupLabels ??
+                                  formFileModalData?.parsedColumnGroupLabels ??
+                                  null,
                                 formFileModalData: formFileModalData || {
                                   item: lineItem || item,
                                   parsedTableHeaders: formXHeadersForWrite,
                                   parsedFormHeader: parsed.formHeader,
+                                  parsedColumnGroupLabels: parsed?.columnGroupLabels ?? null,
                                   fileName: fn,
-                                  formFileName: templateMeta.formFileName
+                                  formFileName: templateMeta.formFileName,
+                                  sheetText: parsed?.sheetText || ''
                                 }
                               }
                             );
@@ -41422,7 +41869,6 @@ const Statutory = ({ userEmail, userRole }) => {
                               formXRefreshErr?.message || formXRefreshErr
                             );
                           }
-                        }
                         let formXEmployees = resolveStatutoryEmployeesForSaveOrder(
                           autofillEmployeesRef.current
                         );
@@ -41439,7 +41885,10 @@ const Statutory = ({ userEmail, userRole }) => {
                         if (
                           formXEmployees.length > 0 &&
                           (formXRowsForWrite.length === 0 ||
-                            formXRowsForWrite.every(formXRowNameLooksBroken))
+                            formXLeaveDownloadRowsNeedRefresh(
+                              formXRowsForWrite,
+                              formXHeadersForWrite
+                            ))
                         ) {
                           if (formXRowsForWrite.length === 0) {
                             formXRowsForWrite = formXEmployees.map(() => ({}));
@@ -45907,8 +46356,11 @@ const Statutory = ({ userEmail, userRole }) => {
       const preservedFormFileName = latestRecord?.formFileName ?? latestRecord?.FormFileName ?? currentItem?.formFileName ?? currentItem?.FormFileName ?? fileName;
       const hasFormFile = preservedFormFile && String(preservedFormFile).trim() !== '' && preservedFormFile !== 'null';
 
-      const resolvedSiteForSave =
-        resolveSiteDisplayName(currentItem || {}, statutoryData) || siteFromUrl || '';
+      const resolvedSiteForSave = resolveSingleSiteNameForStatutorySave(
+        currentItem || {},
+        siteFromUrl,
+        resolveSiteDisplayName(currentItem || {}, statutoryData) || ''
+      );
       const saveMeta = resolveStatutorySectorStateForSave({
         currentItem,
         latestRecord,
@@ -45970,13 +46422,9 @@ const Statutory = ({ userEmail, userRole }) => {
         state: stateForSave || null,
         ...(sectorForSave ? { Sector: sectorForSave } : {}),
         ...(stateForSave ? { State: stateForSave } : {}),
-        site:
-          currentItem?.site ||
-          currentItem?.Site ||
-          metadataSource?.site ||
-          metadataSource?.Site ||
-          resolvedSiteForSave ||
-          '',
+        // Always persist one concrete site (never comma-joined multi-site inference).
+        site: resolvedSiteForSave || null,
+        ...(resolvedSiteForSave ? { Site: resolvedSiteForSave } : {}),
         dueDate: currentItem?.dueDate || metadataSource?.dueDate || metadataSource?.DueDate || '',
         monthFilter: monthFilterValue,
         MonthFilter: monthFilterValue,
@@ -46154,6 +46602,10 @@ const Statutory = ({ userEmail, userRole }) => {
               monthMetaPayload.state = stateForSave;
               monthMetaPayload.State = stateForSave;
             }
+            if (resolvedSiteForSave) {
+              monthMetaPayload.site = resolvedSiteForSave;
+              monthMetaPayload.Site = resolvedSiteForSave;
+            }
             await fetch(`/server/statutoryreg_function/statutory/${keeperStatutoryId}`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
@@ -46222,6 +46674,11 @@ const Statutory = ({ userEmail, userRole }) => {
               const normalizedDescription = (payload.description || '').toLowerCase().trim();
               const normalizedSector = String(payload.sector || currentItem?.sector || currentItem?.Sector || '').trim().toLowerCase();
               const normalizedStateRow = String(payload.state || currentItem?.state || currentItem?.State || '').trim().toLowerCase();
+              const normalizedSiteRow = String(
+                pickSingleSiteNameToken(payload.site || resolvedSiteForSave || '') || ''
+              )
+                .trim()
+                .toLowerCase();
              
               // Find duplicates only within the SAME logical month (match checklist bulk vs saved Statutory month norms).
               const mergeProbeCurrent = {
@@ -46238,6 +46695,9 @@ const Statutory = ({ userEmail, userRole }) => {
                 const itemDescription = (item.description || '').toLowerCase().trim();
                 const itemSector = String(item.sector || item.Sector || '').trim().toLowerCase();
                 const itemState = String(item.state || item.State || '').trim().toLowerCase();
+                const itemSite = String(pickSingleSiteNameToken(item.site || item.Site || '') || '')
+                  .trim()
+                  .toLowerCase();
                 const itemMonthNorm = statutoryDedupeMonthNorm(item, selectedMonth);
                 const itemFormFile = item.formFile || item.FormFile || null;
                 const currentFormFile = currentItem?.formFile || currentItem?.FormFile || null;
@@ -46247,6 +46707,17 @@ const Statutory = ({ userEmail, userRole }) => {
                 const isSameDescription = itemDescription === normalizedDescription;
                 const isSameSector = itemSector === normalizedSector;
                 const isSameStateRow = itemState === normalizedStateRow;
+                const isSameSiteRow = (() => {
+                  if (normalizedSiteRow && itemSite) {
+                    return (
+                      itemSite === normalizedSiteRow ||
+                      resolvedSitesOverlap(normalizedSiteRow, itemSite)
+                    );
+                  }
+                  // Never delete another site's row (or a legacy no-Site row) when saving a named site.
+                  if (normalizedSiteRow || itemSite) return false;
+                  return true;
+                })();
                 const isSameMonth = currentMonthNorm !== 'nomonth' && itemMonthNorm !== 'nomonth' && currentMonthNorm === itemMonthNorm;
                 const isDifferentId = String(item.id) !== keeperStatutoryId;
                 const df = item.draftFile ?? item.DraftFile;
@@ -46259,6 +46730,7 @@ const Statutory = ({ userEmail, userRole }) => {
                        isSameDescription &&
                        isSameSector &&
                        isSameStateRow &&
+                       isSameSiteRow &&
                        isSameMonth &&
                        hasNoDraftFile &&
                        (hasSameFormFile || !itemFormFile);
@@ -71977,6 +72449,39 @@ const Statutory = ({ userEmail, userRole }) => {
       return;
     }
 
+    // Form X leave register: "View File" must regenerate with People + Leave for the selected
+    // month. Downloading the raw Form Master template only shows model rows (1,2,3…) and blank leave.
+    const formXViewHint = [
+      item?.formName,
+      item?.FormName,
+      item?.description,
+      item?.Description,
+      downloadItem?.formFileName,
+      downloadItem?.FormFileName,
+      downloadItem?.formName
+    ]
+      .filter(Boolean)
+      .join(' ');
+    if (
+      isFormXLeaveSocialSecurityContext(
+        null,
+        item,
+        downloadItem?.formFileName || downloadItem?.FormFileName || '',
+        formXViewHint
+      )
+    ) {
+      const draftApiRowId =
+        resolveNumericStatutoryIdForProofRow(item, {
+          preferSiteSubmittedDraft: showApprovalColumn
+        }) ||
+        (isNumericStatutoryBackendId(item?.id) ? String(item.id) : null);
+      await handleViewDraftFileGenerate(item, downloadItem, {
+        sampleStatutoryId: draftApiRowId,
+        draftApiRowId
+      });
+      return;
+    }
+
     const downloadName = (() => {
       const raw = downloadItem.formFileName || getFormFileDownloadFileName(downloadItem);
       const cleaned = String(raw || 'template.xlsx').replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -74040,6 +74545,7 @@ const Statutory = ({ userEmail, userRole }) => {
         );
         const formIWorkmenModalOpen =
           !formXIVMPEmploymentCardModalOpen &&
+          !isFormXVContext(formHeaderForModal, item, displayFileName) &&
           isFormIRegisterOfWorkmenContext(
           item,
           displayFileName,
@@ -74129,6 +74635,28 @@ const Statutory = ({ userEmail, userRole }) => {
               /register\s+of\s+workmen/i.test(subtitleText)
                 ? formHeaderForModal.subtitle
                 : 'Register of Workmen (Contract Labour)'
+          };
+        }
+        const formXVServiceCertificateModalOpen =
+          !isFormXVRJWageSlipContext(
+            formHeaderForModal,
+            item,
+            displayFileName,
+            sheetTextForVariant
+          ) &&
+          isFormXVContext(formHeaderForModal, item, displayFileName);
+        if (formXVServiceCertificateModalOpen && formHeaderForModal) {
+          const titleText = String(formHeaderForModal.title || '');
+          const subtitleText = String(formHeaderForModal.subtitle || '');
+          formHeaderForModal = {
+            ...formHeaderForModal,
+            title:
+              /form[\s._-]*xv(?![a-z])/i.test(titleText) || /form\s*[-–]?\s*xv\b/i.test(titleText)
+                ? formHeaderForModal.title
+                : 'Form XV – Service Certificate',
+            subtitle: /service\s+certificate/i.test(subtitleText)
+              ? formHeaderForModal.subtitle
+              : 'Service Certificate'
           };
         }
         if (formXVIIITamilNaduModalOpen && formHeaderForModal) {
@@ -75825,10 +76353,17 @@ const Statutory = ({ userEmail, userRole }) => {
     const urlSite = String(siteFromUrl || '').trim();
     if (!urlSite) return rows;
     const target = urlSite.toLowerCase();
-    return rows.filter((item) =>
-      resolvedSiteMatchesSingleTarget(resolveSiteDisplayName(item, rows) || '', target)
-    );
-  }, [statutoryData, siteFromUrl, resolveSiteDisplayName]);
+    return rows.filter((item) => {
+      const explicit = pickSingleSiteNameToken(item?.site ?? item?.Site ?? '');
+      if (explicit) return explicit.toLowerCase() === target;
+      // Legacy rows with no Site must not appear in every site of the same state.
+      const hasWorkflow =
+        hasStatutoryDraftFileRef(item) ||
+        statutorySendForApprovalIsSent(item) ||
+        !!(item?.proofSubmissionFile ?? item?.ProofSubmissionFile);
+      return !hasWorkflow;
+    });
+  }, [statutoryData, siteFromUrl]);
 
   // Filter statutory data by month and ensure forms are properly separated by act
   // Items with "Monthly Basis" due date should appear in every month (treated as 15th of that month)
@@ -75858,16 +76393,27 @@ const Statutory = ({ userEmail, userRole }) => {
       });
     }
 
-    // Site login: show only corresponding site rows.
+    // Site login: show only corresponding site rows (never share another site's saved data in the same state).
     if (siteFromUrl && data && data.length > 0) {
       const targetSite = String(siteFromUrl).trim().toLowerCase();
-      data = data.filter((item) =>
-        resolvedSiteMatchesSingleTarget(resolveSiteDisplayName(item, data) || '', targetSite)
-      );
+      data = data.filter((item) => {
+        const explicit = pickSingleSiteNameToken(item?.site ?? item?.Site ?? '');
+        if (explicit) return explicit.toLowerCase() === targetSite;
+        const hasWorkflow =
+          hasStatutoryDraftFileRef(item) ||
+          statutorySendForApprovalIsSent(item) ||
+          !!(item?.proofSubmissionFile ?? item?.ProofSubmissionFile);
+        // Unsaved ChecklistBulk placeholder can show under ?site=; legacy no-Site submissions stay hidden.
+        if (hasWorkflow) return false;
+        const resolved = String(resolveSiteForDisplay(item, data) || '').trim().toLowerCase();
+        return resolved === targetSite || resolvedSiteMatchesSingleTarget(resolved, targetSite);
+      });
     } else if (Array.isArray(allowedSiteNameList) && allowedSiteNameList.length > 0 && data && data.length > 0) {
       const allowedSites = new Set(allowedSiteNameList.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean));
       data = data.filter((item) => {
-        const rowResolved = resolveSiteDisplayName(item, data) || '';
+        const explicit = pickSingleSiteNameToken(item?.site ?? item?.Site ?? '');
+        if (explicit) return allowedSites.has(explicit.toLowerCase());
+        const rowResolved = resolveSiteForDisplay(item, data) || '';
         return resolvedSiteAnyAllowed(rowResolved, allowedSites);
       });
     }
@@ -79562,6 +80108,19 @@ const Statutory = ({ userEmail, userRole }) => {
                                   const fileNameNorm = (viewFileItem.formFileName || '').trim().toUpperCase().replace(/\s+/g, ' ');
                                   const fileNameRedundantWithFormName = formNameNorm && fileNameNorm && fileNameNorm.startsWith(formNameNorm);
                                   const formFileLabel = fileNameRedundantWithFormName ? 'View File' : (viewFileItem.formFileName || 'View File');
+                                  const isFormXViewFileRow = isFormXLeaveSocialSecurityContext(
+                                    null,
+                                    item,
+                                    viewFileItem.formFileName || '',
+                                    [
+                                      item?.formName,
+                                      item?.FormName,
+                                      item?.description,
+                                      viewFileItem.formFileName
+                                    ]
+                                      .filter(Boolean)
+                                      .join(' ')
+                                  );
                                   return (
                                     <a
                                       href="#"
@@ -79572,7 +80131,11 @@ const Statutory = ({ userEmail, userRole }) => {
                                         cursor: 'pointer',
                                         fontWeight: '500'
                                       }}
-                                      title={`Download ${formFileLabel}`}
+                                      title={
+                                        isFormXViewFileRow
+                                          ? 'Download Form X with employee + leave data for the selected month'
+                                          : `Download ${formFileLabel}`
+                                      }
                                     >
                                       <span className="statutory-file-link">View File</span>
                                     </a>

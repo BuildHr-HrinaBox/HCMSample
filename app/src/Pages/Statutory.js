@@ -291,6 +291,19 @@ import {
   applyFormTSEKarnatakaEmployeeToRow,
   getFormTSEKarnatakaRowValueForHeader,
   isFormTSEEmployeeIdentityHeader,
+  formTSEDownloadHasSubstantiveRows,
+  formTSEWorkbookHasIdentityInColumnA,
+  repairFormTSEWorkbookColumnAlignment,
+  resolveFormTSERowsForExport,
+  buildFormTSERowsFromEmployees,
+  computeFormTSEKarnatakaTotalDeductions,
+  FORM_T_KA_DEFAULT_PAYMENT_MODE,
+  FORM_T_KA_OT_HOURS_NIL,
+  applyFormTSEKarnatakaOtHoursNilToMappedRows,
+  isFormTSEKarnatakaDeductionTotalHeader,
+  resolveFormTSEKarnatakaDeductionTotalHeader,
+  resolveFormTSEKarnatakaEarningsTotalHeader,
+  resolveFormTSEKarnatakaNetAmountPayableHeader,
 } from './statutory/formTSEKarnataka';
 import {
   isFormXXVIAPAppointmentLetterContext,
@@ -13451,6 +13464,14 @@ const isFormTSEContext = (formHeader, rowItem, fileName, extraBlob = '') => {
     .join(' ')
     .toLowerCase();
   if (/\bform\s*["']?\s*q\b|\bform[_\s-]*q\b|form_q/i.test(parts)) return false;
+  // Underscored Catalyst filenames: Form___T_-_Karnataka.xlsx (word-boundary \bt\b fails on form___t_)
+  if (
+    /form_{1,}t(?:_|-|$)/i.test(parts) ||
+    /form[\s._-]+t[\s._-]+karnataka/i.test(parts) ||
+    /form[\s._-]*t[\s._-]*s[\s._-]*e\b/i.test(parts)
+  ) {
+    return true;
+  }
   if (
     parts.includes('form-t') ||
     parts.includes('form_t') ||
@@ -13459,6 +13480,13 @@ const isFormTSEContext = (formHeader, rowItem, fileName, extraBlob = '') => {
     parts.includes('form_t_s_e') ||
     parts.includes('t_s_e') ||
     (/\bform[\s_-]*t\b/i.test(parts) && /s[\s&_]*e\b/i.test(parts))
+  ) {
+    return true;
+  }
+  // Title "FORM T" + combined muster (Karnataka Form T), even when filename is ambiguous
+  if (
+    /combined\s+muster\s+roll\s+cum\s+register\s+of\s+wages/i.test(parts) &&
+    (/\bform[\s._-]*t\b/i.test(parts) || /karnataka/i.test(parts) || /rule\s+24\s*\(\s*9[\s-]*b/i.test(parts))
   ) {
     return true;
   }
@@ -23026,6 +23054,8 @@ const Statutory = ({ userEmail, userRole }) => {
   const formModalImportInputRef = useRef(null);
   const formTableDataRef = useRef([]);
   const statutoryAutofillExportCacheRef = useRef(null);
+  /** Survives modal close — Form T Download Draft File regenerates from this when the stored draft is blank. */
+  const formTSELastExportRef = useRef(null);
   const formXIVMPZipExportRef = useRef(null);
   const formXIVMPSaveSucceededRef = useRef(false);
   const formXIXMPZipExportRef = useRef(null);
@@ -24885,6 +24915,30 @@ const Statutory = ({ userEmail, userRole }) => {
       originalHeaderRowIndex: formFileModalData?.originalHeaderRowIndex,
     };
   };
+
+  // Keep Form T export cache aligned with the modal grid so Save/Download match on-screen rows.
+  useEffect(() => {
+    if (
+      !isFormFileModalOpen ||
+      !formFileModalData ||
+      !isFormTSEContext(
+        formFileModalData?.parsedFormHeader,
+        formFileModalData?.item,
+        formFileModalData?.formFileName || formFileModalData?.fileName || '',
+        formFileModalData?.sheetText || ''
+      )
+    ) {
+      return;
+    }
+    if (
+      formTSEDownloadHasSubstantiveRows(
+        formTableData,
+        formFileModalData?.parsedTableHeaders || tableHeaders
+      )
+    ) {
+      snapshotStatutoryAutofillExportCache();
+    }
+  }, [formTableData, isFormFileModalOpen, formFileModalData, tableHeaders]);
 
   const resolveNumericStatutoryIdForProofRow = (item, options = {}) => {
     const preferSiteSubmittedDraft = options?.preferSiteSubmittedDraft === true;
@@ -35493,14 +35547,20 @@ const Statutory = ({ userEmail, userRole }) => {
         expectedAutofillEmployeeTotal > 0 &&
         liveModalGridLoadedRowCount >= expectedAutofillEmployeeTotal;
       const copyLiveModalGridRowsForDownload = () => {
-        const ref = Array.isArray(formTableDataRef.current) ? formTableDataRef.current : null;
-        const stateRows = Array.isArray(formTableData) ? formTableData : null;
+        const ref = Array.isArray(formTableDataRef.current) ? formTableDataRef.current : [];
+        const stateRows = Array.isArray(formTableData) ? formTableData : [];
+        const refCount = countMeaningfulFormTableRows(ref);
+        const stateCount = countMeaningfulFormTableRows(stateRows);
+        // Prefer whichever grid currently holds more filled rows (avoids stale empty ref
+        // winning over freshly setFormTableData before the sync effect runs).
         const source =
-          ref && ref.length > 0
-            ? ref
-            : stateRows && stateRows.length > 0
-              ? stateRows
-              : [];
+          stateCount > refCount
+            ? stateRows
+            : refCount > 0
+              ? ref
+              : stateRows.length > 0
+                ? stateRows
+                : ref;
         const out = [];
         for (let i = 0; i < source.length; i += 1) {
           const row = source[i];
@@ -36286,7 +36346,8 @@ const Statutory = ({ userEmail, userRole }) => {
         if (Array.isArray(cache.headers) && cache.headers.length > 0) {
           headersToUse = [...cache.headers];
         }
-        if (cache.tableStartCol != null) downloadTableStartCol = cache.tableStartCol;
+        // Form T identity is always column A — ignore a stale cache hint under ATTENDANCE (J).
+        downloadTableStartCol = 0;
         if (cache.dataStartIndex != null) downloadDataStartIndex = cache.dataStartIndex;
         if (cache.headerRowIndex != null) downloadHeaderRowIndex = cache.headerRowIndex;
       } else if (
@@ -36386,53 +36447,73 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
 
-      // Form T Karnataka: export autofill grid (modal, session ref, or snapshot cache).
-      if (isFormTSEDownload && formTSEAutofillCacheMatches && !usedLiveModalGrid) {
-        const cache = statutoryAutofillExportCacheRef.current;
+      // Form T Karnataka: export autofill grid (modal, last save, session cache, People, or employees).
+      if (isFormTSEDownload && !usedLiveModalGrid) {
+        const lastExport = formTSELastExportRef.current;
+        const lastExportUsable =
+          lastExport &&
+          Array.isArray(lastExport.rows) &&
+          formTSEDownloadHasSubstantiveRows(lastExport.rows, lastExport.headers || headersToUse);
+        const cache = formTSEAutofillCacheMatches ? statutoryAutofillExportCacheRef.current : null;
         const modalHdrs =
-          Array.isArray(cache.headers) && cache.headers.length > 0 ? cache.headers : headersToUse;
-        const liveRows = filterStatutoryTemplateColumnIndexRows(
-          cache.rows.filter((row) => formTableRowHasMeaningfulData(row)),
-          modalHdrs
-        );
-        if (liveRows.length > 0 && Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          Array.isArray(formFileModalData?.parsedTableHeaders) &&
+          formFileModalData.parsedTableHeaders.length > 0
+            ? formFileModalData.parsedTableHeaders
+            : Array.isArray(cache?.headers) && cache.headers.length > 0
+              ? cache.headers
+              : lastExportUsable && Array.isArray(lastExport.headers) && lastExport.headers.length > 0
+                ? lastExport.headers
+                : headersToUse;
+        const peopleEmployees =
+          Array.isArray(autofillEmployeesRef.current) && autofillEmployeesRef.current.length > 0
+            ? autofillEmployeesRef.current
+            : getCachedPeopleData() || [];
+        const liveCandidate =
+          isFormFileModalOpen || canUseLiveModalGridForDownload || liveModalGridLoadedRowCount > 0
+            ? copyLiveModalGridRowsForDownload()
+            : [];
+        const cacheRows = Array.isArray(cache?.rows) ? cache.rows : [];
+        const lastRows = lastExportUsable ? lastExport.rows : [];
+        const seedRows = formTSEDownloadHasSubstantiveRows(liveCandidate, modalHdrs)
+          ? liveCandidate
+          : formTSEDownloadHasSubstantiveRows(cacheRows, modalHdrs)
+            ? cacheRows
+            : lastRows;
+        const exportRows = resolveFormTSERowsForExport({
+          liveRows: filterStatutoryTemplateColumnIndexRows(
+            (seedRows || []).filter((row) => formTableRowHasMeaningfulData(row)),
+            modalHdrs
+          ),
+          headers: modalHdrs,
+          employees: peopleEmployees,
+          helpers: {
+            sanitizeValue: (v) => String(v ?? '').trim(),
+            formatStatutoryDateDisplay,
+          },
+        });
+        if (
+          formTSEDownloadHasSubstantiveRows(
+            exportRows,
+            Array.isArray(modalHdrs) && modalHdrs.length > 0 ? modalHdrs : headersToUse
+          )
+        ) {
           usedLiveModalGrid = true;
-          headersToUse = [...modalHdrs];
-          mappedData = prepareFormTSEExportRows(liveRows, modalHdrs, modalHdrs);
+          if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+            headersToUse = [...modalHdrs];
+          }
+          mappedData = exportRows;
+          const layoutSource = formFileModalData || cache || (lastExportUsable ? lastExport : null);
+          if (layoutSource?.tableStartCol != null) {
+            downloadTableStartCol = layoutSource.tableStartCol;
+          }
+          if (layoutSource?.dataStartIndex != null) {
+            downloadDataStartIndex = layoutSource.dataStartIndex;
+          }
+          if (layoutSource?.headerRowIndex != null) {
+            downloadHeaderRowIndex = layoutSource.headerRowIndex;
+          }
           savedDraftRowMatrix = null;
         }
-      } else if (
-        isFormTSEDownload &&
-        (isFormFileModalOpen ||
-          canUseLiveModalGridForDownload ||
-          (sameStatutoryLineAsModal && liveModalGridLoadedRowCount > 0)) &&
-        liveModalGridLoadedRowCount > 0
-      ) {
-        usedLiveModalGrid = true;
-        const modalHdrs = formFileModalData?.parsedTableHeaders;
-        const liveRows = filterStatutoryTemplateColumnIndexRows(
-          copyLiveModalGridRowsForDownload(),
-          Array.isArray(modalHdrs) && modalHdrs.length > 0 ? modalHdrs : headersToUse
-        );
-        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
-          headersToUse = [...modalHdrs];
-          mappedData = prepareFormTSEExportRows(liveRows, modalHdrs, modalHdrs);
-        } else {
-          mappedData = liveRows;
-          if (mappedData[0] && typeof mappedData[0] === 'object') {
-            headersToUse = Object.keys(mappedData[0]).filter((k) => !String(k).startsWith('__'));
-          }
-        }
-        if (formFileModalData?.tableStartCol != null) {
-          downloadTableStartCol = formFileModalData.tableStartCol;
-        }
-        if (formFileModalData?.dataStartIndex != null) {
-          downloadDataStartIndex = formFileModalData.dataStartIndex;
-        }
-        if (formFileModalData?.headerRowIndex != null) {
-          downloadHeaderRowIndex = formFileModalData.headerRowIndex;
-        }
-        savedDraftRowMatrix = null;
       }
       // Form XIX Karnataka: export autofill grid (modal, session ref, or snapshot cache).
       if (isFormXIXKarnatakaDownload && formXIXKarnatakaAutofillCacheMatches && !usedLiveModalGrid) {
@@ -37325,6 +37406,14 @@ const Statutory = ({ userEmail, userRole }) => {
       // Fallback to Zoho data if snapshot is not available (skip employee expansion for LWF Form C–style fixed grids).
       const downloadHasMeaningfulRows = isFormXVIIIDownload
         ? formXVIIIMPDownloadHasSubstantiveRows(mappedData, headersToUse)
+        : isFormTSEDownload
+          ? formTSEDownloadHasSubstantiveRows(
+              filterStatutoryTemplateColumnIndexRows(
+                Array.isArray(mappedData) ? mappedData : [],
+                headersToUse
+              ),
+              headersToUse
+            )
         : isClraRegisterOfWagesExcelExport
         ? wageRegisterDownloadHasSubstantiveRows(mappedData, headersToUse)
         : isClraOvertimeRegisterExcelExport
@@ -38746,7 +38835,13 @@ const Statutory = ({ userEmail, userRole }) => {
           if (repairedTDownload.tableStartCol != null) downloadTableStartCol = repairedTDownload.tableStartCol;
         }
       }
-      if (isFormTSEDownload && !downloadSnapshotFastReady && !usedLiveModalGrid && !usedSnapshot && !usedSavedDraftFile && !downloadHasMeaningfulRows) {
+      if (isFormTSEDownload && !formTSEDownloadHasSubstantiveRows(
+        filterStatutoryTemplateColumnIndexRows(
+          Array.isArray(mappedData) ? mappedData : [],
+          headersToUse
+        ),
+        headersToUse
+      )) {
         try {
           const refreshedRows = await fetchAndPopulateEmployeeData(headersToUse, {
             returnMappedData: true,
@@ -39128,7 +39223,15 @@ const Statutory = ({ userEmail, userRole }) => {
           ) {
             mappedData = prepareFormXXIIIOvertimeExportRows(liveRows, modalHdrs);
           } else if (isFormTSEDownload && modalHdrs.length > 0) {
-            mappedData = prepareFormTSEExportRows(liveRows, modalHdrs, modalHdrs);
+            mappedData = resolveFormTSERowsForExport({
+              liveRows: liveRows,
+              headers: modalHdrs,
+              employees: autofillEmployeesRef.current,
+              helpers: {
+                sanitizeValue: (v) => String(v ?? '').trim(),
+                formatStatutoryDateDisplay,
+              },
+            });
             headersToUse = [...modalHdrs];
           } else if (Array.isArray(mappedData) && mappedData.length > 0 && liveRows.length <= mappedData.length) {
             mappedData = overlayLiveModalRowsOntoDownload(mappedData, liveRows, modalHdrs, headersToUse);
@@ -41064,35 +41167,86 @@ const Statutory = ({ userEmail, userRole }) => {
         if (isFormFileModalOpen && countMeaningfulFormTableRows(formTableDataRef.current) > 0) {
           snapshotStatutoryAutofillExportCache();
         }
+        const lastExport = formTSELastExportRef.current;
+        const lastExportMatches =
+          lastExport &&
+          Array.isArray(lastExport.rows) &&
+          lastExport.rows.length > 0 &&
+          (!dedupD ||
+            !lastExport.dedupKey ||
+            lastExport.dedupKey === dedupD ||
+            (lastExport.formName &&
+              statutoryFormNamesMatch(
+                lastExport.formName,
+                lineItem?.formName || lineItem?.FormName || ''
+              )));
         const modalHdrs =
           Array.isArray(formFileModalData?.parsedTableHeaders) &&
           formFileModalData.parsedTableHeaders.length > 0
             ? formFileModalData.parsedTableHeaders
+            : lastExportMatches && Array.isArray(lastExport.headers) && lastExport.headers.length > 0
+              ? lastExport.headers
             : formTSEAutofillCacheMatches && statutoryAutofillExportCacheRef.current?.headers?.length
               ? statutoryAutofillExportCacheRef.current.headers
               : headersToUse;
-        let liveRows = [];
-        if (isFormFileModalOpen || liveModalGridLoadedRowCount > 0) {
-          liveRows = filterStatutoryTemplateColumnIndexRows(
-            copyLiveModalGridRowsForDownload(),
+        const refGridNow = Array.isArray(formTableDataRef.current) ? formTableDataRef.current : [];
+        const stateGridNow = Array.isArray(formTableData) ? formTableData : [];
+        // Prefer the grid that actually has employee names. An empty [] ref must not block state.
+        const liveGridNow =
+          formTSEDownloadHasSubstantiveRows(refGridNow, modalHdrs)
+            ? refGridNow
+            : formTSEDownloadHasSubstantiveRows(stateGridNow, modalHdrs)
+              ? stateGridNow
+              : refGridNow.length > 0
+                ? refGridNow
+                : stateGridNow;
+        const cacheRows =
+          formTSEAutofillCacheMatches && Array.isArray(statutoryAutofillExportCacheRef.current?.rows)
+            ? statutoryAutofillExportCacheRef.current.rows
+            : lastExportMatches
+              ? lastExport.rows
+              : [];
+        const peopleEmployees =
+          Array.isArray(autofillEmployeesRef.current) && autofillEmployeesRef.current.length > 0
+            ? autofillEmployeesRef.current
+            : getCachedPeopleData() || [];
+        const exportRows = resolveFormTSERowsForExport({
+          liveRows: filterStatutoryTemplateColumnIndexRows(
+            formTSEDownloadHasSubstantiveRows(liveGridNow, modalHdrs)
+              ? liveGridNow
+              : formTSEDownloadHasSubstantiveRows(cacheRows, modalHdrs)
+                ? cacheRows
+                : liveGridNow,
             modalHdrs
-          );
-        } else if (formTSEAutofillCacheMatches && statutoryAutofillExportCacheRef.current) {
-          liveRows = filterStatutoryTemplateColumnIndexRows(
-            statutoryAutofillExportCacheRef.current.rows.filter((row) =>
-              formTableRowHasMeaningfulData(row)
-            ),
-            modalHdrs
-          );
-        }
-        if (liveRows.length > 0 && Array.isArray(modalHdrs) && modalHdrs.length > 0) {
-          mappedData = prepareFormTSEExportRows(liveRows, modalHdrs, modalHdrs);
+          ),
+          headers: modalHdrs,
+          employees: peopleEmployees,
+          helpers: {
+            sanitizeValue: (v) => String(v ?? '').trim(),
+            formatStatutoryDateDisplay,
+          },
+        });
+        if (formTSEDownloadHasSubstantiveRows(exportRows, modalHdrs) && Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+          mappedData = exportRows;
           headersToUse = [...modalHdrs];
           usedLiveModalGrid = true;
           savedDraftRowMatrix = null;
+          if (lastExportMatches && lastExport.headerFormData) {
+            downloadHeaderFormData = {
+              ...downloadHeaderFormData,
+              ...lastExport.headerFormData,
+            };
+          }
+          if (lastExportMatches && lastExport.headerSiteContext) {
+            formTSEDownloadSiteContext = {
+              ...formTSEDownloadSiteContext,
+              ...lastExport.headerSiteContext,
+            };
+          }
         }
         const layoutSource =
           formFileModalData ||
+          (lastExportMatches ? lastExport : null) ||
           (formTSEAutofillCacheMatches ? statutoryAutofillExportCacheRef.current : null);
         if (layoutSource?.tableStartCol != null) {
           downloadTableStartCol = layoutSource.tableStartCol;
@@ -41629,7 +41783,7 @@ const Statutory = ({ userEmail, userRole }) => {
           );
         }
       }
-      let { blob, fileName } = isFormKGJGujaratDownload
+      let { blob, fileName, skipSystemGeneratedNote } = isFormKGJGujaratDownload
         ? await buildFormKGJGujaratWorkbookWithTemplateStyles({
             templateArrayBuffer: arrayBuffer,
             mappedData,
@@ -43045,27 +43199,74 @@ const Statutory = ({ userEmail, userRole }) => {
                           ''
                       })
                   : isFormTSEDownload
-                    ? await buildFormTSEWorkbookWithTemplateStyles({
-                        templateArrayBuffer: arrayBuffer,
-                        mappedData,
-                        headersToUse,
-                        parsedHeaderRowIndex: downloadHeaderRowIndex,
-                        parsedDataStartIndex: downloadDataStartIndex,
-                        parsedTableStartCol: downloadTableStartCol,
-                        parsedFormHeader: parsed.formHeader,
-                        headerFormData: downloadHeaderFormData,
-                        headerSiteContext: formTSEDownloadSiteContext,
-                        formFileName:
-                          templateMeta.formFileName ||
-                          resolvedFormFileItem.formFileName ||
-                          'form-draft.xlsx',
-                        currentItem: item,
-                        sheetNameHint:
-                          resolvedDownloadSheetName ||
-                          formFileModalData?.sheetName ||
-                          parsed.sheetName ||
-                          ''
-                      })
+                    ? await (async () => {
+                        // Prefer exact Save workbook so Download Draft File matches auto-download alignment.
+                        const lastExport = formTSELastExportRef.current;
+                        if (
+                          lastExport?.arrayBuffer &&
+                          lastExport.arrayBuffer.byteLength >= 32 &&
+                          (await formTSEWorkbookHasIdentityInColumnA(lastExport.arrayBuffer))
+                        ) {
+                          return {
+                            blob: new Blob([lastExport.arrayBuffer], {
+                              type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                            }),
+                            fileName:
+                              lastExport.fileName ||
+                              templateMeta.formFileName ||
+                              resolvedFormFileItem.formFileName ||
+                              'Form_T_Karnataka.xlsx',
+                            // Save already appended the system-generated note.
+                            skipSystemGeneratedNote: true
+                          };
+                        }
+                        const formTHeaders =
+                          Array.isArray(lastExport?.headers) && lastExport.headers.length > 0
+                            ? lastExport.headers
+                            : headersToUse;
+                        const formTRows =
+                          Array.isArray(lastExport?.rows) &&
+                          formTSEDownloadHasSubstantiveRows(lastExport.rows, formTHeaders)
+                            ? lastExport.rows
+                            : mappedData;
+                        return buildFormTSEWorkbookWithTemplateStyles({
+                          templateArrayBuffer: arrayBuffer,
+                          mappedData: formTRows,
+                          headersToUse: formTHeaders,
+                          parsedHeaderRowIndex:
+                            lastExport?.headerRowIndex != null
+                              ? lastExport.headerRowIndex
+                              : downloadHeaderRowIndex,
+                          parsedDataStartIndex:
+                            lastExport?.dataStartIndex != null
+                              ? lastExport.dataStartIndex
+                              : downloadDataStartIndex,
+                          // Always A — never pass a modal hint under ATTENDANCE (col J).
+                          parsedTableStartCol: 0,
+                          parsedFormHeader: parsed.formHeader,
+                          headerFormData:
+                            lastExport?.headerFormData &&
+                            Object.keys(lastExport.headerFormData).length > 0
+                              ? lastExport.headerFormData
+                              : downloadHeaderFormData,
+                          headerSiteContext:
+                            lastExport?.headerSiteContext &&
+                            Object.keys(lastExport.headerSiteContext).length > 0
+                              ? lastExport.headerSiteContext
+                              : formTSEDownloadSiteContext,
+                          formFileName:
+                            lastExport?.fileName ||
+                            templateMeta.formFileName ||
+                            resolvedFormFileItem.formFileName ||
+                            'form-draft.xlsx',
+                          currentItem: item,
+                          sheetNameHint:
+                            resolvedDownloadSheetName ||
+                            formFileModalData?.sheetName ||
+                            parsed.sheetName ||
+                            ''
+                        });
+                      })()
                   : isFormXVIIIDownload
                     ? await buildFormXVIIIWorkbookWithTemplateStyles({
                         templateArrayBuffer: arrayBuffer,
@@ -43110,7 +43311,11 @@ const Statutory = ({ userEmail, userRole }) => {
       if (!isFormXVDownload && !isFormXVRJDownload && !isFormXIRJDownload && !isFormXIVMPDownload && !isFormXIXMPDownload && !isFormXIXAPDownload && !isFormXIXKarnatakaDownload && !isFormQKarnatakaDownload && !isFormXIIIWorkmenDownload && !(isFormADownload && /\.zip$/i.test(String(fileName || '')))) {
         blob = await appendApprovedStatutoryHeadHrSignSealToDownloadBlob(blob, item);
       }
-      if (!/\.zip$/i.test(String(fileName || '')) && !isFormXIIIWorkmenDownload) {
+      if (
+        !/\.zip$/i.test(String(fileName || '')) &&
+        !isFormXIIIWorkmenDownload &&
+        !skipSystemGeneratedNote
+      ) {
         blob = await appendSystemGeneratedDocumentNoteToStatutoryBlob(blob);
       }
       const url = URL.createObjectURL(blob);
@@ -43393,6 +43598,153 @@ const Statutory = ({ userEmail, userRole }) => {
         resolvedFormFileItem?.FormFileName ||
         ''
     );
+
+    // Form T Karnataka: rebuild from clean formmaster (A–I identity) + repair.
+    // Never stream a dirty Draft template as-is — that left S.NO/Name under column J.
+    const formTDraftHintBlob = [
+      sourceItem?.formName,
+      sourceItem?.FormName,
+      resolvedFormFileItem?.formName,
+      resolvedFormFileItem?.FormName,
+      draftFileHintEarly
+    ]
+      .filter(Boolean)
+      .join(' ');
+    if (isFormTSEContext(null, sourceItem || resolvedFormFileItem, draftFileHintEarly, formTDraftHintBlob)) {
+      try {
+        setFormFileLoading(true);
+        setError('');
+        setSuccess('Downloading draft...');
+        let buffer = null;
+        const lastExport = formTSELastExportRef.current;
+        const lineItem = sourceItem || resolvedFormFileItem || {};
+        const hdrs =
+          Array.isArray(lastExport?.headers) && lastExport.headers.length > 0
+            ? lastExport.headers
+            : Array.isArray(formFileModalData?.parsedTableHeaders)
+              ? formFileModalData.parsedTableHeaders
+              : [];
+        const rows =
+          Array.isArray(lastExport?.rows) && lastExport.rows.length > 0
+            ? lastExport.rows
+            : Array.isArray(formTableDataRef.current)
+              ? formTableDataRef.current
+              : [];
+
+        const rebuildFormTFromCleanTemplate = async (mappedRows, mappedHdrs) => {
+          if (!formTSEDownloadHasSubstantiveRows(mappedRows, mappedHdrs)) return null;
+          const templateMeta = resolveStatutoryFormTemplateForRow(
+            lineItem,
+            { formmasterFormFileByMatchKey, formFileByFormKey, formmasterTemplates },
+            {}
+          );
+          const hasFormFile =
+            templateMeta?.formFile &&
+            templateMeta.formFile !== 'null' &&
+            String(templateMeta.formFile).trim() !== '';
+          if (!hasFormFile) return null;
+          const fn = (
+            templateMeta.formFileName ||
+            resolvedFormFileItem?.formFileName ||
+            fileName ||
+            'Form_T_Karnataka.xlsx'
+          ).replace(/[^a-zA-Z0-9._-]/g, '_');
+          const fileUrl = `/server/formmaster_function/templates/download/${templateMeta.formFile}?fileName=${encodeURIComponent(fn)}`;
+          const templateCacheKey = `formmaster|${templateMeta.formFile}|${fn}`;
+          const entry = await fetchFormTemplateArrayBuffer([fileUrl], templateCacheKey);
+          const templateBuf = entry?.arrayBuffer;
+          if (!templateBuf || templateBuf.byteLength < 32) return null;
+          const rebuilt = await buildFormTSEWorkbookWithTemplateStyles({
+            templateArrayBuffer: templateBuf,
+            mappedData: mappedRows,
+            headersToUse: mappedHdrs,
+            parsedHeaderRowIndex: lastExport?.headerRowIndex ?? formFileModalData?.headerRowIndex ?? -1,
+            parsedDataStartIndex: lastExport?.dataStartIndex ?? formFileModalData?.dataStartIndex ?? -1,
+            parsedTableStartCol: 0,
+            parsedFormHeader: formFileModalData?.parsedFormHeader || null,
+            headerFormData: lastExport?.headerFormData || {},
+            headerSiteContext: lastExport?.headerSiteContext || {},
+            formFileName: fileName || lastExport?.fileName || fn,
+            currentItem: lineItem,
+            sheetNameHint: formFileModalData?.sheetName || 'Form T'
+          });
+          let out = await rebuilt.blob.arrayBuffer();
+          out = await repairFormTSEWorkbookColumnAlignment(out);
+          return out;
+        };
+
+        // 1) Prefer last Save bytes when already A–I aligned.
+        if (lastExport?.arrayBuffer && lastExport.arrayBuffer.byteLength >= 32) {
+          const repairedLast = await repairFormTSEWorkbookColumnAlignment(lastExport.arrayBuffer);
+          if (await formTSEWorkbookHasIdentityInColumnA(repairedLast)) {
+            buffer = repairedLast;
+          }
+        }
+
+        // 2) Rebuild from clean formmaster + cached/modal rows (correct A–I / J+ layout).
+        if (!buffer) {
+          buffer = await rebuildFormTFromCleanTemplate(rows, hdrs);
+        }
+
+        // 3) Last resort: repair the saved Draft bytes (may still be an old J-shifted file).
+        if (!buffer) {
+          const resp = await fetch(
+            `/server/statutoryreg_function/statutory/${draftApiRowId}/file/Draft?disposition=attachment&_ts=${Date.now()}`,
+            { cache: 'no-store' }
+          );
+          if (!resp.ok) {
+            throw new Error(`Could not load saved draft (HTTP ${resp.status}).`);
+          }
+          buffer = await repairFormTSEWorkbookColumnAlignment(await resp.arrayBuffer());
+          if (
+            !(await formTSEWorkbookHasIdentityInColumnA(buffer)) &&
+            formTSEDownloadHasSubstantiveRows(rows, hdrs)
+          ) {
+            const rebuilt = await rebuildFormTFromCleanTemplate(rows, hdrs);
+            if (rebuilt) buffer = rebuilt;
+          }
+        }
+
+        if (!buffer || buffer.byteLength < 32) {
+          throw new Error('Saved draft is empty. Open Autofill, Save again, then download.');
+        }
+        buffer = await repairFormTSEWorkbookColumnAlignment(buffer);
+        if (!(await formTSEWorkbookHasIdentityInColumnA(buffer))) {
+          // Still J-shifted — regenerate via full path (clean formmaster, not Draft).
+          throw new Error('Form T columns still misaligned after repair; regenerating.');
+        }
+        if (formTSELastExportRef.current) {
+          formTSELastExportRef.current.arrayBuffer = buffer;
+        }
+        const blob = new Blob([buffer], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download =
+          fileName ||
+          lastExport?.fileName ||
+          'Form_T_Karnataka.xlsx';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        setSuccess('Draft file downloaded.');
+        setTimeout(() => setSuccess(''), 3000);
+      } catch (formTDraftErr) {
+        console.warn('Form T draft download failed, falling back to regenerate:', formTDraftErr);
+        await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem, {
+          sampleStatutoryId: draftApiRowId,
+          draftApiRowId
+          // Do not preferSavedDraftTemplate — regenerate must use clean formmaster.
+        });
+      } finally {
+        setFormFileLoading(false);
+      }
+      return;
+    }
+
     // Karnataka employee ZIP still needs lean rebuild from saved draft + sample.
     const isFormXIVKarnatakaDownloadRow =
       isFormXIVKarnatakaContext(
@@ -43476,6 +43828,37 @@ const Statutory = ({ userEmail, userRole }) => {
         setFormFileLoading(true);
         setError('');
         setSuccess('Downloading draft...');
+        const isFormTFast = isFormTSEContext(
+          null,
+          sourceItem || resolvedFormFileItem,
+          fastDraftHint,
+          fastDraftBlob
+        );
+        // Form T: prefer the exact workbook from the last Save auto-download (correct A–I alignment).
+        if (isFormTFast) {
+          const lastExport = formTSELastExportRef.current;
+          if (lastExport?.arrayBuffer && lastExport.arrayBuffer.byteLength >= 32) {
+            const aligned = await formTSEWorkbookHasIdentityInColumnA(lastExport.arrayBuffer);
+            if (aligned) {
+              // Bytes already include the Save-time system note — do not append again.
+              const blob = new Blob([lastExport.arrayBuffer], {
+                type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+              });
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement('a');
+              link.href = url;
+              link.download =
+                fileName || lastExport.fileName || 'Form_T_Karnataka.xlsx';
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+              URL.revokeObjectURL(url);
+              setSuccess('Draft file downloaded.');
+              setTimeout(() => setSuccess(''), 3000);
+              return true;
+            }
+          }
+        }
         const resp = await fetch(
           `/server/statutoryreg_function/statutory/${draftApiRowId}/file/Draft?disposition=attachment&_ts=${Date.now()}`,
           { cache: 'no-store' }
@@ -43483,6 +43866,11 @@ const Statutory = ({ userEmail, userRole }) => {
         if (!resp.ok) return false;
         const arrayBuffer = await resp.arrayBuffer();
         if (!arrayBuffer || arrayBuffer.byteLength < 32) return false;
+        // Form T: only stream server draft when employee rows are already in column A (not J).
+        if (isFormTFast) {
+          const aligned = await formTSEWorkbookHasIdentityInColumnA(arrayBuffer);
+          if (!aligned) return false;
+        }
         let blob = new Blob([arrayBuffer], {
           type: resp.headers.get('content-type') || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         });
@@ -43879,6 +44267,7 @@ const Statutory = ({ userEmail, userRole }) => {
       ''
     );
     if (isFormTSEDownloadRow) {
+      // Regenerate from formmaster (skipBackgroundPrefetch false → never use dirty Draft as template).
       await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem, {
         sampleStatutoryId: draftApiRowId,
         draftApiRowId
@@ -46766,18 +47155,54 @@ const Statutory = ({ userEmail, userRole }) => {
           sheetNameHint: resolvedSaveSheetNameForBuild || formFileModalData?.sheetName || ''
         }));
       } else if (formTSESave && templateWb) {
+        // Always re-read the live grid at write time (Save starts with long async template I/O).
+        snapshotStatutoryAutofillExportCache();
         const formTSEHeaders =
-          Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [];
-        const formTSERows = prepareFormTSEExportRows(
-          filterStatutoryTemplateColumnIndexRows(
-            (Array.isArray(tableDataForSave) ? tableDataForSave : []).filter((row) =>
-              formTableRowHasMeaningfulData(row)
-            ),
-            formTSEHeaders
-          ),
-          formTSEHeaders,
-          formTSEHeaders
-        );
+          Array.isArray(formFileModalData?.parsedTableHeaders) &&
+          formFileModalData.parsedTableHeaders.length > 0
+            ? formFileModalData.parsedTableHeaders
+            : Array.isArray(headersToUse) && headersToUse.length > 0
+              ? headersToUse
+              : Array.isArray(tableHeaders)
+                ? tableHeaders
+                : [];
+        const refGridNow = Array.isArray(formTableDataRef.current) ? formTableDataRef.current : [];
+        const stateGridNow = Array.isArray(formTableData) ? formTableData : [];
+        // Prefer the grid that actually has employee names. An empty [] ref must not block state.
+        const liveGridNow =
+          formTSEDownloadHasSubstantiveRows(refGridNow, formTSEHeaders)
+            ? refGridNow
+            : formTSEDownloadHasSubstantiveRows(stateGridNow, formTSEHeaders)
+              ? stateGridNow
+              : refGridNow.length > 0
+                ? refGridNow
+                : stateGridNow;
+        const cacheRows = Array.isArray(statutoryAutofillExportCacheRef.current?.rows)
+          ? statutoryAutofillExportCacheRef.current.rows
+          : [];
+        const formTSEHelpers = {
+          sanitizeValue: (v) => String(v ?? '').trim(),
+          formatStatutoryDateDisplay,
+        };
+        let formTSERows = resolveFormTSERowsForExport({
+          liveRows: filterStatutoryTemplateColumnIndexRows(liveGridNow, formTSEHeaders),
+          headers: formTSEHeaders,
+          employees: autofillEmployeesRef.current,
+          helpers: formTSEHelpers,
+        });
+        if (!formTSEDownloadHasSubstantiveRows(formTSERows, formTSEHeaders) && cacheRows.length > 0) {
+          formTSERows = resolveFormTSERowsForExport({
+            liveRows: filterStatutoryTemplateColumnIndexRows(cacheRows, formTSEHeaders),
+            headers: formTSEHeaders,
+            employees: autofillEmployeesRef.current,
+            helpers: formTSEHelpers,
+          });
+        }
+        if (!formTSEDownloadHasSubstantiveRows(formTSERows, formTSEHeaders)) {
+          throw new Error(
+            'Form T has no employee rows to save. Click Autofill, wait until employee names appear, then Save again.'
+          );
+        }
         const templateArrayBuffer =
           saveTemplateArrayBuffer || XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
         const stateHintForTSave = String(currentItem?.state ?? currentItem?.State ?? '').trim();
@@ -46824,7 +47249,8 @@ const Statutory = ({ userEmail, userRole }) => {
           headersToUse: formTSEHeaders,
           parsedHeaderRowIndex: headerRowIndex,
           parsedDataStartIndex: dataStartIndex,
-          parsedTableStartCol: formFileModalData?.tableStartCol ?? tableStartCol ?? 0,
+          // Always A — never pass a modal hint under ATTENDANCE (col J).
+          parsedTableStartCol: 0,
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           headerFormData: headerDataForSave,
           headerSiteContext: formTSESaveSiteContext,
@@ -46832,6 +47258,23 @@ const Statutory = ({ userEmail, userRole }) => {
           currentItem,
           sheetNameHint: resolvedSaveSheetNameForBuild || formFileModalData?.sheetName || ''
         }));
+        formTSELastExportRef.current = {
+          dedupKey: proofRowDedupKey(currentItem),
+          formName: String(currentItem?.formName || currentItem?.FormName || '').trim(),
+          headers: [...formTSEHeaders],
+          rows: formTSERows.map((row) =>
+            row && typeof row === 'object' && !Array.isArray(row) ? { ...row } : row
+          ),
+          headerFormData:
+            headerDataForSave && typeof headerDataForSave === 'object' ? { ...headerDataForSave } : {},
+          headerSiteContext: { ...formTSESaveSiteContext },
+          tableStartCol: 0,
+          dataStartIndex,
+          headerRowIndex,
+          arrayBuffer: null,
+          fileName: fileName || draftFileNameForSave || 'Form_T_Karnataka.xlsx',
+          savedAt: Date.now(),
+        };
       } else if (formXVIIISave && templateWb) {
         let formXVIIISaveExcelCols = formFileModalData?.headerExcelCols ?? null;
         let mpSaveHeaders =
@@ -46953,6 +47396,31 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (!isZipSaveDownload && blob) {
         blob = await appendSystemGeneratedDocumentNoteToStatutoryBlob(blob);
+      }
+      // Form T: repair J→A shift if needed, then download + cache + upload the same bytes.
+      if (formTSESave && blob && !isZipSaveDownload) {
+        try {
+          let formTBuf = await blob.slice(0).arrayBuffer();
+          formTBuf = await repairFormTSEWorkbookColumnAlignment(formTBuf);
+          blob = new Blob([formTBuf], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          });
+          if (formTSELastExportRef.current) {
+            formTSELastExportRef.current.arrayBuffer = formTBuf;
+            formTSELastExportRef.current.fileName =
+              fileName || draftFileNameForSave || formTSELastExportRef.current.fileName;
+          }
+        } catch (_) {
+          /* ignore repair/cache failure */
+        }
+        const formTDownloadUrl = URL.createObjectURL(blob);
+        const formTLink = document.createElement('a');
+        formTLink.href = formTDownloadUrl;
+        formTLink.download = fileName || draftFileNameForSave || 'Form_T_Karnataka.xlsx';
+        document.body.appendChild(formTLink);
+        formTLink.click();
+        document.body.removeChild(formTLink);
+        URL.revokeObjectURL(formTDownloadUrl);
       }
       const file = new File(
         [blob],
@@ -51626,7 +52094,8 @@ const Statutory = ({ userEmail, userRole }) => {
                       parsedTableHeaders: repaired.headers,
                       headerRowIndex: repaired.headerRowIndex,
                       dataStartIndex: repaired.dataStartIndex,
-                      tableStartCol: repaired.tableStartCol,
+                      // Form T identity always starts at column A — never under ATTENDANCE (J).
+                      tableStartCol: 0,
                     }
                   : prev
               );
@@ -54269,20 +54738,6 @@ const Statutory = ({ userEmail, userRole }) => {
         return hit;
       };
 
-      const formatFormTPaymentMode = (mode) => {
-        const raw = String(mode ?? '').trim();
-        if (!raw) return '';
-        const lower = raw.toLowerCase().replace(/[\s_-]+/g, '');
-        if (lower === 'banktransfer' || lower === 'bank') return 'Bank Transfer';
-        if (lower === 'cash') return 'Cash';
-        if (lower === 'cheque' || lower === 'check') return 'Cheque';
-        return raw
-          .replace(/_/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .replace(/\b\w/g, (ch) => ch.toUpperCase());
-      };
-
       const sumFormTPayrollScalarAmounts = (...vals) => {
         let total = 0;
         let hasAny = false;
@@ -54440,36 +54895,28 @@ const Statutory = ({ userEmail, userRole }) => {
           p['Gross Pay'],
           grossFromEarnings > 0 ? grossFromEarnings : ''
         );
-        const otHours = firstPresent(
-          flat.overtime_hours,
-          flat.total_overtime_hours,
-          flat.ot_hours,
-          flat.monthly_overtime_hours,
-          payrollData?.overtime_hours,
-          payrollData?.total_overtime_hours,
-          p.overtime_hours,
-          p['overtime_hours'],
-          p.total_overtime_hours,
-          p['total_overtime_hours'],
-          p.ot_hours,
-          p['ot_hours']
-        );
+        // Net Amount Payable ← net_pay (never monthly_salary fallback — that is not net_pay)
         const netPay = firstPresent(
           flat.net_pay,
+          flat.Net_Pay,
+          flat.netPay,
           payrollData?.net_pay,
+          payrollData?.['net_pay'],
+          payrollData?.Net_Pay,
+          payrollData?.netPay,
           p.net_pay,
           p['net_pay'],
-          p.monthly_salary,
-          p['monthly_salary']
+          p.Net_Pay,
+          p['Net_Pay'],
+          p.netPay,
+          p['netPay'],
+          p.NetPay,
+          p['NetPay'],
+          p.take_home,
+          p['take_home']
         );
-        const totalDeductions = firstPresent(
-          flat.total_deductions,
-          payrollData?.total_deductions,
-          p.total_deductions,
-          p['total_deductions'],
-          p.total_employee_deductions,
-          p['total_employee_deductions']
-        );
+        // Deductions Total ← gross_pay − net_pay (not payroll total_deductions)
+        const totalDeductions = computeFormTSEKarnatakaTotalDeductions(grossPay, netPay);
         const totalBenefits = firstPresent(
           flat.total_benefits,
           payrollData?.total_benefits,
@@ -54482,12 +54929,9 @@ const Statutory = ({ userEmail, userRole }) => {
           p.total_taxes,
           p['total_taxes']
         );
-        const paymentMode = firstPresent(
-          flat.payment_mode,
-          payrollData?.payment_mode,
-          p.payment_mode,
-          p['payment_mode']
-        );
+        // Mode of Payment Cash/ Cheque No. ← always Bank Transfer
+        const paymentMode = FORM_T_KA_DEFAULT_PAYMENT_MODE;
+        // Total OT hours ← NIL (do not use payroll OT hours)
         const column36Total = sumFormTPayrollScalarAmounts(totalDeductions, totalBenefits, totalTaxes);
         return {
           basic,
@@ -54500,7 +54944,7 @@ const Statutory = ({ userEmail, userRole }) => {
           pt,
           paidDays,
           grossPay,
-          otHours,
+          otHours: '',
           netPay,
           totalDeductions,
           totalBenefits,
@@ -54526,7 +54970,15 @@ const Statutory = ({ userEmail, userRole }) => {
           !payrollRow &&
           !hasFormTSEKarnatakaMonthDefaultPayrollContext(emp, monthCandidates)
         ) {
-          return false;
+          // Still default Total OT hours to NIL (and payment mode) when payroll is absent.
+          const otHeaderOnly = headers.totalOtHours || headers.ot;
+          if (otHeaderOnly) {
+            row[otHeaderOnly] = sanitizeValue(FORM_T_KA_OT_HOURS_NIL);
+          }
+          if (headers.paymentMode) {
+            row[headers.paymentMode] = sanitizeValue(FORM_T_KA_DEFAULT_PAYMENT_MODE);
+          }
+          return !!(otHeaderOnly || headers.paymentMode);
         }
         const map = applyFormTSEKarnatakaMonthDefaultPayrollToMap(
           payrollRow ? buildFormTSEPayrollMap(payrollRow) : {},
@@ -54536,8 +54988,16 @@ const Statutory = ({ userEmail, userRole }) => {
         const hdrList = Array.isArray(headerList) ? headerList : [];
         const findHdrByStatCol = (colNum) =>
           hdrList.find((h) => new RegExp(`\\(\\s*${colNum}\\s*\\)`, 'i').test(String(h || ''))) || null;
-        const totalEarningsHdr = headers.totalEarnings || findHdrByStatCol(25);
-        const netPayableHdr = headers.netPayable || findHdrByStatCol(36);
+        const totalEarningsHdr =
+          headers.totalEarnings ||
+          resolveFormTSEKarnatakaEarningsTotalHeader(hdrList) ||
+          findHdrByStatCol(25);
+        const deductionTotalHdr =
+          headers.deductionTotal || resolveFormTSEKarnatakaDeductionTotalHeader(hdrList);
+        const netPayableHdr =
+          headers.netPayable ||
+          resolveFormTSEKarnatakaNetAmountPayableHeader(hdrList) ||
+          findHdrByStatCol(36);
         const pfHdr = headers.pf || findHdrByStatCol(27);
         const ptHdr = headers.pt || findHdrByStatCol(28);
         const parsePayrollNum = (val) => {
@@ -54553,6 +55013,11 @@ const Statutory = ({ userEmail, userRole }) => {
           if (!allowZero && num === 0) return;
           row[hdr] = sanitizeValue(num);
         };
+        // Never write earned-wages gross into the Deductions-band "Total".
+        const safeEarningsTotalHdr =
+          totalEarningsHdr && !isFormTSEKarnatakaDeductionTotalHeader(totalEarningsHdr, hdrList)
+            ? totalEarningsHdr
+            : null;
         if (headers.payableDays) {
           if (
             map.paidDays === '' &&
@@ -54570,12 +55035,10 @@ const Statutory = ({ userEmail, userRole }) => {
         setCell(headers.hra, map.hra);
         setCell(headers.conv, map.conv);
         setCell(headers.medAllow, map.medAllow);
+        // Total OT hours ← NIL default (do not fetch payroll/attendance OT)
         const otHeader = headers.totalOtHours || headers.ot;
-        if (otHeader && map.otHours !== '' && map.otHours != null) {
-          const otNum = parsePayrollNum(map.otHours);
-          if (Number.isFinite(otNum) && otNum > 0) {
-            row[otHeader] = sanitizeValue(formatStatutoryOvertimeHoursDisplay(otNum) || otNum);
-          }
+        if (otHeader) {
+          row[otHeader] = sanitizeValue(FORM_T_KA_OT_HOURS_NIL);
         }
         setCell(headers.esi, map.esi);
         setCell(pfHdr, map.pf);
@@ -54589,8 +55052,6 @@ const Statutory = ({ userEmail, userRole }) => {
           headers.medAllow,
           headers.attendanceBonus,
           headers.specialAllow,
-          headers.ot,
-          headers.totalOtHours,
           headers.nfh,
           headers.maternityBenefit,
           headers.othersEarning,
@@ -54610,30 +55071,30 @@ const Statutory = ({ userEmail, userRole }) => {
         ];
         const totalEarnings = sumRowNumericHeaders(row, earningHeaders);
         const totalDeductions = sumRowNumericHeaders(row, deductionHeaders);
-        if (totalEarningsHdr) {
+        if (safeEarningsTotalHdr) {
           if (map.grossPay !== '' && map.grossPay != null) {
-            setCell(totalEarningsHdr, map.grossPay, { allowZero: true });
+            setCell(safeEarningsTotalHdr, map.grossPay, { allowZero: true });
           } else if (totalEarnings !== '') {
-            row[totalEarningsHdr] = sanitizeValue(totalEarnings);
+            row[safeEarningsTotalHdr] = sanitizeValue(totalEarnings);
           }
         }
-        if (headers.deductionTotal) {
-          if (map.totalDeductions !== '' && map.totalDeductions != null) {
-            setCell(headers.deductionTotal, map.totalDeductions, { allowZero: true });
+        // Deductions Total ← gross_pay − net_pay (column before Net Amount Payable)
+        const deductionsFromGrossNet = computeFormTSEKarnatakaTotalDeductions(map.grossPay, map.netPay);
+        if (deductionTotalHdr) {
+          if (deductionsFromGrossNet !== '' && deductionsFromGrossNet != null) {
+            setCell(deductionTotalHdr, deductionsFromGrossNet, { allowZero: true });
+          } else if (map.totalDeductions !== '' && map.totalDeductions != null) {
+            setCell(deductionTotalHdr, map.totalDeductions, { allowZero: true });
           } else if (totalDeductions !== '') {
-            row[headers.deductionTotal] = sanitizeValue(totalDeductions);
+            row[deductionTotalHdr] = sanitizeValue(totalDeductions);
           }
         }
-        if (headers.paymentMode && map.paymentMode !== '' && map.paymentMode != null) {
-          const paymentText = formatFormTPaymentMode(map.paymentMode);
-          if (paymentText) row[headers.paymentMode] = sanitizeValue(paymentText);
+        if (headers.paymentMode) {
+          row[headers.paymentMode] = sanitizeValue(FORM_T_KA_DEFAULT_PAYMENT_MODE);
         }
-        if (netPayableHdr) {
-          if (map.netPay !== '' && map.netPay != null) {
-            setCell(netPayableHdr, map.netPay, { allowZero: true });
-          } else if (map.column36Total !== '' && map.column36Total != null) {
-            setCell(netPayableHdr, map.column36Total, { allowZero: true });
-          }
+        // Net Amount Payable ← net_pay only (never column36 / deductions fallback)
+        if (netPayableHdr && map.netPay !== '' && map.netPay != null) {
+          setCell(netPayableHdr, map.netPay, { allowZero: true });
         }
         return (
           map.basic !== '' ||
@@ -54641,14 +55102,14 @@ const Statutory = ({ userEmail, userRole }) => {
           map.paidDays !== '' ||
           map.grossPay !== '' ||
           map.netPay !== '' ||
-          map.otHours !== '' ||
           map.conv !== '' ||
           map.medAllow !== '' ||
           map.pf !== '' ||
           map.pt !== '' ||
-          map.paymentMode !== '' ||
-          map.column36Total !== '' ||
+          !!headers.paymentMode ||
+          !!otHeader ||
           map.totalDeductions !== '' ||
+          deductionsFromGrossNet !== '' ||
           hasFormTSEKarnatakaMonthDefaultPayrollContext(emp, monthCandidates)
         );
       };
@@ -54746,85 +55207,9 @@ const Statutory = ({ userEmail, userRole }) => {
         return (Array.isArray(headers) ? headers : []).find((h) => numRe.test(String(h || '').toLowerCase())) || null;
       };
 
-      const isFormTEarningsTotalHeaderLabel = (s) =>
-        (s === 'total' || (/\btotal\b/.test(s) && !s.includes('deduction') && !s.includes('net'))) &&
-        !s.includes('ot') &&
-        !s.includes('attendance') &&
-        !s.includes('deduction');
-
-      const isFormTNetPayableHeaderLabel = (s) =>
-        (s.includes('net') && (s.includes('payable') || s.includes('paid') || s.includes('amount'))) ||
-        (/\btotal\b/.test(s) && s.includes('net'));
-
       const isFormTPaymentModeHeaderLabel = (s) =>
         (s.includes('mode') && s.includes('payment')) ||
         ((s.includes('cash') || s.includes('cheque') || s.includes('check')) && s.includes('payment'));
-
-      const resolveFormTEarningsTotalHeader = (list) => {
-        const strict = findHeaderByFormTColumnNumber(list, 25, isFormTEarningsTotalHeaderLabel);
-        if (strict) return strict;
-        const h25 = findFormTHeaderByColumnNumber(list, 25);
-        if (h25) {
-          const s = normalizeWageRegisterHeaderCell(h25);
-          if (s.includes('subsist')) return null;
-          if (!s.includes('deduction') && !s.includes('net') && !s.includes('ot')) return h25;
-        }
-        const bareTotals = list.filter((h) => {
-          const raw = String(h || '');
-          if (/\(\s*36\s*\)/i.test(raw)) return false;
-          const s = normalizeWageRegisterHeaderCell(h);
-          return isFormTEarningsTotalHeaderLabel(s);
-        });
-        if (bareTotals.length === 1) return bareTotals[0];
-        if (bareTotals.length > 1) {
-          const with25 = bareTotals.find((h) => /\(\s*25\s*\)/i.test(String(h)));
-          if (with25) return with25;
-          const subsIdx = list.findIndex((h) => normalizeWageRegisterHeaderCell(h).includes('subsist'));
-          if (subsIdx >= 0) {
-            const afterSubs = list
-              .slice(subsIdx + 1)
-              .find((h) => isFormTEarningsTotalHeaderLabel(normalizeWageRegisterHeaderCell(h)));
-            if (afterSubs) return afterSubs;
-          }
-        }
-        return (
-          list.find((h) => {
-            const raw = String(h || '');
-            if (!/\(\s*25\s*\)/i.test(raw)) return false;
-            const s = normalizeWageRegisterHeaderCell(h);
-            return !s.includes('subsist') && !s.includes('deduction');
-          }) || null
-        );
-      };
-
-      const resolveFormTNetPayableHeader = (list) => {
-        const strict =
-          findHeaderByFormTColumnNumber(list, 36, isFormTNetPayableHeaderLabel) ||
-          findHeaderByFormTColumnNumber(list, 36, (s) => /\btotal\b/.test(s) && !s.includes('deduction'));
-        if (strict) return strict;
-        const h36 = findFormTHeaderByColumnNumber(list, 36);
-        if (h36) {
-          const s = normalizeWageRegisterHeaderCell(h36);
-          if (
-            isFormTNetPayableHeaderLabel(s) ||
-            (/\btotal\b/.test(s) && !s.includes('deduction')) ||
-            (!s.includes('deduction') && !s.includes('subsist') && !s.includes('ot'))
-          ) {
-            return h36;
-          }
-        }
-        return (
-          list.find((h) => {
-            const raw = String(h || '');
-            if (!/\(\s*36\s*\)/i.test(raw)) return false;
-            const s = normalizeWageRegisterHeaderCell(h);
-            return (
-              isFormTNetPayableHeaderLabel(s) ||
-              (/\btotal\b/.test(s) && !s.includes('deduction') && !s.includes('subsist'))
-            );
-          }) || null
-        );
-      };
 
       const resolveFormTSETableHeaders = (headers) => {
         const list = Array.isArray(headers) ? headers : [];
@@ -54835,18 +55220,10 @@ const Statutory = ({ userEmail, userRole }) => {
         const findByHeaderText = (labelTest) =>
           list.find((h) => labelTest(normalizeWageRegisterHeaderCell(h)));
         const headersAt15 = list.filter((h) => /\(\s*15\s*\)/i.test(String(h || '')));
-        const earningTotal = resolveFormTEarningsTotalHeader(list);
-        const deductionTotal =
-          findByCol(35, (s) => s.includes('deduction') && s.includes('total')) ||
-          findByLabel((s) => s.includes('deduction') && s.includes('total') && !s.includes('net'));
-        const netPayable =
-          resolveFormTNetPayableHeader(list) ||
-          findByHeaderText(
-            (s) =>
-              (s.includes('net') && s.includes('payable')) ||
-              (s.includes('net') && s.includes('amount') && s.includes('paid'))
-          ) ||
-          findByLabel((s) => s.includes('net') && (s.includes('payable') || s.includes('paid')));
+        // Bare Deduction "Total" (before Net Amount Payable) must not become earned-wages Total.
+        const earningTotal = resolveFormTSEKarnatakaEarningsTotalHeader(list);
+        const deductionTotal = resolveFormTSEKarnatakaDeductionTotalHeader(list);
+        const netPayable = resolveFormTSEKarnatakaNetAmountPayableHeader(list);
         return {
           payableDays:
             findByHeaderText(
@@ -63136,7 +63513,18 @@ const Statutory = ({ userEmail, userRole }) => {
       if (formTSEAutofillContext && formTSEHeadersResolved && Array.isArray(mappedData) && mappedData.length > 0) {
         try {
           const tseFastHits = await enrichFormTSEPayrollRows(mappedData, employeesForMapping);
-          if (tseFastHits > 0 && !returnMappedData && !isStaleAutofillRun()) {
+          mappedData = applyFormTSEKarnatakaOtHoursNilToMappedRows(
+            mappedData,
+            currentHeaders,
+            FORM_T_KA_OT_HOURS_NIL
+          );
+          mappedData.forEach((row, rowIndex) => {
+            const em = unwrapEmp(employeesForMapping[rowIndex]);
+            if (isFormTSEKarnatakaBlankRegisterEmployee(em)) {
+              clearFormTSEKarnatakaBlankRegisterRow(row, currentHeaders, formTSEHeadersResolved);
+            }
+          });
+          if ((tseFastHits > 0 || formTSEHeadersResolved.totalOtHours || formTSEHeadersResolved.ot) && !returnMappedData && !isStaleAutofillRun()) {
             mergeMappedIntoFormTable(mappedData, true);
           }
           console.log(`Form T payroll enrich (post-preload): ${tseFastHits}/${mappedData.length} row(s)`);
@@ -64146,8 +64534,8 @@ const Statutory = ({ userEmail, userRole }) => {
             const needsForm10OvertimeMerge = false;
             const needsFormXXIIIOvertimeMerge = formXXIIIAutofillContext;
             const needsFormXIXKarnatakaOvertimeMerge = formXIXKarnatakaAutofillContext;
-            const needsFormTSEOtHoursMerge =
-              formTSEAutofillContext && !!(formTSEHeadersResolved?.totalOtHours || formTSEHeadersResolved?.ot);
+            // Form T Total OT hours defaults to NIL — do not fetch attendance OT.
+            const needsFormTSEOtHoursMerge = false;
 
             if (
               needsAttendanceHoursMerge ||
@@ -64852,6 +65240,19 @@ const Statutory = ({ userEmail, userRole }) => {
                   clearFormTSEKarnatakaBlankRegisterRow(row, currentHeaders, formTSEHeadersResolved);
                 }
               });
+              if (formTSEAutofillContext) {
+                mappedData = applyFormTSEKarnatakaOtHoursNilToMappedRows(
+                  mappedData,
+                  currentHeaders,
+                  FORM_T_KA_OT_HOURS_NIL
+                );
+                mappedData.forEach((row, rowIndex) => {
+                  const em = unwrapEmp(employeesForMapping[rowIndex]);
+                  if (isFormTSEKarnatakaBlankRegisterEmployee(em)) {
+                    clearFormTSEKarnatakaBlankRegisterRow(row, currentHeaders, formTSEHeadersResolved);
+                  }
+                });
+              }
               console.log(
                 `Attendance merge for ${sdate}..${edate}; records=${attendanceRecords.length}; rows=${mappedData.length}; populated=${attendanceHoursPopulated}`
               );
@@ -77055,6 +77456,43 @@ const Statutory = ({ userEmail, userRole }) => {
 
   const handleCloseFormFileModal = () => {
     snapshotStatutoryAutofillExportCache();
+    // Keep Form T rows after close so Download Draft File can regenerate employee data.
+    if (
+      isFormTSEContext(
+        formFileModalData?.parsedFormHeader,
+        formFileModalData?.item || autofillItem,
+        formFileModalData?.formFileName || formFileModalData?.fileName || '',
+        formFileModalData?.sheetText || ''
+      ) &&
+      formTSEDownloadHasSubstantiveRows(
+        formTableDataRef.current,
+        formFileModalData?.parsedTableHeaders || tableHeaders
+      )
+    ) {
+      const item = formFileModalData?.item || autofillItem;
+      const hdrs =
+        Array.isArray(formFileModalData?.parsedTableHeaders) &&
+        formFileModalData.parsedTableHeaders.length > 0
+          ? formFileModalData.parsedTableHeaders
+          : Array.isArray(tableHeaders)
+            ? tableHeaders
+            : [];
+      formTSELastExportRef.current = {
+        dedupKey: item ? proofRowDedupKey(item) : formTSELastExportRef.current?.dedupKey,
+        formName: String(item?.formName || item?.FormName || '').trim(),
+        headers: [...hdrs],
+        rows: (formTableDataRef.current || []).map((row) =>
+          row && typeof row === 'object' && !Array.isArray(row) ? { ...row } : row
+        ),
+        headerFormData:
+          headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {},
+        headerSiteContext: formTSELastExportRef.current?.headerSiteContext || {},
+        tableStartCol: formFileModalData?.tableStartCol,
+        dataStartIndex: formFileModalData?.dataStartIndex,
+        headerRowIndex: formFileModalData?.headerRowIndex,
+        savedAt: Date.now(),
+      };
+    }
     autofillRunSeqRef.current += 1;
     isFormFileModalOpenRef.current = false;
     pendingSilentRefreshWhileModalRef.current = false;
@@ -81271,9 +81709,17 @@ const Statutory = ({ userEmail, userRole }) => {
                                       formWDraftDownloadHint
                                     ) &&
                                     !/register\s+of\s+fines/i.test(formWDraftDownloadHint);
+                                  const isFormTSEDraftRow = isFormTSEContext(
+                                    null,
+                                    item,
+                                    formWDraftDownloadHint,
+                                    ''
+                                  );
+                                  // Form T: always use draft-file path (fetch + repair J→A). Never regenerate.
                                   // Form U / W / B TN / V / I / A / X: always regenerate from Autofill (saved Draft is often still blank).
                                   const shouldDownloadSavedDraftDirectly =
-                                    hasSavedDraftFileForDownload &&
+                                    (hasSavedDraftFileForDownload ||
+                                      (isFormTSEDraftRow && isNumericStatutoryBackendId(draftApiRowId))) &&
                                     !isFormWDraftRow &&
                                     !isFormBTamilNaduDraftRow &&
                                     !isFormUDraftRow &&
@@ -81327,7 +81773,14 @@ const Statutory = ({ userEmail, userRole }) => {
                                         onClick={(e) => {
                                             e.preventDefault();
                                             e.stopPropagation();
-                                          if (shouldDownloadSavedDraftDirectly) {
+                                          if (isFormTSEDraftRow && draftApiRowId) {
+                                            handleDownloadSavedDraftFile(
+                                              draftApiRowId,
+                                              draftDownloadFileName,
+                                              draftSourceItem || item,
+                                              resolvedFormFileItem
+                                            );
+                                          } else if (shouldDownloadSavedDraftDirectly) {
                                             handleDownloadSavedDraftFile(
                                               draftApiRowId,
                                               draftDownloadFileName,
@@ -81343,7 +81796,9 @@ const Statutory = ({ userEmail, userRole }) => {
                                           }
                                         }}
                                       >
-                                        {shouldDownloadSavedDraftDirectly ? 'Download Draft File' : 'Download form template'}
+                                        {isFormTSEDraftRow || shouldDownloadSavedDraftDirectly
+                                          ? 'Download Draft File'
+                                          : 'Download form template'}
                                       </a>
                                     </span>
                                   );

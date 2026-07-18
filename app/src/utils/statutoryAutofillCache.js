@@ -521,9 +521,13 @@ export function getPayrollBulkRowsForAutofill() {
 /** Let the browser paint and process scroll/input before heavy autofill work continues. */
 export function yieldToMain() {
   return new Promise((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(resolve);
-    });
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(resolve);
+      });
+      return;
+    }
+    setTimeout(resolve, 0);
   });
 }
 

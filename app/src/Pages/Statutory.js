@@ -88,7 +88,13 @@ import {
 import { getPayrollOrganizationId } from '../utils/payrollOrgId';
 import {
   flattenPayrollEarningColumns,
+  getEarningsArray,
+  getDeductionsArray,
   getTaxesArray,
+  getPayrollPayloadObject,
+  findEarningAmount,
+  findDeductionAmount,
+  sumPayrollLineItems,
   readPayrollForm15WageAmounts,
   payrollRowsHaveWageBreakdown,
   payrollRowHasNetPay,
@@ -241,6 +247,9 @@ import {
   formXVIIIMPDownloadHasSubstantiveRows,
   formXVIIIMPRowsNeedPayrollEnrich,
   enrichFormXVIIIMPPayrollRowsFromCache,
+  finalizeFormXVIIIMPOtherAllowancesForDownload,
+  snapshotFormXVIIIMPDistinctOtherAllowances,
+  restoreFormXVIIIMPDistinctOtherAllowances,
   FORM_XVIII_MP_NIL,
   FORM_XVIII_MP_LEAVE_CATEGORY,
 } from './statutory/formXVIIIMPCombinedRegister';
@@ -41034,17 +41043,17 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       let formXVIIIDownloadExcelCols =
         parsed.headerExcelCols ?? formFileModalData?.headerExcelCols ?? null;
+      let formXVIIIDownloadPayrollRows = null;
+      let formXVIIIDownloadEmployees = [];
+      let formXVIIIDownloadPayrollHelpers = null;
+      // Keep the on-screen Other allowances (e.g. 32165) before remap/enrich can drop them.
+      const formXVIIIPreservedOtherAllowances =
+        isFormXVIIIDownload && Array.isArray(mappedData)
+          ? snapshotFormXVIIIMPDistinctOtherAllowances(mappedData, headersToUse)
+          : [];
       if (isFormXVIIIDownload && templateWb?.SheetNames?.length) {
-        const mpHdrCount = Array.isArray(headersToUse)
-          ? headersToUse.filter((h) => String(h || '').trim()).length
-          : 0;
-        const mpColsReady =
-          mpHdrCount >= 4 &&
-          Array.isArray(formXVIIIDownloadExcelCols) &&
-          formXVIIIDownloadExcelCols.length === mpHdrCount &&
-          downloadDataStartIndex != null &&
-          downloadDataStartIndex >= 0;
-        if (!mpColsReady) {
+        // Always rebuild from the template so section col 14 stays "Other allowances"
+        // (modal headerExcelCols can inherit a merged Wage-rate label).
         const mpDownloadCols = resolveMPCombinedRegisterVisibleTableColumns({
           workbook: templateWb,
           sheetName:
@@ -41060,13 +41069,13 @@ const Statutory = ({ userEmail, userRole }) => {
         });
         if (mpDownloadCols.headers.length >= 4) {
           const priorHdrs = [...headersToUse];
-          headersToUse = mpDownloadCols.headers;
+          headersToUse = [...mpDownloadCols.headers];
           formXVIIIDownloadExcelCols = mpDownloadCols.excelCols;
           downloadHeaderRowIndex = mpDownloadCols.headerRowIndex;
           downloadDataStartIndex = mpDownloadCols.dataStartIndex;
           downloadTableStartCol = mpDownloadCols.tableStartCol || 0;
+          // Remap also repairs duplicate Wage-rate → Other allowances on headersToUse.
           mappedData = remapMPCombinedRegisterRows(mappedData, priorHdrs, headersToUse);
-        }
         }
       }
       if (
@@ -41080,9 +41089,11 @@ const Statutory = ({ userEmail, userRole }) => {
           parsed?.formHeader?.wagePeriodText || formFileModalData?.parsedFormHeader?.wagePeriodText || ''
         );
         const employeesForMpDownload = resolveStatutoryEmployeesForSaveOrder(autofillEmployeesRef.current);
+        formXVIIIDownloadEmployees =
+          employeesForMpDownload.length > 0 ? employeesForMpDownload : mappedData.map(() => ({}));
         enrichFormXVIIIMPEmployeeRows(
           mappedData,
-          employeesForMpDownload.length > 0 ? employeesForMpDownload : mappedData.map(() => ({})),
+          formXVIIIDownloadEmployees,
           headersToUse,
           {
             sanitizeValue: (v) => String(v ?? '').trim(),
@@ -41092,27 +41103,40 @@ const Statutory = ({ userEmail, userRole }) => {
         const mpDownloadPayrollHelpers = {
           sanitizeValue: (v) => String(v ?? '').trim(),
           flattenPayrollEarningColumns,
+          getPayrollPayloadObject,
+          getEarningsArray,
+          getDeductionsArray,
+          findEarningAmount,
+          findDeductionAmount,
+          sumPayrollLineItems,
           resolvePayrollAmounts: (payload) =>
             resolveApShopsRegisterPayrollAmounts(payload, null, null),
         };
+        formXVIIIDownloadPayrollHelpers = mpDownloadPayrollHelpers;
         let mpDownloadHits = enrichFormXVIIIMPPayrollRowsFromCache(
           mappedData,
-          employeesForMpDownload.length > 0 ? employeesForMpDownload : mappedData.map(() => ({})),
+          formXVIIIDownloadEmployees,
           headersToUse,
           mpDownloadMonth,
           mpDownloadPayrollHelpers
         );
-        if (mpDownloadHits === 0) {
+        formXVIIIDownloadPayrollRows =
+          resolveFormXVIIIMPPayrollRowsForAutofill(
+            (getCachedForm15PayrollTableRows(mpDownloadMonth)?.rows || []).map((row) =>
+              flattenPayrollEarningColumns(row)
+            ),
+            mpDownloadMonth
+          ) || [];
+        if (mpDownloadHits === 0 || formXVIIIMPRowsNeedPayrollEnrich(mappedData, headersToUse)) {
           try {
             const mpLoadedRows = await loadFormXVIIIMPPayrollRowsForAutofill(mpDownloadMonth, {
               timeoutMs: 12000,
             });
             if (Array.isArray(mpLoadedRows) && mpLoadedRows.length > 0) {
+              formXVIIIDownloadPayrollRows = mpLoadedRows;
               mpDownloadHits = enrichFormXVIIIMPPayrollRows(
                 mappedData,
-                employeesForMpDownload.length > 0
-                  ? employeesForMpDownload
-                  : mappedData.map(() => ({})),
+                formXVIIIDownloadEmployees,
                 headersToUse,
                 {
                   ...mpDownloadPayrollHelpers,
@@ -41124,6 +41148,24 @@ const Statutory = ({ userEmail, userRole }) => {
             console.warn('Form XVIII MP download payroll reload skipped:', mpDlErr?.message || mpDlErr);
           }
         }
+        // Final pass: force Other allowances = gross − basic − hra (never Wage rate).
+        finalizeFormXVIIIMPOtherAllowancesForDownload(
+          mappedData,
+          headersToUse,
+          formXVIIIDownloadEmployees,
+          {
+            ...mpDownloadPayrollHelpers,
+            payrollRows: Array.isArray(formXVIIIDownloadPayrollRows)
+              ? formXVIIIDownloadPayrollRows
+              : [],
+          }
+        );
+        // If enrich could not recompute, put back the UI values (32165 etc.).
+        restoreFormXVIIIMPDistinctOtherAllowances(
+          mappedData,
+          headersToUse,
+          formXVIIIPreservedOtherAllowances
+        );
       }
       if (isFormXVIIIDownload) {
         await yieldToMain();
@@ -43282,7 +43324,21 @@ const Statutory = ({ userEmail, userRole }) => {
                           templateMeta.formFileName ||
                           resolvedFormFileItem.formFileName ||
                           'form-draft.xlsx',
-                        currentItem: item
+                        currentItem: item,
+                        payrollRows: Array.isArray(formXVIIIDownloadPayrollRows)
+                          ? formXVIIIDownloadPayrollRows
+                          : [],
+                        payrollHelpers: formXVIIIDownloadPayrollHelpers || {
+                          sanitizeValue: (v) => String(v ?? '').trim(),
+                          flattenPayrollEarningColumns,
+                          getPayrollPayloadObject,
+                          getEarningsArray,
+                          getDeductionsArray,
+                          findEarningAmount,
+                          findDeductionAmount,
+                          sumPayrollLineItems,
+                        },
+                        employees: formXVIIIDownloadEmployees,
                       })
         : buildDraftWorkbook({
             currentItem: item,
@@ -47297,7 +47353,41 @@ const Statutory = ({ userEmail, userRole }) => {
           mpSaveHeaderRowIndex = mpSaveCols.headerRowIndex;
           mpSaveDataStartIndex = mpSaveCols.dataStartIndex;
         }
+        const mpSavePreservedOther = snapshotFormXVIIIMPDistinctOtherAllowances(
+          tableDataForSave,
+          headersToUse
+        );
         const mpSaveData = remapMPCombinedRegisterRows(tableDataForSave, headersToUse, mpSaveHeaders);
+        const mpSaveMonth = resolvePayrollMonthIsoCandidates(
+          selectedMonth,
+          currentItem,
+          formFileModalData?.parsedFormHeader?.wagePeriodText || ''
+        );
+        const mpSaveEmployees = resolveStatutoryEmployeesForSaveOrder(autofillEmployeesRef.current);
+        const mpSavePayrollRows = resolveFormXVIIIMPPayrollRowsForAutofill(
+          (getCachedForm15PayrollTableRows(mpSaveMonth)?.rows || []).map((row) =>
+            flattenPayrollEarningColumns(row)
+          ),
+          mpSaveMonth
+        );
+        const mpSavePayrollHelpers = {
+          sanitizeValue: (v) => String(v ?? '').trim(),
+          flattenPayrollEarningColumns,
+          getPayrollPayloadObject,
+          getEarningsArray,
+          getDeductionsArray,
+          findEarningAmount,
+          findDeductionAmount,
+          sumPayrollLineItems,
+          payrollRows: mpSavePayrollRows,
+        };
+        finalizeFormXVIIIMPOtherAllowancesForDownload(
+          mpSaveData,
+          mpSaveHeaders,
+          mpSaveEmployees.length > 0 ? mpSaveEmployees : mpSaveData.map(() => ({})),
+          mpSavePayrollHelpers
+        );
+        restoreFormXVIIIMPDistinctOtherAllowances(mpSaveData, mpSaveHeaders, mpSavePreservedOther);
         const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
         ({ blob, fileName } = await buildFormXVIIIWorkbookWithTemplateStyles({
           templateArrayBuffer,
@@ -47310,7 +47400,10 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           headerFormData: headerDataForSave,
           formFileName: draftFileNameForSave,
-          currentItem
+          currentItem,
+          payrollRows: mpSavePayrollRows,
+          payrollHelpers: mpSavePayrollHelpers,
+          employees: mpSaveEmployees.length > 0 ? mpSaveEmployees : mpSaveData.map(() => ({})),
         }));
       } else if (formXXVISave && templateWb) {
         ({ blob, fileName } = buildDraftWorkbook({

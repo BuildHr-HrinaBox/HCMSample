@@ -9,6 +9,7 @@ import {
 } from '../../utils/excelTableBorders';
 import {
   flattenPayrollEarningColumns,
+  getEarningsArray,
   mergePayrollRunEmployeePayload,
   readPayrollForm15WageAmounts,
   readPayrollScalar,
@@ -353,6 +354,56 @@ function stripTrailingSectionIndex(label) {
     .toLowerCase();
 }
 
+/** Section-index → canonical header when merged cells inherit the previous column label. */
+export const FORM_XVIII_MP_SECTION_INDEX_HEADERS = {
+  13: 'Wage rate/ pay or (piece rate/ wages per unit)',
+  14: 'Other allowances',
+  15: 'Over time worked (Number of hours in the month)',
+  16: 'Amount of overtime wages',
+  17: 'Amount of Maternity benefit (If any)',
+  18: 'Any other Amount (Please mention)',
+  19: 'Total/ gross Wages/ Earnings',
+  23: 'Net amount payable',
+};
+
+/** Prefer canonical section label when sheet text is blank or wrongly copied from a merge. */
+export function resolveFormXVIIIMPSectionHeaderLabel(label, sectionIdx, prevLabel = '') {
+  const idx = String(sectionIdx || '').trim();
+  const cur = String(label || '').replace(/\s+/g, ' ').trim();
+  const prev = String(prevLabel || '').replace(/\s+/g, ' ').trim();
+  const curBase = stripTrailingSectionIndex(cur);
+  const prevBase = stripTrailingSectionIndex(prev);
+  const alias = FORM_XVIII_MP_SECTION_INDEX_HEADERS[idx];
+  const prevIsWage = isFormXVIIIMPWageRateHeader(prev);
+  const curIsWage = isFormXVIIIMPWageRateHeader(cur);
+  const curBlankOrColumn = !cur || /^column\s+\d+$/i.test(cur);
+
+  // Merged-header bleed: column after Wage rate repeating the same label ⇒ Other allowances.
+  // Also covers wrong section index "13" inherited from a merged index cell.
+  if (prevIsWage && (curIsWage || (curBlankOrColumn && idx !== '13'))) {
+    return FORM_XVIII_MP_SECTION_INDEX_HEADERS[14];
+  }
+  if (!alias) return cur;
+  if (!cur || /^column\s+\d+$/i.test(cur)) return alias;
+  if (prevBase && curBase && prevBase === curBase) return alias;
+  // Col 14 must never keep a Wage-rate label inherited from a merged parent cell.
+  if (idx === '14' && curIsWage && !isFormXVIIIMPOtherAllowanceHeader(cur)) {
+    return alias;
+  }
+  return cur;
+}
+
+/** Turn consecutive duplicate Wage-rate headers into Other allowances (download safety net). */
+export function repairFormXVIIIMPDuplicateWageHeaders(headers) {
+  const list = Array.isArray(headers) ? [...headers] : [];
+  for (let i = 1; i < list.length; i += 1) {
+    if (isFormXVIIIMPWageRateHeader(list[i]) && isFormXVIIIMPWageRateHeader(list[i - 1])) {
+      list[i] = FORM_XVIII_MP_SECTION_INDEX_HEADERS[14];
+    }
+  }
+  return list;
+}
+
 /** MP Combined Register: header row + optional (1)(2)… index row; map grid 1:1 to Excel columns. */
 export function rebuildFormXVIIIMPCombinedRegisterTableHeadersFromSheet({
   headerRowIndex = -1,
@@ -455,9 +506,15 @@ export function rebuildFormXVIIIMPCombinedRegisterTableHeadersFromSheet({
   });
 
   for (let c = startCol; c <= endCol; c += 1) {
+    // Prefer raw section index so merged cells do not copy "13" into column 14.
     const sectionIdx =
-      sectionRow >= 0 ? normalizeStatutoryColumnIndexCell(getMergedAwareCellText(sectionRow, c)) : '';
+      sectionRow >= 0
+        ? normalizeStatutoryColumnIndexCell(
+            readRaw(sectionRow, c) || getMergedAwareCellText(sectionRow, c)
+          )
+        : '';
     let label = pickColumnHeaderLabel(c, sectionIdx);
+    const prevLabel = headers.length > 0 ? headers[headers.length - 1] : '';
     if (!label) {
       if (headers.length === 0) continue;
       label =
@@ -465,20 +522,22 @@ export function rebuildFormXVIIIMPCombinedRegisterTableHeadersFromSheet({
           ? `Column ${sectionIdx}`
           : `Column ${c - startCol + 1}`;
     } else if (sectionIdx && /^\d+$/.test(sectionIdx) && !/\(\s*\d+\s*\)/.test(label)) {
-      const prevBase =
-        headers.length > 0 ? stripTrailingSectionIndex(headers[headers.length - 1]) : '';
+      const prevBase = stripTrailingSectionIndex(prevLabel);
       const curBase = stripTrailingSectionIndex(label);
       if (prevBase && prevBase === curBase) {
         label = `${label} (${sectionIdx})`;
       }
     }
+    // Fix merged-header bleed: col 14 "Other allowances" must not inherit Wage rate text.
+    label = resolveFormXVIIIMPSectionHeaderLabel(label, sectionIdx, prevLabel) || label;
     headers.push(label);
     excelCols.push(c);
   }
 
   if (headers.length < 4) return null;
+  const repairedHeaders = repairFormXVIIIMPDuplicateWageHeaders(headers);
   return {
-    headers,
+    headers: repairedHeaders,
     excelCols,
     headerRowIndex: mainRow,
     dataStartIndex: dataStartRow,
@@ -577,18 +636,20 @@ function parseFormXVIIIMPMoney(value) {
   return Number.isFinite(n) ? n : NaN;
 }
 
-/** Other allowances = gross_pay − basic − hra (requires basic and/or hra so it never dumps full gross). */
+/** Other allowances = gross_pay − basic − hra (requires positive basic/hra so it never dumps full gross). */
 export function computeFormXVIIIMPOtherAllowances(grossPay, basic, hra) {
   const g = parseFormXVIIIMPMoney(grossPay);
   if (!Number.isFinite(g)) return '';
   const b = parseFormXVIIIMPMoney(basic);
   const h = parseFormXVIIIMPMoney(hra);
-  const hasBasic = Number.isFinite(b);
-  const hasHra = Number.isFinite(h);
+  const hasBasic = Number.isFinite(b) && b > 0;
+  const hasHra = Number.isFinite(h) && h > 0;
   if (!hasBasic && !hasHra) return '';
   const known = (hasBasic ? b : 0) + (hasHra ? h : 0);
+  if (!(known > 0)) return '';
   const other = Math.round((g - known) * 100) / 100;
-  if (!Number.isFinite(other) || other < 0) return '';
+  // Never mirror Wage rate / gross into Other allowances.
+  if (!Number.isFinite(other) || other < 0 || other === g) return '';
   return other;
 }
 
@@ -818,7 +879,10 @@ export function isFormXVIIIMPOtherAllowanceHeader(header) {
 
 export function isFormXVIIIMPWageRateHeader(header) {
   const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (s.includes('overtime')) return false;
+  if (s.includes('overtime') || s.includes('allowance') || s.includes('gross') || s.includes('earning')) {
+    return false;
+  }
+  if (s.includes('net') || s.includes('deduction') || s.includes('total')) return false;
   return (
     (s.includes('wage') && (s.includes('rate') || s.includes('pay') || s.includes('piece'))) ||
     (s.includes('piece') && s.includes('rate'))
@@ -1020,11 +1084,26 @@ export function readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers = {}) {
         readPayrollScalar(flat, ['hra_fbp', 'hra', 'HRA', 'House Rent Allowance'], [/^hra_fbp$/, /^hra$/]) ??
         readPayrollScalar(p, ['hra_fbp', 'hra', 'HRA', 'House Rent Allowance'], [/^hra_fbp$/, /^hra$/]) ??
         '';
-  if ((basic === '' || basic == null || hra === '' || hra == null) && typeof helpers.findEarningAmount === 'function') {
-    const earnings = helpers.getEarningsArray ? helpers.getEarningsArray(p) : [];
+  if (basic === '' || basic == null || hra === '' || hra == null) {
+    const earnings =
+      typeof helpers.getEarningsArray === 'function'
+        ? helpers.getEarningsArray(p)
+        : getEarningsArray(p);
+    const findAmt =
+      typeof helpers.findEarningAmount === 'function'
+        ? helpers.findEarningAmount
+        : (list, pred) => {
+            for (const item of list || []) {
+              const n = String(item?.name || item?.earning_name || '').toLowerCase();
+              const t = String(item?.type || item?.earning_type || '').toLowerCase();
+              const amt = item?.amount ?? item?.earning_amount;
+              if (pred(t, n) && amt != null && amt !== '') return amt;
+            }
+            return '';
+          };
     if (basic === '' || basic == null) {
       basic =
-        helpers.findEarningAmount(
+        findAmt(
           earnings,
           (t, n) =>
             t === 'basic' ||
@@ -1037,14 +1116,14 @@ export function readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers = {}) {
     }
     if (hra === '' || hra == null) {
       hra =
-        helpers.findEarningAmount(
+        findAmt(
           earnings,
           (t, n) =>
             t === 'hra' ||
             t === 'hra_fbp' ||
             n === 'hra' ||
             n.includes('house rent') ||
-            n.includes('hra')
+            (n.includes('hra') && !n.includes('other'))
         ) || hra;
     }
   }
@@ -1084,8 +1163,17 @@ export function readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers = {}) {
       : readPayrollScalar(flat, ['net_pay', 'Net Pay', 'netPay', 'monthly_salary'], [/^net_pay$/]) ||
         readPayrollScalar(p, ['net_pay', 'Net Pay', 'netPay', 'monthly_salary'], [/^net_pay$/]);
   const otherFromFormula = computeFormXVIIIMPOtherAllowances(grossResolved, basic, hra);
+  const grossNum = parseFormXVIIIMPMoney(grossResolved);
+  const rawNum = parseFormXVIIIMPMoney(other_allowance_raw);
+  // Never fall back to a payroll "other_allowance" that is just gross / wage-rate.
+  const rawSafe =
+    other_allowance_raw !== '' &&
+    other_allowance_raw != null &&
+    !(Number.isFinite(rawNum) && Number.isFinite(grossNum) && rawNum === grossNum && grossNum !== 0)
+      ? other_allowance_raw
+      : '';
   const other_allowance =
-    otherFromFormula !== '' && otherFromFormula != null ? otherFromFormula : other_allowance_raw;
+    otherFromFormula !== '' && otherFromFormula != null ? otherFromFormula : rawSafe;
   return {
     gross: grossResolved,
     net: netResolved,
@@ -1169,11 +1257,16 @@ export function resolveFormXVIIIMPTableHeaders(headers) {
         (s.includes('nature') && s.includes('work')) ||
         (s.includes('category') && s.includes('work'))
     ),
-    wageRate: findHeader(
-      (s) =>
+    wageRate: findHeader((s) => {
+      if (s.includes('allowance') || s.includes('gross') || s.includes('earning') || s.includes('net')) {
+        return false;
+      }
+      if (s.includes('deduction') || s.includes('total')) return false;
+      return (
         (s.includes('wage') && (s.includes('rate') || s.includes('pay') || s.includes('piece'))) ||
         (s.includes('piece') && s.includes('rate'))
-    ),
+      );
+    }),
     daysWorked: findHeader(
       (s) =>
         (s.includes('total') && s.includes('day') && s.includes('work')) ||
@@ -1333,13 +1426,40 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
     row[header] = sanitizeValue(val);
     hit = true;
   };
+  const writeOtherAllowance = (header, val) => {
+    if (!header) return;
+    const g = parseFormXVIIIMPMoney(gross);
+    const v = parseFormXVIIIMPMoney(val);
+    const existing = parseFormXVIIIMPMoney(row[header]);
+    // Do not write Wage rate / gross into Other allowances.
+    if (Number.isFinite(v) && Number.isFinite(g) && v === g && g !== 0) {
+      if (Number.isFinite(existing) && existing === g) {
+        row[header] = '';
+        hit = true;
+      }
+      return;
+    }
+    // Clear a previously mirrored gross when formula could not be resolved.
+    if (
+      (val === '' || val == null) &&
+      Number.isFinite(existing) &&
+      Number.isFinite(g) &&
+      existing === g &&
+      g !== 0
+    ) {
+      row[header] = '';
+      hit = true;
+      return;
+    }
+    writeAmount(header, val);
+  };
   const daysValue =
     paid_days !== '' && paid_days != null ? paid_days : FORM_XVIII_MP_DEFAULT_DAYS_WORKED;
 
   headers.forEach((h) => {
     if (isFormXVIIIMPGrossWagesHeader(h)) writeAmount(h, gross);
     if (isFormXVIIIMPNetPayableHeader(h)) writeAmount(h, net);
-    if (isFormXVIIIMPOtherAllowanceHeader(h)) writeAmount(h, other_allowance);
+    if (isFormXVIIIMPOtherAllowanceHeader(h)) writeOtherAllowance(h, other_allowance);
     if (isFormXVIIIMPWageRateHeader(h)) writeAmount(h, gross);
     if (isFormXVIIIMPDaysWorkedHeader(h)) writeAmount(h, daysValue);
     if (isFormXVIIIMPLeaveCategoryHeader(h)) writeAmount(h, FORM_XVIII_MP_LEAVE_CATEGORY);
@@ -1348,7 +1468,7 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
   if (mpHeaders) {
     writeAmount(mpHeaders.grossWages, gross);
     writeAmount(mpHeaders.netPayable, net);
-    writeAmount(mpHeaders.otherAllowances, other_allowance);
+    writeOtherAllowance(mpHeaders.otherAllowances, other_allowance);
     writeAmount(mpHeaders.wageRate, gross);
     writeAmount(mpHeaders.daysWorked, daysValue);
     writeAmount(mpHeaders.leaveCategory, FORM_XVIII_MP_LEAVE_CATEGORY);
@@ -1400,7 +1520,7 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
   };
 
   set('grossWages', gross);
-  set('otherAllowances', otherAllow);
+  writeOtherAllowance(mpHeaders?.otherAllowances, otherAllow);
   set('pf', pf);
   set('esic', esic);
   set('pt', pt);
@@ -1567,6 +1687,91 @@ export function enrichFormXVIIIMPPayrollRowsFromCache(
     ...helpers,
     payrollRows,
   });
+}
+
+/**
+ * Last-mile download fix: recompute Other allowances = gross − basic − hra and
+ * never leave Wage rate / gross mirrored into that column.
+ */
+export function finalizeFormXVIIIMPOtherAllowancesForDownload(
+  mappedData,
+  headers,
+  employees = [],
+  helpers = {}
+) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  const headerList = Array.isArray(headers) ? headers : [];
+  {
+    const repaired = repairFormXVIIIMPDuplicateWageHeaders(headerList);
+    for (let i = 0; i < repaired.length; i += 1) headerList[i] = repaired[i];
+  }
+  const mpHeaders = resolveFormXVIIIMPTableHeaders(headerList);
+  let otherHeader = mpHeaders.otherAllowances;
+  if (!otherHeader) {
+    otherHeader = headerList.find((h) => isFormXVIIIMPOtherAllowanceHeader(h)) || null;
+  }
+  // Ensure a writable Other allowances key exists even if headers were mislabeled.
+  if (!otherHeader) {
+    otherHeader = FORM_XVIII_MP_SECTION_INDEX_HEADERS[14];
+    if (!headerList.includes(otherHeader)) headerList.push(otherHeader);
+  }
+  const wageHeader = mpHeaders.wageRate;
+  const grossHeader = mpHeaders.grossWages;
+  const sanitizeValue = helpers.sanitizeValue || ((v) => String(v ?? '').trim());
+  const rows = Array.isArray(helpers.payrollRows) ? helpers.payrollRows : [];
+  const resolver =
+    typeof helpers.resolvePayrollRow === 'function'
+      ? helpers.resolvePayrollRow
+      : rows.length > 0
+        ? buildFormXVIIIMPPayrollRowResolver(rows)
+        : null;
+  let hits = 0;
+  mappedData.forEach((row, rowIndex) => {
+    if (!row || typeof row !== 'object') return;
+    const empItem = employees[rowIndex];
+    const emp = empItem?.Employee || empItem?.employee || empItem;
+    let payrollRow =
+      typeof resolver === 'function'
+        ? resolveFormXVIIIMPPayrollRowForAutofillRow(emp, row, rows, headerList, resolver)
+        : null;
+    if ((!payrollRow || payrollRow.fetch_error) && rows[rowIndex] && !rows[rowIndex].fetch_error) {
+      payrollRow = rows[rowIndex];
+    }
+    let otherVal = '';
+    let grossVal = '';
+    if (payrollRow && !payrollRow.fetch_error) {
+      const parsed = readFormXVIIIMPPayrollGrossNet(payrollRow, helpers);
+      otherVal = parsed.other_allowance;
+      grossVal = parsed.gross;
+      if (otherVal !== '' && otherVal != null) {
+        row[otherHeader] = sanitizeValue(otherVal);
+        hits += 1;
+      }
+    }
+    const gCandidates = [
+      parseFormXVIIIMPMoney(grossVal),
+      parseFormXVIIIMPMoney(row[grossHeader]),
+      parseFormXVIIIMPMoney(row[wageHeader]),
+    ];
+    const g = gCandidates.find((n) => Number.isFinite(n));
+    const cur = parseFormXVIIIMPMoney(row[otherHeader]);
+    // Strip mirrored Wage rate / gross when formula could not produce a distinct value.
+    if (Number.isFinite(cur) && Number.isFinite(g) && cur === g && g !== 0) {
+      if (otherVal === '' || otherVal == null || parseFormXVIIIMPMoney(otherVal) === g) {
+        row[otherHeader] = '';
+        hits += 1;
+      }
+    }
+    // Copy correct value onto every Other-allowances header variant in the row.
+    headerList.forEach((h) => {
+      if (!isFormXVIIIMPOtherAllowanceHeader(h)) return;
+      if (h === otherHeader) return;
+      if (row[otherHeader] !== '' && row[otherHeader] != null) {
+        row[h] = row[otherHeader];
+      }
+    });
+  });
+  return hits;
 }
 
 /** Apply NIL to Form XVIII MP OT / maternity / advances / fines / other-amount columns. */
@@ -1769,16 +1974,16 @@ export function resolveMPCombinedRegisterVisibleTableColumns({
   });
   if (rebuild?.headers?.length >= 4) {
     return {
-      headers: rebuild.headers,
+      headers: repairFormXVIIIMPDuplicateWageHeaders(rebuild.headers),
       excelCols: rebuild.excelCols,
       headerRowIndex: rebuild.headerRowIndex,
       dataStartIndex: rebuild.dataStartIndex,
       tableStartCol: rebuild.tableStartCol
     };
   }
-  const headers = Array.isArray(fallbackHeaders)
-    ? fallbackHeaders.filter((h) => String(h || '').trim())
-    : [];
+  const headers = repairFormXVIIIMPDuplicateWageHeaders(
+    Array.isArray(fallbackHeaders) ? fallbackHeaders.filter((h) => String(h || '').trim()) : []
+  );
   if (headers.length < 4) {
     return { headers: [], excelCols: [], headerRowIndex, dataStartIndex, tableStartCol };
   }
@@ -1829,20 +2034,197 @@ export function remapMPCombinedRegisterRows(rows, oldHeaders, newHeaders) {
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9 ]/g, '');
+  const samePayrollRole = (a, b) => {
+    if (isFormXVIIIMPOtherAllowanceHeader(a) && isFormXVIIIMPOtherAllowanceHeader(b)) return true;
+    if (isFormXVIIIMPWageRateHeader(a) && isFormXVIIIMPWageRateHeader(b)) return true;
+    if (isFormXVIIIMPGrossWagesHeader(a) && isFormXVIIIMPGrossWagesHeader(b)) return true;
+    if (isFormXVIIIMPNetPayableHeader(a) && isFormXVIIIMPNetPayableHeader(b)) return true;
+    return false;
+  };
+  const repairedNew = repairFormXVIIIMPDuplicateWageHeaders(newHeaders);
+  // Keep caller header list aligned with remapped row keys.
+  if (Array.isArray(newHeaders) && repairedNew.length === newHeaders.length) {
+    for (let i = 0; i < repairedNew.length; i += 1) newHeaders[i] = repairedNew[i];
+  }
   return rows.map((row) => {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
     const out = {};
-    newHeaders.forEach((nh) => {
+    const otherSrcKey = Object.keys(row).find((k) => isFormXVIIIMPOtherAllowanceHeader(k));
+    repairedNew.forEach((nh) => {
       const target = norm(nh);
+      if (isFormXVIIIMPOtherAllowanceHeader(nh) && otherSrcKey) {
+        out[nh] = row[otherSrcKey];
+        return;
+      }
       if (Object.prototype.hasOwnProperty.call(row, nh)) {
         out[nh] = row[nh];
         return;
       }
-      const key = Object.keys(row).find((k) => norm(k) === target);
+      const key =
+        Object.keys(row).find((k) => norm(k) === target) ||
+        Object.keys(row).find((k) => samePayrollRole(k, nh));
       if (key) out[nh] = row[key];
       else out[nh] = '';
     });
     return out;
+  });
+}
+
+/** Read Other allowances from a grid row by role (not fuzzy wage-rate match). */
+export function readFormXVIIIMPOtherAllowanceFromRow(row, headers = []) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
+  const list = Array.isArray(headers) ? headers : [];
+  for (let i = 0; i < list.length; i += 1) {
+    const h = list[i];
+    if (!isFormXVIIIMPOtherAllowanceHeader(h)) continue;
+    if (row[h] !== '' && row[h] != null) return row[h];
+  }
+  const keys = Object.keys(row).filter((k) => !String(k || '').startsWith('__'));
+  for (let i = 0; i < keys.length; i += 1) {
+    const k = keys[i];
+    if (!isFormXVIIIMPOtherAllowanceHeader(k)) continue;
+    if (row[k] !== '' && row[k] != null) return row[k];
+  }
+  return '';
+}
+
+/** Read wage-rate / gross amounts from a grid row by header role. */
+export function readFormXVIIIMPWageAndGrossFromRow(row, headers = []) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    return { wage: '', gross: '', wageNum: NaN, grossNum: NaN };
+  }
+  const list = Array.isArray(headers) ? headers : [];
+  const mp = resolveFormXVIIIMPTableHeaders(list);
+  let wage = mp.wageRate && row[mp.wageRate] != null ? row[mp.wageRate] : '';
+  let gross = mp.grossWages && row[mp.grossWages] != null ? row[mp.grossWages] : '';
+  if (wage === '' || wage == null) {
+    const k = Object.keys(row).find((key) => isFormXVIIIMPWageRateHeader(key));
+    if (k) wage = row[k];
+  }
+  if (gross === '' || gross == null) {
+    const k = Object.keys(row).find((key) => isFormXVIIIMPGrossWagesHeader(key));
+    if (k) gross = row[k];
+  }
+  return {
+    wage,
+    gross,
+    wageNum: parseFormXVIIIMPMoney(wage),
+    grossNum: parseFormXVIIIMPMoney(gross),
+  };
+}
+
+/**
+ * Resolve Other allowances for Excel write: payroll formula first, then distinct grid value.
+ * Never returns Wage rate / gross.
+ */
+export function resolveFormXVIIIMPOtherAllowanceForWrite(row, headers = [], payrollRow = null, helpers = {}) {
+  const { wageNum, grossNum } = readFormXVIIIMPWageAndGrossFromRow(row, headers);
+  const mirrorsWageOrGross = (val) => {
+    const n = parseFormXVIIIMPMoney(val);
+    if (!Number.isFinite(n) || n === 0) return !Number.isFinite(n);
+    if (Number.isFinite(wageNum) && n === wageNum) return true;
+    if (Number.isFinite(grossNum) && n === grossNum) return true;
+    return false;
+  };
+  if (payrollRow && !payrollRow.fetch_error) {
+    const parsed = readFormXVIIIMPPayrollGrossNet(payrollRow, helpers);
+    if (parsed.other_allowance !== '' && parsed.other_allowance != null && !mirrorsWageOrGross(parsed.other_allowance)) {
+      return parsed.other_allowance;
+    }
+  }
+  const fromRow = readFormXVIIIMPOtherAllowanceFromRow(row, headers);
+  if (fromRow !== '' && fromRow != null && !mirrorsWageOrGross(fromRow)) {
+    return fromRow;
+  }
+  return '';
+}
+
+/** Snapshot Other allowances that are already distinct from Wage rate / gross (live UI values). */
+export function snapshotFormXVIIIMPDistinctOtherAllowances(mappedData, headers) {
+  if (!Array.isArray(mappedData)) return [];
+  return mappedData.map((row) => {
+    const fromRow = readFormXVIIIMPOtherAllowanceFromRow(row, headers);
+    if (fromRow === '' || fromRow == null) return null;
+    const { wageNum, grossNum } = readFormXVIIIMPWageAndGrossFromRow(row, headers);
+    const n = parseFormXVIIIMPMoney(fromRow);
+    if (!Number.isFinite(n) || n === 0) return null;
+    if (Number.isFinite(wageNum) && n === wageNum) return null;
+    if (Number.isFinite(grossNum) && n === grossNum) return null;
+    return String(fromRow).trim();
+  });
+}
+
+/** Restore snapshotted Other allowances when enrich/finalize left Wage rate mirrored or blank. */
+export function restoreFormXVIIIMPDistinctOtherAllowances(mappedData, headers, snapshot) {
+  if (!Array.isArray(mappedData) || !Array.isArray(snapshot)) return 0;
+  const headerList = Array.isArray(headers) ? headers : [];
+  {
+    const repaired = repairFormXVIIIMPDuplicateWageHeaders(headerList);
+    for (let i = 0; i < repaired.length; i += 1) headerList[i] = repaired[i];
+  }
+  const mp = resolveFormXVIIIMPTableHeaders(headerList);
+  let otherHeader = mp.otherAllowances || headerList.find((h) => isFormXVIIIMPOtherAllowanceHeader(h));
+  if (!otherHeader) {
+    otherHeader = FORM_XVIII_MP_SECTION_INDEX_HEADERS[14];
+    if (!headerList.includes(otherHeader)) headerList.push(otherHeader);
+  }
+  let hits = 0;
+  mappedData.forEach((row, idx) => {
+    if (!row || typeof row !== 'object') return;
+    const preserved = snapshot[idx];
+    if (preserved == null || preserved === '') return;
+    const cur = parseFormXVIIIMPMoney(row[otherHeader]);
+    const { wageNum, grossNum } = readFormXVIIIMPWageAndGrossFromRow(row, headerList);
+    const bad =
+      !Number.isFinite(cur) ||
+      cur === 0 ||
+      (Number.isFinite(wageNum) && cur === wageNum) ||
+      (Number.isFinite(grossNum) && cur === grossNum);
+    if (!bad) return;
+    row[otherHeader] = preserved;
+    headerList.forEach((h) => {
+      if (isFormXVIIIMPOtherAllowanceHeader(h)) row[h] = preserved;
+    });
+    hits += 1;
+  });
+  return hits;
+}
+
+/** Header index for Other allowances (by role, or column immediately after Wage rate). */
+export function findFormXVIIIMPOtherAllowanceHeaderIndex(headers) {
+  const list = Array.isArray(headers) ? headers : [];
+  const byRole = list.findIndex((h) => isFormXVIIIMPOtherAllowanceHeader(h));
+  if (byRole >= 0) return byRole;
+  const wageIdx = list.findIndex((h) => isFormXVIIIMPWageRateHeader(h));
+  if (wageIdx >= 0 && wageIdx + 1 < list.length) return wageIdx + 1;
+  return -1;
+}
+
+function unmergeFormXVIIIExcelJSRowsInRange(worksheet, startRow, endRow, colFrom, colTo) {
+  const merges = worksheet?.model?.merges;
+  if (!worksheet || !Array.isArray(merges) || merges.length === 0) return;
+  const toRemove = [];
+  for (let i = 0; i < merges.length; i += 1) {
+    const range = merges[i];
+    const parts = String(range || '').split(':');
+    if (parts.length !== 2) continue;
+    const start = parts[0].match(/^([A-Z]+)(\d+)$/i);
+    const end = parts[1].match(/^([A-Z]+)(\d+)$/i);
+    if (!start || !end) continue;
+    const r1 = parseInt(start[2], 10);
+    const r2 = parseInt(end[2], 10);
+    const c1 = XLSX.utils.decode_col(start[1].toUpperCase()) + 1;
+    const c2 = XLSX.utils.decode_col(end[1].toUpperCase()) + 1;
+    if (r2 >= startRow && r1 <= endRow && c2 >= colFrom && c1 <= colTo) {
+      toRemove.push(range);
+    }
+  }
+  toRemove.forEach((range) => {
+    try {
+      worksheet.unMergeCells(range);
+    } catch (_) {
+      /* ignore */
+    }
   });
 }
 
@@ -1857,7 +2239,10 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
   parsedFormHeader,
   headerFormData = {},
   formFileName,
-  currentItem = null
+  currentItem = null,
+  payrollRows = null,
+  payrollHelpers = {},
+  employees = [],
 }) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateArrayBuffer);
@@ -1964,7 +2349,7 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
     }
   }
 
-  const effectiveHeaders = mpLayout.headers;
+  const effectiveHeaders = Array.isArray(mpLayout.headers) ? [...mpLayout.headers] : [];
   if (effectiveHeaders.length < 4) {
     throw new Error('Could not locate Form XVIII MP Combined Register table columns.');
   }
@@ -1988,6 +2373,28 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
           ? mpLayout.headerRowIndex + 3
           : 12;
 
+  // Repair headers from the section-index row (13=Wage rate, 14=Other allowances, …).
+  // Prevents layoutKnown / merged-parent labels from writing Wage rate into col 14.
+  const sectionRow1 =
+    startRow > 1 ? startRow - 1 : mpLayout.headerRowIndex >= 0 ? mpLayout.headerRowIndex + 2 : -1;
+  if (sectionRow1 > 0 && fieldCols.length === effectiveHeaders.length) {
+    const repaired = effectiveHeaders.map((label, idx) => {
+      const col = fieldCols[idx];
+      // Prefer the cell's own value; only fall back to merge parent when blank.
+      const rawSection = excelCellValueToString(worksheet.getCell(sectionRow1, col)?.value).trim();
+      const mergedSection = getMergedAwareCellText(sectionRow1, col);
+      const sectionRaw = rawSection || mergedSection;
+      const sectionIdx = String(sectionRaw).replace(/[^\d]/g, '');
+      const prev = idx > 0 ? effectiveHeaders[idx - 1] : '';
+      return resolveFormXVIIIMPSectionHeaderLabel(label, sectionIdx, prev) || label;
+    });
+    for (let i = 0; i < repaired.length; i += 1) effectiveHeaders[i] = repaired[i];
+  }
+  {
+    const deduped = repairFormXVIIIMPDuplicateWageHeaders(effectiveHeaders);
+    for (let i = 0; i < deduped.length; i += 1) effectiveHeaders[i] = deduped[i];
+  }
+
   writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
     headerFormData: headerFormData && typeof headerFormData === 'object' ? headerFormData : {},
     parsedFormHeader,
@@ -2007,7 +2414,12 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
     if (!row || typeof row !== 'object' || Array.isArray(row)) {
       return Array.isArray(row) ? row[headerIndex] : '';
     }
-    if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
+    if (Object.prototype.hasOwnProperty.call(row, header)) {
+      const direct = row[header];
+      // Empty Other allowances must not fuzzy-fall through to Wage rate.
+      if (direct !== '' && direct != null) return direct;
+      if (!isFormXVIIIMPOtherAllowanceHeader(header)) return direct;
+    }
     const target = normalize(header);
     if (!target) return '';
     const rowKeys = Object.keys(row).filter((k) => !String(k || '').startsWith('__'));
@@ -2018,9 +2430,22 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
         allHeaders.slice(0, headerIndex + 1).filter((h) => normalize(h) === target).length - 1;
       return row[exact[Math.min(Math.max(occur, 0), exact.length - 1)]];
     }
+    // Role-based match (Other allowances ↔ Other allowance) — never Wage rate ↔ Other allowances.
+    if (isFormXVIIIMPOtherAllowanceHeader(header)) {
+      const otherKey = rowKeys.find((k) => isFormXVIIIMPOtherAllowanceHeader(k));
+      if (otherKey) return row[otherKey];
+      return '';
+    }
+    if (isFormXVIIIMPWageRateHeader(header)) {
+      const wageKey = rowKeys.find((k) => isFormXVIIIMPWageRateHeader(k));
+      if (wageKey) return row[wageKey];
+      return '';
+    }
     const fuzzy = rowKeys.find((k) => {
       const nk = normalize(k);
-      return nk && (nk.includes(target) || target.includes(nk));
+      if (!nk) return false;
+      if (isFormXVIIIMPWageRateHeader(k) || isFormXVIIIMPOtherAllowanceHeader(k)) return false;
+      return nk.includes(target) || target.includes(nk);
     });
     return fuzzy ? row[fuzzy] : '';
   };
@@ -2056,6 +2481,63 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
     throughCol: tableColMax + 30
   });
 
+  const mpWriteHeaders = resolveFormXVIIIMPTableHeaders(effectiveHeaders);
+  let otherHeaderIdx = findFormXVIIIMPOtherAllowanceHeaderIndex(effectiveHeaders);
+  if (otherHeaderIdx >= 0 && !isFormXVIIIMPOtherAllowanceHeader(effectiveHeaders[otherHeaderIdx])) {
+    effectiveHeaders[otherHeaderIdx] = FORM_XVIII_MP_SECTION_INDEX_HEADERS[14];
+  }
+  const otherHdrForWrite =
+    mpWriteHeaders.otherAllowances ||
+    (otherHeaderIdx >= 0 ? effectiveHeaders[otherHeaderIdx] : null) ||
+    FORM_XVIII_MP_SECTION_INDEX_HEADERS[14];
+  const otherExcelCol = otherHeaderIdx >= 0 ? fieldCols[otherHeaderIdx] : null;
+
+  const writeHelpers = {
+    flattenPayrollEarningColumns,
+    ...payrollHelpers,
+  };
+  const payrollList = Array.isArray(payrollRows) ? payrollRows : [];
+  const payrollResolver =
+    payrollList.length > 0 ? buildFormXVIIIMPPayrollRowResolver(payrollList) : null;
+
+  // Unmerge Wage rate ↔ Other allowances spans so col 14 can hold its own value.
+  if (otherExcelCol && sourcePrimary.length > 0) {
+    const wageIdx = effectiveHeaders.findIndex((h) => isFormXVIIIMPWageRateHeader(h));
+    const wageCol = wageIdx >= 0 ? fieldCols[wageIdx] : otherExcelCol - 1;
+    const colFrom = Math.max(1, Math.min(wageCol || otherExcelCol, otherExcelCol) - 1);
+    const colTo = Math.max(wageCol || otherExcelCol, otherExcelCol) + 1;
+    unmergeFormXVIIIExcelJSRowsInRange(
+      worksheet,
+      startRow,
+      startRow + Math.max(sourcePrimary.length, 1) - 1,
+      colFrom,
+      colTo
+    );
+  }
+
+  const writeCellValue = (excelRow, targetCol, value, useExactCell) => {
+    if (!targetCol || targetCol < 1) return;
+    const cell = useExactCell
+      ? worksheet.getCell(excelRow, targetCol)
+      : (() => {
+          const tl = getMergeTopLeft(excelRow, targetCol);
+          return worksheet.getCell(tl.r, tl.c);
+        })();
+    if (value == null || value === '') {
+      cell.value = '';
+      return;
+    }
+    if (
+      typeof value === 'number' ||
+      (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim()))
+    ) {
+      cell.value = Number(value);
+    } else {
+      cell.value = String(value);
+    }
+    cell.font = { ...(cell.font || {}), bold: false };
+  };
+
   for (let i = 0; i < sourcePrimary.length; i += 1) {
     if (i > 0 && i % 20 === 0) {
       await yieldToMain();
@@ -2063,26 +2545,60 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
     const row = sourcePrimary[i];
     if (!rowLooksMeaningful(row)) continue;
     const excelRow = startRow + i;
+    const { wageNum, grossNum } = Array.isArray(row)
+      ? { wageNum: NaN, grossNum: NaN }
+      : readFormXVIIIMPWageAndGrossFromRow(row, effectiveHeaders);
+
+    let payrollRow = null;
+    if (!Array.isArray(row) && payrollList.length > 0) {
+      const empItem = Array.isArray(employees) ? employees[i] : null;
+      const emp = empItem?.Employee || empItem?.employee || empItem;
+      payrollRow = resolveFormXVIIIMPPayrollRowForAutofillRow(
+        emp,
+        row,
+        payrollList,
+        effectiveHeaders,
+        payrollResolver
+      );
+      if ((!payrollRow || payrollRow.fetch_error) && payrollList[i] && !payrollList[i].fetch_error) {
+        payrollRow = payrollList[i];
+      }
+    }
+    const otherWriteVal = Array.isArray(row)
+      ? ''
+      : resolveFormXVIIIMPOtherAllowanceForWrite(row, effectiveHeaders, payrollRow, writeHelpers);
+    if (!Array.isArray(row) && otherWriteVal !== '' && otherHdrForWrite) {
+      row[otherHdrForWrite] = otherWriteVal;
+    }
+
     for (let j = 0; j < effectiveHeaders.length; j += 1) {
       const header = effectiveHeaders[j];
       let value = Array.isArray(row) ? row[j] : getRowValueForHeader(row, header, j, effectiveHeaders);
+      // Hard guard: never paint Wage rate / gross into Other allowances column.
+      if (isFormXVIIIMPOtherAllowanceHeader(header) || j === otherHeaderIdx) {
+        value = otherWriteVal;
+        const otherNum = parseFormXVIIIMPMoney(value);
+        if (
+          Number.isFinite(otherNum) &&
+          ((Number.isFinite(wageNum) && otherNum === wageNum && wageNum !== 0) ||
+            (Number.isFinite(grossNum) && otherNum === grossNum && grossNum !== 0))
+        ) {
+          value = '';
+        }
+      }
       const targetCol = fieldCols[j];
-      if (!targetCol || targetCol < 1) continue;
-      const tl = getMergeTopLeft(excelRow, targetCol);
-      const cell = worksheet.getCell(tl.r, tl.c);
-      if (value == null || value === '') {
-        cell.value = '';
-        continue;
-      }
-      if (
-        typeof value === 'number' ||
-        (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim()))
-      ) {
-        cell.value = Number(value);
-      } else {
-        cell.value = String(value);
-      }
-      cell.font = { ...(cell.font || {}), bold: false };
+      const useExactCell =
+        isFormXVIIIMPOtherAllowanceHeader(header) ||
+        j === otherHeaderIdx ||
+        isFormXVIIIMPWageRateHeader(header) ||
+        isFormXVIIIMPGrossWagesHeader(header) ||
+        isFormXVIIIMPNetPayableHeader(header);
+      writeCellValue(excelRow, targetCol, value, useExactCell);
+    }
+
+    // Final pass: always stamp Other allowances onto the exact sheet column (section 14).
+    if (otherExcelCol) {
+      writeCellValue(excelRow, otherExcelCol, otherWriteVal, true);
     }
   }
 

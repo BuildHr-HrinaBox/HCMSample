@@ -371,11 +371,69 @@ export function readPayrollNetPayForStatutory(payrollRow) {
   return Number.isFinite(n) && n > 0 ? n : '';
 }
 
-function findEarningAmount(earnings, matcher) {
-  const hit = earnings.find((item) => matcher(payrollEarningType(item), payrollEarningName(item)));
+/** Unwrap nested Zoho salary / employee_salary / data wrappers into a plain payroll object. */
+export function getPayrollPayloadObject(data) {
+  const parseMaybeJson = (v) => {
+    if (!v) return {};
+    if (typeof v === 'object') return v;
+    if (typeof v === 'string') {
+      try {
+        const parsed = JSON.parse(v);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+      } catch (_) {
+        return {};
+      }
+    }
+    return {};
+  };
+
+  if (!data) return {};
+  if (Array.isArray(data)) {
+    const first = data[0];
+    if (!first) return {};
+    if (typeof first === 'string') return parseMaybeJson(first);
+    return getPayrollPayloadObject(first);
+  }
+  if (typeof data !== 'object') return {};
+  if (data.salary) return getPayrollPayloadObject(parseMaybeJson(data.salary));
+  if (data.employee_salary) return getPayrollPayloadObject(parseMaybeJson(data.employee_salary));
+  if (data.data) return getPayrollPayloadObject(parseMaybeJson(data.data));
+  if (data.employee && typeof data.employee === 'object') {
+    return { ...parseMaybeJson(data.employee), ...data };
+  }
+  return data;
+}
+
+export function findEarningAmount(earnings, matcher) {
+  const list = Array.isArray(earnings) ? earnings : [];
+  const hit = list.find((item) => matcher(payrollEarningType(item), payrollEarningName(item)));
   if (!hit) return '';
   const amount = getPayrollLineAmount(hit);
   return Number.isFinite(amount) ? amount : '';
+}
+
+export function findDeductionAmount(deductions, matcher) {
+  const list = Array.isArray(deductions) ? deductions : [];
+  const hit = list.find((item) =>
+    matcher(payrollComponentType(item), payrollComponentName(item))
+  );
+  if (!hit) return '';
+  const amount = getPayrollLineAmount(hit);
+  return Number.isFinite(amount) ? amount : '';
+}
+
+export function sumPayrollLineItems(items) {
+  const list = Array.isArray(items) ? items : [];
+  let total = 0;
+  let hasAny = false;
+  list.forEach((it) => {
+    const amount = getPayrollLineAmount(it);
+    if (Number.isFinite(amount)) {
+      total += amount;
+      hasAny = true;
+    }
+  });
+  return hasAny ? total : '';
 }
 
 function pickBasicAmount(earnings) {

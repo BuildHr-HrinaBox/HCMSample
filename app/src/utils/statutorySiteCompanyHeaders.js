@@ -20,6 +20,9 @@ export function statutoryHeaderLabelMatchKey(label) {
   if (/name\s+and\s+address\s+of\s+contractor/.test(compact) && !/principal/.test(compact)) {
     return 'statutory_contractor';
   }
+  if (/name\s+and\s+location\s+of\s+(?:the\s+)?work\s*site|name\s+and\s+location\s+of\s+worksite/.test(compact)) {
+    return 'statutory_worksite';
+  }
   if (/(?:name|nature)\s+and\s+location\s+of\s+work/.test(compact)) {
     return 'statutory_nature_location';
   }

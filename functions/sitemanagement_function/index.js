@@ -333,14 +333,8 @@ app.post('/sitemanagement', async (req, res) => {
     if (!inchargePhone || !String(inchargePhone).trim()) {
       return res.status(400).send({ status: 'failure', message: 'Incharge Phone is required.' });
     }
-    if (!inchargeEmail || !String(inchargeEmail).trim()) {
-      return res.status(400).send({ status: 'failure', message: 'Incharge Email is required.' });
-    }
     if (!inchargeDesignation || !String(inchargeDesignation).trim()) {
       return res.status(400).send({ status: 'failure', message: 'Incharge Designation is required.' });
-    }
-    if (!industry || !String(industry).trim()) {
-      return res.status(400).send({ status: 'failure', message: 'Industry is required.' });
     }
 
     const { catalyst } = res.locals;
@@ -489,14 +483,8 @@ app.put('/sitemanagement/:ROWID', async (req, res) => {
     if (!inchargePhone || !String(inchargePhone).trim()) {
       return res.status(400).send({ status: 'failure', message: 'Incharge Phone is required.' });
     }
-    if (!inchargeEmail || !String(inchargeEmail).trim()) {
-      return res.status(400).send({ status: 'failure', message: 'Incharge Email is required.' });
-    }
     if (!inchargeDesignation || !String(inchargeDesignation).trim()) {
       return res.status(400).send({ status: 'failure', message: 'Incharge Designation is required.' });
-    }
-    if (!industry || !String(industry).trim()) {
-      return res.status(400).send({ status: 'failure', message: 'Industry is required.' });
     }
 
     const { catalyst } = res.locals;

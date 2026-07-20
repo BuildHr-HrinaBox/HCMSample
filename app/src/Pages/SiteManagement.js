@@ -251,7 +251,6 @@ function validateSiteFormValues(form) {
   }
   if (!form.siteAddress.trim()) errors.siteAddress = 'Address is required';
   if (!form.unitNo.trim()) errors.unitNo = 'Unit no. is required';
-  if (!form.industry.trim()) errors.industry = 'Industry is required';
   if (!form.inchargeName.trim()) errors.inchargeName = 'Name is required';
   if (!String(form.inchargePhone || '').trim()) {
     errors.inchargePhone = 'Phone is required';
@@ -259,9 +258,7 @@ function validateSiteFormValues(form) {
     errors.inchargePhone = 'Enter a valid 10-digit phone number';
   }
   const em = String(form.inchargeEmail || '').trim();
-  if (!em) {
-    errors.inchargeEmail = 'Mail Id is required';
-  } else if (!SITE_FORM_EMAIL_REGEX.test(em)) {
+  if (em && !SITE_FORM_EMAIL_REGEX.test(em)) {
     errors.inchargeEmail = 'Enter a valid email address (e.g., name@company.com)';
   }
   const contractorEmail = String(form.contractorEmail || '').trim();
@@ -286,7 +283,6 @@ const SITE_FORM_BLUR_VALIDATE_NAMES = new Set([
   'unitNo',
   'contractorEmail',
   'contractorPhone',
-  'industry',
   'inchargeName',
   'inchargePhone',
   'inchargeEmail',
@@ -1243,18 +1239,13 @@ const SiteManagement = ({ userEmail, userRole }) => {
                           )}
                         </div>
                         <div className="company-details-field">
-                          <label htmlFor="sm-industry">
-                            Industry <span className="required" aria-hidden="true">*</span>
-                          </label>
+                          <label htmlFor="sm-industry">Industry</label>
                           <select
                             id="sm-industry"
                             name="industry"
                             value={form.industry}
                             onChange={handleChange}
-                            onBlur={handleSiteFieldBlur}
                             disabled={viewOnly}
-                            required
-                            aria-describedby={formErrors.industry ? 'sm-industry-error' : undefined}
                           >
                             <option value="">Select</option>
                             {industrySelectOptions.map((sector) => (
@@ -1263,11 +1254,6 @@ const SiteManagement = ({ userEmail, userRole }) => {
                               </option>
                             ))}
                           </select>
-                          {formErrors.industry && (
-                            <div id="sm-industry-error" style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>
-                              {formErrors.industry}
-                            </div>
-                          )}
                         </div>
                         {rcFieldVisibility.showSandERC && (
                           <div className="company-details-field">
@@ -1445,9 +1431,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
                           )}
                         </div>
                         <div className="company-details-field">
-                          <label htmlFor="sm-inchargeEmail">
-                            Mail Id <span className="required" aria-hidden="true">*</span>
-                          </label>
+                          <label htmlFor="sm-inchargeEmail">Mail Id</label>
                           <input
                             id="sm-inchargeEmail"
                             name="inchargeEmail"
@@ -1458,7 +1442,6 @@ const SiteManagement = ({ userEmail, userRole }) => {
                             placeholder="Enter mail id"
                             disabled={viewOnly}
                             maxLength={254}
-                            required
                           />
                           {formErrors.inchargeEmail && (
                             <div style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>{formErrors.inchargeEmail}</div>

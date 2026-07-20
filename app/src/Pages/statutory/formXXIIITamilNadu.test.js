@@ -1,0 +1,104 @@
+import {
+  FORM_XXIII_TN_OT_NIL,
+  applyFormXXIIITamilNaduOtNilToMappedRows,
+  isFormXXIIITamilNaduContext,
+  isFormXXIIITamilNaduOtNilHeader,
+  isFormXXIIITamilNaduOtWorkedDatesHeader,
+  isFormXXIIITamilNaduTotalOvertimeWorkedHeader,
+  isFormXXIIITamilNaduOvertimeRateHeader,
+  isFormXXIIITamilNaduOvertimeEarningsHeader,
+  isFormXXIIITamilNaduOtWagesPaidDateHeader,
+} from './formXXIIITamilNadu';
+
+describe('Form XXIII Tamil Nadu overtime NIL columns', () => {
+  const headers = [
+    'Serial No.',
+    'Name and surname of workmen',
+    "Father's/Husband's name",
+    'Sex',
+    'Designation/ Nature of employment',
+    'Dates on which overtime worked',
+    'Total overtime worked or production in case of piece rates',
+    'Normal rate of wages',
+    'Overtime rate of wages',
+    'Overtime earnings',
+    'Date on which overtime wages paid',
+    'Remarks',
+  ];
+
+  it('detects Form_XXIII_-_TamilNadu.xlsx context', () => {
+    expect(
+      isFormXXIIITamilNaduContext(
+        { title: 'FORM XXIII', subtitle: 'Register of Overtime' },
+        { state: 'Tamil Nadu', formName: 'Form XXIII' },
+        'Form_XXIII_-_TamilNadu.xlsx'
+      )
+    ).toBe(true);
+    expect(
+      isFormXXIIITamilNaduContext(
+        { title: 'FORM XXIII' },
+        { state: 'Madhya Pradesh' },
+        'Form_XXIII_MP.xlsx'
+      )
+    ).toBe(false);
+  });
+
+  it('recognizes the five OT columns for NIL', () => {
+    expect(isFormXXIIITamilNaduOtWorkedDatesHeader('Dates on which overtime worked')).toBe(true);
+    expect(
+      isFormXXIIITamilNaduTotalOvertimeWorkedHeader(
+        'Total overtime worked or production in case of piece rates'
+      )
+    ).toBe(true);
+    expect(isFormXXIIITamilNaduOvertimeRateHeader('Overtime rate of wages')).toBe(true);
+    expect(isFormXXIIITamilNaduOvertimeEarningsHeader('Overtime earnings')).toBe(true);
+    expect(isFormXXIIITamilNaduOtWagesPaidDateHeader('Date on which overtime wages paid')).toBe(
+      true
+    );
+    expect(isFormXXIIITamilNaduOtNilHeader('Normal rate of wages')).toBe(false);
+    expect(isFormXXIIITamilNaduOtNilHeader('Name and surname of workmen')).toBe(false);
+  });
+
+  it('fills blank OT columns with NIL without touching normal rate', () => {
+    const rows = applyFormXXIIITamilNaduOtNilToMappedRows(
+      [
+        {
+          'Name and surname of workmen': 'Ravi',
+          'Normal rate of wages': '100851',
+          'Dates on which overtime worked': '',
+          'Overtime rate of wages': '',
+        },
+      ],
+      headers
+    );
+    expect(rows[0]['Name and surname of workmen']).toBe('Ravi');
+    expect(rows[0]['Normal rate of wages']).toBe('100851');
+    expect(rows[0]['Dates on which overtime worked']).toBe(FORM_XXIII_TN_OT_NIL);
+    expect(rows[0]['Total overtime worked or production in case of piece rates']).toBe(
+      FORM_XXIII_TN_OT_NIL
+    );
+    expect(rows[0]['Overtime rate of wages']).toBe(FORM_XXIII_TN_OT_NIL);
+    expect(rows[0]['Overtime earnings']).toBe(FORM_XXIII_TN_OT_NIL);
+    expect(rows[0]['Date on which overtime wages paid']).toBe(FORM_XXIII_TN_OT_NIL);
+  });
+
+  it('overwrites attendance OT values with NIL when overwrite is true', () => {
+    const rows = applyFormXXIIITamilNaduOtNilToMappedRows(
+      [
+        {
+          'Dates on which overtime worked': '2026-04-01',
+          'Total overtime worked or production in case of piece rates': '150:31',
+          'Overtime rate of wages': '100',
+        },
+      ],
+      headers,
+      FORM_XXIII_TN_OT_NIL,
+      { overwrite: true }
+    );
+    expect(rows[0]['Dates on which overtime worked']).toBe(FORM_XXIII_TN_OT_NIL);
+    expect(rows[0]['Total overtime worked or production in case of piece rates']).toBe(
+      FORM_XXIII_TN_OT_NIL
+    );
+    expect(rows[0]['Overtime rate of wages']).toBe(FORM_XXIII_TN_OT_NIL);
+  });
+});

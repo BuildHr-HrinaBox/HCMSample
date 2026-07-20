@@ -68,9 +68,9 @@ export function getEarnedLeaveMetricsFromRecord(row, leaveTypeLabels = {}) {
 }
 
 /**
- * Form 15 Part 1 Earned Leave columns (same source as Leave page breakout):
- * - beginning / earned during / balance at end → paidBalance ("Leave earned during the Period")
- * - availed during month → paidBooked (booked count)
+ * Leave-page earned metrics (paidBalance / paidBooked).
+ * Tamil Nadu Form 15 Part 1 uses Form X formulas in form15TamilNaduLeave.js
+ * (beginning = balance + booked, earnedDuring = 0, etc.).
  */
 export function getForm15EarnedLeavePeriodMetrics(leaveRecord, leaveTypeLabels = {}) {
   const { balance, availed, earnedKey } = getEarnedLeaveMetricsFromRecord(leaveRecord, leaveTypeLabels);

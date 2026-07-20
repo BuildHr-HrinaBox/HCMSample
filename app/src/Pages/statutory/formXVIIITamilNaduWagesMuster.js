@@ -57,6 +57,30 @@ export function isRegisterOfWagesCumMusterRollBlob(blob) {
   );
 }
 
+/** Filename / form-name identity for Form XXVI (26) — must not be treated as Form XVIII. */
+function identityIndicatesFormXXVINotXVIII(rowItem, fileName) {
+  const identity = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    rowItem?.formFileName,
+    rowItem?.FormFileName,
+    fileName
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (!identity) return false;
+  // Explicit Form XVIII / 18 identity wins.
+  if (/form[\s._-]*xviii(?![a-z])/i.test(identity) || /form[\s._-]*18(?!\d)/i.test(identity)) {
+    return false;
+  }
+  // Form 26-A is a different register; still not Form XVIII.
+  if (/form[\s._-]*xxvi(?![a-z])/i.test(identity) || /form[\s._-]*26(?!\d)/i.test(identity)) {
+    return true;
+  }
+  return false;
+}
+
 /** Tamil Nadu CLRA Form XVIII — wages-cum-muster (distinct from generic/AP Form XVIII workbooks). */
 export function isFormXVIIITamilNaduClraContext(
   formHeader,
@@ -65,6 +89,9 @@ export function isFormXVIIITamilNaduClraContext(
   tableHeaders = '',
   sheetText = ''
 ) {
+  // Form_26 / Form_XXVI Tamil Nadu templates sometimes contain leftover Form XVIII title text.
+  // Identity (filename / form name) must win over sheet wording.
+  if (identityIndicatesFormXXVINotXVIII(rowItem, fileName)) return false;
   const parts = buildFormXVIIIContextBlob(formHeader, rowItem, fileName, tableHeaders, sheetText);
   if (!isRegisterOfWagesCumMusterRollBlob(parts)) return false;
   return isFormXVIIITamilNaduContext(parts);
@@ -337,6 +364,68 @@ export function applyFormXVIIITamilNaduAutofillFromSite(headerData, context = {}
   fill('form_xviii_principal_employer', context.principalEmployerText || '');
   fill('form_xviii_month_year', context.monthYearText || '');
   return out;
+}
+
+/** Daily attendance /units worked — not the Total attendance column. */
+export function isFormXVIIITamilNaduDailyAttendanceHeader(header) {
+  const s = formXVIIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (s.includes('total') || s.includes('done')) return false;
+  return (
+    (s.includes('daily') && s.includes('attendance')) ||
+    (s.includes('daily') && s.includes('units') && s.includes('work'))
+  );
+}
+
+/** Total attendance/ units of work done. */
+export function isFormXVIIITamilNaduTotalAttendanceHeader(header) {
+  const s = formXVIIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (isFormXVIIITamilNaduDailyAttendanceHeader(header)) return false;
+  return (
+    (s.includes('total') && s.includes('attendance')) ||
+    (s.includes('units') && s.includes('work') && s.includes('done'))
+  );
+}
+
+/** Daily rate of wages/piece-rate ← gross_pay. */
+export function isFormXVIIITamilNaduDailyRateHeader(header) {
+  const s = formXVIIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  return (
+    (s.includes('daily') && s.includes('rate') && s.includes('wage')) ||
+    s.includes('piece-rate') ||
+    s.includes('piece rate')
+  );
+}
+
+/** Other cash payments (nature of payment to be indicated) ← gross_pay − basic − hra. */
+export function isFormXVIIITamilNaduOtherCashPaymentsHeader(header) {
+  const s = formXVIIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  return s.includes('other') && s.includes('cash') && (s.includes('payment') || s.includes('nature'));
+}
+
+function parseFormXVIIITamilNaduMoney(value) {
+  if (value == null || value === '') return NaN;
+  const n = Number(String(value).replace(/,/g, '').trim());
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** Other cash = gross_pay − basic − hra (blank when basic/hra missing so we never dump full gross). */
+export function computeFormXVIIITamilNaduOtherCashPayments(grossPay, basic, hra) {
+  const g = parseFormXVIIITamilNaduMoney(grossPay);
+  if (!Number.isFinite(g)) return '';
+  const b = parseFormXVIIITamilNaduMoney(basic);
+  const h = parseFormXVIIITamilNaduMoney(hra);
+  const hasBasic = Number.isFinite(b) && b > 0;
+  const hasHra = Number.isFinite(h) && h > 0;
+  if (!hasBasic && !hasHra) return '';
+  const known = (hasBasic ? b : 0) + (hasHra ? h : 0);
+  if (!(known > 0)) return '';
+  const other = Math.round((g - known) * 100) / 100;
+  if (!Number.isFinite(other) || other < 0 || other === g) return '';
+  return other;
 }
 
 export { FORM_XVIII_TN_HEADER_KEYS };

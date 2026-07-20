@@ -15,6 +15,7 @@ import {
   isFormXVIIIMPWageRateHeader,
   looksLikeKarnatakaFormTSheet,
   looksLikeMPCombinedRegisterSheet,
+  looksLikeTamilNaduFormXVIIISheet,
   readFormXVIIIMPOtherAllowanceFromRow,
   remapMPCombinedRegisterRows,
   repairFormXVIIIMPDuplicateWageHeaders,
@@ -50,6 +51,7 @@ describe('Form XVIII MP Combined Register mappings', () => {
     const mpBlob =
       'Form XVIII Madhya Pradesh Muster Roll-cum Register of Wages Name of the establishment and address Location of work';
     expect(looksLikeKarnatakaFormTSheet(mpBlob)).toBe(false);
+    expect(looksLikeTamilNaduFormXVIIISheet(mpBlob)).toBe(false);
     expect(looksLikeMPCombinedRegisterSheet(mpBlob)).toBe(true);
     expect(
       isFormXVIIIMPCombinedRegisterContext(
@@ -59,6 +61,25 @@ describe('Form XVIII MP Combined Register mappings', () => {
         'Name of the establishment and address Location of work'
       )
     ).toBe(true);
+  });
+
+  it('does not treat Form_XVIII_-_TamilNadu.xlsx as MP Form XVIII combined register', () => {
+    const tnBlob =
+      'Form_XVIII_-_TamilNadu.xlsx Form XVIII – Register of Wages-cum-Muster Roll Form of Register of Wages-cum-Muster Roll [See rule 78(1)(a)(i)] Tamil Nadu';
+    expect(looksLikeTamilNaduFormXVIIISheet(tnBlob)).toBe(true);
+    expect(looksLikeMPCombinedRegisterSheet(tnBlob)).toBe(false);
+    expect(
+      isFormXVIIIMPCombinedRegisterContext(
+        {
+          title: 'Form XVIII – Register of Wages-cum-Muster Roll',
+          subtitle: 'Form of Register of Wages-cum-Muster Roll',
+          reference: '[See rule 78(1)(a)(i)]',
+        },
+        { formName: 'Form XVIII', state: 'Tamil Nadu' },
+        'Form_XVIII_-_TamilNadu.xlsx',
+        'Form XVIII – Register of Wages-cum-Muster Roll Daily attendance /units worked Amount of wages earned'
+      )
+    ).toBe(false);
   });
 
   it('computes Other allowances as gross_pay − basic − hra', () => {

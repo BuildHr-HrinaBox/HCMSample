@@ -210,9 +210,14 @@ export function looksLikeForm25APMusterPartialHeaders(tableHeaders) {
   const src = Array.isArray(tableHeaders) ? tableHeaders : [];
   if (src.length < FORM_25_AP_MUSTER_PREFIX_COUNT + 5) return false;
   const joined = src.map((h) => form25APMusterHeaderNorm(h)).join('\n');
+  // Tamil Nadu Form 25 also has 1–31 day columns — do not treat day headers alone as AP Muster.
+  if (/scheme\s+of\s+shift|register\s+of\s+adult|worker\s+identif|name\s+of\s+the\s+worker/.test(joined)) {
+    return false;
+  }
   if (/relay/.test(joined) && /shift/.test(joined) && /period\s+of\s+work/.test(joined)) return true;
   const dayLike = src.filter((h) => isForm25APMusterDayHeaderKey(h)).length;
-  return dayLike >= 5;
+  if (dayLike < 5) return false;
+  return /relay|father|period\s+of\s+work|shift\s+number|muster\s+roll/.test(joined);
 }
 
 export function buildForm25APMusterSecondBandLabel(monthName, year) {

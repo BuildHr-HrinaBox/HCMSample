@@ -1492,6 +1492,32 @@ export function buildFormXIXMPHeaderFields(
   });
 }
 
+/** TN Form XIX autofill columns — keep in sync with formXIXTamilNadu.FORM_XIX_TN_TABLE_HEADERS. */
+const FORM_XIX_TN_WAGE_TABLE_HEADERS = [
+  'Workman Code',
+  'Workman Name',
+  "Father's Name",
+  'UAN',
+  'ESIC IP Number',
+  'Date of Joining',
+  'No. of. Working Days',
+  'No. of. Overtime',
+  'Rate of Daily Wages/Piece Rate',
+  'Nature of Work',
+  'Basic',
+  'Dearness Allowance',
+  'Leave with Wages Including Cash in Lieu of Kinds',
+  'Other Allowances',
+  'Gross Wages',
+  'Employee Provident Fund',
+  'ESIC',
+  'Advance/Loan',
+  'Labour Welfare Fund',
+  'Professional Tax',
+  'Total Wage Deductions',
+  'Net Amount of Wages Paid',
+];
+
 export function resolveFormXIXMPHeaderFieldLayout(parsed, workbook, hints = {}) {
   const formHeader = hints.formHeader || parsed?.formHeader || null;
   const item = hints.item || null;
@@ -1504,7 +1530,9 @@ export function resolveFormXIXMPHeaderFieldLayout(parsed, workbook, hints = {}) 
   const effectiveSheetCols = accessor?.effectiveSheetCols ?? 20;
   const layoutHints = { formHeader, item, fileName, formFileName: fileName, sheetText };
   const headerFields = buildFormXIXMPHeaderFields(getMergedAwareCellText, effectiveSheetCols, layoutHints);
-  const wageFields = buildFormXIXMPWageFieldsFromSheet(getMergedAwareCellText, effectiveSheetCols);
+  const tamilNadu = isFormXIXTamilNaduWageSlipContext(formHeader, item, fileName, sheetText);
+  // Tamil Nadu template is workman-code key/value — do not use MP wage particulars 1–7.
+  const wageFields = tamilNadu ? [] : buildFormXIXMPWageFieldsFromSheet(getMergedAwareCellText, effectiveSheetCols);
 
   return {
     formHeader: {
@@ -1513,10 +1541,14 @@ export function resolveFormXIXMPHeaderFieldLayout(parsed, workbook, hints = {}) 
       reference: formHeader?.reference || '',
       formXIXAPHeaderFieldLayout: true,
       formXIXMPTableLayout: true,
+      formXIXTamilNaduTableLayout: tamilNadu,
+      formXIXTamilNaduHeaderFieldLayout: tamilNadu,
       textRows: [],
       fields: [...headerFields, ...wageFields],
     },
-    headers: resolveFormXIXMPWageTableHeaders(parsed?.headers || hints.tableHeaders || null),
+    headers: tamilNadu
+      ? [...FORM_XIX_TN_WAGE_TABLE_HEADERS]
+      : resolveFormXIXMPWageTableHeaders(parsed?.headers || hints.tableHeaders || null),
     tableData: [],
     headerRowIndex: -1,
     dataStartIndex: 0,
@@ -1643,6 +1675,13 @@ const pickStaticFormXIXMPHeaderData = (headerFormData) => {
 
 export function canUseFormXIXMPFastExport(parsedFormHeader) {
   if (!parsedFormHeader?.formXIXMPTableLayout) return false;
+  // TN wage slip needs ExcelJS border styling on A1:D17 — skip XML fast path.
+  if (
+    parsedFormHeader?.formXIXTamilNaduTableLayout ||
+    parsedFormHeader?.formXIXTamilNaduHeaderFieldLayout
+  ) {
+    return false;
+  }
   const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
   const positioned = fields.filter((field) => field?.key && field.labelRow != null).length;
   return positioned >= 4;
@@ -1912,21 +1951,62 @@ export function resolveFormXIXMPWorkmanHeaderField(parsedFormHeader) {
   return fields.find((f) => f.key === 'form_xix_ap_workman') || null;
 }
 
+const FORM_XIX_TN_ROW_TO_HEADER_KEY = [
+  ['Workman Code', 'form_xix_tn_workman_code'],
+  ['Workman Name', 'form_xix_tn_workman_name'],
+  ["Father's Name", 'form_xix_tn_father_name'],
+  ['UAN', 'form_xix_tn_uan'],
+  ['ESIC IP Number', 'form_xix_tn_esic_ip'],
+  ['Date of Joining', 'form_xix_tn_date_of_joining'],
+  ['No. of. Working Days', 'form_xix_tn_working_days'],
+  ['No. of. Overtime', 'form_xix_tn_overtime'],
+  ['Rate of Daily Wages/Piece Rate', 'form_xix_tn_rate'],
+  ['Nature of Work', 'form_xix_tn_nature_of_work'],
+  ['Basic', 'form_xix_tn_basic'],
+  ['Dearness Allowance', 'form_xix_tn_da'],
+  ['Leave with Wages Including Cash in Lieu of Kinds', 'form_xix_tn_leave_wages'],
+  ['Other Allowances', 'form_xix_tn_other_allowances'],
+  ['Gross Wages', 'form_xix_tn_gross'],
+  ['Employee Provident Fund', 'form_xix_tn_epf'],
+  ['ESIC', 'form_xix_tn_esic'],
+  ['Advance/Loan', 'form_xix_tn_advance_loan'],
+  ['Labour Welfare Fund', 'form_xix_tn_lwf'],
+  ['Professional Tax', 'form_xix_tn_pt'],
+  ['Total Wage Deductions', 'form_xix_tn_total_deductions'],
+  ['Net Amount of Wages Paid', 'form_xix_tn_net'],
+];
+
 function buildEmployeeHeaderFormData(headerFormData, employeeRow, parsedFormHeader, payrollRow = null, empItem = null) {
   const base = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
-  if (employeeRow && typeof employeeRow === 'object') {
-    const workmanHeader = FORM_XIX_MP_WAGE_TABLE_HEADERS.find(isFormXIXMPWorkmanNameHeader);
-    const workmanValue = workmanHeader ? getFormXIXMPRowValueForHeader(employeeRow, workmanHeader) : '';
-    if (workmanValue) base.form_xix_ap_workman = workmanValue;
+  const tamilNaduLayout =
+    !!parsedFormHeader?.formXIXTamilNaduTableLayout ||
+    !!parsedFormHeader?.formXIXTamilNaduHeaderFieldLayout;
 
-    FORM_XIX_MP_WAGE_SPECS.forEach((spec) => {
-      const tableHeader =
-        FORM_XIX_MP_WAGE_TABLE_HEADERS.find(
-          (h) => FORM_XIX_MP_WAGE_KEY_BY_HEADER.get(h.replace(/\s*:+\s*$/, '')) === spec.key
-        ) || spec.label;
-      const value = getFormXIXMPRowValueForHeader(employeeRow, tableHeader);
-      if (String(value ?? '').trim() !== '') base[spec.key] = value;
-    });
+  if (employeeRow && typeof employeeRow === 'object') {
+    if (tamilNaduLayout) {
+      FORM_XIX_TN_ROW_TO_HEADER_KEY.forEach(([tableHeader, key]) => {
+        const value = getFormXIXMPRowValueForHeader(employeeRow, tableHeader);
+        if (String(value ?? '').trim() !== '') base[key] = value;
+      });
+      const workmanName = String(base.form_xix_tn_workman_name ?? '').trim();
+      const fatherName = String(base.form_xix_tn_father_name ?? '').trim();
+      if (workmanName || fatherName) {
+        base.form_xix_ap_workman = [workmanName, fatherName].filter(Boolean).join('\n');
+      }
+    } else {
+      const workmanHeader = FORM_XIX_MP_WAGE_TABLE_HEADERS.find(isFormXIXMPWorkmanNameHeader);
+      const workmanValue = workmanHeader ? getFormXIXMPRowValueForHeader(employeeRow, workmanHeader) : '';
+      if (workmanValue) base.form_xix_ap_workman = workmanValue;
+
+      FORM_XIX_MP_WAGE_SPECS.forEach((spec) => {
+        const tableHeader =
+          FORM_XIX_MP_WAGE_TABLE_HEADERS.find(
+            (h) => FORM_XIX_MP_WAGE_KEY_BY_HEADER.get(h.replace(/\s*:+\s*$/, '')) === spec.key
+          ) || spec.label;
+        const value = getFormXIXMPRowValueForHeader(employeeRow, tableHeader);
+        if (String(value ?? '').trim() !== '') base[spec.key] = value;
+      });
+    }
   }
 
   const emp = unwrapFormXIXMPEmployeeItem(empItem);
@@ -2036,9 +2116,18 @@ export async function buildFormXIXMPWorkbookWithTemplateStyles({
     buildEmployeeHeaderFormData(headerFormData, employeeRow, parsedFormHeader, payrollRow, empItem)
   );
 
-  writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, mergedHeaderData, parsedFormHeader, {
-    excelCellValueToString: formXIXMPExcelCellValueToString,
-  });
+  const isTamilNaduExport =
+    !!parsedFormHeader?.formXIXTamilNaduTableLayout ||
+    !!parsedFormHeader?.formXIXTamilNaduHeaderFieldLayout;
+
+  if (isTamilNaduExport) {
+    // TN layout is A–D only — do not run AP label scan (it writes into G–L value band).
+    writeFormXIXTamilNaduFieldsInline(worksheet, mergedHeaderData, parsedFormHeader);
+  } else {
+    writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, mergedHeaderData, parsedFormHeader, {
+      excelCellValueToString: formXIXMPExcelCellValueToString,
+    });
+  }
 
   const out = await workbook.xlsx.writeBuffer();
   const fileName =
@@ -2047,6 +2136,151 @@ export async function buildFormXIXMPWorkbookWithTemplateStyles({
     `Form_XIX_MP_${Date.now()}.xlsx`;
   const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   return { blob, fileName };
+}
+
+
+/** Write TN key/value cells without importing formXIXTamilNadu (avoids circular deps). */
+function writeFormXIXTamilNaduFieldsInline(worksheet, headerFormData, parsedFormHeader) {
+  if (!worksheet || !headerFormData) return;
+  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  const defaults = {
+    form_xix_tn_workman_code: [4, 2],
+    form_xix_tn_workman_name: [5, 2],
+    form_xix_tn_father_name: [6, 2],
+    form_xix_tn_uan: [7, 2],
+    form_xix_tn_esic_ip: [8, 2],
+    form_xix_tn_date_of_joining: [4, 4],
+    form_xix_tn_working_days: [5, 4],
+    form_xix_tn_overtime: [6, 4],
+    form_xix_tn_rate: [7, 4],
+    form_xix_tn_nature_of_work: [8, 4],
+    form_xix_tn_basic: [10, 2],
+    form_xix_tn_da: [11, 2],
+    form_xix_tn_leave_wages: [13, 2],
+    form_xix_tn_other_allowances: [14, 2],
+    form_xix_tn_gross: [15, 2],
+    form_xix_tn_epf: [10, 4],
+    form_xix_tn_esic: [11, 4],
+    form_xix_tn_advance_loan: [12, 4],
+    form_xix_tn_lwf: [13, 4],
+    form_xix_tn_pt: [14, 4],
+    form_xix_tn_total_deductions: [15, 4],
+    // Net amount written by writeFormXIXTamilNaduNetAmountRowInline (label A–C + value D).
+  };
+  Object.entries(defaults).forEach(([key, [row, col]]) => {
+    const value = headerFormData[key];
+    if (value == null || String(value).trim() === '') return;
+    const field = fields.find((f) => f.key === key);
+    const r = field?.valueRow != null ? field.valueRow + 1 : row;
+    const ccol = field?.valueCol != null ? field.valueCol + 1 : col;
+    worksheet.getCell(r, ccol).value = formXIXMPSanitizeExportText(value);
+  });
+  writeFormXIXTamilNaduNetAmountRowInline(worksheet, headerFormData?.form_xix_tn_net);
+  clearFormXIXTamilNaduExtraColumnsInline(worksheet);
+  applyFormXIXTamilNaduAllBordersInline(worksheet);
+}
+
+/**
+ * Row 17: label "Net Amount of Wages Paid" in A–C, amount in D.
+ * Template sometimes merges A17:D17 so only the number was visible.
+ */
+function writeFormXIXTamilNaduNetAmountRowInline(worksheet, netAmount) {
+  if (!worksheet) return;
+  const merges = worksheet.model?.merges || [];
+  const toUnmerge = [];
+  (Array.isArray(merges) ? merges : []).forEach((ref) => {
+    const s = String(ref || '');
+    // e.g. A17:D17 / A17:C18
+    if (/^[A-D]17:/i.test(s) || /^[A-D]17$/i.test(s) || /:([A-D])17$/i.test(s)) {
+      toUnmerge.push(s);
+    }
+  });
+  // ExcelJS also exposes worksheet._merges / worksheet.merges depending on version
+  if (typeof worksheet.unMergeCells === 'function') {
+    toUnmerge.forEach((ref) => {
+      try {
+        worksheet.unMergeCells(ref);
+      } catch (_) {
+        /* ignore */
+      }
+    });
+    // Scan common merge ranges on row 17
+    ['A17:D17', 'A17:C17', 'B17:C17', 'B17:D17', 'A17:D18', 'B17:C18'].forEach((ref) => {
+      try {
+        worksheet.unMergeCells(ref);
+      } catch (_) {
+        /* ignore if not merged */
+      }
+    });
+  }
+
+  for (let c = 1; c <= 4; c += 1) {
+    worksheet.getCell(17, c).value = null;
+  }
+
+  for (let c = 1; c <= 3; c += 1) {
+    const cell = worksheet.getCell(17, c);
+    cell.value = c === 1 ? 'Net Amount of Wages Paid' : null;
+    cell.alignment = {
+      ...(cell.alignment || {}),
+      horizontal: 'left',
+      vertical: 'middle',
+      wrapText: true,
+    };
+  }
+  try {
+    if (typeof worksheet.mergeCells === 'function') {
+      worksheet.mergeCells(17, 1, 17, 3);
+    }
+  } catch (_) {
+    /* already merged or unsupported */
+  }
+
+  const amountText =
+    netAmount != null && String(netAmount).trim() !== ''
+      ? formXIXMPSanitizeExportText(netAmount)
+      : '';
+  const amountCell = worksheet.getCell(17, 4);
+  if (amountText) amountCell.value = amountText;
+  amountCell.alignment = {
+    ...(amountCell.alignment || {}),
+    horizontal: 'right',
+    vertical: 'middle',
+  };
+}
+
+/** Clear stray G–J (and E–F) leftovers from AP/MP stacked writes outside the A–D form. */
+function clearFormXIXTamilNaduExtraColumnsInline(worksheet) {
+  if (!worksheet) return;
+  const maxRow = Math.max(worksheet.rowCount || 0, 20);
+  for (let r = 1; r <= maxRow; r += 1) {
+    for (let c = 5; c <= 10; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      cell.value = null;
+      cell.border = undefined;
+    }
+  }
+}
+
+/** Thin all-borders on TN Form XIX A1:D17 (keeps border logic local to avoid circular imports). */
+function applyFormXIXTamilNaduAllBordersInline(worksheet) {
+  if (!worksheet) return;
+  const border = {
+    top: { style: 'thin', color: { argb: 'FF000000' } },
+    left: { style: 'thin', color: { argb: 'FF000000' } },
+    bottom: { style: 'thin', color: { argb: 'FF000000' } },
+    right: { style: 'thin', color: { argb: 'FF000000' } },
+  };
+  for (let r = 1; r <= 17; r += 1) {
+    for (let c = 1; c <= 4; c += 1) {
+      worksheet.getCell(r, c).border = {
+        top: { ...border.top },
+        left: { ...border.left },
+        bottom: { ...border.bottom },
+        right: { ...border.right },
+      };
+    }
+  }
 }
 
 function sanitizeFormXIXMPHeaderFormData(headerFormData) {
@@ -2060,8 +2294,11 @@ function sanitizeFormXIXMPHeaderFormData(headerFormData) {
 }
 
 export function resolveFormXIXMPEmployeeDownloadBaseName(row, headers, fallbackIndex = 0) {
-  const hdrs = resolveFormXIXMPWageTableHeaders(headers);
-  const workmanHeader = hdrs.find(isFormXIXMPWorkmanNameHeader);
+  const hdrs = Array.isArray(headers) && headers.length > 0 ? headers : resolveFormXIXMPWageTableHeaders(headers);
+  const workmanHeader =
+    hdrs.find((h) => /^workman\s+name$/i.test(normHeader(h))) ||
+    hdrs.find(isFormXIXMPWorkmanNameHeader) ||
+    hdrs.find((h) => /^workman\s+code$/i.test(normHeader(h)));
   const raw = workmanHeader ? String(getFormXIXMPRowValueForHeader(row, workmanHeader) || '').trim() : '';
   const firstLine = raw.split(/\r?\n/)[0] || raw;
   const slug = firstLine

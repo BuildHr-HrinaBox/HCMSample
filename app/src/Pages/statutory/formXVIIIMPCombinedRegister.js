@@ -160,9 +160,31 @@ export function looksLikeKarnatakaFormTSheet(blob) {
   );
 }
 
+/**
+ * Tamil Nadu CLRA Form XVIII (Register of Wages-cum-Muster Roll) shares "Form XVIII" /
+ * "wages-cum-muster" wording with MP Form XVIII — never treat it as the MP combined register.
+ */
+export function looksLikeTamilNaduFormXVIIISheet(blob) {
+  const s = String(blob || '').toLowerCase();
+  if (!/tamil[\s._-]*nadu|tamilnadu/.test(s) && !/form_xviii[_\s-]*tamil|form[\s._-]*xviii[_\s-]*tamil/.test(s)) {
+    return false;
+  }
+  // Explicit Madhya Pradesh identity wins over a stray "Tamil Nadu" mention elsewhere.
+  if (/\bmadhya\s+pradesh\b/.test(s) && !/form_xviii[_\s-]*tamil|form[\s._-]*xviii[_\s-]*tamil/.test(s)) {
+    return false;
+  }
+  return (
+    /form[\s._-]*xviii(?![a-z])/i.test(s) ||
+    /form[\s._-]*18(?!\d)/i.test(s) ||
+    /register[\s._-]*of[\s._-]*wages[\s._-]*cum[\s._-]*muster/i.test(s) ||
+    /register\s+of\s+wages[\s-]*cum[\s-]*muster\s+roll/i.test(s)
+  );
+}
+
 export function looksLikeMPCombinedRegisterSheet(blob) {
   const s = String(blob || '').toLowerCase();
   if (looksLikeKarnatakaFormTSheet(s)) return false;
+  if (looksLikeTamilNaduFormXVIIISheet(s)) return false;
   return (
     /muster[\s._-]*roll[\s._-]*cum[\s._-]*register[\s._-]*of[\s._-]*wages/i.test(s) ||
     /register[\s._-]*of[\s._-]*wages[\s._-]*cum[\s._-]*muster/i.test(s) ||
@@ -190,6 +212,8 @@ export function isFormXVIIIMPCombinedRegisterContext(formHeader, rowItem, fileNa
     .join(' ')
     .toLowerCase();
   if (looksLikeKarnatakaFormTSheet(parts)) return false;
+  // Form_XVIII_-_TamilNadu.xlsx must use Central/TN wages-cum-muster parse — not MP rebuild.
+  if (looksLikeTamilNaduFormXVIIISheet(parts)) return false;
   return (
     /\bform\s*xviii\b|\bform_xviii\b|\bform-xviii\b/i.test(parts) ||
     looksLikeMPCombinedRegisterSheet(parts)

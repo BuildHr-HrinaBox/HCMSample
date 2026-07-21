@@ -1,11 +1,15 @@
 'use strict';
 
 const axios = require('axios');
-const { IncomingMessage, ServerResponse } = require('http');
+const express = require('express');
+const catalystSDK = require('zcatalyst-sdk-node');
 
 /** Zoho bookedAndBalance returns at most 30 per call (docs); .in DC accepts up to 100. */
 const ZOHO_LEAVE_PAGE_SIZE = 100;
 const ZOHO_LEAVE_MAX_PAGES = 200;
+const LEAVE_DATA_TABLE = 'LeaveData';
+const LEAVE_DATA_INSERT_CHUNK = 100;
+const LEAVE_DATA_DELETE_CHUNK = 200;
 
 /**
  * Catalyst function to fetch Zoho People Leave data.
@@ -95,7 +99,7 @@ function mergeLeavePages(pages) {
   return merged;
 }
 
-module.exports = async (req, res) => {
+async function handleLeaveFetch(req, res) {
   try {
     const fromDate = readQueryParam(req, 'from') || '01-Jan-2025';
     const toDate = readQueryParam(req, 'to') || '31-Dec-2025';
@@ -130,31 +134,194 @@ module.exports = async (req, res) => {
     const leaveRecords = renameLeaveRecordKeys(normalizeLeaveResponse(rawData), leaveTypeLabels);
     const records = toRecordsMap(rawData, leaveRecords);
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: true, records, leaveTypeLabels, leaveRecords, meta }));
+    res.status(200).json({ success: true, records, leaveTypeLabels, leaveRecords, meta });
   } catch (error) {
     console.error('leavedata_function error:', error);
     const errorMessage = formatZohoApiError(error.response?.data, error.message || 'Unknown error occurred');
-    
-    // Log full error details for debugging
+
     if (error.response) {
       console.error('Error response status:', error.response.status);
       console.error('Error response data:', error.response.data);
       console.error('Error response headers:', error.response.headers);
     }
-    
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ 
-      success: false, 
+
+    res.status(500).json({
+      success: false,
       error: errorMessage,
       details: process.env.NODE_ENV === 'development' ? {
         status: error.response?.status,
         statusText: error.response?.statusText,
         data: error.response?.data
       } : undefined
-    }));
+    });
   }
-};
+}
+
+function toNullIfEmpty(value) {
+  if (value == null) return null;
+  const str = String(value).trim();
+  return str === '' ? null : str;
+}
+
+function cellToStoreValue(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
+    }
+  }
+  const str = String(value).trim();
+  return str === '' ? null : str;
+}
+
+function mapIncomingLeaveDataRow(row) {
+  if (!row || typeof row !== 'object') return null;
+  const mapped = {
+    Employee: toNullIfEmpty(row.Employee ?? row.employee),
+    LeaveearnedduringthePeriod: cellToStoreValue(
+      row.LeaveearnedduringthePeriod ?? row.leaveEarnedDuringthePeriod
+    ),
+    LeaveavailedduringthePeriod: cellToStoreValue(
+      row.LeaveavailedduringthePeriod ?? row.leaveAvailedDuringthePeriod
+    ),
+    Totals: cellToStoreValue(row.Totals ?? row.totals),
+    LegacyEarnedLeave: cellToStoreValue(row.LegacyEarnedLeave ?? row.legacyEarnedLeave),
+    PaternityLeave: cellToStoreValue(row.PaternityLeave ?? row.paternityLeave),
+    Absent: cellToStoreValue(row.Absent ?? row.absent),
+    ContingencyLeave: cellToStoreValue(row.ContingencyLeave ?? row.contingencyLeave),
+    MaternityLeave: cellToStoreValue(row.MaternityLeave ?? row.maternityLeave),
+    Earnedleave: cellToStoreValue(row.Earnedleave ?? row.EarnedLeave ?? row.earnedleave),
+    MonthWise: toNullIfEmpty(row.MonthWise ?? row.monthWise ?? row.month_wise),
+  };
+  if (!mapped.Employee) return null;
+  return mapped;
+}
+
+function escapeZcqlLiteral(value) {
+  return String(value || '').replace(/'/g, "''");
+}
+
+async function deleteLeaveDataRowsForMonth(catalyst, monthWise) {
+  const month = String(monthWise || '').trim();
+  if (!month) return deleteAllLeaveDataRows(catalyst);
+
+  const table = catalyst.datastore().table(LEAVE_DATA_TABLE);
+  const zcql = catalyst.zcql();
+  let ids = [];
+
+  try {
+    const safe = escapeZcqlLiteral(month);
+    const rows = await zcql.executeZCQLQuery(
+      `SELECT ROWID FROM ${LEAVE_DATA_TABLE} WHERE MonthWise = '${safe}'`
+    );
+    ids = (Array.isArray(rows) ? rows : [])
+      .map((entry) => {
+        const cell = entry[LEAVE_DATA_TABLE] || entry;
+        return cell?.ROWID ?? cell?.rowid ?? null;
+      })
+      .filter((id) => id != null);
+  } catch (err) {
+    console.warn('LeaveData month delete query failed:', err.message || err);
+    return 0;
+  }
+
+  if (ids.length === 0) return 0;
+
+  for (let i = 0; i < ids.length; i += LEAVE_DATA_DELETE_CHUNK) {
+    const chunk = ids.slice(i, i + LEAVE_DATA_DELETE_CHUNK);
+    if (typeof table.deleteRows === 'function') {
+      await table.deleteRows(chunk);
+    } else {
+      for (const id of chunk) {
+        await table.deleteRow(id);
+      }
+    }
+  }
+  return ids.length;
+}
+
+async function deleteAllLeaveDataRows(catalyst) {
+  const table = catalyst.datastore().table(LEAVE_DATA_TABLE);
+  const zcql = catalyst.zcql();
+  let ids = [];
+
+  try {
+    const rows = await zcql.executeZCQLQuery(`SELECT ROWID FROM ${LEAVE_DATA_TABLE}`);
+    ids = (Array.isArray(rows) ? rows : [])
+      .map((entry) => {
+        const cell = entry[LEAVE_DATA_TABLE] || entry;
+        return cell?.ROWID ?? cell?.rowid ?? null;
+      })
+      .filter((id) => id != null);
+  } catch (err) {
+    console.warn('LeaveData ZCQL select failed, trying getAllRows:', err.message || err);
+    try {
+      const rows = await table.getAllRows();
+      ids = (Array.isArray(rows) ? rows : [])
+        .map((row) => row?.ROWID ?? row?.rowid ?? null)
+        .filter((id) => id != null);
+    } catch (getAllErr) {
+      console.warn('LeaveData getAllRows failed:', getAllErr.message || getAllErr);
+    }
+  }
+
+  if (ids.length === 0) return 0;
+
+  for (let i = 0; i < ids.length; i += LEAVE_DATA_DELETE_CHUNK) {
+    const chunk = ids.slice(i, i + LEAVE_DATA_DELETE_CHUNK);
+    if (typeof table.deleteRows === 'function') {
+      await table.deleteRows(chunk);
+    } else {
+      for (const id of chunk) {
+        await table.deleteRow(id);
+      }
+    }
+  }
+  return ids.length;
+}
+
+async function persistLeaveDataRows(catalyst, records, { replaceExisting = true, monthWise = null } = {}) {
+  const month = String(monthWise || '').trim() || null;
+  const list = Array.isArray(records)
+    ? records
+        .map((row) => {
+          const mapped = mapIncomingLeaveDataRow(row);
+          if (!mapped) return null;
+          if (!mapped.MonthWise && month) mapped.MonthWise = month;
+          return mapped;
+        })
+        .filter(Boolean)
+    : [];
+  if (list.length === 0) {
+    return { saved: false, reason: 'empty_records' };
+  }
+
+  let deleted = 0;
+  if (replaceExisting) {
+    deleted = month
+      ? await deleteLeaveDataRowsForMonth(catalyst, month)
+      : await deleteAllLeaveDataRows(catalyst);
+  }
+
+  const table = catalyst.datastore().table(LEAVE_DATA_TABLE);
+  let inserted = 0;
+  for (let i = 0; i < list.length; i += LEAVE_DATA_INSERT_CHUNK) {
+    const chunk = list.slice(i, i + LEAVE_DATA_INSERT_CHUNK);
+    if (chunk.length === 0) continue;
+    await table.insertRows(chunk);
+    inserted += chunk.length;
+  }
+
+  return {
+    saved: true,
+    inserted,
+    deleted,
+    total: inserted,
+    monthWise: month,
+  };
+}
 
 const DEFAULT_ZOHO_CLIENT_ID = '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
 const DEFAULT_ZOHO_CLIENT_SECRET = 'b6d3935145d59974934b981d6291b40af69a3ab150';
@@ -626,3 +793,69 @@ async function fetchAllLeaveData({ accessToken, fromDate, toDate, unit }) {
     meta: { total, pages: pages.length, pageSize, mode: 'fetch_all' },
   };
 }
+
+const app = express();
+app.use(express.json({ limit: '50mb' }));
+app.use((req, res, next) => {
+  try {
+    res.locals.catalyst = catalystSDK.initialize(req);
+    next();
+  } catch (err) {
+    // GET fetch does not need Catalyst datastore; only fail hard for POST save.
+    if (String(req.method || '').toUpperCase() === 'POST') {
+      res.status(500).json({ success: false, error: 'Catalyst init failed' });
+      return;
+    }
+    res.locals.catalyst = null;
+    next();
+  }
+});
+
+app.get('/', handleLeaveFetch);
+
+app.post('/save', async (req, res) => {
+  try {
+    const { catalyst } = res.locals;
+    if (!catalyst) {
+      res.status(500).json({ success: false, error: 'Catalyst init failed' });
+      return;
+    }
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const records = Array.isArray(body.records) ? body.records : [];
+    const replaceExisting = body.replaceExisting !== false && body.replaceExisting !== '0';
+    const monthWise = body.monthWise || body.MonthWise || null;
+    const result = await persistLeaveDataRows(catalyst, records, { replaceExisting, monthWise });
+
+    if (!result.saved) {
+      res.status(400).json({
+        success: false,
+        error: result.reason === 'empty_records' ? 'No leave records to save' : 'Could not save leave data',
+        reason: result.reason || 'unknown',
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      message: result.monthWise
+        ? `Leave data saved to LeaveData table for ${result.monthWise}.`
+        : 'Leave data saved to LeaveData table.',
+      data: {
+        inserted: result.inserted,
+        deleted: result.deleted,
+        total: result.total,
+        monthWise: result.monthWise || null,
+        from: body.from || null,
+        to: body.to || null,
+      },
+    });
+  } catch (err) {
+    console.error('leavedata_function save error:', err.message || err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to save leave data',
+    });
+  }
+});
+
+module.exports = app;

@@ -3,7 +3,11 @@ import './Leave.css';
 import {
   getDefaultLeaveReportRange,
   fetchLeaveReport,
+  mapLeaveRecordToLeaveDataRow,
+  saveLeaveDataToBackend,
+  getLeaveMonthWise,
 } from '../utils/leaveApi';
+import { extractLeaveRecordsFromApiResult } from '../utils/leaveMetrics';
 
 /** Leave types used for earned / availed breakout columns */
 const EARNED_LEAVE_NAMES = new Set([
@@ -98,11 +102,13 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
   const [loading, setLoading] = useState(false);
   const [loadStatus, setLoadStatus] = useState('');
   const [error, setError] = useState('');
+  const [saveMessage, setSaveMessage] = useState('');
 
   const fetchData = async () => {
     setLoading(true);
     setError('');
     setLoadStatus('');
+    setSaveMessage('');
     setData(null);
     setMeta(null);
     try {
@@ -124,16 +130,60 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
       if (!result.success) {
         throw new Error('Invalid response');
       }
+
+      const leaveTypeLabels = result.leaveTypeLabels || {};
+      const extracted = extractLeaveRecordsFromApiResult(result);
+      const leaveRecords =
+        Array.isArray(extracted.records) && extracted.records.length > 0
+          ? extracted.records
+          : Array.isArray(result.leaveRecords)
+            ? result.leaveRecords
+            : [];
+      const labelsForMap = extracted.leaveTypeLabels || leaveTypeLabels;
+      const monthWise = getLeaveMonthWise(fromDate, toDate);
+      const mappedRows = leaveRecords
+        .map((row) =>
+          mapLeaveRecordToLeaveDataRow(row, labelsForMap, {
+            from: fromDate,
+            to: toDate,
+            monthWise,
+          })
+        )
+        .filter(Boolean);
+
+      if (mappedRows.length > 0) {
+        setLoadStatus(
+          `Saving ${mappedRows.length} row(s) to LeaveData${monthWise ? ` (${monthWise})` : ''}…`
+        );
+        const saveResult = await saveLeaveDataToBackend({
+          records: mappedRows,
+          from: fromDate,
+          to: toDate,
+          monthWise,
+          apiBase,
+          onProgress: setLoadStatus,
+        });
+        const inserted = saveResult?.data?.inserted ?? mappedRows.length;
+        setSaveMessage(
+          monthWise
+            ? `Saved ${inserted} row(s) to LeaveData for ${monthWise}.`
+            : `Saved ${inserted} row(s) to LeaveData table.`
+        );
+      } else {
+        setSaveMessage('No leave rows to save to LeaveData.');
+      }
+
       setData({
         raw: result.raw,
-        leaveTypeLabels: result.leaveTypeLabels,
-        leaveRecords: result.leaveRecords,
+        leaveTypeLabels: labelsForMap,
+        leaveRecords,
       });
       setMeta(result.meta || null);
     } catch (err) {
       setError(err.message || 'Failed to fetch leave data');
       setData(null);
       setMeta(null);
+      setSaveMessage('');
     } finally {
       setLoading(false);
     }
@@ -277,6 +327,12 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
       {error && (
         <div className="leave-error">
           {error}
+        </div>
+      )}
+
+      {saveMessage && !error && (
+        <div className="leave-meta" style={{ color: '#047857', marginBottom: 12 }}>
+          {saveMessage}
         </div>
       )}
 

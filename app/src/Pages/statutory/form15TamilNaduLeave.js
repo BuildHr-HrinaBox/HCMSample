@@ -627,3 +627,61 @@ export function formatForm15Part1LeaveTransferSummary(summary) {
   }
   return `Form 15 Part 1 leave (Form X mapping): ${parts.join(', ')}.`;
 }
+
+function leaveMetricTypeFromHeader(header) {
+  const s = normHeader(header);
+  if (!s.includes('leave')) return null;
+  if (s.includes('beginning') && s.includes('month')) return 'beginning';
+  if (s.includes('earned') && (s.includes('period') || s.includes('during'))) return 'earned';
+  if (s.includes('availed') && s.includes('month')) return 'availed';
+  if (s.includes('balance') && s.includes('end') && s.includes('month')) return 'balance';
+  return null;
+}
+
+/**
+ * Collect leave cell values from an autofill/modal row in stable column order.
+ * Prefers `headers` order, then any extra leave keys on the row.
+ * Includes "0" (earned-during default).
+ *
+ * @returns {string[]}
+ */
+export function buildForm15Part1LeaveExportColumnValues(row, headers = []) {
+  if (!row || typeof row !== 'object') return [];
+  const values = [];
+  const seen = new Set();
+  const pushKey = (key) => {
+    const k = String(key || '').trim();
+    if (!k || seen.has(k) || String(k).startsWith('__')) return;
+    if (!leaveMetricTypeFromHeader(k)) return;
+    seen.add(k);
+    const raw = row[k];
+    if (raw == null) {
+      values.push('');
+      return;
+    }
+    values.push(String(raw).trim());
+  };
+  (Array.isArray(headers) ? headers : []).forEach(pushKey);
+  Object.keys(row).forEach(pushKey);
+  return values;
+}
+
+/**
+ * Map modal leave values onto Excel physical columns that sit after the worker-id column.
+ * Used when merged group headers ("Earned Leave") hide leaf titles so metric classification fails.
+ *
+ * @returns {(string|number|null)[]} same length as physicalColCount (or leaveColIndexes length)
+ */
+export function mapForm15Part1LeaveValuesToExcelLeaveColumns(
+  row,
+  headers,
+  leaveColumnCount
+) {
+  const values = buildForm15Part1LeaveExportColumnValues(row, headers);
+  const count = Math.max(0, Number(leaveColumnCount) || 0);
+  const out = [];
+  for (let i = 0; i < count; i += 1) {
+    out.push(i < values.length ? values[i] : '');
+  }
+  return out;
+}

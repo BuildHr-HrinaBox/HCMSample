@@ -356,3 +356,231 @@ export async function fetchLeaveReport({
   }
   return result;
 }
+
+function parseJsonMaybe(val) {
+  if (val == null) return null;
+  if (typeof val === 'object') return val;
+  if (typeof val === 'string') {
+    const s = val.trim();
+    if (!s.startsWith('{') && !s.startsWith('[')) return null;
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function formatEmployeeForStore(val) {
+  const o = parseJsonMaybe(val) ?? (val && typeof val === 'object' ? val : null);
+  if (o && typeof o === 'object') {
+    const name = o.name != null ? String(o.name) : '';
+    const id = o.id != null ? String(o.id) : '';
+    if (name && id) return `${name} (${id})`;
+    return name || id || '';
+  }
+  return val == null ? '' : String(val);
+}
+
+function formatLeaveCellForStore(val) {
+  const obj = parseJsonMaybe(val) ?? (val && typeof val === 'object' ? val : null);
+  if (!obj || typeof obj !== 'object') return val == null ? '' : String(val);
+  if (Object.keys(obj).length === 0) return '';
+  if ('paidBalance' in obj || 'paidBooked' in obj || 'unpaidBalance' in obj || 'unpaidBooked' in obj) {
+    const b = obj.paidBalance ?? obj.balance ?? obj.unpaidBalance;
+    const book = obj.paidBooked ?? obj.booked ?? obj.unpaidBooked;
+    const parts = [];
+    if (b != null && b !== '') parts.push(`Balance: ${b}`);
+    if (book != null && book !== '') parts.push(`Booked: ${book}`);
+    return parts.join(', ');
+  }
+  if (Object.keys(obj).length === 1 && 'balance' in obj) return String(obj.balance);
+  if ('balance' in obj || 'booked' in obj) {
+    const parts = [];
+    if (obj.balance != null && obj.balance !== '') parts.push(`Balance: ${obj.balance}`);
+    if (obj.booked != null && obj.booked !== '') parts.push(`Booked: ${obj.booked}`);
+    return parts.join(', ');
+  }
+  try {
+    return JSON.stringify(obj);
+  } catch {
+    return String(obj);
+  }
+}
+
+const EARNED_LEAVE_LABELS = new Set([
+  'Earned Leave (Test)',
+  'Earned Leave(Test)',
+  'Earned Leave (test)',
+  'Earned Leave',
+  'Earned leave',
+]);
+
+function findLeaveTypeKey(row, leaveTypeLabels, matcher) {
+  if (!row || typeof row !== 'object') return null;
+  for (const key of Object.keys(row)) {
+    const label = leaveTypeLabels && leaveTypeLabels[key] ? String(leaveTypeLabels[key]) : key;
+    if (matcher(String(key), String(label))) return key;
+  }
+  return null;
+}
+
+function getEarnedLeaveBreakout(row, leaveTypeLabels) {
+  const earnedKey = findLeaveTypeKey(row, leaveTypeLabels, (key, label) => {
+    if (/legacy/i.test(key) || /legacy/i.test(label)) return false;
+    return EARNED_LEAVE_LABELS.has(key) || EARNED_LEAVE_LABELS.has(label) || /^earned\s+leave(\s*\(test\))?$/i.test(label);
+  });
+  if (!earnedKey) return { balance: '', booked: '', earnedKey: null };
+  const raw = row[earnedKey];
+  const obj = parseJsonMaybe(raw) ?? (raw && typeof raw === 'object' ? raw : null);
+  if (!obj || typeof obj !== 'object') return { balance: '', booked: '', earnedKey };
+  const balance = obj.paidBalance ?? obj.balance ?? obj.Balance;
+  const booked = obj.paidBooked ?? obj.booked ?? obj.Booked;
+  return {
+    balance: balance != null && balance !== '' ? String(balance) : '',
+    booked: booked != null && booked !== '' ? String(booked) : '',
+    earnedKey,
+  };
+}
+
+function pickLeaveTypeDisplay(row, leaveTypeLabels, matcher) {
+  const key = findLeaveTypeKey(row, leaveTypeLabels, matcher);
+  if (!key) return '';
+  return formatLeaveCellForStore(row[key]);
+}
+
+/**
+ * Derive MonthWise (YYYY-MM) from Zoho leave From date (DD-Mon-YYYY).
+ * Falls back to To date, then empty string.
+ */
+export function getLeaveMonthWise(fromDate, toDate) {
+  const parse = (dateStr) => {
+    const m = String(dateStr || '')
+      .trim()
+      .match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+    if (!m) return '';
+    const mon = MONTH_ABBR.findIndex((x) => x.toLowerCase() === m[2].toLowerCase());
+    if (mon < 0) return '';
+    return `${m[3]}-${String(mon + 1).padStart(2, '0')}`;
+  };
+  return parse(fromDate) || parse(toDate) || '';
+}
+
+/**
+ * Map a Zoho leave report row to LeaveData datastore columns.
+ */
+export function mapLeaveRecordToLeaveDataRow(row, leaveTypeLabels = {}, options = {}) {
+  if (!row || typeof row !== 'object') return null;
+
+  const employee =
+    formatEmployeeForStore(row.employee ?? row.Employee) ||
+    (row.employeeId != null ? String(row.employeeId) : '');
+  if (!employee) return null;
+
+  const earned = getEarnedLeaveBreakout(row, leaveTypeLabels);
+  const monthWise =
+    options.monthWise != null && String(options.monthWise).trim() !== ''
+      ? String(options.monthWise).trim()
+      : getLeaveMonthWise(options.from, options.to);
+
+  return {
+    Employee: employee,
+    LeaveearnedduringthePeriod: earned.balance,
+    LeaveavailedduringthePeriod: earned.booked,
+    Totals: formatLeaveCellForStore(row.totals ?? row.Totals),
+    LegacyEarnedLeave: pickLeaveTypeDisplay(
+      row,
+      leaveTypeLabels,
+      (key, label) => /legacy/i.test(key) || /legacy/i.test(label)
+    ),
+    PaternityLeave: pickLeaveTypeDisplay(
+      row,
+      leaveTypeLabels,
+      (key, label) => /paternity/i.test(key) || /paternity/i.test(label)
+    ),
+    Absent: pickLeaveTypeDisplay(
+      row,
+      leaveTypeLabels,
+      (key, label) => /^absent$/i.test(key.trim()) || /^absent$/i.test(label.trim())
+    ),
+    ContingencyLeave: pickLeaveTypeDisplay(
+      row,
+      leaveTypeLabels,
+      (key, label) => /contingency/i.test(key) || /contingency/i.test(label)
+    ),
+    MaternityLeave: pickLeaveTypeDisplay(
+      row,
+      leaveTypeLabels,
+      (key, label) => /maternity/i.test(key) || /maternity/i.test(label)
+    ),
+    Earnedleave: earned.earnedKey ? formatLeaveCellForStore(row[earned.earnedKey]) : '',
+    MonthWise: monthWise,
+  };
+}
+
+/**
+ * Persist mapped leave rows into Catalyst LeaveData table via leavedata_function /save.
+ */
+export async function saveLeaveDataToBackend({
+  records,
+  from,
+  to,
+  monthWise,
+  apiBase = API_BASE,
+  replaceExisting = true,
+  chunkSize = 80,
+  onProgress,
+} = {}) {
+  const resolvedMonth =
+    (monthWise && String(monthWise).trim()) || getLeaveMonthWise(from, to) || null;
+  const list = Array.isArray(records)
+    ? records
+        .filter((r) => r && r.Employee)
+        .map((r) => ({
+          ...r,
+          MonthWise: r.MonthWise || resolvedMonth || '',
+        }))
+    : [];
+  if (list.length === 0) {
+    throw new Error('No leave records to save');
+  }
+
+  let lastJson = null;
+  for (let offset = 0; offset < list.length; offset += chunkSize) {
+    const chunk = list.slice(offset, offset + chunkSize);
+    const isFirst = offset === 0;
+    onProgress?.(
+      `Saving to LeaveData… ${Math.min(offset + chunk.length, list.length)} / ${list.length}`
+    );
+
+    const res = await fetch(`${apiBase}/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        from: from || null,
+        to: to || null,
+        monthWise: resolvedMonth,
+        records: chunk,
+        replaceExisting: isFirst ? replaceExisting : false,
+      }),
+    });
+
+    const text = await res.text();
+    let json = {};
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error(
+        `LeaveData save returned HTTP ${res.status} (not JSON). Redeploy leavedata_function and check Catalyst logs.`
+      );
+    }
+    if (!res.ok || json.success === false) {
+      throw new Error(json.error || json.message || `Save failed (HTTP ${res.status})`);
+    }
+    lastJson = json;
+  }
+
+  return lastJson;
+}

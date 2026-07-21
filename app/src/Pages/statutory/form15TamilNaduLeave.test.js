@@ -1,9 +1,11 @@
 import {
   applyForm15Part1TamilNaduLeaveAutofillWithSummary,
   applyForm15Part1TamilNaduLeaveToRow,
+  buildForm15Part1LeaveExportColumnValues,
   buildForm15Part1LeaveSectionValues,
   ensureForm15Part1LeaveColumnsLikeFormX,
   formatForm15Part1LeaveTransferSummary,
+  mapForm15Part1LeaveValuesToExcelLeaveColumns,
   matchForm15Part1LeaveRecord,
   resolveForm15Part1LeaveColumnHeaders,
   toFormXSectionHeadersFromForm15,
@@ -395,5 +397,41 @@ describe('form15TamilNaduLeave (Form X mapping)', () => {
     expect(match.ambiguous).toBe(false);
     expect(match.record.EmployeeID).toBe('VE0888');
     expect(match.reason).toBe('matched_id');
+  });
+
+  it('builds leave export values in header order including earned-during 0', () => {
+    const exportHeaders = [
+      'Name of the Worker',
+      'Worker Identity No.',
+      'Leave at the beginning of the Month',
+      'Leave earned during the Period',
+      'Leave availed during the Month',
+      'Leave balance at the end of the Month',
+      'Leave at beginning of the Month',
+      'Leave availed during the Month (2)',
+      'Leave balance at end of the Month',
+    ];
+    const row = {
+      'Name of the Worker': 'Rajeshkumar Ramasamy',
+      'Worker Identity No.': 'VE0447',
+      'Leave at the beginning of the Month': '39',
+      'Leave earned during the Period': '0',
+      'Leave availed during the Month': '11',
+      'Leave balance at the end of the Month': '28',
+      'Leave at beginning of the Month': '28',
+      'Leave availed during the Month (2)': '2',
+      'Leave balance at end of the Month': '26',
+    };
+    const values = buildForm15Part1LeaveExportColumnValues(row, exportHeaders);
+    expect(values).toEqual(['39', '0', '11', '28', '28', '2', '26']);
+    expect(mapForm15Part1LeaveValuesToExcelLeaveColumns(row, exportHeaders, 7)).toEqual([
+      '39',
+      '0',
+      '11',
+      '28',
+      '28',
+      '2',
+      '26',
+    ]);
   });
 });

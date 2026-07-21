@@ -1,12 +1,331 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { Calendar, CheckCircle2, Trash2, Upload } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import './CompanyDetails.css';
 import { INDIAN_CITIES } from '../utils/indianCities';
 import { INDIAN_STATES } from '../utils/indianStates';
 import CityCombobox, { StateCombobox } from '../components/CityCombobox';
 
 const API_BASE = '/server/company_function';
+
+/** Full company form fields for CSV export/import (ID omitted from export; import still accepts ID if present). */
+const COMPANY_CSV_COLS = [
+  { key: 'companyName', label: 'Name' },
+  { key: 'companyMail', label: 'Mail Id' },
+  { key: 'companyPhoneNumber', label: 'Moblie Number' },
+  { key: 'companyAddress', label: 'Address' },
+  { key: 'city', label: 'City' },
+  { key: 'state', label: 'State' },
+  { key: 'postalcode', label: 'Postal code' },
+  { key: 'incorprationDate', label: 'Incorporation date' },
+  { key: 'incorporationNo', label: 'Incorporation number' },
+  { key: 'companyPANNumber', label: 'PAN' },
+  { key: 'gstNo', label: 'GST number' },
+  { key: 'pfNo', label: 'PF number' },
+  { key: 'esiNo', label: 'ESI number' },
+  { key: 'directorName', label: 'Director Name' },
+  { key: 'directorMail', label: 'Director Mail Id' },
+  { key: 'directorPhoneNumber', label: 'Director Mobile Number' },
+  { key: 'directorAddress', label: 'Director Address' },
+  { key: 'ownerName', label: 'Owner / In-charge name' },
+  { key: 'ownerPAN', label: 'Owner / In-charge PAN' },
+  { key: 'ownerAaadhar', label: 'Owner / In-charge Aadhar' },
+  { key: 'ownerDesignation', label: 'Owner / In-charge designation' },
+  { key: 'safetyOfficerName', label: 'Safety officer name' },
+  { key: 'safetyOfficerPhone', label: 'Safety officer phone' }
+];
+
+/** Older exports included ID and used duplicate labels for director fields — map by position. */
+const COMPANY_CSV_LEGACY_LABELS = [
+  'ID',
+  'Name',
+  'Mail Id',
+  'Moblie Number',
+  'Address',
+  'City',
+  'State',
+  'Postal code',
+  'Incorporation date',
+  'Incorporation number',
+  'PAN',
+  'GST number',
+  'PF number',
+  'ESI number',
+  'Name',
+  'Mail Id',
+  'Mobile Number',
+  'Address',
+  'Owner / In-charge name',
+  'Owner / In-charge PAN',
+  'Owner / In-charge Aadhar',
+  'Owner / In-charge designation',
+  'Safety officer name',
+  'Safety officer phone'
+];
+
+/** Older export with ID + unique director labels (before ID was removed from export). */
+const COMPANY_CSV_LEGACY_WITH_ID_LABELS = [
+  'ID',
+  ...COMPANY_CSV_COLS.map((c) => c.label)
+];
+
+function normalizeCsvHeader(h) {
+  return String(h ?? '')
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function stripCsvExcelTextPrefix(v) {
+  const s = String(v ?? '').trim();
+  return s.startsWith('\t') ? s.slice(1).trim() : s;
+}
+
+function headersMatchLabelList(headerRow, labels) {
+  if (!Array.isArray(headerRow) || headerRow.length < labels.length) return false;
+  return labels.every(
+    (label, i) => normalizeCsvHeader(headerRow[i]) === normalizeCsvHeader(label)
+  );
+}
+
+function buildCompanyCsvHeaderIndexMap(headerRow) {
+  const map = {};
+
+  // Older export: ID + duplicate director labels (Name / Mail Id / …)
+  if (headersMatchLabelList(headerRow, COMPANY_CSV_LEGACY_LABELS)) {
+    const legacyKeys = ['id', ...COMPANY_CSV_COLS.map((c) => c.key)];
+    legacyKeys.forEach((key, i) => {
+      map[key] = i;
+    });
+    return map;
+  }
+
+  // Older export: ID + unique director labels
+  if (headersMatchLabelList(headerRow, COMPANY_CSV_LEGACY_WITH_ID_LABELS)) {
+    map.id = 0;
+    COMPANY_CSV_COLS.forEach((c, i) => {
+      map[c.key] = i + 1;
+    });
+    return map;
+  }
+
+  // Current export (no ID column)
+  if (
+    COMPANY_CSV_COLS.every(
+      (c, i) => normalizeCsvHeader(headerRow[i]) === normalizeCsvHeader(c.label)
+    )
+  ) {
+    COMPANY_CSV_COLS.forEach((c, i) => {
+      map[c.key] = i;
+    });
+    return map;
+  }
+
+  const aliases = {
+    id: ['id', 'rowid'],
+    companyName: ['name', 'company name', 'companyname'],
+    companyMail: ['mail id', 'email', 'company mail', 'company email', 'companymail'],
+    companyPhoneNumber: ['moblie number', 'mobile number', 'phone', 'company phone', 'companyphone'],
+    companyAddress: ['address', 'company address'],
+    city: ['city'],
+    state: ['state'],
+    postalcode: ['postal code', 'postalcode', 'pincode', 'pin code'],
+    incorprationDate: ['incorporation date', 'incorpration date', 'incorporationdate'],
+    incorporationNo: ['incorporation number', 'incorporation no', 'incorporationno'],
+    companyPANNumber: ['pan', 'company pan', 'companypannumber'],
+    gstNo: ['gst number', 'gst', 'gstin', 'gstno'],
+    pfNo: ['pf number', 'pf', 'pfno'],
+    esiNo: ['esi number', 'esi', 'esino'],
+    directorName: ['director name', 'director'],
+    directorMail: ['director mail id', 'director email', 'director mail'],
+    directorPhoneNumber: ['director mobile number', 'director phone', 'director phone number'],
+    directorAddress: ['director address'],
+    ownerName: ['owner / in-charge name', 'owner name', 'owner/in-charge name'],
+    ownerPAN: ['owner / in-charge pan', 'owner pan'],
+    ownerAaadhar: ['owner / in-charge aadhar', 'owner aadhar', 'owner aadhaar'],
+    ownerDesignation: ['owner / in-charge designation', 'owner designation'],
+    safetyOfficerName: ['safety officer name'],
+    safetyOfficerPhone: ['safety officer phone']
+  };
+  const normalizedHeaders = headerRow.map(normalizeCsvHeader);
+  Object.keys(aliases).forEach((key) => {
+    const idx = normalizedHeaders.findIndex((h) => aliases[key].includes(h));
+    if (idx >= 0) map[key] = idx;
+  });
+  return map;
+}
+
+/** Format a JS Date as DD/MM/YYYY using local calendar parts. */
+function formatJsDateToDdMmYyyy(d) {
+  if (!(d instanceof Date) || isNaN(d.getTime())) return '';
+  const day = String(d.getDate()).padStart(2, '0');
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  return `${day}/${mo}/${d.getFullYear()}`;
+}
+
+/** Convert Excel serial (or SheetJS date code) to DD/MM/YYYY via SSF (avoids timezone off-by-one). */
+function excelSerialToDdMmYyyy(serial) {
+  const num = Number(serial);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  if (XLSX.SSF && typeof XLSX.SSF.parse_date_code === 'function') {
+    const parsed = XLSX.SSF.parse_date_code(num);
+    if (parsed && parsed.y && parsed.m && parsed.d) {
+      const day = String(parsed.d).padStart(2, '0');
+      const mo = String(parsed.m).padStart(2, '0');
+      return `${day}/${mo}/${parsed.y}`;
+    }
+  }
+  const utc = new Date(Date.UTC(1899, 11, 30) + Math.round(num) * 86400000);
+  if (isNaN(utc.getTime())) return '';
+  const day = String(utc.getUTCDate()).padStart(2, '0');
+  const mo = String(utc.getUTCMonth() + 1).padStart(2, '0');
+  return `${day}/${mo}/${utc.getUTCFullYear()}`;
+}
+
+/**
+ * Read sheet as AOA, preferring Excel display text (`cell.w`) so DD/MM/YYYY dates
+ * are not reformatted to US short dates like 6/11/26.
+ */
+function sheetToAoaPreferDisplayText(ws) {
+  if (!ws || !ws['!ref']) return [];
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const rows = [];
+  for (let R = range.s.r; R <= range.e.r; R += 1) {
+    const row = [];
+    for (let C = range.s.c; C <= range.e.c; C += 1) {
+      const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+      if (!cell) {
+        row.push('');
+        continue;
+      }
+      if (cell.w != null && String(cell.w).trim() !== '') {
+        row.push(String(cell.w));
+        continue;
+      }
+      if (cell.t === 'd' && cell.v instanceof Date) {
+        row.push(cell.v);
+        continue;
+      }
+      if (cell.t === 'n' && cell.v != null) {
+        row.push(cell.v);
+        continue;
+      }
+      row.push(cell.v == null ? '' : cell.v);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * Normalize Excel/CSV date cells to DD/MM/YYYY for validation.
+ * Excel stores dates as serials/Date objects; display may look like DD/MM/YYYY
+ * while the raw value is not a plain date string.
+ */
+function normalizeImportIncorporationDate(val) {
+  if (val == null || val === '') return '';
+  if (val instanceof Date) {
+    // Prefer SSF path when we only have a Date — use UTC+local safe formatting via serial
+    const serial = val.getTime() / 86400000 + 25569;
+    const fromSerial = excelSerialToDdMmYyyy(serial);
+    if (fromSerial) return fromSerial;
+    return formatJsDateToDdMmYyyy(val);
+  }
+  if (typeof val === 'number' && Number.isFinite(val)) {
+    if (val >= 1000 && val <= 9999 && Number.isInteger(val)) return `01/01/${val}`;
+    if (val > 20000 && val < 1000000) return excelSerialToDdMmYyyy(val);
+  }
+  let s = stripCsvExcelTextPrefix(val);
+  if (!s) return '';
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const num = Number(s);
+    if (num >= 1000 && num <= 9999 && Number.isInteger(num)) return `01/01/${num}`;
+    if (num > 20000 && num < 1000000) return excelSerialToDdMmYyyy(num);
+  }
+  const isoDt = /^(\d{4}-\d{2}-\d{2})(?:[T\s].*)?$/.exec(s);
+  if (isoDt) {
+    const [y, mo, d] = isoDt[1].split('-');
+    return `${d}/${mo}/${y}`;
+  }
+  // Strip trailing time: "11/06/2026 00:00:00", "11/06/2026 12:00 AM"
+  s = s.replace(/\s+\d{1,2}:\d{2}(:\d{2})?(\.\d+)?(\s*[AaPp][Mm])?\s*$/, '').trim();
+  return s;
+}
+
+function parseCompanyImportWorkbook(arrayBuffer) {
+  // cellDates:false keeps Excel dates as serials; we use cell.w (display) when present
+  const wb = XLSX.read(arrayBuffer, { type: 'array', cellDates: false });
+  const sheetName = wb.SheetNames[0];
+  if (!sheetName) throw new Error('No sheets found in the file.');
+  const ws = wb.Sheets[sheetName];
+  const rows = sheetToAoaPreferDisplayText(ws);
+  if (!rows.length) throw new Error('No data found in the file.');
+  const headerRow = rows[0].map((h) => stripCsvExcelTextPrefix(h));
+  const indexMap = buildCompanyCsvHeaderIndexMap(headerRow);
+  if (indexMap.companyName == null) {
+    throw new Error('Could not find a Name / Company Name column. Use Export CSV as a template.');
+  }
+  const dataRows = rows.slice(1).filter((row) =>
+    Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== '')
+  );
+  return dataRows.map((row, rowIndex) => {
+    const record = { __row: rowIndex + 2, id: '' };
+    if (indexMap.id != null) {
+      record.id = stripCsvExcelTextPrefix(row[indexMap.id]);
+    }
+    COMPANY_CSV_COLS.forEach(({ key }) => {
+      const idx = indexMap[key];
+      if (idx == null) {
+        record[key] = '';
+        return;
+      }
+      const rawVal = row[idx];
+      if (key === 'incorprationDate') {
+        record[key] = normalizeImportIncorporationDate(rawVal);
+        return;
+      }
+      if (rawVal instanceof Date && !isNaN(rawVal.getTime())) {
+        record[key] = formatJsDateToDdMmYyyy(rawVal);
+        return;
+      }
+      record[key] = stripCsvExcelTextPrefix(rawVal);
+    });
+    return record;
+  });
+}
+
+function buildCompanyPayloadFromImportRow(row) {
+  const incParsed = parseFlexibleIncorporationDate(String(row.incorprationDate || '').trim());
+  return {
+    companyName: String(row.companyName || '').trim(),
+    companyPANNumber: String(row.companyPANNumber || '').trim().toUpperCase(),
+    companyAddress: String(row.companyAddress || '').trim(),
+    city: String(row.city || '').trim(),
+    state: String(row.state || '').trim(),
+    postalcode: String(row.postalcode || '').trim(),
+    incorprationDate: incParsed || null,
+    incorporationNo: String(row.incorporationNo || '').trim(),
+    gstNo: String(row.gstNo || '').trim().toUpperCase(),
+    pfNo: normalizePfNumberInput(row.pfNo),
+    esiNo: normalizeEsiNumberInput(row.esiNo),
+    companyMail: String(row.companyMail || '').trim(),
+    companyPhoneNumber: digitsOnly(row.companyPhoneNumber),
+    directorName: String(row.directorName || '').trim(),
+    directorPhoneNumber: digitsOnly(row.directorPhoneNumber),
+    directorMail: String(row.directorMail || '').trim(),
+    directorAddress: String(row.directorAddress || '').trim(),
+    ownerName: String(row.ownerName || '').trim(),
+    ownerPAN: String(row.ownerPAN || '').trim().toUpperCase(),
+    ownerAaadhar: digitsOnly(row.ownerAaadhar),
+    ownerDesignation: String(row.ownerDesignation || '').trim(),
+    safetyOfficerName: String(row.safetyOfficerName || '').trim(),
+    safetyOfficerPhone: digitsOnly(row.safetyOfficerPhone),
+    doctroName: '',
+    doctroPhone: ''
+  };
+}
 
 /** Keep in sync with HcmDashboardSidebar (same-route Company Details nav). */
 const COMPANY_DETAILS_CLOSE_MODAL_EVENT = 'company-details-close-modal';
@@ -153,11 +472,16 @@ function normalizeDateSeparators(t) {
 
 /**
  * Parse incorporation date from user input to canonical YYYY-MM-DD (local calendar).
- * Accepts YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, and 4-digit year → YYYY-01-01.
+ * Accepts YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY, optional time suffix,
+ * 2-digit years, and 4-digit year → YYYY-01-01.
  */
 function parseFlexibleIncorporationDate(s) {
-  const t = normalizeDateSeparators(String(s || '').trim());
+  let t = normalizeDateSeparators(String(s || '').trim());
   if (!t) return null;
+  // Drop time portion Excel often appends (e.g. "11/06/2026 00:00:00")
+  t = t.replace(/\s+\d{1,2}:\d{2}(:\d{2})?(\.\d+)?(\s*[AaPp][Mm])?\s*$/, '').trim();
+  const isoDt = /^(\d{4}-\d{2}-\d{2})(?:[T\s].*)?$/.exec(t);
+  if (isoDt) t = isoDt[1];
   let m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(t);
   if (m) {
     const y = +m[1];
@@ -171,6 +495,16 @@ function parseFlexibleIncorporationDate(s) {
     const d = +m[1];
     const mo = +m[2];
     const y = +m[3];
+    if (isValidCalendarDate(y, mo, d)) return padYmd(y, mo, d);
+    return null;
+  }
+  // DD/MM/YY (Excel short year)
+  m = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})$/.exec(t);
+  if (m) {
+    const d = +m[1];
+    const mo = +m[2];
+    const yy = +m[3];
+    const y = yy >= 70 ? 1900 + yy : 2000 + yy;
     if (isValidCalendarDate(y, mo, d)) return padYmd(y, mo, d);
     return null;
   }
@@ -373,6 +707,19 @@ function companyRowId(c) {
   return String(c.id ?? c.ROWID ?? c.rowid ?? c.Company?.ROWID ?? '').trim();
 }
 
+/** Natural key for import upsert: Company Name (case-insensitive). */
+function companyImportNameKey(name) {
+  return String(name ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function companyRecordNameKey(c) {
+  if (!c || typeof c !== 'object') return '';
+  return companyImportNameKey(c.companyName ?? c.CompanyName ?? c.Name ?? '');
+}
+
 /** Normalize location fields from API list row or Datastore payload (PascalCase or camelCase). */
 function normalizeCompanyRecord(company) {
   if (!company || typeof company !== 'object') return company;
@@ -449,7 +796,9 @@ const CompanyDetails = ({ userRole, userEmail }) => {
   const [formErrors, setFormErrors] = useState({});
   const [toast, setToast] = useState('');
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [importing, setImporting] = useState(false);
   const toastTimerRef = useRef(null);
+  const importFileRef = useRef(null);
 
   const dismissToast = useCallback(() => {
     if (toastTimerRef.current) {
@@ -1054,36 +1403,8 @@ const CompanyDetails = ({ userRole, userEmail }) => {
   };
 
   const exportCompaniesCsv = () => {
-    /** Full company form fields (not limited to visible table columns). */
-    const cols = [
-      { key: 'id', label: 'ID' },
-      { key: 'companyName', label: 'Name' },
-      { key: 'companyMail', label: 'Mail Id' },
-      { key: 'companyPhoneNumber', label: 'Moblie Number' },
-      { key: 'companyAddress', label: 'Address' },
-      { key: 'city', label: 'City' },
-      { key: 'state', label: 'State' },
-      { key: 'postalcode', label: 'Postal code' },
-      { key: 'incorprationDate', label: 'Incorporation date' },
-      { key: 'incorporationNo', label: 'Incorporation number' },
-      { key: 'companyPANNumber', label: 'PAN' },
-      { key: 'gstNo', label: 'GST number' },
-      { key: 'pfNo', label: 'PF number' },
-      { key: 'esiNo', label: 'ESI number' },
-      { key: 'directorName', label: 'Name' },
-      { key: 'directorMail', label: 'Mail Id' },
-      { key: 'directorPhoneNumber', label: 'Mobile Number' },
-      { key: 'directorAddress', label: 'Address' },
-      { key: 'ownerName', label: 'Owner / In-charge name' },
-      { key: 'ownerPAN', label: 'Owner / In-charge PAN' },
-      { key: 'ownerAaadhar', label: 'Owner / In-charge Aadhar' },
-      { key: 'ownerDesignation', label: 'Owner / In-charge designation' },
-      { key: 'safetyOfficerName', label: 'Safety officer name' },
-      { key: 'safetyOfficerPhone', label: 'Safety officer phone' },
-    ];
     /** Leading tab inside a quoted field forces Excel to treat the cell as text (avoids 5.64E+09, ###, etc.). */
     const CSV_EXCEL_TEXT_KEYS = new Set([
-      'id',
       'companyPhoneNumber',
       'directorPhoneNumber',
       'safetyOfficerPhone',
@@ -1124,8 +1445,8 @@ const CompanyDetails = ({ userRole, userEmail }) => {
         .toLowerCase()
         .localeCompare(String(b[field] ?? '').toLowerCase(), undefined, { sensitivity: 'base' });
     const list = [...companies].sort((a, b) => strCmp(a, b, 'companyName'));
-    const header = cols.map((c) => escLabel(c.label)).join(',');
-    const rows = list.map((co) => cols.map((c) => escCsvCell(cellValue(co, c.key), c.key)).join(','));
+    const header = COMPANY_CSV_COLS.map((c) => escLabel(c.label)).join(',');
+    const rows = list.map((co) => COMPANY_CSV_COLS.map((c) => escCsvCell(cellValue(co, c.key), c.key)).join(','));
     const csv = '\ufeff' + [header, ...rows].join('\r\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -1135,6 +1456,174 @@ const CompanyDetails = ({ userRole, userEmail }) => {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  const handleImportCompanies = useCallback(
+    async (event) => {
+      const file = event.target.files?.[0];
+      if (importFileRef.current) importFileRef.current.value = '';
+      if (!file) return;
+
+      const name = String(file.name || '').toLowerCase();
+      const okExt = name.endsWith('.csv') || name.endsWith('.xlsx') || name.endsWith('.xls');
+      if (!okExt) {
+        setMessage('Invalid file type. Please upload a CSV or Excel file (.csv, .xlsx, .xls).');
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        setMessage('File size exceeds 5MB limit.');
+        return;
+      }
+
+      setImporting(true);
+      setMessage('');
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const importRows = parseCompanyImportWorkbook(arrayBuffer);
+        if (!importRows.length) {
+          setMessage('No data rows found in the file.');
+          return;
+        }
+
+        // Refresh so upsert matches latest DB rows (not a stale client list)
+        let companiesForMatch = companies;
+        try {
+          const res = await fetch(`${API_BASE}/company`);
+          const data = await res.json();
+          if (data.status === 'success' && Array.isArray(data.data?.companyDetails)) {
+            companiesForMatch = data.data.companyDetails.map(normalizeCompanyRecord);
+            setCompanies(companiesForMatch);
+          }
+        } catch (_) {
+          // keep in-memory list
+        }
+
+        const existingById = new Map();
+        const existingByName = new Map();
+        companiesForMatch.forEach((c) => {
+          const id = companyRowId(c);
+          if (id) existingById.set(id, c);
+          const nameKey = companyRecordNameKey(c);
+          // Keep the first match when duplicates already exist
+          if (nameKey && !existingByName.has(nameKey)) existingByName.set(nameKey, c);
+        });
+
+        let created = 0;
+        let updated = 0;
+        const errors = [];
+
+        for (const row of importRows) {
+          const formValues = {
+            ...initialForm,
+            companyName: row.companyName,
+            companyMail: row.companyMail,
+            companyPhoneNumber: row.companyPhoneNumber,
+            companyAddress: row.companyAddress,
+            city: row.city,
+            state: row.state,
+            postalcode: row.postalcode,
+            incorprationDate: row.incorprationDate,
+            incorporationNo: row.incorporationNo,
+            companyPANNumber: row.companyPANNumber,
+            gstNo: row.gstNo,
+            pfNo: row.pfNo,
+            esiNo: row.esiNo,
+            directorName: row.directorName,
+            directorMail: row.directorMail,
+            directorPhoneNumber: row.directorPhoneNumber,
+            directorAddress: row.directorAddress,
+            ownerName: row.ownerName,
+            ownerPAN: row.ownerPAN,
+            ownerAaadhar: row.ownerAaadhar,
+            ownerDesignation: row.ownerDesignation,
+            safetyOfficerName: row.safetyOfficerName,
+            safetyOfficerPhone: row.safetyOfficerPhone
+          };
+          const errs = validateCompanyFormValues(formValues);
+          if (Object.keys(errs).length > 0) {
+            const first = Object.values(errs)[0];
+            errors.push(`Row ${row.__row}: ${first}`);
+            continue;
+          }
+
+          const payload = buildCompanyPayloadFromImportRow(row);
+          const rowId = String(row.id || '').trim();
+          const nameKey = companyImportNameKey(row.companyName);
+          let matchId = '';
+          let existing = null;
+          if (rowId && existingById.has(rowId)) {
+            matchId = rowId;
+            existing = existingById.get(rowId);
+          } else if (nameKey && existingByName.has(nameKey)) {
+            existing = existingByName.get(nameKey);
+            matchId = companyRowId(existing);
+          }
+
+          try {
+            if (matchId) {
+              payload.doctroName = String(existing?.doctroName ?? '').trim();
+              payload.doctroPhone = String(existing?.doctroPhone ?? '').trim();
+              const res = await fetch(`${API_BASE}/company/${encodeURIComponent(matchId)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              const data = await res.json();
+              if (data.status === 'success') {
+                updated += 1;
+                const updatedCo = { ...(existing || {}), ...payload, id: matchId };
+                existingById.set(matchId, updatedCo);
+                if (nameKey) existingByName.set(nameKey, updatedCo);
+              } else {
+                errors.push(`Row ${row.__row}: ${data.message || 'Update failed'}`);
+              }
+            } else {
+              const res = await fetch(`${API_BASE}/company`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              const data = await res.json();
+              if (data.status === 'success') {
+                created += 1;
+                const createdRow = data.data?.company;
+                const createdId = companyRowId(createdRow);
+                const createdCo = { ...payload, id: createdId };
+                if (createdId) existingById.set(createdId, createdCo);
+                // Prevent later rows in the same file from creating another duplicate
+                if (nameKey) existingByName.set(nameKey, createdCo);
+              } else {
+                errors.push(`Row ${row.__row}: ${data.message || 'Add failed'}`);
+              }
+            }
+          } catch (err) {
+            errors.push(`Row ${row.__row}: ${err.message || 'Request failed'}`);
+          }
+        }
+
+        await fetchCompanies();
+        const parts = [];
+        if (created) parts.push(`${created} added`);
+        if (updated) parts.push(`${updated} updated`);
+        if (parts.length) showToast(`Import complete: ${parts.join(', ')}`);
+        if (errors.length) {
+          const preview = errors.slice(0, 5).join(' · ');
+          const more = errors.length > 5 ? ` (+${errors.length - 5} more)` : '';
+          setMessage(
+            parts.length
+              ? `Imported with ${errors.length} error(s): ${preview}${more}`
+              : `Import failed: ${preview}${more}`
+          );
+        } else if (!parts.length) {
+          setMessage('No companies were imported.');
+        }
+      } catch (err) {
+        setMessage(err.message || 'Import failed');
+      } finally {
+        setImporting(false);
+      }
+    },
+    [companies, fetchCompanies, showToast]
+  );
 
   const toggleRowSelected = (id) => {
     const key = String(id);
@@ -1761,14 +2250,49 @@ const CompanyDetails = ({ userRole, userEmail }) => {
         </div>
       ) : (
           <div className="company-details-shell-box">
+            <input
+              ref={importFileRef}
+              type="file"
+              accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              style={{ display: 'none' }}
+              onChange={handleImportCompanies}
+              aria-hidden
+            />
             {loading ? (
               <p className="company-details-loading">Loading...</p>
             ) : companies.length === 0 ? (
               <div className="company-details-empty-state">
                 <p className="company-details-empty">No company details. Click Add to create one.</p>
-                <button type="button" className="company-details-btn company-details-btn-add" onClick={openAdd}>
-                  <span className="company-details-btn-add-icon">+</span> Add Company
-                </button>
+                <div className="company-details-empty-actions">
+                  <button
+                    type="button"
+                    className="company-details-btn company-details-btn-export"
+                    onClick={() => importFileRef.current?.click()}
+                    disabled={importing}
+                    title="Import CSV"
+                    aria-label="Import CSV"
+                  >
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden
+                    >
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    {importing ? 'Importing…' : 'Import CSV'}
+                  </button>
+                  <button type="button" className="company-details-btn company-details-btn-add" onClick={openAdd}>
+                    <span className="company-details-btn-add-icon">+</span> Add Company
+                  </button>
+                </div>
               </div>
             ) : (
               <>
@@ -1788,6 +2312,31 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                     />
                   </div>
                   <div className="company-details-inner-toolbar-right">
+                    <button
+                      type="button"
+                      className="company-details-btn company-details-btn-export"
+                      onClick={() => importFileRef.current?.click()}
+                      disabled={importing}
+                      title="Import CSV"
+                      aria-label="Import CSV"
+                    >
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden
+                      >
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      {importing ? 'Importing…' : 'Import CSV'}
+                    </button>
                     <button type="button" className="company-details-btn company-details-btn-export" onClick={exportCompaniesCsv} title="Export CSV" aria-label="Export CSV">
                       <svg
                         width="16"

@@ -396,6 +396,19 @@ main.nd-content.nd-content--embedded-page > .company-details-page:not(.company-d
   text-align: center;
 }
 
+.company-details-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.company-details-btn-export:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 .company-details-message--flush {
   width: 100%;
   max-width: none;

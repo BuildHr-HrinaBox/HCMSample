@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { CheckCircle2, Trash2 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import './SiteManagement.css';
 import './CompanyDetails.css';
 import { resolveLoginEmailString, stringifyUserEmail } from '../utils/resolveLoginEmail';
@@ -17,9 +18,242 @@ import CityCombobox, { StateCombobox } from '../components/CityCombobox';
 
 const API_BASE = '/server/sitemanagement_function';
 const COMPANY_API = '/server/company_function';
-const CHECKLISTBULK_API = '/server/checklistbulk_function';
 
 const SITE_TABLE_PAGE_SIZE = 10;
+
+/** Site CSV export/import columns (order matters for round-trip). */
+/** Site CSV export/import columns (ID omitted from export; import still accepts ID if present). */
+const SITE_CSV_COLS = [
+  { key: 'companyName', label: 'Company Name' },
+  { key: 'siteName', label: 'Site Name' },
+  { key: 'siteAddress', label: 'Address' },
+  { key: 'siteCity', label: 'City' },
+  { key: 'siteState', label: 'State' },
+  { key: 'sitePostalCode', label: 'Postal code' },
+  { key: 'unitNo', label: 'Unit no' },
+  { key: 'contractorName', label: 'Contractor Name' },
+  { key: 'contractorAddress', label: 'Contractor Address' },
+  { key: 'contractorEmail', label: 'Contractor Email' },
+  { key: 'contractorPhone', label: 'Contractor Phone' },
+  { key: 'contractorCity', label: 'Contractor City' },
+  { key: 'contractorState', label: 'Contractor State' },
+  { key: 'inchargeName', label: 'Incharge Name' },
+  { key: 'inchargePhone', label: 'Incharge Phone' },
+  { key: 'inchargeEmail', label: 'Incharge Mail Id' },
+  { key: 'inchargeDesignation', label: 'Incharge Designation' },
+  { key: 'industry', label: 'Industry' },
+  { key: 'location', label: 'Location' }
+];
+
+/** Older exports used ID + short incharge labels (Name / Phone / Mail Id / Designation). */
+const SITE_CSV_LEGACY_LABELS = [
+  'ID',
+  'Company Name',
+  'Site Name',
+  'Address',
+  'City',
+  'State',
+  'Postal code',
+  'Unit no',
+  'Contractor Name',
+  'Contractor Address',
+  'Contractor Email',
+  'Contractor Phone',
+  'Contractor City',
+  'Contractor State',
+  'Name',
+  'Phone',
+  'Mail Id',
+  'Designation',
+  'Industry',
+  'Location'
+];
+
+/** Older export with ID + unique incharge labels (before ID was removed from export). */
+const SITE_CSV_LEGACY_WITH_ID_LABELS = ['ID', ...SITE_CSV_COLS.map((c) => c.label)];
+
+function normalizeCsvHeader(h) {
+  return String(h ?? '')
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function stripCsvExcelTextPrefix(v) {
+  const s = String(v ?? '').trim();
+  return s.startsWith('\t') ? s.slice(1).trim() : s;
+}
+
+function headersMatchLabelList(headerRow, labels) {
+  if (!Array.isArray(headerRow) || headerRow.length < labels.length) return false;
+  return labels.every(
+    (label, i) => normalizeCsvHeader(headerRow[i]) === normalizeCsvHeader(label)
+  );
+}
+
+function buildSiteCsvHeaderIndexMap(headerRow) {
+  const map = {};
+
+  // Older export: ID + short incharge labels
+  if (headersMatchLabelList(headerRow, SITE_CSV_LEGACY_LABELS)) {
+    const legacyKeys = ['id', ...SITE_CSV_COLS.map((c) => c.key)];
+    legacyKeys.forEach((key, i) => {
+      map[key] = i;
+    });
+    return map;
+  }
+
+  // Older export: ID + unique incharge labels
+  if (headersMatchLabelList(headerRow, SITE_CSV_LEGACY_WITH_ID_LABELS)) {
+    map.id = 0;
+    SITE_CSV_COLS.forEach((c, i) => {
+      map[c.key] = i + 1;
+    });
+    return map;
+  }
+
+  // Current export (no ID column)
+  if (
+    SITE_CSV_COLS.every(
+      (c, i) => normalizeCsvHeader(headerRow[i]) === normalizeCsvHeader(c.label)
+    )
+  ) {
+    SITE_CSV_COLS.forEach((c, i) => {
+      map[c.key] = i;
+    });
+    return map;
+  }
+
+  const aliases = {
+    id: ['id', 'rowid'],
+    companyName: ['company name', 'company', 'companyname'],
+    siteName: ['site name', 'sitename', 'site'],
+    siteAddress: ['address', 'site address'],
+    siteCity: ['city', 'site city'],
+    siteState: ['state', 'site state'],
+    sitePostalCode: ['postal code', 'postalcode', 'pincode', 'pin code', 'site postal code'],
+    unitNo: ['unit no', 'unit', 'unit no.', 'unitno'],
+    contractorName: ['contractor name', 'contractor'],
+    contractorAddress: ['contractor address'],
+    contractorEmail: ['contractor email'],
+    contractorPhone: ['contractor phone'],
+    contractorCity: ['contractor city'],
+    contractorState: ['contractor state'],
+    inchargeName: ['incharge name', 'name', 'incharge'],
+    inchargePhone: ['incharge phone', 'phone'],
+    inchargeEmail: ['incharge mail id', 'incharge email', 'mail id', 'email'],
+    inchargeDesignation: ['incharge designation', 'designation'],
+    industry: ['industry'],
+    location: ['location']
+  };
+  const normalizedHeaders = headerRow.map(normalizeCsvHeader);
+  Object.keys(aliases).forEach((key) => {
+    const idx = normalizedHeaders.findIndex((h) => aliases[key].includes(h));
+    if (idx >= 0) map[key] = idx;
+  });
+  return map;
+}
+
+function sheetToAoaPreferDisplayText(ws) {
+  if (!ws || !ws['!ref']) return [];
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const rows = [];
+  for (let R = range.s.r; R <= range.e.r; R += 1) {
+    const row = [];
+    for (let C = range.s.c; C <= range.e.c; C += 1) {
+      const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+      if (!cell) {
+        row.push('');
+        continue;
+      }
+      if (cell.w != null && String(cell.w).trim() !== '') {
+        row.push(String(cell.w));
+        continue;
+      }
+      row.push(cell.v == null ? '' : cell.v);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+function parseSiteImportWorkbook(arrayBuffer) {
+  const wb = XLSX.read(arrayBuffer, { type: 'array', cellDates: false });
+  const sheetName = wb.SheetNames[0];
+  if (!sheetName) throw new Error('No sheets found in the file.');
+  const ws = wb.Sheets[sheetName];
+  const rows = sheetToAoaPreferDisplayText(ws);
+  if (!rows.length) throw new Error('No data found in the file.');
+  const headerRow = rows[0].map((h) => stripCsvExcelTextPrefix(h));
+  const indexMap = buildSiteCsvHeaderIndexMap(headerRow);
+  if (indexMap.siteName == null) {
+    throw new Error('Could not find a Site Name column. Use Export CSV as a template.');
+  }
+  const dataRows = rows.slice(1).filter((row) =>
+    Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== '')
+  );
+  return dataRows.map((row, rowIndex) => {
+    const record = { __row: rowIndex + 2, id: '' };
+    if (indexMap.id != null) {
+      record.id = stripCsvExcelTextPrefix(row[indexMap.id]);
+    }
+    SITE_CSV_COLS.forEach(({ key }) => {
+      const idx = indexMap[key];
+      if (idx == null) {
+        record[key] = '';
+        return;
+      }
+      record[key] = stripCsvExcelTextPrefix(row[idx]);
+    });
+    return record;
+  });
+}
+
+function resolveCompanyForImport(companyName, companiesList) {
+  const name = String(companyName || '').trim().toLowerCase();
+  if (!name) return { companyId: '', companyName: '' };
+  const match = (companiesList || []).find(
+    (c) => String(c.companyName || '').trim().toLowerCase() === name
+  );
+  if (match) {
+    return {
+      companyId: String(match.id ?? match.ROWID ?? '').trim(),
+      companyName: String(match.companyName || companyName).trim()
+    };
+  }
+  return { companyId: '', companyName: String(companyName || '').trim() };
+}
+
+function buildSitePayloadFromImportRow(row, companyResolved) {
+  return {
+    siteName: String(row.siteName || '').trim(),
+    companyId: String(companyResolved.companyId || '').trim(),
+    companyName: String(companyResolved.companyName || row.companyName || '').trim(),
+    company: String(companyResolved.companyName || row.companyName || '').trim(),
+    siteAddress: String(row.siteAddress || '').trim(),
+    siteCity: String(row.siteCity || '').trim(),
+    siteState: String(row.siteState || '').trim(),
+    sitePostalCode: digitsOnly(row.sitePostalCode).slice(0, 6),
+    unitNo: String(row.unitNo || '').trim(),
+    contractorName: String(row.contractorName || '').trim(),
+    contractorAddress: String(row.contractorAddress || '').trim(),
+    contractorEmail: String(row.contractorEmail || '').trim(),
+    contractorPhone: digitsOnly(row.contractorPhone).slice(0, 10),
+    contractorCity: String(row.contractorCity || '').trim(),
+    contractorState: String(row.contractorState || '').trim(),
+    inchargeName: String(row.inchargeName || '').trim(),
+    inchargePhone: digitsOnly(row.inchargePhone).slice(0, 10),
+    inchargeEmail: String(row.inchargeEmail || '').trim(),
+    inchargeDesignation: String(row.inchargeDesignation || '').trim(),
+    industry: normalizeSiteIndustryLabel(row.industry),
+    sandERCNumber: '',
+    factoryRCNumber: '',
+    clraRCNumber: '',
+    location: String(row.location || '').trim(),
+    audit: 'false'
+  };
+}
 
 /** Company Details fields shown read-only after a company is selected (from company_function). */
 const COMPANY_LINK_DISPLAY_FIELDS = [
@@ -57,6 +291,31 @@ function siteCompanyId(s) {
   if (!s || typeof s !== 'object') return '';
   const id = s.companyId ?? s.CompanyId ?? s.companyROWID ?? '';
   return id == null || id === '' ? '' : String(id);
+}
+
+/** Natural key for import upsert: Company Name + Site Name + State (case-insensitive). */
+function siteImportNaturalKey(companyName, siteName, siteState) {
+  const norm = (v) =>
+    String(v ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+  const company = norm(companyName);
+  const site = norm(siteName);
+  const state = norm(siteState);
+  if (!company || !site || !state) return '';
+  return `${company}|${site}|${state}`;
+}
+
+function siteRecordNaturalKey(s) {
+  if (!s || typeof s !== 'object') return '';
+  const siteName = String(s.siteName ?? s.SiteName ?? '').trim();
+  return siteImportNaturalKey(siteCompanyName(s), siteName, siteStateFromRecord(s));
+}
+
+function siteRecordId(s) {
+  if (!s || typeof s !== 'object') return '';
+  return String(s.id ?? s.ROWID ?? s.rowid ?? '').trim();
 }
 
 /** @returns {(number | 'ellipsis')[]} */
@@ -132,14 +391,32 @@ function isFactoryIndustryLabel(industry) {
   );
 }
 
+/** Only these three Industry values are allowed in Site Management. */
+const SITE_INDUSTRY_OPTIONS = ['CLRA', 'Shops and Establishment', 'Factories Act'];
+
+/**
+ * Map misspellings / variants (e.g. "Shop and establishment") to the canonical three labels.
+ * Unknown values return '' so they are not added as extra dropdown options.
+ */
+function normalizeSiteIndustryLabel(industry) {
+  const raw = String(industry || '').trim();
+  if (!raw) return '';
+  if (SITE_INDUSTRY_OPTIONS.includes(raw)) return raw;
+  if (isClraIndustryLabel(raw)) return 'CLRA';
+  if (isShopsAndEstablishmentIndustryLabel(raw)) return 'Shops and Establishment';
+  if (isFactoryIndustryLabel(raw)) return 'Factories Act';
+  return '';
+}
+
 function getSiteRcFieldVisibility(industry) {
-  if (isClraIndustryLabel(industry)) {
+  const normalized = normalizeSiteIndustryLabel(industry) || industry;
+  if (isClraIndustryLabel(normalized)) {
     return { showSandERC: false, showFactoryRC: false, showClraRC: true };
   }
-  if (isShopsAndEstablishmentIndustryLabel(industry)) {
+  if (isShopsAndEstablishmentIndustryLabel(normalized)) {
     return { showSandERC: true, showFactoryRC: false, showClraRC: false };
   }
-  if (isFactoryIndustryLabel(industry)) {
+  if (isFactoryIndustryLabel(normalized)) {
     return { showSandERC: false, showFactoryRC: true, showClraRC: false };
   }
   return { showSandERC: false, showFactoryRC: false, showClraRC: false };
@@ -321,9 +598,9 @@ const SiteManagement = ({ userEmail, userRole }) => {
   const [prioritySiteId, setPrioritySiteId] = useState('');
   const [toast, setToast] = useState('');
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [importing, setImporting] = useState(false);
   const toastTimerRef = useRef(null);
-  /** Unique sectors from Checklist Master (checklistbulk), sorted */
-  const [checklistSectors, setChecklistSectors] = useState([]);
+  const importFileRef = useRef(null);
   /** Companies from company_function for Site → Company link */
   const [companies, setCompanies] = useState([]);
   /** Login email aligned with Catalyst + localStorage (prop alone is often stale vs real sign-in). */
@@ -487,30 +764,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
 
   const exportSitesCsv = () => {
     /** Site export: main form fields (audit omitted); all rows in scope (ignores table search). */
-    const cols = [
-      { key: 'id', label: 'ID' },
-      { key: 'companyName', label: 'Company Name' },
-      { key: 'siteName', label: 'Site Name' },
-      { key: 'siteAddress', label: 'Address' },
-      { key: 'siteCity', label: 'City' },
-      { key: 'siteState', label: 'State' },
-      { key: 'sitePostalCode', label: 'Postal code' },
-      { key: 'unitNo', label: 'Unit no' },
-      { key: 'contractorName', label: 'Contractor Name' },
-      { key: 'contractorAddress', label: 'Contractor Address' },
-      { key: 'contractorEmail', label: 'Contractor Email' },
-      { key: 'contractorPhone', label: 'Contractor Phone' },
-      { key: 'contractorCity', label: 'Contractor City' },
-      { key: 'contractorState', label: 'Contractor State' },
-      { key: 'inchargeName', label: 'Name' },
-      { key: 'inchargePhone', label: 'Phone' },
-      { key: 'inchargeEmail', label: 'Mail Id' },
-      { key: 'inchargeDesignation', label: 'Designation' },
-      { key: 'industry', label: 'Industry' },
-      { key: 'location', label: 'Location' }
-    ];
     const CSV_EXCEL_TEXT_KEYS = new Set([
-      'id',
       'sitePostalCode',
       'contractorPhone',
       'contractorEmail',
@@ -543,8 +797,8 @@ const SiteManagement = ({ userEmail, userRole }) => {
         .toLowerCase()
         .localeCompare(String(b[field] ?? '').toLowerCase(), undefined, { sensitivity: 'base' });
     const list = [...displaySites].sort((a, b) => strCmp(a, b, 'siteName'));
-    const header = cols.map((c) => escLabel(c.label)).join(',');
-    const rows = list.map((site) => cols.map((c) => escCsvCell(cellValue(site, c.key), c.key)).join(','));
+    const header = SITE_CSV_COLS.map((c) => escLabel(c.label)).join(',');
+    const rows = list.map((site) => SITE_CSV_COLS.map((c) => escCsvCell(cellValue(site, c.key), c.key)).join(','));
     const csv = '\ufeff' + [header, ...rows].join('\r\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -611,25 +865,6 @@ const SiteManagement = ({ userEmail, userRole }) => {
     });
   }, [sites]);
 
-  const fetchChecklistSectors = useCallback(async () => {
-    try {
-      const res = await fetch(`${CHECKLISTBULK_API}/checklistbulk?action=getAll`);
-      const data = await res.json();
-      if (data.status === 'success' && Array.isArray(data.data)) {
-        const set = new Set();
-        data.data.forEach((row) => {
-          const s = String(row.sector ?? row.Sector ?? '').trim();
-          if (s) set.add(s);
-        });
-        setChecklistSectors([...set].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })));
-      } else {
-        setChecklistSectors([]);
-      }
-    } catch (_) {
-      setChecklistSectors([]);
-    }
-  }, []);
-
   const fetchCompanies = useCallback(async () => {
     try {
       const res = await fetch(`${COMPANY_API}/company`, { cache: 'no-store' });
@@ -645,10 +880,6 @@ const SiteManagement = ({ userEmail, userRole }) => {
       setCompanies([]);
     }
   }, []);
-
-  useEffect(() => {
-    fetchChecklistSectors();
-  }, [fetchChecklistSectors]);
 
   useEffect(() => {
     fetchCompanies();
@@ -694,13 +925,8 @@ const SiteManagement = ({ userEmail, userRole }) => {
     return list;
   }, [companies, form.companyId, form.companyName]);
 
-  /** Include current site industry if it is not in Checklist Master (legacy rows) */
-  const industrySelectOptions = useMemo(() => {
-    const cur = String(form.industry || '').trim();
-    const list = [...checklistSectors];
-    if (cur && !list.includes(cur)) list.unshift(cur);
-    return list;
-  }, [checklistSectors, form.industry]);
+  /** Industry dropdown: only the three canonical values (no Checklist Master spelling variants). */
+  const industrySelectOptions = SITE_INDUSTRY_OPTIONS;
 
   const rcFieldVisibility = useMemo(
     () => getSiteRcFieldVisibility(form.industry),
@@ -751,7 +977,6 @@ const SiteManagement = ({ userEmail, userRole }) => {
         : initialForm
     );
     setFormErrors({});
-    fetchChecklistSectors();
     fetchCompanies();
     setShowForm(true);
   };
@@ -778,7 +1003,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
       inchargePhone: site.inchargePhone || '',
       inchargeEmail: siteInchargeEmail(site) || site.inchargeEmail || '',
       inchargeDesignation: site.inchargeDesignation || '',
-      industry: siteIndustry(site) || site.industry || '',
+      industry: normalizeSiteIndustryLabel(siteIndustry(site) || site.industry || ''),
       sandERCNumber: siteSandERCNumber(site) || site.sandERCNumber || '',
       factoryRCNumber: siteFactoryRCNumber(site) || site.factoryRCNumber || '',
       clraRCNumber: siteCLRARCNumber(site) || site.clraRCNumber || '',
@@ -786,7 +1011,6 @@ const SiteManagement = ({ userEmail, userRole }) => {
       audit: site.audit === true || site.audit === 'true' ? 'true' : 'false'
     });
     setFormErrors({});
-    fetchChecklistSectors();
     fetchCompanies();
     setShowForm(true);
   };
@@ -813,7 +1037,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
       inchargePhone: site.inchargePhone || '',
       inchargeEmail: siteInchargeEmail(site) || site.inchargeEmail || '',
       inchargeDesignation: site.inchargeDesignation || '',
-      industry: siteIndustry(site) || site.industry || '',
+      industry: normalizeSiteIndustryLabel(siteIndustry(site) || site.industry || ''),
       sandERCNumber: siteSandERCNumber(site) || site.sandERCNumber || '',
       factoryRCNumber: siteFactoryRCNumber(site) || site.factoryRCNumber || '',
       clraRCNumber: siteCLRARCNumber(site) || site.clraRCNumber || '',
@@ -821,7 +1045,6 @@ const SiteManagement = ({ userEmail, userRole }) => {
       audit: site.audit === true || site.audit === 'true' ? 'true' : 'false'
     });
     setFormErrors({});
-    fetchChecklistSectors();
     fetchCompanies();
     setShowForm(true);
   };
@@ -855,6 +1078,186 @@ const SiteManagement = ({ userEmail, userRole }) => {
     }, 4000);
   }, []);
 
+  const handleImportSites = useCallback(
+    async (event) => {
+      const file = event.target.files?.[0];
+      if (importFileRef.current) importFileRef.current.value = '';
+      if (!file) return;
+
+      const name = String(file.name || '').toLowerCase();
+      const okExt = name.endsWith('.csv') || name.endsWith('.xlsx') || name.endsWith('.xls');
+      if (!okExt) {
+        setMessage('Invalid file type. Please upload a CSV or Excel file (.csv, .xlsx, .xls).');
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        setMessage('File size exceeds 5MB limit.');
+        return;
+      }
+
+      setImporting(true);
+      setMessage('');
+      try {
+        let companiesList = companies;
+        if (!companiesList.length) {
+          try {
+            const res = await fetch(`${COMPANY_API}/company`, { cache: 'no-store' });
+            const data = await res.json().catch(() => ({}));
+            companiesList = Array.isArray(data?.data?.companyDetails) ? data.data.companyDetails : [];
+            if (companiesList.length) setCompanies(companiesList);
+          } catch (_) {
+            companiesList = [];
+          }
+        }
+
+        const arrayBuffer = await file.arrayBuffer();
+        const importRows = parseSiteImportWorkbook(arrayBuffer);
+        if (!importRows.length) {
+          setMessage('No data rows found in the file.');
+          return;
+        }
+
+        // Refresh current sites so upsert matches latest DB rows (not a stale client list)
+        let sitesForMatch = sites;
+        try {
+          const res = await fetch(`${API_BASE}/sitemanagement`);
+          const data = await readJsonFromResponse(res);
+          if (data.status === 'success' && Array.isArray(data.data?.siteDetails)) {
+            sitesForMatch = data.data.siteDetails;
+            setSites(sitesForMatch);
+          }
+        } catch (_) {
+          // keep in-memory sites
+        }
+
+        const existingById = new Map();
+        const existingByNaturalKey = new Map();
+        sitesForMatch.forEach((s) => {
+          const id = siteRecordId(s);
+          if (id) existingById.set(id, s);
+          const key = siteRecordNaturalKey(s);
+          // Keep the first match when duplicates already exist
+          if (key && !existingByNaturalKey.has(key)) existingByNaturalKey.set(key, s);
+        });
+
+        let created = 0;
+        let updated = 0;
+        const errors = [];
+
+        for (const row of importRows) {
+          const companyResolved = resolveCompanyForImport(row.companyName, companiesList);
+          const companyNameForMatch = companyResolved.companyName || row.companyName;
+          const formValues = {
+            ...initialForm,
+            siteName: row.siteName,
+            companyId: companyResolved.companyId,
+            companyName: companyNameForMatch,
+            siteAddress: row.siteAddress,
+            siteCity: row.siteCity,
+            siteState: row.siteState,
+            sitePostalCode: row.sitePostalCode,
+            unitNo: row.unitNo,
+            contractorName: row.contractorName,
+            contractorAddress: row.contractorAddress,
+            contractorEmail: row.contractorEmail,
+            contractorPhone: row.contractorPhone,
+            contractorCity: row.contractorCity,
+            contractorState: row.contractorState,
+            inchargeName: row.inchargeName,
+            inchargePhone: row.inchargePhone,
+            inchargeEmail: row.inchargeEmail,
+            inchargeDesignation: row.inchargeDesignation,
+            industry: normalizeSiteIndustryLabel(row.industry),
+            location: row.location
+          };
+          const errs = validateSiteFormValues(formValues);
+          if (Object.keys(errs).length > 0) {
+            errors.push(`Row ${row.__row}: ${Object.values(errs)[0]}`);
+            continue;
+          }
+          if (!companyNameForMatch) {
+            errors.push(`Row ${row.__row}: Company is required`);
+            continue;
+          }
+
+          const payload = buildSitePayloadFromImportRow(row, companyResolved);
+          const rowId = String(row.id || '').trim();
+          const naturalKey = siteImportNaturalKey(companyNameForMatch, row.siteName, row.siteState);
+          let matchId = '';
+          if (rowId && existingById.has(rowId)) {
+            matchId = rowId;
+          } else if (naturalKey && existingByNaturalKey.has(naturalKey)) {
+            matchId = siteRecordId(existingByNaturalKey.get(naturalKey));
+          }
+
+          try {
+            if (matchId) {
+              const res = await fetch(`${API_BASE}/sitemanagement/${encodeURIComponent(matchId)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              const data = await readJsonFromResponse(res);
+              if (data.status === 'success') {
+                updated += 1;
+                const updatedSite = {
+                  ...(existingById.get(matchId) || existingByNaturalKey.get(naturalKey) || {}),
+                  ...payload,
+                  id: matchId
+                };
+                existingById.set(matchId, updatedSite);
+                if (naturalKey) existingByNaturalKey.set(naturalKey, updatedSite);
+              } else {
+                errors.push(`Row ${row.__row}: ${data.message || 'Update failed'}`);
+              }
+            } else {
+              const res = await fetch(`${API_BASE}/sitemanagement`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              const data = await readJsonFromResponse(res);
+              if (data.status === 'success') {
+                created += 1;
+                const createdId = extractSiteIdFromResponse(data);
+                const createdSite = { ...payload, id: createdId };
+                if (createdId) existingById.set(createdId, createdSite);
+                // Prevent later rows in the same file from creating another duplicate
+                if (naturalKey) existingByNaturalKey.set(naturalKey, createdSite);
+              } else {
+                errors.push(`Row ${row.__row}: ${data.message || 'Add failed'}`);
+              }
+            }
+          } catch (err) {
+            errors.push(`Row ${row.__row}: ${err.message || 'Request failed'}`);
+          }
+        }
+
+        await fetchSites({ clearMessage: false });
+        const parts = [];
+        if (created) parts.push(`${created} added`);
+        if (updated) parts.push(`${updated} updated`);
+        if (parts.length) showToast(`Import complete: ${parts.join(', ')}`);
+        if (errors.length) {
+          const preview = errors.slice(0, 5).join(' · ');
+          const more = errors.length > 5 ? ` (+${errors.length - 5} more)` : '';
+          setMessage(
+            parts.length
+              ? `Imported with ${errors.length} error(s): ${preview}${more}`
+              : `Import failed: ${preview}${more}`
+          );
+        } else if (!parts.length) {
+          setMessage('No sites were imported.');
+        }
+      } catch (err) {
+        setMessage(err.message || 'Import failed');
+      } finally {
+        setImporting(false);
+      }
+    },
+    [companies, sites, fetchSites, showToast]
+  );
+
   useEffect(
     () => () => {
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -880,7 +1283,8 @@ const SiteManagement = ({ userEmail, userRole }) => {
       });
       return;
     }
-    const nextValue = sanitizeSiteFormField(name, value);
+    const nextValue =
+      name === 'industry' ? normalizeSiteIndustryLabel(value) : sanitizeSiteFormField(name, value);
     setForm((prev) => {
       const next = { ...prev, [name]: nextValue };
       if (name === 'industry') {
@@ -941,7 +1345,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
         inchargePhone: form.inchargePhone.trim(),
         inchargeEmail: form.inchargeEmail.trim(),
         inchargeDesignation: form.inchargeDesignation.trim(),
-        industry: form.industry.trim(),
+        industry: normalizeSiteIndustryLabel(form.industry),
         sandERCNumber: rcFieldVisibility.showSandERC ? form.sandERCNumber.trim() : '',
         factoryRCNumber: rcFieldVisibility.showFactoryRC ? form.factoryRCNumber.trim() : '',
         clraRCNumber: rcFieldVisibility.showClraRC ? form.clraRCNumber.trim() : '',
@@ -1625,14 +2029,39 @@ const SiteManagement = ({ userEmail, userRole }) => {
             </nav>
           </header>
           <div className="company-details-shell-box">
+            <input
+              ref={importFileRef}
+              type="file"
+              accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              style={{ display: 'none' }}
+              onChange={handleImportSites}
+              aria-hidden
+            />
             {loading ? (
               <p className="site-management-loading">Loading...</p>
             ) : displaySites.length === 0 ? (
               <div className="company-details-empty-state">
                 <p className="site-management-empty">{emptyListMessage}</p>
-                <button type="button" className="company-details-btn company-details-btn-add" onClick={openAdd}>
-                  <span className="company-details-btn-add-icon">+</span> Add Site
-                </button>
+                <div className="company-details-empty-actions">
+                  <button
+                    type="button"
+                    className="company-details-btn company-details-btn-export"
+                    onClick={() => importFileRef.current?.click()}
+                    disabled={importing}
+                    title="Import CSV"
+                    aria-label="Import CSV"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    {importing ? 'Importing…' : 'Import CSV'}
+                  </button>
+                  <button type="button" className="company-details-btn company-details-btn-add" onClick={openAdd}>
+                    <span className="company-details-btn-add-icon">+</span> Add Site
+                  </button>
+                </div>
               </div>
             ) : (
               <>
@@ -1652,6 +2081,21 @@ const SiteManagement = ({ userEmail, userRole }) => {
                     />
                   </div>
                   <div className="company-details-inner-toolbar-right">
+                    <button
+                      type="button"
+                      className="company-details-btn company-details-btn-export"
+                      onClick={() => importFileRef.current?.click()}
+                      disabled={importing}
+                      title="Import CSV"
+                      aria-label="Import CSV"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      {importing ? 'Importing…' : 'Import CSV'}
+                    </button>
                     <button type="button" className="company-details-btn company-details-btn-export" onClick={exportSitesCsv} title="Export CSV" aria-label="Export CSV">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />

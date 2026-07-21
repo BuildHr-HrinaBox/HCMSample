@@ -366,6 +366,20 @@ export function applyFormXVIIITamilNaduAutofillFromSite(headerData, context = {}
   return out;
 }
 
+/** SL.No / Serial No. in register of workmen (not the leading Sl No. column). */
+export function isFormXVIIITamilNaduSerialRegisterHeader(header) {
+  const s = formXVIIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (!(s.includes('register') && (s.includes('workmen') || s.includes('workman')))) return false;
+  return (
+    s.includes('serial') ||
+    /\bsl\.?\s*no\b/.test(s) ||
+    /\bs\.?\s*no\b/.test(s) ||
+    s.includes('sl.no') ||
+    s.includes('sl no')
+  );
+}
+
 /** Daily attendance /units worked — not the Total attendance column. */
 export function isFormXVIIITamilNaduDailyAttendanceHeader(header) {
   const s = formXVIIITamilNaduHeaderNorm(header);
@@ -406,10 +420,113 @@ export function isFormXVIIITamilNaduOtherCashPaymentsHeader(header) {
   return s.includes('other') && s.includes('cash') && (s.includes('payment') || s.includes('nature'));
 }
 
+/** Overtime under Amount of wages earned — default display text when no OT earning. */
+export const FORM_XVIII_TN_OVERTIME_NIL = 'Nil';
+
+export function isFormXVIIITamilNaduOvertimeHeader(header) {
+  const s = formXVIIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (s.includes('other')) return false;
+  return /\bover[\s-]*time\b/.test(s) || s === 'ot' || s.startsWith('ot ');
+}
+
+export function applyFormXVIIITamilNaduOvertimeNilToRow(row, headers, helpers = {}) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const out = row && typeof row === 'object' ? { ...row } : {};
+  const nilText = helpers.nilText != null ? String(helpers.nilText) : FORM_XVIII_TN_OVERTIME_NIL;
+  const { overwrite = false } = helpers;
+
+  hdrs.forEach((header) => {
+    if (!isFormXVIIITamilNaduOvertimeHeader(header)) return;
+    const existing = String(out[header] ?? '').trim();
+    if (
+      !overwrite &&
+      existing &&
+      !/^enter\b/i.test(existing) &&
+      !/^nil+$/i.test(existing) &&
+      existing.toLowerCase() !== 'n/a' &&
+      existing !== '-' &&
+      existing !== '—'
+    ) {
+      return;
+    }
+    // Keep a real overtime amount when present (unless overwrite).
+    if (!overwrite && existing && /^-?\d+(\.\d+)?$/.test(existing.replace(/,/g, ''))) {
+      return;
+    }
+    out[header] = nilText;
+  });
+  return out;
+}
+
+export function applyFormXVIIITamilNaduOvertimeNilToMappedRows(
+  mappedData,
+  headers,
+  nilText = FORM_XVIII_TN_OVERTIME_NIL,
+  helpers = {}
+) {
+  if (!Array.isArray(mappedData)) return [];
+  const { overwrite = false } = helpers;
+  return mappedData.map((row) =>
+    applyFormXVIIITamilNaduOvertimeNilToRow(row, headers, { nilText, overwrite })
+  );
+}
+
 function parseFormXVIIITamilNaduMoney(value) {
   if (value == null || value === '') return NaN;
   const n = Number(String(value).replace(/,/g, '').trim());
   return Number.isFinite(n) ? n : NaN;
+}
+
+/** Count filled wage-muster body columns (excludes serial-only stubs from sparse SampleData). */
+export function countFormXVIIITamilNaduWageMusterBodyCells(row, headers = []) {
+  if (!row || typeof row !== 'object') return 0;
+  const hdrs =
+    Array.isArray(headers) && headers.length > 0 ? headers : Object.keys(row);
+  let n = 0;
+  for (let i = 0; i < hdrs.length; i += 1) {
+    const h = hdrs[i];
+    const direct = row[h];
+    let v = direct;
+    if (v == null || String(v).trim() === '') {
+      const target = formXVIIITamilNaduHeaderNorm(h);
+      if (target) {
+        const hit = Object.keys(row).find((k) => formXVIIITamilNaduHeaderNorm(k) === target);
+        if (hit) v = row[hit];
+      }
+    }
+    if (v == null || String(v).trim() === '') continue;
+    const s = formXVIIITamilNaduHeaderNorm(h);
+    if (/^(sl|s)\s*no|serial\s*number|^column\s+\d+$/i.test(s)) continue;
+    if (
+      /name of employee|name of workman|designation|nature of work|basic\s+wages|dearness|overtime|deduction|net\s+amount|total\b/i.test(
+        s
+      ) ||
+      isFormXVIIITamilNaduDailyAttendanceHeader(h) ||
+      isFormXVIIITamilNaduTotalAttendanceHeader(h) ||
+      isFormXVIIITamilNaduDailyRateHeader(h) ||
+      isFormXVIIITamilNaduOtherCashPaymentsHeader(h)
+    ) {
+      n += 1;
+    }
+  }
+  return n;
+}
+
+export function formXVIIITamilNaduRowsRicherThan(candidateRows, candidateHeaders, baseRows, baseHeaders) {
+  const cand = Array.isArray(candidateRows) ? candidateRows : [];
+  const base = Array.isArray(baseRows) ? baseRows : [];
+  if (cand.length === 0) return false;
+  if (base.length === 0) return true;
+  const candScore = cand.reduce(
+    (sum, row) => sum + countFormXVIIITamilNaduWageMusterBodyCells(row, candidateHeaders),
+    0
+  );
+  const baseScore = base.reduce(
+    (sum, row) => sum + countFormXVIIITamilNaduWageMusterBodyCells(row, baseHeaders),
+    0
+  );
+  return candScore > baseScore;
 }
 
 /** Other cash = gross_pay − basic − hra (blank when basic/hra missing so we never dump full gross). */

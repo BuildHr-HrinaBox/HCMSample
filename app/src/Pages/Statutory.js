@@ -870,10 +870,15 @@ import {
   buildFormPGJEmployeePayrollCandidates,
   enrichFormPGJGujaratDisplayHeader,
   enrichFormPGJGujaratPayrollRows,
+  applyFormPGJGujaratStaticDefaults,
   isFormPGJGujaratContext,
   isFormPGJGujaratTableLayoutFormHeader,
   isFormPGJDateOfMonthDayHeader,
   isFormPGJWageTailHeader,
+  isFormPGJWageRateHeader,
+  isFormPGJOvertimeHoursHeader,
+  isFormPGJOvertimeEarningsHeader,
+  FORM_PGJ_OVERTIME_DEFAULT,
   isFormPGJWorkingHoursFromHeader,
   isFormPGJWorkingHoursToHeader,
   readFormPGJShiftEndFromEmployee,
@@ -884,6 +889,7 @@ import {
   resolveFormPGJGujaratTableHeaders,
   resolveFormPGJTableHeadersForWorkbook,
   stripAndNormalizeFormPGJTableHeaders,
+  buildFormPGJGujaratWorkbookWithTemplateStyles,
 } from './statutory/formPGJGujarat';
 import {
   applyFormQMaharashtraPayrollToRow,
@@ -920,8 +926,10 @@ import {
   isFormLGJSerialHeader,
   isFormLGJShiftDateHeader,
   isFormLGJGujaratContext,
+  isFormLGJWeeklyHolidayHeader,
   resolveFormLGJFirstShiftFromValue,
   resolveFormLGJFirstShiftToValue,
+  resolveFormLGJWeeklyHolidayValue,
   isFormLGJGujaratTableLayoutFormHeader,
   isFormLGJWorkerNameHeader,
   parseFormLGJShiftCellValue,
@@ -11982,6 +11990,16 @@ const isFormQContext = (formHeader, rowItem, fileName, tableHeaders) => {
     .join(' ')
     .toLowerCase();
   if (/\bform\s*xxiii\b|\bform_xxiii\b|\bform-xxiii\b/i.test(parts)) return false;
+  // Gujarat Form P (muster-roll cum wage) shares worker/day headers with Form Q — exclude it.
+  if (
+    !/\bform[\s._-]*q\b/.test(parts) &&
+    (/\bform_p_gj\b/.test(parts) ||
+      (/\bform[\s._-]*p\b/.test(parts) &&
+        (/gujarat|\b_gj\b|cum\s+wage|see\s+rules?\s*76/.test(parts) ||
+          (/age/.test(parts) && /sex/.test(parts) && /interval\s+for\s+rest/.test(parts)))))
+  ) {
+    return false;
+  }
   if (/\bform\s*["']?\s*q\b|\bform[_\s-]*q\b|form_q\.xlsx/i.test(parts)) return true;
   if (/muster[\s-]*roll/.test(parts) && /wage\s+register/.test(parts) && /working\s+hours/.test(parts)) {
     return true;
@@ -27678,7 +27696,15 @@ const Statutory = ({ userEmail, userRole }) => {
           `${effectiveFormHeader?.title || ''} ${effectiveFormHeader?.subtitle || ''}`
         );
       const isFormTSEDraft = isFormTSEContext(effectiveFormHeader, currentItem, formFileName, '');
+      const isFormPGJGujaratDraft = isFormPGJGujaratContext(
+        effectiveFormHeader,
+        currentItem,
+        formFileName,
+        '',
+        headersToUse
+      );
       const isFormQMaharashtraDraft =
+        !isFormPGJGujaratDraft &&
         !isFormQKarnatakaContext(
           effectiveFormHeader,
           currentItem,
@@ -27696,8 +27722,12 @@ const Statutory = ({ userEmail, userRole }) => {
             headersToUse.some((h) => /full\s+name\s+of\s+the\s+worker/i.test(String(h || ''))) &&
             headersToUse.some((h) => /working\s+hours/i.test(String(h || '')))));
       // Always trust the live sheet: if it has Form Q worker headers, use Form Q write path.
+      // Skip for Gujarat Form P — same "Full Name of the Worker" label, different column layout.
       let formQSheetHasWorkerGrid = false;
-      if (!isFormQKarnatakaContext(effectiveFormHeader, currentItem, formFileName, '')) {
+      if (
+        !isFormPGJGujaratDraft &&
+        !isFormQKarnatakaContext(effectiveFormHeader, currentItem, formFileName, '')
+      ) {
         for (let r = 0; r < 35 && !formQSheetHasWorkerGrid; r += 1) {
           for (let c = 0; c < 50; c += 1) {
             const ref = XLSX.utils.encode_cell({ r, c });
@@ -38936,6 +38966,13 @@ const Statutory = ({ userEmail, userRole }) => {
         sheetTextForDownload,
         headersToUse
       );
+      const isFormPGJGujaratDownload = isFormPGJGujaratContext(
+        parsed?.formHeader,
+        lineItem,
+        fn,
+        sheetTextForDownload,
+        headersToUse
+      );
       const isFormDRajasthanDownload = isFormDRajasthanContext(
         parsed?.formHeader,
         lineItem,
@@ -39360,6 +39397,7 @@ const Statutory = ({ userEmail, userRole }) => {
       const formQDownloadFnHint =
         templateMeta.formFileName || resolvedFormFileItem.formFileName || fn || '';
       const isFormQMaharashtraDownload =
+        !isFormPGJGujaratDownload &&
         !isFormQKarnatakaContext(parsed?.formHeader, item, formQDownloadFnHint, '') &&
         (/form[\s_-]*q/i.test(String(formQDownloadFnHint)) ||
           /form[\s_-]*q/i.test(String(resolvedDownloadSheetName || parsed?.sheetName || '')) ||
@@ -39660,6 +39698,7 @@ const Statutory = ({ userEmail, userRole }) => {
       const formKGJGujaratAutofillCacheMatches = isFormKGJGujaratDownload && autofillExportCacheMatches;
       const formOGJGujaratAutofillCacheMatches = isFormOGJGujaratDownload && autofillExportCacheMatches;
       const formLGJGujaratAutofillCacheMatches = isFormLGJGujaratDownload && autofillExportCacheMatches;
+      const formPGJGujaratAutofillCacheMatches = isFormPGJGujaratDownload && autofillExportCacheMatches;
       const formDRajasthanAutofillCacheMatches = isFormDRajasthanDownload && autofillExportCacheMatches;
       const formDGJGujaratAutofillCacheMatches = isFormDGJGujaratDownload && autofillExportCacheMatches;
       const formAGJGujaratAutofillCacheMatches = isFormAGJGujaratDownload && autofillExportCacheMatches;
@@ -45682,6 +45721,38 @@ const Statutory = ({ userEmail, userRole }) => {
           downloadHeaderRowIndex = layoutSource.headerRowIndex;
         }
       }
+      if (isFormPGJGujaratDownload) {
+        if (isFormFileModalOpen && countMeaningfulFormTableRows(formTableDataRef.current) > 0) {
+          snapshotStatutoryAutofillExportCache();
+        }
+        const modalHdrs = resolveFormPGJGujaratTableHeaders(
+          Array.isArray(formFileModalData?.parsedTableHeaders) &&
+            formFileModalData.parsedTableHeaders.length > 0
+            ? formFileModalData.parsedTableHeaders
+            : formPGJGujaratAutofillCacheMatches &&
+                statutoryAutofillExportCacheRef.current?.headers?.length
+              ? statutoryAutofillExportCacheRef.current.headers
+              : headersToUse
+        );
+        let liveRows = [];
+        if (isFormFileModalOpen || liveModalGridLoadedRowCount > 0) {
+          liveRows = copyLiveModalGridRowsForDownload().filter((row) =>
+            formTableRowHasMeaningfulData(row)
+          );
+        } else if (formPGJGujaratAutofillCacheMatches && statutoryAutofillExportCacheRef.current) {
+          liveRows = statutoryAutofillExportCacheRef.current.rows.filter((row) =>
+            formTableRowHasMeaningfulData(row)
+          );
+        } else if (usedLiveModalGrid && Array.isArray(mappedData) && mappedData.length > 0) {
+          liveRows = mappedData.filter((row) => formTableRowHasMeaningfulData(row));
+        }
+        if (liveRows.length > 0 && modalHdrs.length > 0) {
+          mappedData = remapFormPGJRowsToHeaders(liveRows, modalHdrs, modalHdrs);
+          headersToUse = [...modalHdrs];
+          usedLiveModalGrid = true;
+          savedDraftRowMatrix = null;
+        }
+      }
       if (isFormDRajasthanDownload && Array.isArray(mappedData) && mappedData.length > 0) {
         try {
           const drjHdrs = resolveFormDRajasthanTableHeaders(headersToUse);
@@ -45867,7 +45938,7 @@ const Statutory = ({ userEmail, userRole }) => {
             mappedData,
             headersToUse: resolveFormOGJGujaratTableHeaders(headersToUse),
             parsedHeaderRowIndex: downloadHeaderRowIndex,
-            parsedDataStartIndex: downloadDataStartIndex,
+            // Do not pass dataStartIndex — sheet detection avoids writing row 1 into From/Till.
             parsedTableStartCol: downloadTableStartCol,
             parsedFormHeader: parsed.formHeader,
             headerFormData: downloadHeaderFormData,
@@ -45891,6 +45962,19 @@ const Statutory = ({ userEmail, userRole }) => {
               templateMeta.formFileName ||
               resolvedFormFileItem.formFileName ||
               'form-draft.xlsx',
+          })
+        : isFormPGJGujaratDownload
+        ? await buildFormPGJGujaratWorkbookWithTemplateStyles({
+            templateArrayBuffer: arrayBuffer,
+            mappedData,
+            headersToUse: resolveFormPGJGujaratTableHeaders(headersToUse),
+            parsedFormHeader: parsed.formHeader,
+            headerFormData: downloadHeaderFormData,
+            formFileName:
+              templateMeta.formFileName ||
+              resolvedFormFileItem.formFileName ||
+              'form-draft.xlsx',
+            formatStatutoryDateDisplay,
           })
         : isFormADownload
         ? await (async () => {
@@ -47458,11 +47542,12 @@ const Statutory = ({ userEmail, userRole }) => {
         const fnHint =
           templateMeta.formFileName || resolvedFormFileItem.formFileName || fn || fileName || '';
         const formQDl =
-          isFormQMaharashtraDownload ||
+          !isFormPGJGujaratDownload &&
+          (isFormQMaharashtraDownload ||
           (!isFormQKarnatakaContext(parsed?.formHeader, item, fnHint, '') &&
             (/form[\s_-]*q/i.test(String(fnHint)) ||
               /form[\s_-]*q/i.test(String(resolvedDownloadSheetName || parsed?.sheetName || '')) ||
-              isFormQContext(parsed?.formHeader, item, fnHint, headersToUse)));
+              isFormQContext(parsed?.formHeader, item, fnHint, headersToUse))));
         if (formQDl && blob) {
           blob = await repairFormQMaharashtraDownloadBlob(blob);
           blob = await applyFormQMaharashtraFullBordersToBlob(blob);
@@ -64219,6 +64304,15 @@ const Statutory = ({ userEmail, userRole }) => {
             }
           }
           if (formPGJAutofillContext) {
+            if (isFormPGJWageRateHeader(header)) {
+              // Do not fetch Wage Rate for Form P.
+              row[header] = '';
+              return;
+            }
+            if (isFormPGJOvertimeHoursHeader(header) || isFormPGJOvertimeEarningsHeader(header)) {
+              row[header] = FORM_PGJ_OVERTIME_DEFAULT;
+              return;
+            }
             if (isFormPGJWorkingHoursFromHeader(header)) {
               row[header] = sanitizeValue(
                 formatAttendanceShiftTimeDisplay(readFormPGJShiftStartFromEmployee(empItem))
@@ -64343,6 +64437,10 @@ const Statutory = ({ userEmail, userRole }) => {
                 emp['Designation.displayValue'] ||
                 ''
             );
+            return;
+          }
+          if (formLGJGujaratAutofillContext && isFormLGJWeeklyHolidayHeader(header)) {
+            row[header] = sanitizeValue(resolveFormLGJWeeklyHolidayValue());
             return;
           }
           if (formLGJGujaratAutofillContext && isFormLGJFirstShiftFromHeader(header)) {
@@ -71890,11 +71988,16 @@ const Statutory = ({ userEmail, userRole }) => {
               resolvePayrollRow: resolvePgjPayrollRow,
             }
           );
+          applyFormPGJGujaratStaticDefaults(mappedData, pgjHdrs, { overwrite: true });
           if (!returnMappedData && !isStaleAutofillRun()) {
             mergeMappedIntoFormTable(mappedData, true);
           }
           console.log(`Form P Gujarat payroll final pass: ${pgjPayrollHits}/${mappedData.length} row(s)`);
         } else {
+          const pgjHdrsEmpty = stripAndNormalizeFormPGJTableHeaders(
+            buildFormPGJGujaratCanonicalHeaders(formQDayCount)
+          );
+          applyFormPGJGujaratStaticDefaults(mappedData, pgjHdrsEmpty, { overwrite: true });
           console.warn(
             `Form P Gujarat payroll: no rows for ${pgjMonthCandidates.join(', ')} — fetch payroll on Payroll page first, then Autofill again`
           );
@@ -74519,9 +74622,10 @@ const Statutory = ({ userEmail, userRole }) => {
         );
         tableDataToSet = mappedData;
       } else if (formPGJAutofillContext) {
+        applyFormPGJGujaratStaticDefaults(mappedData, currentHeaders, { overwrite: true });
         tableDataToSet = remapFormPGJRowsToHeaders(
           mappedData,
-          modalData?.parsedTableHeaders || tableHeaders,
+          currentHeaders,
           currentHeaders
         );
       } else if (formOGJGujaratAutofillContext) {
@@ -86069,17 +86173,20 @@ const Statutory = ({ userEmail, userRole }) => {
     };
 
     const dateColCount = model.shiftGroups.reduce((sum, g) => sum + g.cols.length, 0);
+    const identityBefore = model.identityBefore || model.identity || [];
+    const identityAfter = model.identityAfter || [];
+    const renderIdentityTh = (col) => (
+      <th
+        key={`forml-id-${col.index}`}
+        rowSpan={3}
+        style={identityHeaderStyle}
+        title={col.header}
+      >
+        {formatStatutoryTableHeaderLabel(col.header)}
+      </th>
+    );
     const row1 = [
-      ...model.identity.map((col) => (
-        <th
-          key={`forml-id-${col.index}`}
-          rowSpan={3}
-          style={identityHeaderStyle}
-          title={col.header}
-        >
-          {formatStatutoryTableHeaderLabel(col.header)}
-        </th>
-      )),
+      ...identityBefore.map(renderIdentityTh),
       <th
         key="forml-date-band"
         colSpan={dateColCount}
@@ -86088,6 +86195,7 @@ const Statutory = ({ userEmail, userRole }) => {
       >
         {model.dateBand}
       </th>,
+      ...identityAfter.map(renderIdentityTh),
     ];
 
     const row2 = model.shiftGroups.map((group) => (

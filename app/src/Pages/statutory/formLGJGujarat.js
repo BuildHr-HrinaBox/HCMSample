@@ -6,6 +6,7 @@ import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statut
 
 export const FORM_LGJ_DATE_BAND = 'Date of the Month';
 
+export const FORM_LGJ_WEEKLY_HOLIDAY_DEFAULT = 'Saturday & Sunday';
 export const FORM_LGJ_FIRST_SHIFT_FROM_DEFAULT = '9 AM';
 export const FORM_LGJ_FIRST_SHIFT_TO_DEFAULT = '6 PM';
 
@@ -13,10 +14,13 @@ export const FORM_LGJ_GJ_CANONICAL_TABLE_HEADERS = [
   'Sr. No.',
   'Name of the Worker',
   'Designation',
+  'Weekly holiday day',
   `${FORM_LGJ_DATE_BAND}_1st Shift_From`,
   `${FORM_LGJ_DATE_BAND}_1st Shift_To`,
   `${FORM_LGJ_DATE_BAND}_2nd Shift_From`,
   `${FORM_LGJ_DATE_BAND}_2nd Shift_To`,
+  `${FORM_LGJ_DATE_BAND}_3rd Shift_From`,
+  `${FORM_LGJ_DATE_BAND}_3rd Shift_To`,
 ];
 
 export function formLGJGujaratHeaderNorm(txt) {
@@ -116,6 +120,7 @@ function normalizeFormLGJHeaderKey(header) {
   if (/^sr\.?\s*no/.test(n)) return 'Sr. No.';
   if (/name\s+of\s+the\s+worker/.test(n)) return 'Name of the Worker';
   if (/^designation$/.test(n)) return 'Designation';
+  if (/weekly\s+holiday/.test(n)) return 'Weekly holiday day';
 
   const triple = raw.match(/^(.+?)_(.+?)_(From|To|Till)$/i);
   if (triple) {
@@ -273,6 +278,7 @@ export function rebuildFormLGJGujaratTableHeadersFromSheet({
       if (/^sr\.?\s*no/.test(n)) return 'Sr. No.';
       if (/name\s+of\s+the\s+worker/.test(n)) return 'Name of the Worker';
       if (/^designation$/.test(n)) return 'Designation';
+      if (/weekly\s+holiday/.test(n)) return 'Weekly holiday day';
     }
     return '';
   };
@@ -282,14 +288,20 @@ export function rebuildFormLGJGujaratTableHeadersFromSheet({
   const mainHeaders = [];
   let subHeaderRowIndex = headerRowIndex + 1;
   let dataStartIndex = headerRowIndex + 3;
+  let weeklyHolidayCol = -1;
 
   let c = startCol;
   const maxCols = Math.max(effectiveSheetCols, (jsonData[headerRowIndex] || []).length, startCol + 10);
-  while (c < startCol + 4 && c < maxCols) {
+  while (c < startCol + 5 && c < maxCols) {
     const label = readIdentityLabel(c);
     if (label) {
       flatHeaders.push(label);
       mainHeaders.push(label);
+      if (label === 'Weekly holiday day') weeklyHolidayCol = c;
+    } else {
+      // Stop identity scan once we hit Date-of-Month / shift band cells.
+      const probe = normLower(getMergedAwareCellText(headerRowIndex, c));
+      if (/date\s+of\s+the\s+month|date\s+of\s+month|\d+(?:st|nd|rd|th)\s+shift/.test(probe)) break;
     }
     c = Math.max(c + 1, getMergeSpanEndCol(headerRowIndex, c));
   }
@@ -387,17 +399,23 @@ export function rebuildFormLGJGujaratTableHeadersFromSheet({
     });
   });
 
-  let weeklyHolidayCol = -1;
-  for (let col = startCol; col < maxCols; col += 1) {
-    for (let r = headerRowIndex; r <= headerRowIndex + 4; r += 1) {
-      const t = normLower(getMergedAwareCellText(r, col));
-      if (/weekly\s+holiday/.test(t)) {
-        weeklyHolidayCol = col;
-        flatHeaders.push('Weekly holiday day');
-        break;
+  if (weeklyHolidayCol < 0) {
+    for (let col = startCol; col < maxCols; col += 1) {
+      for (let r = headerRowIndex; r <= headerRowIndex + 4; r += 1) {
+        const t = normLower(getMergedAwareCellText(r, col));
+        if (/weekly\s+holiday/.test(t)) {
+          weeklyHolidayCol = col;
+          break;
+        }
       }
+      if (weeklyHolidayCol >= 0) break;
     }
-    if (weeklyHolidayCol >= 0) break;
+  }
+  if (weeklyHolidayCol >= 0 && !flatHeaders.includes('Weekly holiday day')) {
+    const desigIdx = flatHeaders.indexOf('Designation');
+    const insertAt = desigIdx >= 0 ? desigIdx + 1 : Math.min(3, flatHeaders.length);
+    flatHeaders.splice(insertAt, 0, 'Weekly holiday day');
+    mainHeaders.splice(insertAt, 0, 'Weekly holiday day');
   }
 
   if (flatHeaders.length < 5) {
@@ -436,6 +454,7 @@ export function remapFormLGJGujaratRowsToHeaders(rows, sourceHeaders, targetHead
     if (/^sr\.?\s*no/.test(n)) return 'sno';
     if (/name\s+of\s+the\s+worker/.test(n)) return 'workerName';
     if (/^designation$/.test(n)) return 'designation';
+    if (/weekly\s+holiday/.test(n)) return 'weeklyHoliday';
     const parsed = parseFormLGJHeaderKey(header);
     if (parsed) return `shift:${parsed.shift.toLowerCase()}:${parsed.field.toLowerCase()}`;
     return n;
@@ -504,6 +523,15 @@ export function resolveFormLGJFirstShiftToValue(_emp, _readShiftEnd, _formatShif
   return FORM_LGJ_FIRST_SHIFT_TO_DEFAULT;
 }
 
+/** Weekly holiday day — default Saturday & Sunday (Form L rule 14 notice). */
+export function resolveFormLGJWeeklyHolidayValue() {
+  return FORM_LGJ_WEEKLY_HOLIDAY_DEFAULT;
+}
+
+export function isFormLGJWeeklyHolidayHeader(header) {
+  return /weekly\s+holiday/.test(normHeaderLabel(header));
+}
+
 export function getFormLGJRowValueForHeader(row, header) {
   if (!row || !header) return '';
   const direct = row[header];
@@ -513,6 +541,7 @@ export function getFormLGJRowValueForHeader(row, header) {
     if (isFormLGJSerialHeader(h)) return 'sno';
     if (isFormLGJWorkerNameHeader(h)) return 'workerName';
     if (isFormLGJDesignationHeader(h)) return 'designation';
+    if (isFormLGJWeeklyHolidayHeader(h)) return 'weeklyHoliday';
     const parsed = parseFormLGJHeaderKey(h);
     if (parsed) return `shift:${parsed.shift.toLowerCase()}:${parsed.field.toLowerCase()}`;
     return normHeaderLabel(h);
@@ -524,6 +553,7 @@ export function getFormLGJRowValueForHeader(row, header) {
       return String(v).trim();
     }
   }
+  if (bucket === 'weeklyHoliday') return FORM_LGJ_WEEKLY_HOLIDAY_DEFAULT;
   return '';
 }
 
@@ -567,12 +597,19 @@ export function extractFormLGJNoticeTextRows(jsonData, headerRowIndex, getMerged
 /** Chunk model for 3-row table header: identity cols + Date band + shift bands + From/To. */
 export function buildFormLGJHeaderChunkModel(headers) {
   const hdrs = resolveFormLGJGujaratTableHeaders(headers);
-  const identity = [];
+  const identityBefore = [];
+  const identityAfter = [];
   const dateCols = [];
+  let seenDate = false;
   hdrs.forEach((header, index) => {
     const parsed = parseFormLGJHeaderKey(header);
-    if (parsed) dateCols.push({ index, header, ...parsed });
-    else identity.push({ index, header });
+    if (parsed) {
+      seenDate = true;
+      dateCols.push({ index, header, ...parsed });
+      return;
+    }
+    if (!seenDate) identityBefore.push({ index, header });
+    else identityAfter.push({ index, header });
   });
   if (dateCols.length === 0) return null;
 
@@ -593,11 +630,13 @@ export function buildFormLGJHeaderChunkModel(headers) {
     });
   });
 
-  return { identity, shiftGroups, dateBand: FORM_LGJ_DATE_BAND };
-}
-
-export function isFormLGJWeeklyHolidayHeader(header) {
-  return /weekly\s+holiday/.test(normHeaderLabel(header));
+  return {
+    identity: [...identityBefore, ...identityAfter],
+    identityBefore,
+    identityAfter,
+    shiftGroups,
+    dateBand: FORM_LGJ_DATE_BAND,
+  };
 }
 
 export function rowHasMeaningfulFormLGJGujaratExportData(row, headers) {

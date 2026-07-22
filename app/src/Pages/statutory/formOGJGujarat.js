@@ -248,12 +248,12 @@ export function rebuildFormOGJGujaratTableHeadersFromSheet({
   if (flatHeaders.length < 4) return null;
 
   let subHeaderRowIndex = subRowIndex;
-  for (let sr = headerRowIndex + 1; sr <= headerRowIndex + 4; sr += 1) {
+  outerSubScan: for (let sr = headerRowIndex + 1; sr <= headerRowIndex + 4; sr += 1) {
     for (let sc = startCol; sc < maxCols; sc += 1) {
       const sub = normLower(getMergedAwareCellText(sr, sc));
       if (sub === 'from' || sub === 'till' || sub === 'to') {
         subHeaderRowIndex = sr;
-        break;
+        break outerSubScan;
       }
     }
   }
@@ -270,7 +270,8 @@ export function rebuildFormOGJGujaratTableHeadersFromSheet({
           if (/^sr\.?\s*no/.test(n)) return 'Sr. No.';
           if (/name\s+of\s+workers?/.test(n)) return 'Name of Workers';
           if (/number\s+of\s+accumulated\s+leave/.test(n)) return 'Number of accumulated leave';
-          if (/name\s+of\s+accumulated\s+leave/.test(n)) return 'Name of accumulated leave';
+          // Template typo "Name of accumulated leave" ≡ official "Number of accumulated leave"
+          if (/name\s+of\s+accumulated\s+leave/.test(n)) return 'Number of accumulated leave';
           if (/accumulated\s+leave/.test(n) && !/period|perod/.test(n)) return 'Number of accumulated leave';
           return h;
         })
@@ -282,13 +283,16 @@ export function rebuildFormOGJGujaratTableHeadersFromSheet({
     normalizedSubs[parent] = subColumnsData[key];
   });
 
+  // Always start after From/Till sub-header (never write into the period labels row).
+  const dataStartIndex = Math.max(headerRowIndex + 3, subHeaderRowIndex + 1);
+
   return {
     headers: mainHeaders,
     expandedHeaders,
     subColumnsData: normalizedSubs,
     headerRowIndex,
     startCol,
-    dataStartIndex: Math.max(headerRowIndex + 2, subHeaderRowIndex + 1),
+    dataStartIndex,
   };
 }
 
@@ -302,7 +306,8 @@ export function remapFormOGJGujaratRowsToHeaders(rows, sourceHeaders, targetHead
     if (/^sr\.?\s*no/.test(n)) return 'sno';
     if (/name\s+of\s+workers?/.test(n)) return 'workerName';
     if (/number\s+of\s+accumulated\s+leave/.test(n)) return 'leaveCount';
-    if (/name\s+of\s+accumulated\s+leave/.test(n)) return 'leaveName';
+    // Template typo "Name …" stores the same LeaveCount value as "Number …"
+    if (/name\s+of\s+accumulated\s+leave/.test(n)) return 'leaveCount';
     if (/accumulated\s+leave/.test(n) && !/period|perod/.test(n)) return 'leaveCount';
     if (/period|perod/.test(n) && /from/.test(n)) return 'periodFrom';
     if (/period|perod/.test(n) && /(till|to)/.test(n)) return 'periodTill';
@@ -354,6 +359,7 @@ export function isFormOGJAccumulatedLeaveCountHeader(header) {
 
 export function isFormOGJAccumulatedLeaveNameHeader(header) {
   const n = normHeaderLabel(header);
+  // Excel templates often label this "Name of accumulated leave" (typo for Number).
   return /name\s+of\s+accumulated\s+leave/.test(n);
 }
 
@@ -567,7 +573,8 @@ export function getFormOGJRowValueForHeader(row, header) {
     if (isFormOGJSerialHeader(h)) return 'sno';
     if (isFormOGJWorkerNameHeader(h)) return 'workerName';
     if (isFormOGJAccumulatedLeaveCountHeader(h)) return 'leaveCount';
-    if (isFormOGJAccumulatedLeaveNameHeader(h)) return 'leaveName';
+    // Template "Name of accumulated leave" ≡ LeaveCount / Number column
+    if (isFormOGJAccumulatedLeaveNameHeader(h)) return 'leaveCount';
     if (isFormOGJAccumulatedLeaveHeader(h)) return 'leaveCount';
     if (isFormOGJPeriodFromHeader(h)) return 'periodFrom';
     if (isFormOGJPeriodTillHeader(h)) return 'periodTill';
@@ -621,6 +628,9 @@ export function applyFormOGJGujaratApprovedLeaveToRow(
   let applied = 0;
   hdrs.forEach((header) => {
     if (isFormOGJAccumulatedLeaveCountHeader(header) && leaveCount) {
+      if (setFormOGJRowCell(row, header, leaveCount, overwrite)) applied += 1;
+    } else if (isFormOGJAccumulatedLeaveNameHeader(header) && leaveCount) {
+      // Template typo "Name …" still receives LeaveCount (same as Number column).
       if (setFormOGJRowCell(row, header, leaveCount, overwrite)) applied += 1;
     } else if (isFormOGJAccumulatedLeaveNameHeader(header) && leaveType) {
       if (setFormOGJRowCell(row, header, leaveType, overwrite)) applied += 1;
@@ -727,7 +737,8 @@ function formOGJHeaderAliasBucket(n) {
   if (/^sr\.?\s*no/.test(norm)) return 'sno';
   if (/name\s+of\s+workers?/.test(norm)) return 'workerName';
   if (/number\s+of\s+accumulated\s+leave/.test(norm)) return 'leaveCount';
-  if (/name\s+of\s+accumulated\s+leave/.test(norm)) return 'leaveName';
+  // Template typo "Name of accumulated leave" ≡ Number / LeaveCount
+  if (/name\s+of\s+accumulated\s+leave/.test(norm)) return 'leaveCount';
   if (/accumulated\s+leave/.test(norm) && !/period|perod/.test(norm)) return 'leaveCount';
   if (/period|perod/.test(norm) && /accumulated/.test(norm) && /leave/.test(norm)) return 'periodBand';
   if (norm === 'from') return 'periodFrom';
@@ -823,6 +834,92 @@ function buildMergeSpanEndResolver(worksheet, getMergeTopLeft) {
   };
 }
 
+function collectWorksheetRowText(worksheet, row, maxCol = 20) {
+  const parts = [];
+  for (let c = 1; c <= maxCol; c += 1) {
+    const t = excelCellValueToString(worksheet.getCell(row, c)?.value)
+      .replace(/\r?\n+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (t) parts.push(t);
+  }
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Unmerge any ranges that intersect the data body so each employee gets its own row. */
+function unmergeFormOGJDataRegion(worksheet, rowFrom, rowTo, colFrom, colTo) {
+  if (!worksheet || typeof worksheet.unMergeCells !== 'function') return;
+  const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
+  merges.forEach((label) => {
+    const parts = String(label || '').split(':');
+    if (parts.length !== 2) return;
+    try {
+      const tl = worksheet.getCell(parts[0]);
+      const br = worksheet.getCell(parts[1]);
+      const r1 = tl.fullAddress?.row ?? tl.row;
+      const c1 = tl.fullAddress?.col ?? tl.col;
+      const r2 = br.fullAddress?.row ?? br.row;
+      const c2 = br.fullAddress?.col ?? br.col;
+      const rowOverlap = r1 <= rowTo && r2 >= rowFrom;
+      const colOverlap = c1 <= colTo && c2 >= colFrom;
+      // Vertical merges into the body collapse multiple employees into one cell.
+      if (rowOverlap && colOverlap && r2 > r1) {
+        worksheet.unMergeCells(label);
+      }
+    } catch (_) {
+      /* ignore invalid merge refs */
+    }
+  });
+}
+
+function findFormOGJFooterRow(worksheet, fromRow) {
+  const start = Math.max(1, fromRow);
+  const end = Math.max(start + 40, (worksheet.rowCount || start) + 5);
+  for (let r = start; r <= end; r += 1) {
+    const text = collectWorksheetRowText(worksheet, r, 30).toLowerCase();
+    if (!text) continue;
+    if (
+      /system\s+generated/.test(text) ||
+      /authorised\s+signatory|authorized\s+signatory/.test(text) ||
+      /signature\s+of\s+employer/.test(text) ||
+      /^date\s*:/.test(text) ||
+      /^place\s*:/.test(text) ||
+      /copy\s+to\s+workers/.test(text)
+    ) {
+      return r;
+    }
+  }
+  return null;
+}
+
+function ensureFormOGJDataRowCapacity(worksheet, dataStartRow, rowCount, colFrom, colTo) {
+  if (!worksheet || rowCount < 1) return dataStartRow;
+
+  // Unmerge first — vertical merges make every write land on the same top-left cell
+  // (last employee overwrites the first; download shows only Sr. No. 2).
+  unmergeFormOGJDataRegion(
+    worksheet,
+    dataStartRow,
+    dataStartRow + Math.max(rowCount, 2) + 5,
+    colFrom,
+    colTo
+  );
+
+  const footerRow = findFormOGJFooterRow(worksheet, dataStartRow);
+  if (footerRow != null && footerRow > dataStartRow) {
+    const available = footerRow - dataStartRow;
+    const need = rowCount - available;
+    if (need > 0 && typeof worksheet.spliceRows === 'function') {
+      const blanks = Array.from({ length: need }, () => []);
+      worksheet.spliceRows(footerRow, 0, ...blanks);
+    }
+  } else if (typeof worksheet.spliceRows === 'function' && rowCount > 1) {
+    const blanks = Array.from({ length: rowCount - 1 }, () => []);
+    worksheet.spliceRows(dataStartRow + 1, 0, ...blanks);
+  }
+  return dataStartRow;
+}
+
 function detectFormOGJGujaratTableLayout(worksheet, hints = {}) {
   const getMergeTopLeft = buildMergeTopLeftResolver(worksheet);
   const getMergeSpanEnd = buildMergeSpanEndResolver(worksheet, getMergeTopLeft);
@@ -831,38 +928,34 @@ function detectFormOGJGujaratTableLayout(worksheet, hints = {}) {
     return excelCellValueToString(worksheet.getCell(tl.r, tl.c)?.value).trim();
   };
 
-  let headerRow =
-    hints.parsedHeaderRowIndex != null && hints.parsedHeaderRowIndex >= 0
-      ? hints.parsedHeaderRowIndex + 1
-      : -1;
+  // Prefer sheet scan over modal hints — stale dataStartIndex was writing emp #1 into From/Till.
+  let headerRow = -1;
   let startCol =
     hints.parsedTableStartCol != null && hints.parsedTableStartCol >= 0
       ? hints.parsedTableStartCol + 1
       : 1;
 
-  if (headerRow < 1) {
-    const maxScanRows = Math.max(40, worksheet.rowCount + 5);
-    for (let r = 1; r <= maxScanRows; r += 1) {
-      const parts = [];
+  const maxScanRows = Math.max(45, worksheet.rowCount + 5);
+  for (let r = 1; r <= maxScanRows; r += 1) {
+    const parts = [];
+    for (let c = 1; c <= 20; c += 1) {
+      const t = getMergedAwareCellText(r, c);
+      if (t) parts.push(t.toLowerCase());
+    }
+    const joined = parts.join(' ');
+    if (
+      /sr\.?\s*no/.test(joined) &&
+      /name\s+of\s+workers?/.test(joined) &&
+      /accumulated\s+leave/.test(joined)
+    ) {
+      headerRow = r;
       for (let c = 1; c <= 20; c += 1) {
-        const t = getMergedAwareCellText(r, c);
-        if (t) parts.push(t.toLowerCase());
-      }
-      const joined = parts.join(' ');
-      if (
-        /sr\.?\s*no/.test(joined) &&
-        /name\s+of\s+workers?/.test(joined) &&
-        /accumulated\s+leave/.test(joined)
-      ) {
-        headerRow = r;
-        for (let c = 1; c <= 20; c += 1) {
-          if (excelCellLooksLikeSerialHeader(getMergedAwareCellText(r, c))) {
-            startCol = c;
-            break;
-          }
+        if (excelCellLooksLikeSerialHeader(getMergedAwareCellText(r, c))) {
+          startCol = c;
+          break;
         }
-        break;
       }
+      break;
     }
   }
   if (headerRow < 1) return null;
@@ -908,17 +1001,33 @@ function detectFormOGJGujaratTableLayout(worksheet, hints = {}) {
         label: `${FORM_OGJ_PERIOD_PARENT}_Till`,
       });
     } else if (bucket && bucket !== 'periodFrom' && bucket !== 'periodTill') {
-      templateCols.push({ col: c, bucket, label });
+      const normalizedLabel =
+        bucket === 'leaveCount' ? 'Number of accumulated leave' : label;
+      templateCols.push({ col: c, bucket, label: normalizedLabel });
     }
     c = endC + 1;
     if (templateCols.length >= 5) break;
   }
   if (templateCols.length < 4) return null;
 
+  // Independent From/Till scan (all columns) — do not trust modal dataStartIndex.
+  let fromTillRow = -1;
+  for (let r = headerRow; r <= headerRow + 6; r += 1) {
+    let hasFrom = false;
+    let hasTill = false;
+    for (let col = 1; col <= 25; col += 1) {
+      const t = formOGJGujaratHeaderNorm(getMergedAwareCellText(r, col));
+      if (t === 'from') hasFrom = true;
+      if (t === 'till' || t === 'to') hasTill = true;
+    }
+    if (hasFrom || hasTill) {
+      fromTillRow = r;
+      subHeaderRow = Math.max(subHeaderRow, r);
+    }
+  }
+
   const dataStartRow =
-    hints.parsedDataStartIndex != null && hints.parsedDataStartIndex >= 0
-      ? hints.parsedDataStartIndex + 1
-      : Math.max(headerRow + 3, subHeaderRow + 1);
+    fromTillRow > 0 ? fromTillRow + 1 : Math.max(headerRow + 3, subHeaderRow + 1);
 
   return { headerRow, subHeaderRow, dataStartRow, templateCols, startCol };
 }
@@ -943,12 +1052,12 @@ export async function buildFormOGJGujaratWorkbookWithTemplateStyles({
 
   const layout = detectFormOGJGujaratTableLayout(worksheet, {
     parsedHeaderRowIndex,
-    parsedDataStartIndex,
     parsedTableStartCol,
+    // Intentionally ignore parsedDataStartIndex — stale modal index wrote emp #1 into From/Till.
   });
   if (!layout) throw new Error('Could not locate Gujarat Form O table header row.');
 
-  const { dataStartRow, templateCols } = layout;
+  let { dataStartRow, templateCols } = layout;
   const formatDate =
     typeof formatStatutoryDateDisplay === 'function'
       ? formatStatutoryDateDisplay
@@ -975,6 +1084,15 @@ export async function buildFormOGJGujaratWorkbookWithTemplateStyles({
 
   const tableColMin = Math.min(...templateCols.map(({ col }) => col));
   const tableColMax = Math.max(...templateCols.map(({ col }) => col));
+
+  dataStartRow = ensureFormOGJDataRowCapacity(
+    worksheet,
+    dataStartRow,
+    Math.max(rows.length, 1),
+    tableColMin,
+    tableColMax
+  );
+
   const clearToRow = Math.max(dataStartRow + rows.length + 10, dataStartRow + 15);
   for (let r = dataStartRow; r <= clearToRow; r += 1) {
     for (let col = tableColMin; col <= tableColMax; col += 1) {
@@ -999,7 +1117,8 @@ export async function buildFormOGJGujaratWorkbookWithTemplateStyles({
           }
         }
       }
-      if ((val == null || val === '') && bucket === 'sno') val = String(idx + 1);
+      // Always renumber after filter/remap so Sr. No. starts at 1 in the download.
+      if (bucket === 'sno') val = String(idx + 1);
       const cell = worksheet.getCell(dataStartRow + idx, col);
       if (val == null || val === '') {
         cell.value = '';

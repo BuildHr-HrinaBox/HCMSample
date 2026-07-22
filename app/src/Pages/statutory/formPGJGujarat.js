@@ -3,6 +3,7 @@
 import * as XLSX from 'xlsx';
 import {
   flattenPayrollEarningColumns,
+  readPayrollForm15WageAmounts,
   readPayrollScalar,
   readPayrollTextScalar,
 } from '../../utils/payrollEarnings';
@@ -55,11 +56,24 @@ export function isFormPGJGujaratContext(
   const hasFormP = /\bform[\s._-]*p\b/.test(parts);
   if (hasGujarat && hasFormP) return true;
   if (/\bform_p_gj\b/.test(parts)) return true;
+  if (hasFormP && /muster[\s-]*roll/.test(parts) && /wage\s+register/.test(parts)) return true;
+  // Original Form P template fingerprint (Age / Sex / Interval) — not Form Q MH.
   const joined = parts;
+  if (
+    /interval\s+for\s+rest/.test(joined) &&
+    /\bage\b/.test(joined) &&
+    /\bsex\b/.test(joined) &&
+    /date\s+of\s+month/.test(joined) &&
+    (/full\s+name\s+of\s+the\s+worker/.test(joined) || /name\s+of\s+the\s+worker/.test(joined))
+  ) {
+    return true;
+  }
+  // App UI headers for Gujarat Form P (Father's name + Wage Rate + Date of Month_n).
   return (
+    hasGujarat &&
     /sr\.?\s*no/.test(joined) &&
     /date\s+of\s+month/.test(joined) &&
-    (/working\s+hours/.test(joined) || /total\s+days\s+worked/.test(joined) || /name\s+of\s+the\s+worker/.test(joined))
+    (/father/.test(joined) || /wage\s+rate/.test(joined) || /name\s+of\s+the\s+worker/.test(joined))
   );
 }
 
@@ -90,6 +104,9 @@ const FORM_PGJ_WAGE_TAIL_HEADERS = [
   'Date of Payment',
   'Signature/Thumb Impression',
 ];
+
+/** Form P — overtime columns always default to NIL (not fetched). */
+export const FORM_PGJ_OVERTIME_DEFAULT = 'NIL';
 
 /** Full modal / export column list — worker cols, hours, days 1–31, wage summary. */
 export function buildFormPGJGujaratCanonicalHeaders(daysInMonth = 31) {
@@ -213,7 +230,8 @@ export function remapFormPGJRowsToHeaders(rows, oldHeaders, newHeaders) {
     return rows || [];
   }
   const oldList = Array.isArray(oldHeaders) ? oldHeaders : [];
-  const normOld = (h) => formPGJGujaratHeaderNorm(stripLeadingNumber(h));
+  // Punctuation-insensitive (Rs. vs Rs) so Actual Wages / OT values survive remap.
+  const normOld = (h) => normHeaderLabel(h);
   return rows.map((row, rowIndex) => {
     const next = {};
     newHeaders.forEach((newH) => {
@@ -229,6 +247,21 @@ export function remapFormPGJRowsToHeaders(rows, oldHeaders, newHeaders) {
         if (v != null && String(v).trim() !== '') {
           next[newH] = v;
           return;
+        }
+      }
+      // Bucket fallback — e.g. Actual Wages Paid under a slightly different label.
+      if (row && typeof row === 'object') {
+        const newBucket = matchFormPGJWageTailBucket(newH) || (
+          isFormPGJWageRateHeader(newH) ? 'wageRate' : ''
+        );
+        if (newBucket && newBucket !== 'skip') {
+          for (const [k, v] of Object.entries(row)) {
+            if (String(k).startsWith('__')) continue;
+            if (matchFormPGJWageTailBucket(k) === newBucket && v != null && String(v).trim() !== '') {
+              next[newH] = v;
+              return;
+            }
+          }
         }
       }
       if (/^sr\.?\s*no/i.test(newH)) {
@@ -611,6 +644,46 @@ function parsePayrollNumber(value) {
   return Number.isFinite(n) ? n : NaN;
 }
 
+/** Prefer flatten-computed basic; also accept Basic Salary / basic_* component keys. */
+function readFormPGJBasicAmount(payrollRow, flat) {
+  const wages = readPayrollForm15WageAmounts(payrollRow);
+  const candidates = [
+    wages.basic,
+    flat?.basic,
+    flat?.earned_basic,
+    flat?.basic_pay,
+    flat?.basic_earnings,
+    flat?.basic_salary,
+    flat?.Basic,
+    flat?.['Basic Salary'],
+    flat?.['basic salary'],
+  ];
+  if (flat && typeof flat === 'object') {
+    Object.entries(flat).forEach(([key, value]) => {
+      const k = String(key || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_');
+      if (!k) return;
+      if (k.includes('arrear') || k.includes('overtime') || k.includes('_ot_') || k.endsWith('_ot')) return;
+      if (
+        k === 'basic' ||
+        k === 'earned_basic' ||
+        k === 'basic_pay' ||
+        k === 'basic_earnings' ||
+        k === 'basic_salary' ||
+        /(^|_)basic($|_)/.test(k)
+      ) {
+        candidates.push(value);
+      }
+    });
+  }
+  for (let i = 0; i < candidates.length; i += 1) {
+    const n = parsePayrollNumber(candidates[i]);
+    if (Number.isFinite(n)) return n;
+  }
+  return '';
+}
+
 function readPayrollDeductionScalar(flat, payrollRow, keys, patterns = []) {
   const val = readPayrollScalar({ ...flat, ...payrollRow }, keys, patterns);
   return val !== '' && val != null ? val : '';
@@ -622,7 +695,8 @@ export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
     basic: '',
     hra: '',
     grossPay: '',
-    overtimeHours: '',
+    overtimeHours: FORM_PGJ_OVERTIME_DEFAULT,
+    overtimeEarnings: FORM_PGJ_OVERTIME_DEFAULT,
     esi: '',
     professionalTax: '',
     incomeTax: '',
@@ -632,61 +706,36 @@ export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
   };
   if (!payrollRow || payrollRow.fetch_error) return empty;
 
+  // Flatten first — raw payrollRow.basic often overwrites computed basic when merged last.
   const flat = flattenPayrollEarningColumns(payrollRow);
-  const merged = { ...flat, ...payrollRow };
+  const wages = readPayrollForm15WageAmounts(payrollRow);
 
   const paidDays = readPayrollScalar(
-    merged,
+    flat,
     ['paid_days', 'Paid Days', 'days_worked', 'Days Worked', 'paidDays', 'no_of_days_worked'],
     [/^paid_days$/, /paiddays/, /daysworked/]
   );
 
-  const basic =
-    readPayrollScalar(
-      merged,
-      ['basic', 'Basic', 'earned_basic', 'Earned Basic', 'basic_pay', 'Basic Earnings'],
-      [/^basic$/, /^earned_basic$/, /^basic_pay$/]
-    ) || (flat.basic != null && flat.basic !== '' ? flat.basic : '');
+  const basic = readFormPGJBasicAmount(payrollRow, flat);
 
   const hra =
-    readPayrollScalar(
-      merged,
-      ['hra_fbp', 'HRA FBP', 'hra (fbp)', 'hra_fp', 'HRA (FBP)'],
-      [/^hra_fbp$/, /^hra_fp$/]
-    ) ||
-    readPayrollScalar(
-      merged,
-      ['hra', 'HRA', 'house_rent_allowance', 'House Rent Allowance'],
-      [/^hra$/, /house.*rent/]
-    ) ||
-    (flat.hra_fbp != null && flat.hra_fbp !== '' ? flat.hra_fbp : flat.hra || '');
+    wages.hra !== '' && wages.hra != null
+      ? wages.hra
+      : readPayrollScalar(
+          flat,
+          ['hra_fbp', 'HRA FBP', 'hra (fbp)', 'hra_fp', 'HRA (FBP)', 'hra', 'HRA', 'house_rent_allowance'],
+          [/^hra_fbp$/, /^hra_fp$/, /^hra$/, /house.*rent/]
+        );
 
   const grossPay = readPayrollScalar(
-    merged,
+    flat,
     ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'Gross Amount Payable'],
     [/^gross_pay$/, /^total_earnings$/]
   );
 
-  let overtimeHours = readPayrollTextScalar(
-    merged,
-    [
-      'total_ot_hours',
-      'Total OT hours',
-      'total overtime hours',
-      'overtime_hours',
-      'Overtime Hours',
-      'total_overtime_hours',
-      'ot_hours',
-    ],
-    [/total.*ot.*hour/i, /^total_ot_hours$/, /^overtime_hours$/, /^ot_hours$/]
-  );
-  if (overtimeHours === '') {
-    overtimeHours = readPayrollScalar(
-      merged,
-      ['total_ot_hours', 'overtime_hours', 'total_overtime_hours', 'ot_hours'],
-      [/total.*ot.*hour/i, /^total_ot_hours$/, /^overtime_hours$/, /^ot_hours$/]
-    );
-  }
+  // Form P: overtime columns are always NIL (not fetched from payroll).
+  const overtimeHours = FORM_PGJ_OVERTIME_DEFAULT;
+  const overtimeEarnings = FORM_PGJ_OVERTIME_DEFAULT;
 
   const esi = readPayrollDeductionScalar(
     flat,
@@ -703,7 +752,7 @@ export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
   );
 
   const incomeTax =
-    readPayrollScalar(merged, ['income_tax', 'Income Tax'], [/^income_tax$/]) ||
+    readPayrollScalar(flat, ['income_tax', 'Income Tax'], [/^income_tax$/]) ||
     readPayrollDeductionScalar(
       flat,
       payrollRow,
@@ -712,20 +761,20 @@ export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
     );
 
   const totalDeduction = readPayrollScalar(
-    merged,
+    flat,
     ['total_deductions', 'Total Deductions', 'totalDeductions', 'total_employee_deductions', 'total_deduction'],
     [/^total_deductions?$/]
   );
 
   const netPay = readPayrollScalar(
-    merged,
+    flat,
     ['net_pay', 'Net Pay', 'netPay', 'monthly_salary', 'Net Payable'],
     [/^net_pay$/]
   );
 
   const payDateRaw =
     readPayrollTextScalar(
-      merged,
+      flat,
       ['pay_date', 'Pay Date', 'payment_date', 'Payment Date', 'paid_date', 'date_of_payment', 'Date of Payment'],
       [/^pay_date$/, /payment.*date/i, /^paid_date$/]
     ) ||
@@ -742,6 +791,7 @@ export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
     hra,
     grossPay,
     overtimeHours,
+    overtimeEarnings,
     esi,
     professionalTax,
     incomeTax,
@@ -753,9 +803,31 @@ export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
 
 function formatCellValue(value, { allowZero = false } = {}) {
   if (value == null || value === '') return '';
+  if (typeof value === 'string' && /^nil$/i.test(value.trim())) return 'NIL';
   const num = parsePayrollNumber(value);
   if (Number.isFinite(num) && (allowZero || num !== 0)) return num;
   return String(value).trim();
+}
+
+export function isFormPGJWageRateHeader(header) {
+  const n = normHeaderLabel(header);
+  return (
+    n === 'wage rate' ||
+    /^wage\s*rate$/.test(n) ||
+    (n.includes('wage') && n.includes('rate') && !n.includes('minimum') && !n.includes('overtime'))
+  );
+}
+
+export function isFormPGJActualWagesPaidHeader(header) {
+  return /actual\s+wages\s+paid/.test(normHeaderLabel(header));
+}
+
+export function isFormPGJOvertimeHoursHeader(header) {
+  return /total\s+hours?\s+of\s+overtime/.test(normHeaderLabel(header));
+}
+
+export function isFormPGJOvertimeEarningsHeader(header) {
+  return /overtime\s+earnings?/.test(normHeaderLabel(header));
 }
 
 function matchFormPGJWageTailBucket(header) {
@@ -768,7 +840,7 @@ function matchFormPGJWageTailBucket(header) {
   if (n.includes('dearness allowance')) return 'skip';
   if (n.includes('gross amount payable')) return 'grossPay';
   if (n.includes('total hours of overtime')) return 'overtimeHours';
-  if (n.includes('overtime earnings')) return 'skip';
+  if (n.includes('overtime earnings')) return 'overtimeEarnings';
   if (n.includes('provident fund')) return 'skip';
   if (n.includes('family pension')) return 'skip';
   if (n.includes('esi contribution') || (n.includes('esi') && n.includes('contribution'))) return 'esi';
@@ -849,15 +921,80 @@ export function applyFormPGJGujaratPayrollToRow(row, payrollRow, headers, helper
     return true;
   };
   let wrote = false;
+  const stampAliases = (predicate, value) => {
+    hdrs.forEach((header) => {
+      if (predicate(header) && setCell(header, value, { allowZero: true })) wrote = true;
+    });
+    Object.keys(out).forEach((key) => {
+      if (String(key).startsWith('__')) return;
+      if (predicate(key) && setCell(key, value, { allowZero: true })) wrote = true;
+    });
+  };
+
   hdrs.forEach((header) => {
     if (isFormPGJSignatureHeader(header)) return;
+    if (isFormPGJWageRateHeader(header)) {
+      if (overwrite || cellIsEmpty(header)) out[header] = '';
+      return;
+    }
     const bucket = matchFormPGJWageTailBucket(header);
     if (!bucket || bucket === 'skip') return;
+    if (bucket === 'overtimeHours' || bucket === 'overtimeEarnings') {
+      if (setCell(header, FORM_PGJ_OVERTIME_DEFAULT, { allowZero: true })) wrote = true;
+      return;
+    }
     if (Object.prototype.hasOwnProperty.call(payroll, bucket)) {
       if (setCell(header, payroll[bucket], { allowZero: true })) wrote = true;
     }
   });
+
+  // Force Actual Wages Paid ← basic (header text variants / alias keys).
+  if (payroll.basic !== '' && payroll.basic != null) {
+    stampAliases(isFormPGJActualWagesPaidHeader, payroll.basic);
+  }
+  stampAliases(isFormPGJOvertimeHoursHeader, FORM_PGJ_OVERTIME_DEFAULT);
+  stampAliases(isFormPGJOvertimeEarningsHeader, FORM_PGJ_OVERTIME_DEFAULT);
+  hdrs.forEach((header) => {
+    if (isFormPGJWageRateHeader(header)) out[header] = '';
+  });
+  Object.keys(out).forEach((key) => {
+    if (isFormPGJWageRateHeader(key)) out[key] = '';
+  });
+
   return wrote;
+}
+
+/** Apply Form P static defaults (OT NIL, clear Wage Rate) even when payroll is missing. */
+export function applyFormPGJGujaratStaticDefaults(mappedData, headers, { overwrite = true } = {}) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  const hdrs = Array.isArray(headers) && headers.length > 0 ? headers : buildFormPGJGujaratCanonicalHeaders();
+  let hits = 0;
+  mappedData.forEach((row) => {
+    if (!row || typeof row !== 'object') return;
+    let touched = false;
+    const setIf = (header, value) => {
+      const cur = String(row[header] ?? '').trim();
+      const empty = !cur || /^enter\b/i.test(cur) || cur.toLowerCase().includes('enter ');
+      if (!overwrite && !empty) return;
+      row[header] = value;
+      touched = true;
+    };
+    hdrs.forEach((header) => {
+      if (isFormPGJWageRateHeader(header)) setIf(header, '');
+      if (isFormPGJOvertimeHoursHeader(header) || isFormPGJOvertimeEarningsHeader(header)) {
+        setIf(header, FORM_PGJ_OVERTIME_DEFAULT);
+      }
+    });
+    Object.keys(row).forEach((key) => {
+      if (String(key).startsWith('__')) return;
+      if (isFormPGJWageRateHeader(key)) setIf(key, '');
+      if (isFormPGJOvertimeHoursHeader(key) || isFormPGJOvertimeEarningsHeader(key)) {
+        setIf(key, FORM_PGJ_OVERTIME_DEFAULT);
+      }
+    });
+    if (touched) hits += 1;
+  });
+  return hits;
 }
 
 export function enrichFormPGJGujaratPayrollRows(mappedData, employees, headers, helpers = {}) {
@@ -900,6 +1037,7 @@ export function enrichFormPGJGujaratPayrollRows(mappedData, employees, headers, 
       payDate,
       overwrite,
     });
+    applyFormPGJGujaratStaticDefaults([row], hdrs, { overwrite: true });
     if (wrote) hits += 1;
   });
   return hits;
@@ -914,5 +1052,463 @@ export function enrichFormPGJGujaratDisplayHeader(formHeader, fileName, item, he
     fields: Array.isArray(formHeader?.fields) && formHeader.fields.length > 0
       ? formHeader.fields
       : [{ label: 'Month', value: '', key: 'form_p_gj_month' }],
+  };
+}
+
+const excelCellValueToString = (val) => {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'object') {
+    if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+    if (val.text != null) return String(val.text);
+    if (val.result != null) return String(val.result);
+  }
+  return '';
+};
+
+function buildMergeTopLeftResolver(worksheet) {
+  const cache = new Map();
+  return (r, c) => {
+    const key = `${r}:${c}`;
+    if (cache.has(key)) return cache.get(key);
+    let topLeft = { r, c };
+    const merges = worksheet.model?.merges;
+    if (Array.isArray(merges)) {
+      for (let mi = 0; mi < merges.length; mi += 1) {
+        const parts = String(merges[mi] || '').split(':');
+        if (parts.length !== 2) continue;
+        const tl = worksheet.getCell(parts[0]);
+        const br = worksheet.getCell(parts[1]);
+        if (!tl || !br) continue;
+        const r1 = tl.fullAddress?.row ?? tl.row;
+        const c1 = tl.fullAddress?.col ?? tl.col;
+        const r2 = br.fullAddress?.row ?? br.row;
+        const c2 = br.fullAddress?.col ?? br.col;
+        if (r >= r1 && r <= r2 && c >= c1 && c <= c2) {
+          topLeft = { r: r1, c: c1 };
+          break;
+        }
+      }
+    }
+    cache.set(key, topLeft);
+    return topLeft;
+  };
+}
+
+function formPGJTemplateBucket(label) {
+  const n = normHeaderLabel(label)
+    .replace(/\b\d+\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!n) return '';
+  if (/^sr\.?\s*no/.test(n) || /^s\.?\s*no/.test(n)) return 'sno';
+  if (/full\s+name\s+of\s+the\s+worker/.test(n) || /name\s+of\s+the\s+worker/.test(n)) return 'workerName';
+  if (/^designation/.test(n) || (/designation/.test(n) && /nature\s+of\s+work/.test(n))) return 'designation';
+  if (/^age$/.test(n)) return 'age';
+  if (/^sex$/.test(n)) return 'sex';
+  if (/entry\s+into\s+service/.test(n)) return 'dateOfEntry';
+  if (/^working\s+hours$/.test(n) || (n.includes('working hours') && !/from|to/.test(n))) {
+    return 'workingHours';
+  }
+  if (/working\s+hours/.test(n) && /\bfrom\b/.test(n)) return 'workingHoursFrom';
+  if (/working\s+hours/.test(n) && /\bto\b/.test(n)) return 'workingHoursTo';
+  if (/interval\s+for\s+rest/.test(n) && /\bfrom\b/.test(n)) return 'intervalFrom';
+  if (/interval\s+for\s+rest/.test(n) && /\bto\b/.test(n)) return 'intervalTo';
+  if (/^interval\s+for\s+rest$/.test(n) || (/interval\s+for\s+rest/.test(n) && !/from|to/.test(n))) {
+    return 'intervalRest';
+  }
+  if (/^date\s+of\s+(the\s+)?month$/.test(n)) return 'dateBand';
+  // Day numbers — use raw digit label (do not strip numbers above)
+  {
+    const rawDigit = formPGJGujaratHeaderNorm(label).replace(/[^0-9]/g, '');
+    if (/^\d{1,2}$/.test(rawDigit) && /^\d{1,2}$/.test(formPGJGujaratHeaderNorm(label).trim())) {
+      const d = parseInt(rawDigit, 10);
+      if (d >= 1 && d <= 31) return `day:${d}`;
+    }
+  }
+  if (/father|husband/.test(n)) return 'fatherName';
+  if (/wage\s+rate/.test(n) && !/minimum/.test(n)) return 'wageRate';
+  const wageBucket = matchFormPGJWageTailBucket(label);
+  if (wageBucket && wageBucket !== 'skip') return wageBucket;
+  if (isFormPGJWageTailHeader(label) || /minimum\s+rate\s+of\s+wages/.test(n)) {
+    if (/minimum\s+rate/.test(n)) return 'skip';
+    if (/total\s+production/.test(n)) return 'skip';
+    if (/dearness/.test(n)) return 'skip';
+    if (/provident\s+fund|family\s+pension|loan|advances|other\s+deduction|signature|thumb/.test(n)) {
+      return 'skip';
+    }
+  }
+  if (/actual\s+wages\s+paid/.test(n)) return 'basic';
+  if (/house\s+rent/.test(n)) return 'hra';
+  if (/gross\s+amount/.test(n)) return 'grossPay';
+  if (/total\s+hours?\s+of\s+overtime/.test(n)) return 'overtimeHours';
+  if (/overtime\s+earnings?/.test(n)) return 'overtimeEarnings';
+  if (/total\s+days?\s+worked/.test(n)) return 'paidDays';
+  if (/net\s+payable/.test(n)) return 'netPay';
+  if (/date\s+of\s+payment/.test(n)) return 'paymentDate';
+  if (/esi/.test(n)) return 'esi';
+  if (/professional\s+tax/.test(n)) return 'professionalTax';
+  if (/income\s+tax/.test(n)) return 'incomeTax';
+  if (/total\s+deduction/.test(n)) return 'totalDeduction';
+  return '';
+}
+
+/** Detect original Form P template columns (Age/Sex/Working Hours/Interval/days/wage tail). */
+export function detectFormPGJGujaratTableLayout(worksheet) {
+  const getMergeTopLeft = buildMergeTopLeftResolver(worksheet);
+  const getText = (r, c) => {
+    const tl = getMergeTopLeft(r, c);
+    return excelCellValueToString(worksheet.getCell(tl.r, tl.c)?.value).trim();
+  };
+  const norm = (txt) => formPGJGujaratHeaderNorm(txt);
+
+  let headerRow = -1;
+  let startCol = 1;
+  const maxR = Math.max(40, worksheet.rowCount || 40);
+  const maxC = Math.max(80, worksheet.columnCount || 0, worksheet.actualColumnCount || 0);
+
+  for (let r = 1; r <= maxR; r += 1) {
+    const parts = [];
+    for (let c = 1; c <= maxC; c += 1) {
+      const t = norm(getText(r, c));
+      if (t) parts.push(t);
+    }
+    const joined = parts.join(' ');
+    if (
+      /sr\.?\s*no/.test(joined) &&
+      (/full\s+name\s+of\s+the\s+worker/.test(joined) || /name\s+of\s+the\s+worker/.test(joined)) &&
+      (/date\s+of\s+(the\s+)?month/.test(joined) || /working\s+hours/.test(joined))
+    ) {
+      headerRow = r;
+      for (let c = 1; c <= maxC; c += 1) {
+        const t = norm(getText(r, c));
+        if (/^sr\.?\s*no/.test(t) || t === 'sr no') {
+          startCol = c;
+          break;
+        }
+      }
+      break;
+    }
+  }
+  if (headerRow < 1) return null;
+
+  const templateCols = [];
+  const seenBuckets = new Set();
+  let day1Col = -1;
+  const subRow = headerRow + 1;
+
+  for (let c = startCol; c <= startCol + 70; c += 1) {
+    const main = getText(headerRow, c);
+    const sub = getText(subRow, c);
+    const mainN = norm(main);
+    const subN = norm(sub);
+
+    // Day numbers on sub-row under Date of Month band
+    if (/^\d{1,2}$/.test(subN) || /^\d{1,2}$/.test(mainN)) {
+      const day = parseInt(subN || mainN, 10);
+      if (day >= 1 && day <= 31) {
+        const pastWorker =
+          seenBuckets.has('workerName') ||
+          seenBuckets.has('designation') ||
+          seenBuckets.has('workingHours') ||
+          seenBuckets.has('workingHoursFrom') ||
+          day1Col > 0;
+        if (pastWorker) {
+          if (day1Col < 0) day1Col = c;
+          const bucket = `day:${day}`;
+          if (!seenBuckets.has(bucket)) {
+            seenBuckets.add(bucket);
+            templateCols.push({ col: c, bucket, label: `Date of Month_${day}` });
+          }
+          continue;
+        }
+      }
+    }
+
+    let label = main || sub;
+    // Prefer parent label when sub is From/To under Working hours / Interval
+    if (/^(from|to)$/i.test(sub) && /working\s+hours|interval\s+for\s+rest/i.test(main)) {
+      label = `${main}_${sub}`;
+    } else if (!main && sub) {
+      label = sub;
+    }
+
+    const bucket = formPGJTemplateBucket(label);
+    if (!bucket || bucket === 'skip' || bucket === 'dateBand') continue;
+    if (seenBuckets.has(bucket) && !String(bucket).startsWith('day:')) continue;
+    seenBuckets.add(bucket);
+    templateCols.push({ col: c, bucket, label: label || bucket });
+  }
+
+  // Fill missing day columns from day1Col if only some were found
+  if (day1Col > 0) {
+    for (let d = 1; d <= 31; d += 1) {
+      const bucket = `day:${d}`;
+      if (seenBuckets.has(bucket)) continue;
+      seenBuckets.add(bucket);
+      templateCols.push({ col: day1Col + (d - 1), bucket, label: `Date of Month_${d}` });
+    }
+  }
+
+  templateCols.sort((a, b) => a.col - b.col);
+
+  let dataStartRow = headerRow + 2;
+  for (let r = headerRow + 1; r <= headerRow + 4; r += 1) {
+    let seqHits = 0;
+    for (let hi = 0; hi < 9; hi += 1) {
+      const t = String(getText(r, startCol + hi) || '').replace(/\s+/g, '').trim();
+      if (t === String(hi + 1)) seqHits += 1;
+    }
+    if (seqHits >= 4) {
+      dataStartRow = r + 1;
+      break;
+    }
+    if (/^(from|to|\d{1,2})$/i.test(getText(r, startCol + 6)) || /^(from|to)$/i.test(getText(r, startCol + 7))) {
+      dataStartRow = Math.max(dataStartRow, r + 1);
+    }
+  }
+
+  if (templateCols.length < 6) return null;
+  return { headerRow, dataStartRow, templateCols, startCol, day1Col };
+}
+
+function getFormPGJExportValueForBucket(row, bucket, idx = 0) {
+  if (!row || typeof row !== 'object') return '';
+  if (bucket === 'sno') {
+    const direct =
+      row['Sr. No.'] ?? row['Sr. No'] ?? row['Sr No'] ?? row.sno ?? '';
+    if (direct != null && String(direct).trim() !== '') return String(direct).trim();
+    return String(idx + 1);
+  }
+  if (bucket === 'workerName') {
+    return (
+      row['Name of the Worker'] ||
+      row['Full Name of the Worker'] ||
+      row['Full Name of the worker'] ||
+      row['Name of Workers'] ||
+      row.__employeeLookupName ||
+      ''
+    );
+  }
+  if (bucket === 'designation') {
+    return row.Designation || row['Designation'] || '';
+  }
+  if (bucket === 'fatherName') {
+    return row["Father's / Husband's Name"] || row['Father Name'] || '';
+  }
+  if (bucket === 'dateOfEntry') {
+    return (
+      row['Date of entry into service'] ||
+      row['Date of Entry into service'] ||
+      row['Date of Entry into Service'] ||
+      ''
+    );
+  }
+  if (bucket === 'workingHoursFrom') {
+    return row['Working hours_From'] || row['Working Hours_From'] || '';
+  }
+  if (bucket === 'workingHoursTo') {
+    return row['Working hours_To'] || row['Working Hours_To'] || '';
+  }
+  if (bucket === 'workingHours') {
+    const from = String(row['Working hours_From'] || row['Working Hours_From'] || '').trim();
+    const to = String(row['Working hours_To'] || row['Working Hours_To'] || '').trim();
+    if (from && to) return `${from} - ${to}`;
+    return from || to || row['Working Hours'] || row['Working hours'] || '';
+  }
+  if (bucket === 'intervalRest' || bucket === 'intervalFrom' || bucket === 'intervalTo') {
+    return (
+      row['Interval for Rest'] ||
+      row['Interval for Rest_From'] ||
+      row['Interval for Rest_To'] ||
+      ''
+    );
+  }
+  if (bucket === 'age' || bucket === 'sex' || bucket === 'wageRate') return '';
+  if (String(bucket).startsWith('day:')) {
+    const d = bucket.split(':')[1];
+    return (
+      row[`Date of Month_${d}`] ||
+      row[`Date of the Month_${d}`] ||
+      row[`Date of Month_${Number(d)}`] ||
+      ''
+    );
+  }
+  if (bucket === 'basic') {
+    return (
+      row['Actual Wages Paid Rs.'] ||
+      row['Actual Wages Paid Rs'] ||
+      row.basic ||
+      ''
+    );
+  }
+  if (bucket === 'overtimeHours') {
+    return (
+      row['Total hours of Overtime during the month'] ||
+      row['Total hours of overtime worked during the month'] ||
+      FORM_PGJ_OVERTIME_DEFAULT
+    );
+  }
+  if (bucket === 'overtimeEarnings') {
+    return row['Overtime Earnings Rs.'] || row['Overtime earnings Rs.'] || FORM_PGJ_OVERTIME_DEFAULT;
+  }
+  if (bucket === 'hra') {
+    return row['House Rent Allowance Rs.'] || row['House Rent Allowance Paid Rs.'] || '';
+  }
+  if (bucket === 'grossPay') {
+    return row['Gross Amount Payable Rs.'] || '';
+  }
+  if (bucket === 'paidDays') {
+    return row['Total Days Worked'] || row['Total Days worked'] || '';
+  }
+  if (bucket === 'netPay') return row['Net Payable Rs.'] || '';
+  if (bucket === 'paymentDate') return row['Date of Payment'] || '';
+  if (bucket === 'esi') return row['ESI Contribution Rs.'] || '';
+  if (bucket === 'professionalTax') return row['Professional Tax Rs.'] || '';
+  if (bucket === 'incomeTax') return row['Income Tax Rs.'] || '';
+  if (bucket === 'totalDeduction') return row['Total Deduction Rs.'] || '';
+
+  // Generic: find row key whose template bucket matches
+  for (const [k, v] of Object.entries(row)) {
+    if (String(k).startsWith('__')) continue;
+    if (formPGJTemplateBucket(k) === bucket && v != null && String(v).trim() !== '') {
+      return v;
+    }
+  }
+  return '';
+}
+
+/**
+ * Write Form P rows into the original Gujarat muster-roll template
+ * (Sr / Full Name / Designation / Age / Sex / Date of Entry / Working Hours /
+ *  Interval for Rest / days 1–31 / wage summary) by detecting columns from headers.
+ */
+export async function buildFormPGJGujaratWorkbookWithTemplateStyles({
+  templateArrayBuffer,
+  mappedData,
+  headersToUse,
+  parsedFormHeader,
+  formFileName,
+  headerFormData,
+  formatStatutoryDateDisplay = null,
+}) {
+  const ExcelJS = (await import('exceljs')).default;
+  const { ensureExcelJSDataRowsWithBorders } = await import('../../utils/excelTableBorders');
+  const { writeStatutoryHeaderFieldsToExcelJsWorksheet } = await import(
+    '../../utils/statutorySiteCompanyHeaders'
+  );
+
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateArrayBuffer);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) throw new Error('Form P template worksheet not found.');
+
+  const layout = detectFormPGJGujaratTableLayout(worksheet);
+  if (!layout) throw new Error('Could not locate Gujarat Form P table header row.');
+
+  const { dataStartRow, templateCols, startCol } = layout;
+  const formatDate =
+    typeof formatStatutoryDateDisplay === 'function'
+      ? formatStatutoryDateDisplay
+      : (v) => String(v || '').trim();
+
+  if (headerFormData && typeof headerFormData === 'object') {
+    writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
+      headerFormData,
+      parsedFormHeader,
+      headerRowEnd: Math.max(1, layout.headerRow - 1),
+      maxScanCols: 80,
+    });
+  }
+
+  const rows = (Array.isArray(mappedData) ? mappedData : []).filter(
+    (row) =>
+      row &&
+      typeof row === 'object' &&
+      Object.entries(row).some(
+        ([k, v]) => !String(k).startsWith('__') && v != null && String(v).trim() !== ''
+      )
+  );
+
+  const tableColMin = Math.min(...templateCols.map(({ col }) => col), startCol);
+  const tableColMax = Math.max(...templateCols.map(({ col }) => col));
+
+  // Unmerge vertical body merges so each employee keeps its own row.
+  const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
+  merges.forEach((label) => {
+    const parts = String(label || '').split(':');
+    if (parts.length !== 2 || typeof worksheet.unMergeCells !== 'function') return;
+    try {
+      const tl = worksheet.getCell(parts[0]);
+      const br = worksheet.getCell(parts[1]);
+      const r1 = tl.fullAddress?.row ?? tl.row;
+      const c1 = tl.fullAddress?.col ?? tl.col;
+      const r2 = br.fullAddress?.row ?? br.row;
+      const c2 = br.fullAddress?.col ?? br.col;
+      if (r2 > r1 && r1 <= dataStartRow + rows.length + 5 && r2 >= dataStartRow && c2 >= tableColMin && c1 <= tableColMax) {
+        worksheet.unMergeCells(label);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  });
+
+  const clearTo = Math.max(rows.length + 15, 20);
+  for (let i = 0; i < clearTo; i += 1) {
+    for (let col = tableColMin; col <= tableColMax; col += 1) {
+      worksheet.getCell(dataStartRow + i, col).value = '';
+    }
+  }
+
+  rows.forEach((row, idx) => {
+    const excelRow = dataStartRow + idx;
+    worksheet.getRow(excelRow).height = 18;
+    templateCols.forEach(({ col, bucket }) => {
+      let val = getFormPGJExportValueForBucket(row, bucket, idx);
+      if (bucket === 'sno') val = String(idx + 1);
+      if (bucket === 'dateOfEntry' && val) val = formatDate(val);
+      if (bucket === 'paymentDate' && val) val = formatDate(val);
+      if (bucket === 'overtimeHours' || bucket === 'overtimeEarnings') {
+        if (!val || String(val).trim() === '') val = FORM_PGJ_OVERTIME_DEFAULT;
+      }
+      if (bucket === 'wageRate' || bucket === 'age' || bucket === 'sex') val = '';
+      if (val == null || val === '' || /^enter\s+/i.test(String(val).trim())) {
+        worksheet.getCell(excelRow, col).value = '';
+        return;
+      }
+      const cell = worksheet.getCell(excelRow, col);
+      if (
+        typeof val === 'number' ||
+        (typeof val === 'string' && /^-?\d+(\.\d+)?$/.test(String(val).trim()))
+      ) {
+        cell.value = Number(val);
+      } else {
+        cell.value = String(val);
+      }
+      cell.alignment = { ...(cell.alignment || {}), vertical: 'middle', wrapText: true };
+    });
+  });
+
+  if (rows.length > 0) {
+    ensureExcelJSDataRowsWithBorders(worksheet, {
+      dataStartRow,
+      dataRowCount: rows.length,
+      colFrom: tableColMin,
+      colTo: tableColMax,
+      templateRow: dataStartRow,
+      templateBodyRows: 1,
+    });
+  }
+
+  const out = await workbook.xlsx.writeBuffer();
+  return {
+    blob: new Blob([out], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }),
+    fileName:
+      formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      'Form_P_GJ_Gujarat.xlsx',
   };
 }

@@ -444,6 +444,7 @@ function pickBasicAmount(earnings) {
       name === 'basic' ||
       name === 'basic earnings' ||
       name === 'basic pay' ||
+      name === 'basic salary' ||
       name === 'earned basic' ||
       type === 'basic' ||
       type === 'earned_basic'
@@ -459,10 +460,10 @@ function pickBasicAmount(earnings) {
       type === 'basic' ||
       type === 'earned_basic' ||
       name === 'basic' ||
-      name.includes('basic earnings') ||
-      name.includes('basic pay') ||
-      name.includes('earned basic') ||
-      name.includes('basic wage')
+      (name.includes('basic') &&
+        !name.includes('arrear') &&
+        !name.includes('overtime') &&
+        !name.includes('special'))
   );
 }
 

@@ -245,7 +245,7 @@ async function fetchAllAttendanceRecords({ accessToken, sdate, edate }) {
   let startIndex = 0;
   let pages = 0;
   let firstPageKey = '';
-  const delayMs = Math.max(0, parseInt(process.env.ZOHO_ATTENDANCE_PAGE_DELAY_MS || '300', 10) || 300);
+  const delayMs = Math.max(0, parseInt(process.env.ZOHO_ATTENDANCE_PAGE_DELAY_MS || '80', 10) || 80);
 
   for (let guard = 0; guard < 500; guard++) {
     const page = await fetchAttendancePage({ accessToken, sdate, edate, startIndex });

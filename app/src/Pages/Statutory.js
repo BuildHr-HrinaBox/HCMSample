@@ -18,7 +18,12 @@ import {
 import { resolveLoginEmailString } from '../utils/resolveLoginEmail';
 import { fetchPayrollTableRowsForMonths, loadPayrollTableRowsForStatutoryAutofill, getPayrollTableRowsForStatutoryAutofillSync, prefetchPayrollTableRowsForMonths } from '../utils/payrollTable';
 import { fetchSamplePayrollEmployeeRow, fetchSamplePayrollRowsForMonth } from '../utils/samplePayrollApi';
-import { ensureExcelJSDataRowsWithBorders, clearExcelJSTrailingTableCells, countExcelJSTemplateBodyRows } from '../utils/excelTableBorders';
+import {
+  ensureExcelJSDataRowsWithBorders,
+  clearExcelJSTrailingTableCells,
+  countExcelJSTemplateBodyRows,
+  applyExcelJSFullBoxBordersToRange,
+} from '../utils/excelTableBorders';
 import {
   fetchAttendanceData,
   fetchFormTemplateArrayBuffer,
@@ -30,6 +35,7 @@ import {
   flattenZohoPeopleEmployees,
   getCachedAttendanceData,
   getCachedLeaveData,
+  getCachedStoredLeaveData,
   getCachedPeopleData,
   getCachedPayrollBulkRows,
   getCachedForm15PayrollTableRows,
@@ -46,6 +52,8 @@ import {
   prefetchPeopleData,
   prefetchPeopleDataFast,
   prefetchLeaveData,
+  prefetchStoredLeaveData,
+  fetchStoredLeaveDataForAutofill,
   prefetchApprovedLeaveData,
   fetchApprovedLeaveData,
   getCachedApprovedLeaveData,
@@ -485,10 +493,15 @@ import {
   isFormXIXRJDesignationDepartmentHeader,
   isFormXIXRJNormalEarningsHeader,
   isFormXIXRJNormalHoursHeader,
+  isFormXIXRJNormalRateHeader,
   isFormXIXRJOvertimeAutofillContext,
+  isFormXIXRJOvertimeEarningsHeader,
+  isFormXIXRJOvertimePaymentDateHeader,
+  isFormXIXRJOvertimeRateHeader,
   isFormXIXRJOvertimeWorkedDateHeader,
   isFormXIXRJTotalEarningsHeader,
   isFormXIXRJWagesOfOvertimeOccasionHeader,
+  prepareFormXIXRJOvertimeExportRows,
   readFormXIXRJRowCell,
   remapFormXIXRJRowsToHeaders,
   resolveFormXIXRJDesignationAndDepartment,
@@ -6259,9 +6272,11 @@ const formTablePageHasEmployeeAutofillData = (row, headers = []) => {
     const header = headers[i];
     const k = String(header || '').toLowerCase().replace(/\s+/g, ' ').trim();
     if (!k) continue;
-    const isWorkerName = k.includes('worker') && k.includes('name');
+    const isWorkerName =
+      (k.includes('worker') || k.includes('workman') || k.includes('workmen')) && k.includes('name');
     const isWorkerId =
-      k.includes('worker') && (k.includes('identity') || k.includes('identify') || k.includes('id'));
+      (k.includes('worker') || k.includes('workman')) &&
+      (k.includes('identity') || k.includes('identify') || k.includes('id'));
     const isEmpId = /^emp\s*id$/.test(k) || (k.includes('emp') && k.includes('id'));
     const isEmployeeName = k.includes('employee') && k.includes('name');
     const cellVal = String(row[header] || '').trim();
@@ -7325,6 +7340,145 @@ const formatFormQDayAttendanceCode = (rec, dayDate) => {
   return formatForm25DayAttendanceCode(rec, dayDate);
 };
 
+/**
+ * Fast Form Q day-grid paint from cached/prefetched attendance (before full merge finishes).
+ * Returns number of cells written.
+ */
+const applyFormQMaharashtraAttendanceFromCache = (
+  mappedData,
+  employees,
+  headers,
+  attendanceRawOrRecords,
+  options = {}
+) => {
+  const rows = Array.isArray(mappedData) ? mappedData : [];
+  const emps = Array.isArray(employees) ? employees : [];
+  const hdrs = Array.isArray(headers) ? headers : [];
+  if (rows.length === 0 || hdrs.length === 0 || !attendanceRawOrRecords) return 0;
+
+  const {
+    targetYear,
+    targetMonthIndex,
+    getNameCandidates = null,
+    sdate = '',
+    edate = '',
+  } = options;
+  if (!Number.isFinite(targetYear) || !Number.isFinite(targetMonthIndex)) return 0;
+
+  const dateDayHeaders = hdrs
+    .map((header) => {
+      const t = String(header || '').trim();
+      const direct = t.match(/^(\d{1,2})$/);
+      if (direct) {
+        const day = Number(direct[1]);
+        if (day >= 1 && day <= 31) return { header, day };
+      }
+      const suffixed = t.match(/(?:^|_)(\d{1,2})$/);
+      if (suffixed) {
+        const day = Number(suffixed[1]);
+        if (day >= 1 && day <= 31) return { header, day };
+      }
+      return null;
+    })
+    .filter(Boolean);
+  if (dateDayHeaders.length === 0) return 0;
+
+  const records = (
+    Array.isArray(attendanceRawOrRecords)
+      ? attendanceRawOrRecords
+      : expandAttendanceToDailyRows(attendanceRawOrRecords)
+  ).filter((rec) => {
+    const k = normalizeAttendanceDateKey(rec?.date ?? rec?.Date ?? '');
+    if (!k) return false;
+    if (sdate && k < sdate) return false;
+    if (edate && k > edate) return false;
+    return true;
+  });
+  if (records.length === 0) return 0;
+
+  const byIdDate = new Map();
+  const byNameDate = new Map();
+  const byEmailDate = new Map();
+  records.forEach((rec) => {
+    const iso = normalizeAttendanceDateKey(rec?.date ?? rec?.Date ?? '');
+    if (!iso) return;
+    getAttendanceEmployeeIdCandidates(rec)
+      .flatMap(expandAttendanceLookupIdVariants)
+      .forEach((id) => {
+        const key = `${id}::${iso}`;
+        if (!byIdDate.has(key)) byIdDate.set(key, rec);
+      });
+    getAttendanceNameLookupKeys(rec).forEach((nameKey) => {
+      const key = `${nameKey}::${iso}`;
+      if (!byNameDate.has(key)) byNameDate.set(key, rec);
+    });
+    const email = getAttendanceEmployeeEmail(rec);
+    if (email) {
+      const key = `${email}::${iso}`;
+      if (!byEmailDate.has(key)) byEmailDate.set(key, rec);
+    }
+  });
+
+  const today = new Date();
+  const isCurrentSelectedMonth =
+    targetYear === today.getFullYear() && targetMonthIndex === today.getMonth();
+  let wrote = 0;
+
+  rows.forEach((row, rowIndex) => {
+    if (!row || typeof row !== 'object') return;
+    const empItem = emps[rowIndex];
+    const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+    const idCandidates = Array.from(
+      new Set(
+        getAttendanceEmployeeIdCandidates(emp || {})
+          .map((v) => String(v || '').trim())
+          .filter(Boolean)
+          .flatMap(expandAttendanceLookupIdVariants)
+      )
+    );
+    const nameCandidates = Array.from(
+      new Set(
+        [
+          ...(typeof getNameCandidates === 'function' ? getNameCandidates(emp || {}) : []),
+          ...getAttendanceNameLookupKeys(emp || {}),
+        ]
+          .map((v) => String(v || '').trim().toLowerCase())
+          .filter(Boolean)
+      )
+    );
+    const emailCandidate = getAttendanceEmployeeEmail(emp || {});
+
+    dateDayHeaders.forEach(({ header, day }) => {
+      const dayDate = new Date(targetYear, targetMonthIndex, day);
+      if (dayDate.getMonth() !== targetMonthIndex) return;
+      if (shouldSkipStatutoryDayAttendanceForEmployee(emp, dayDate, row, hdrs)) {
+        row[header] = '';
+        return;
+      }
+      if (isCurrentSelectedMonth && day > today.getDate()) {
+        row[header] = '';
+        return;
+      }
+      const iso = formatStatutoryPrefetchYmd(dayDate);
+      const byId = idCandidates.map((id) => byIdDate.get(`${id}::${iso}`)).find(Boolean);
+      const byName =
+        !byId &&
+        nameCandidates.map((name) => byNameDate.get(`${name}::${iso}`)).find(Boolean);
+      const byEmail =
+        !byId && !byName && emailCandidate
+          ? byEmailDate.get(`${emailCandidate}::${iso}`)
+          : null;
+      const rec = byId || byName || byEmail || null;
+      const code = formatFormQDayAttendanceCode(rec, dayDate);
+      if (!code) return;
+      row[header] = code;
+      wrote += 1;
+    });
+  });
+
+  return wrote;
+};
+
 const form25StatusIsHalfDay = (statusRaw) => {
   const s = normalizeForm25StatusToken(statusRaw);
   return /half\s*day|halfday|\bhd\b|\b0\.5\b/.test(s);
@@ -7674,7 +7828,7 @@ function isLeaveRegisterMetricHeader(header) {
   );
 }
 
-/** Form 15 Part 1 leave-register sub-columns are filled from Zoho booked/balance leave API, not People. */
+/** Form 15 Part 1 leave-register sub-columns are filled from LeaveData table, not People. */
 function isForm15Part1LeaveRegisterHeader(header) {
   return isLeaveRegisterMetricHeader(header);
 }
@@ -11955,6 +12109,713 @@ const remapFormQRowsToHeaders = (rows, oldHeaders, newHeaders) => {
     });
     return next;
   });
+};
+
+/**
+ * Map Form Q Maharashtra modal headers → live Excel columns.
+ * Handles templates where Working hours / Interval for Rest parents sit on the row
+ * above Sr. No., while From/To and day numbers (1–31) sit on the Sr. No. row.
+ * Returns { headerToCol, startCol, headerRowIndex, dataStartIndex } or null.
+ */
+const buildFormQMaharashtraExportColMap = (ws, preferredHeaders = []) => {
+  if (!ws) return null;
+  const merges = ws['!merges'] || [];
+  const sheetArr = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const getRaw = (r, c) => {
+    if (r < 0 || c < 0) return '';
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const cell = ws[ref];
+    if (!cell || cell.v == null) return '';
+    return String(cell.v).trim();
+  };
+  const getText = (r, c) => {
+    const direct = getRaw(r, c);
+    if (direct) return direct;
+    for (let i = 0; i < merges.length; i += 1) {
+      const m = merges[i];
+      if (!m?.s || !m?.e) continue;
+      if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) {
+        const topLeft = getRaw(m.s.r, m.s.c);
+        if (topLeft) return topLeft;
+      }
+    }
+    return '';
+  };
+  const norm = (txt) =>
+    String(txt || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const normLower = (txt) => norm(txt).toLowerCase();
+  const getMergeEnd = (r, c) => {
+    for (let i = 0; i < merges.length; i += 1) {
+      const m = merges[i];
+      if (!m?.s || !m?.e) continue;
+      if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) return m.e.c + 1;
+    }
+    return c + 1;
+  };
+  const parentLabelAt = (r, c) => {
+    for (const rr of [r - 1, r - 2, r]) {
+      if (rr < 0) continue;
+      const t = normLower(getText(rr, c));
+      if (/working\s+hours/.test(t)) return 'Working hours';
+      if (/interval\s+for\s+rest/.test(t)) return 'Interval for Rest';
+      if (/date\s+of\s+the\s+month/.test(t)) return 'Date of the Month';
+    }
+    return '';
+  };
+
+  let headerRowIndex = -1;
+  const maxScanCols = 120;
+  for (let r = 0; r < Math.min(35, sheetArr.length); r += 1) {
+    const parts = [];
+    for (let c = 0; c < maxScanCols; c += 1) {
+      const t = normLower(getText(r, c));
+      if (t) parts.push(t);
+    }
+    const joined = parts.join(' ');
+    if (/sr\.?\s*no/.test(joined) && /full\s+name\s+of\s+the\s+worker/.test(joined)) {
+      headerRowIndex = r;
+      break;
+    }
+  }
+  if (headerRowIndex < 0) return null;
+
+  let startCol = -1;
+  for (let c = 0; c < maxScanCols; c += 1) {
+    const t = normLower(getText(headerRowIndex, c));
+    if (/^sr\.?\s*no\.?$/.test(t) || t === 'sr no' || t.startsWith('sr. no')) {
+      startCol = c;
+      break;
+    }
+  }
+  if (startCol < 0) startCol = 2;
+
+  const headerToCol = new Map();
+  const setIfEmpty = (header, col) => {
+    const h = String(header || '').trim();
+    if (!h || col == null || !Number.isFinite(col)) return;
+    if (!headerToCol.has(h)) headerToCol.set(h, col);
+  };
+  const matchWorkerHeader = (mainL) => {
+    if (/^sr\.?\s*no\.?$/.test(mainL) || mainL === 'sr no') return 'Sr. No.';
+    if (/full\s+name\s+of\s+the\s+worker/.test(mainL)) return 'Full Name of the worker';
+    if (/designation/.test(mainL) && /nature\s+of\s+work/.test(mainL)) {
+      return 'Designation of the worker and nature of work';
+    }
+    if (/^age$/.test(mainL)) return 'Age';
+    if (/^sex$/.test(mainL)) return 'Sex';
+    if (/entry\s+into\s+service/.test(mainL)) return 'Date of entry into service';
+    return '';
+  };
+
+  let c = startCol;
+  let dayBandStart = -1;
+  let hoursFromAssigned = false;
+  let restFromAssigned = false;
+  let workerFieldsSeen = 0;
+  const maxCols = Math.max(maxScanCols, (sheetArr[headerRowIndex] || []).length, 80);
+  while (c < maxCols) {
+    const mergeEnd = getMergeEnd(headerRowIndex, c);
+    let endC = mergeEnd;
+    const main = norm(getText(headerRowIndex, c));
+    const mainL = normLower(main);
+    const parent = parentLabelAt(headerRowIndex, c);
+
+    if (!main) {
+      c += 1;
+      continue;
+    }
+    if (/name\s+of\s+the\s+employer|^month\s*:?$|name\s+of\s+the\s+establishment/.test(mainL)) {
+      c = Math.max(c + 1, endC);
+      continue;
+    }
+
+    while (endC < maxCols) {
+      const nextMain = norm(getText(headerRowIndex, endC));
+      if (!nextMain) break;
+      if (normLower(nextMain) !== mainL) break;
+      endC = Math.max(endC, getMergeEnd(headerRowIndex, endC));
+    }
+    const span = Math.max(1, endC - c);
+
+    if (/working\s+hours/.test(mainL) || parent === 'Working hours') {
+      if (/^(from|to)$/i.test(main) || /working\s+hours/.test(mainL)) {
+        if (!hoursFromAssigned) {
+          setIfEmpty('Working hours_From', c);
+          setIfEmpty('Working hours_To', c + 1);
+          hoursFromAssigned = true;
+          c = span >= 2 ? endC : c + 2;
+          continue;
+        }
+      }
+    }
+    if (/interval\s+for\s+rest/.test(mainL) || parent === 'Interval for Rest') {
+      if (/^(from|to)$/i.test(main) || /interval\s+for\s+rest/.test(mainL)) {
+        if (!restFromAssigned) {
+          setIfEmpty('Interval for Rest_From', c);
+          setIfEmpty('Interval for Rest_To', c + 1);
+          restFromAssigned = true;
+          c = span >= 2 ? endC : c + 2;
+          continue;
+        }
+      }
+    }
+
+    if (/^(from)$/i.test(main) && !hoursFromAssigned) {
+      setIfEmpty('Working hours_From', c);
+      const toCol = normLower(getText(headerRowIndex, c + 1)) === 'to' ? c + 1 : c + 1;
+      setIfEmpty('Working hours_To', toCol);
+      hoursFromAssigned = true;
+      c = toCol + 1;
+      continue;
+    }
+    if (/^(from)$/i.test(main) && hoursFromAssigned && !restFromAssigned) {
+      setIfEmpty('Interval for Rest_From', c);
+      const toCol = normLower(getText(headerRowIndex, c + 1)) === 'to' ? c + 1 : c + 1;
+      setIfEmpty('Interval for Rest_To', toCol);
+      restFromAssigned = true;
+      c = toCol + 1;
+      continue;
+    }
+    if (/^(to)$/i.test(main)) {
+      c = Math.max(c + 1, endC);
+      continue;
+    }
+
+    const workerHeader = matchWorkerHeader(mainL);
+    if (workerHeader) {
+      setIfEmpty(workerHeader, c);
+      workerFieldsSeen += 1;
+      c = endC;
+      continue;
+    }
+
+    if (/date\s+of\s+the\s+month/.test(mainL) || parent === 'Date of the Month') {
+      if (dayBandStart < 0) dayBandStart = c;
+      c = endC;
+      continue;
+    }
+
+    if (/^\d{1,2}$/.test(main)) {
+      const day = parseInt(main, 10);
+      const pastWorkerBand =
+        workerFieldsSeen >= 4 || hoursFromAssigned || restFromAssigned || dayBandStart >= 0;
+      if (day >= 1 && day <= 31 && pastWorkerBand) {
+        if (dayBandStart < 0) dayBandStart = c;
+        setIfEmpty(`Date of the Month_${day}`, c);
+        c = endC;
+        continue;
+      }
+      // Section-index digits under worker cols — skip.
+      c = endC;
+      continue;
+    }
+
+    if (isFormQWageTailHeader(main)) {
+      setIfEmpty(main, c);
+      c = endC;
+      continue;
+    }
+
+    setIfEmpty(main, c);
+    c = endC;
+  }
+
+  // Also read From/To / day numbers from the sub-row when parents are vertically merged.
+  const subRowIndex = headerRowIndex + 1;
+  if (subRowIndex < sheetArr.length) {
+    for (let sc = startCol; sc < startCol + 60; sc += 1) {
+      const sub = norm(getText(subRowIndex, sc));
+      const parent = parentLabelAt(headerRowIndex, sc);
+      if (/^(from)$/i.test(sub) && parent === 'Working hours' && !headerToCol.has('Working hours_From')) {
+        setIfEmpty('Working hours_From', sc);
+      } else if (/^(to)$/i.test(sub) && parent === 'Working hours' && !headerToCol.has('Working hours_To')) {
+        setIfEmpty('Working hours_To', sc);
+      } else if (/^(from)$/i.test(sub) && parent === 'Interval for Rest' && !headerToCol.has('Interval for Rest_From')) {
+        setIfEmpty('Interval for Rest_From', sc);
+      } else if (/^(to)$/i.test(sub) && parent === 'Interval for Rest' && !headerToCol.has('Interval for Rest_To')) {
+        setIfEmpty('Interval for Rest_To', sc);
+      } else if (/^\d{1,2}$/.test(sub)) {
+        const day = parseInt(sub, 10);
+        if (day >= 1 && day <= 31 && (parent === 'Date of the Month' || sc >= (headerToCol.get('Interval for Rest_To') ?? startCol + 8))) {
+          if (dayBandStart < 0) dayBandStart = sc;
+          setIfEmpty(`Date of the Month_${day}`, sc);
+        }
+      }
+    }
+  }
+
+  if (dayBandStart < 0) {
+    const afterRest = headerToCol.get('Interval for Rest_To');
+    const afterHours = headerToCol.get('Working hours_To');
+    const probeFrom = (afterRest ?? afterHours ?? startCol + 8) + 1;
+    for (let sc = probeFrom; sc < probeFrom + 40; sc += 1) {
+      const t = norm(getText(headerRowIndex, sc)) || norm(getText(subRowIndex, sc));
+      if (t === '1') {
+        dayBandStart = sc;
+        break;
+      }
+    }
+  }
+  if (dayBandStart >= 0) {
+    for (let d = 1; d <= 31; d += 1) {
+      setIfEmpty(`Date of the Month_${d}`, dayBandStart + (d - 1));
+    }
+  }
+
+  const preferred = Array.isArray(preferredHeaders) ? preferredHeaders : [];
+  preferred.forEach((h) => {
+    if (headerToCol.has(h)) return;
+    const n = normLower(h);
+    for (const [k, col] of headerToCol.entries()) {
+      if (normLower(k) === n) {
+        headerToCol.set(h, col);
+        return;
+      }
+    }
+  });
+
+  // Fill any still-missing preferred leaf headers sequentially from Sr. No.
+  if (preferred.length > 0) {
+    let seqCol = startCol;
+    preferred.forEach((h) => {
+      if (headerToCol.has(h)) {
+        seqCol = Math.max(seqCol, headerToCol.get(h) + 1);
+        return;
+      }
+      // Do not invent day/wage cols before the mapped day band.
+      if (/^date\s+of\s+the\s+month_\d+/i.test(h) || isFormQWageTailHeader(h)) return;
+      setIfEmpty(h, seqCol);
+      seqCol += 1;
+    });
+  }
+
+  let dataStartIndex = headerRowIndex + 2;
+  for (let r = headerRowIndex + 1; r <= headerRowIndex + 4 && r < sheetArr.length; r += 1) {
+    let seqHits = 0;
+    for (let hi = 0; hi < 9; hi += 1) {
+      const t = norm(getText(r, startCol + hi)).replace(/\s+/g, '');
+      if (t === String(hi + 1)) seqHits += 1;
+    }
+    if (seqHits >= 4) {
+      dataStartIndex = r + 1;
+      break;
+    }
+    let fromToHits = 0;
+    for (let hi = 0; hi < 12; hi += 1) {
+      if (/^(from|to)$/i.test(norm(getText(r, startCol + hi)))) fromToHits += 1;
+    }
+    if (fromToHits >= 2) dataStartIndex = Math.max(dataStartIndex, r + 1);
+  }
+
+  if (headerToCol.size < 4) return null;
+  return { headerToCol, startCol, headerRowIndex, dataStartIndex };
+};
+
+/**
+ * If Form Q MH worker fields landed under the day band (col M+), shift them left
+ * so Sr. No. / Name / … sit under the worker headers (usually col C+).
+ * Uses a fixed 10-column worker leaf band (Sr→Rest To) when day headers are unclear.
+ * Does NOT touch merges/widths unless a real shift is detected — keeps original template layout.
+ */
+const repairFormQMaharashtraSheetColumnAlignment = (ws) => {
+  if (!ws) return false;
+  const merges = ws['!merges'] || [];
+  const getRaw = (r, c) => {
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const cell = ws[ref];
+    if (!cell || cell.v == null) return '';
+    return String(cell.v).trim();
+  };
+  const getVal = (r, c) => {
+    const direct = getRaw(r, c);
+    if (direct) return direct;
+    for (let i = 0; i < merges.length; i += 1) {
+      const m = merges[i];
+      if (!m?.s || !m?.e) continue;
+      if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) {
+        const top = getRaw(m.s.r, m.s.c);
+        if (top) return top;
+      }
+    }
+    return '';
+  };
+  const setVal = (r, c, value) => {
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const prev = ws[ref] || {};
+    if (value == null || value === '') {
+      ws[ref] = { ...prev, t: 's', v: '' };
+      return;
+    }
+    const isNum =
+      typeof value === 'number' ||
+      (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim()));
+    ws[ref] = isNum
+      ? { ...prev, t: 'n', v: Number(value) }
+      : { ...prev, t: 's', v: String(value) };
+  };
+  const normLower = (txt) =>
+    String(txt || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+  let snoCol = -1;
+  let headerRow = -1;
+  for (let r = 0; r < 40; r += 1) {
+    let nameCol = -1;
+    for (let c = 0; c < 80; c += 1) {
+      const t = normLower(getVal(r, c));
+      if (/full\s+name\s+of\s+the\s+worker/.test(t)) {
+        nameCol = c;
+        break;
+      }
+    }
+    if (nameCol < 0) continue;
+    for (let c = Math.max(0, nameCol - 6); c <= nameCol; c += 1) {
+      const t = normLower(getVal(r, c));
+      if (/^sr\.?\s*no/.test(t) || /^s\.?\s*no/.test(t) || /^sl\.?\s*no/.test(t)) {
+        snoCol = c;
+        headerRow = r;
+        break;
+      }
+    }
+    if (snoCol < 0) {
+      snoCol = Math.max(0, nameCol - 1);
+      headerRow = r;
+    }
+    break;
+  }
+  if (snoCol < 0) snoCol = 2;
+  if (snoCol > 6) snoCol = 2;
+  if (headerRow < 0) headerRow = 8;
+
+  // Standard Form Q leaf band before days: 10 cols (Sr…Rest To). Day 1 is usually col M when Sr is C.
+  // Do NOT scan the section-index row (typically headerRow+2 with 1..8 under worker cols) —
+  // that falsely sets day1Col === snoCol and disables the left-shift repair.
+  let day1Col = -1;
+  const tryDayBandAt = (r) => {
+    for (let c = snoCol + 8; c <= snoCol + 20; c += 1) {
+      if (getRaw(r, c) !== '1') continue;
+      const next = getRaw(r, c + 1);
+      const next2 = getRaw(r, c + 2);
+      if (next === '2' && next2 === '3') {
+        // Reject worker-band section markers: same row also has 1 at snoCol.
+        if (getRaw(r, snoCol) === '1' && getRaw(r, snoCol + 1) === '2') continue;
+        return c;
+      }
+    }
+    return -1;
+  };
+  day1Col = tryDayBandAt(headerRow + 1);
+  if (day1Col < 0) day1Col = tryDayBandAt(headerRow);
+  if (day1Col < 0) {
+    // Fallback: first From/To pair ends, then look for 1,2,3 to the right.
+    let afterRest = snoCol + 9;
+    for (let c = snoCol + 5; c <= snoCol + 12; c += 1) {
+      if (/^to$/i.test(getRaw(headerRow + 1, c)) || /^to$/i.test(getRaw(headerRow, c))) {
+        afterRest = c;
+      }
+    }
+    for (let c = afterRest + 1; c <= afterRest + 8; c += 1) {
+      if (
+        getRaw(headerRow + 1, c) === '1' &&
+        getRaw(headerRow + 1, c + 1) === '2' &&
+        getRaw(headerRow + 1, c + 2) === '3'
+      ) {
+        day1Col = c;
+        break;
+      }
+      if (
+        getRaw(headerRow, c) === '1' &&
+        getRaw(headerRow, c + 1) === '2' &&
+        getRaw(headerRow, c + 2) === '3'
+      ) {
+        day1Col = c;
+        break;
+      }
+    }
+  }
+  if (day1Col < 0) day1Col = snoCol + 10;
+
+  const shift = day1Col - snoCol;
+  if (shift < 6 || shift > 16) return false;
+
+  let dataStart = headerRow + 2;
+  for (let r = headerRow + 1; r <= headerRow + 4; r += 1) {
+    let seqHits = 0;
+    for (let hi = 0; hi < 9; hi += 1) {
+      if (String(getRaw(r, snoCol + hi) || '').replace(/\s+/g, '') === String(hi + 1)) seqHits += 1;
+    }
+    if (seqHits >= 4) {
+      dataStart = r + 1;
+      break;
+    }
+    let fromToHits = 0;
+    for (let hi = 0; hi < 12; hi += 1) {
+      if (/^(from|to)$/i.test(getRaw(r, snoCol + hi))) fromToHits += 1;
+    }
+    if (fromToHits >= 2) dataStart = Math.max(dataStart, r + 1);
+  }
+
+  // Probe first: only mutate the template when rows are actually shifted into the day band.
+  const shiftedRows = [];
+  for (let r = dataStart; r < dataStart + 120; r += 1) {
+    const atSno = getRaw(r, snoCol);
+    const atName = getRaw(r, snoCol + 1);
+    const atDay1 = getRaw(r, day1Col);
+    const atDay2 = getRaw(r, day1Col + 1);
+    const atDay3 = getRaw(r, day1Col + 2);
+    if (atSno || atName) continue;
+    if (!atDay1 && !atDay2) continue;
+
+    const day1LooksSerial = /^\d{1,3}$/.test(atDay1);
+    const day2LooksName =
+      /[a-zA-Z]{2,}/.test(atDay2) && !/^(P|A|WO|PH|L|H|HD|OD)$/i.test(atDay2);
+    const day1LooksName =
+      /[a-zA-Z]{2,}/.test(atDay1) &&
+      !/^(P|A|WO|PH|L|H|HD|OD)$/i.test(atDay1) &&
+      (/engi|male|female|jun|sen|\d{2}/i.test(atDay2) || /engi|male|female|\d{2}/i.test(atDay3));
+    if (!(day1LooksSerial && day2LooksName) && !day1LooksName) continue;
+    shiftedRows.push(r);
+  }
+  if (shiftedRows.length === 0) return false;
+
+  // Only now unmerge the affected data rows (never the header band).
+  const unmergeFrom = Math.min(...shiftedRows);
+  const unmergeTo = Math.max(...shiftedRows);
+  unmergeSheetJsVerticalMergesInRange(ws, unmergeFrom, unmergeTo, snoCol, day1Col + 40);
+
+  shiftedRows.forEach((r) => {
+    const width = Math.max(shift + 45, 70);
+    const moved = [];
+    for (let i = 0; i < width; i += 1) moved.push(getRaw(r, day1Col + i));
+    for (let i = 0; i < width; i += 1) setVal(r, snoCol + i, moved[i] || '');
+    for (let c = snoCol + width; c < day1Col + width; c += 1) setVal(r, c, '');
+  });
+  return true;
+};
+
+/** SheetJS read → repair Form Q MH column shift → write back (runs after ExcelJS note append too). */
+const repairFormQMaharashtraDownloadBlob = async (blob) => {
+  if (!blob || /zip/i.test(String(blob.type || ''))) return blob;
+  try {
+    const arrayBuffer = await blob.arrayBuffer();
+    if (!arrayBuffer || arrayBuffer.byteLength < 32) return blob;
+    const wb = XLSX.read(arrayBuffer, { type: 'array', cellStyles: true });
+    let any = false;
+    (wb.SheetNames || []).forEach((name) => {
+      const sheet = wb.Sheets?.[name];
+      if (!sheet) return;
+      // Only touch Form Q muster sheets.
+      let looksFormQ = /form[\s_-]*q/i.test(String(name || ''));
+      if (!looksFormQ) {
+        for (let r = 0; r < 30 && !looksFormQ; r += 1) {
+          for (let c = 0; c < 40; c += 1) {
+            const ref = XLSX.utils.encode_cell({ r, c });
+            const cell = sheet[ref];
+            if (cell?.v != null && /full\s+name\s+of\s+the\s+worker/i.test(String(cell.v))) {
+              looksFormQ = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!looksFormQ) return;
+      if (repairFormQMaharashtraSheetColumnAlignment(sheet)) any = true;
+    });
+    if (!any) return blob;
+    const out = XLSX.write(wb, { type: 'array', bookType: 'xlsx', cellStyles: true });
+    return new Blob([out], {
+      type: blob.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+  } catch (err) {
+    console.warn('Form Q Maharashtra download blob repair failed:', err);
+    return blob;
+  }
+};
+
+/**
+ * Final ExcelJS pass: put a full thin box border on every Form Q header + data cell
+ * (Sr. No. → day band → wage/deduction/signature), matching the official template grid.
+ * Runs after SheetJS repair which otherwise strips ExcelJS borders.
+ */
+const applyFormQMaharashtraFullBordersToBlob = async (blob) => {
+  if (!blob || /zip/i.test(String(blob.type || ''))) return blob;
+  try {
+    const arrayBuffer = await blob.arrayBuffer();
+    if (!arrayBuffer || arrayBuffer.byteLength < 32) return blob;
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(arrayBuffer);
+    const cellText = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+    const norm = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+    let touched = false;
+    (workbook.worksheets || []).forEach((worksheet) => {
+      if (!worksheet) return;
+      const sheetLooksFormQ = /form\s*q/i.test(String(worksheet.name || ''));
+      const maxR = Math.min(Math.max(worksheet.rowCount || 40, 40), 250);
+      const maxC = Math.max(worksheet.columnCount || 0, worksheet.actualColumnCount || 0, 120);
+      let headerRow = -1;
+      let startCol = 3;
+      for (let r = 1; r <= Math.min(45, maxR); r += 1) {
+        let nameCol = -1;
+        for (let c = 1; c <= maxC; c += 1) {
+          const t = norm(cellText(worksheet.getCell(r, c)?.value));
+          if (/full\s+name\s+of\s+the\s+worker/.test(t)) {
+            nameCol = c;
+            break;
+          }
+        }
+        if (nameCol < 0) continue;
+        let snoCol = -1;
+        for (let c = Math.max(1, nameCol - 6); c <= nameCol; c += 1) {
+          const t = norm(cellText(worksheet.getCell(r, c)?.value));
+          if (/^sr\.?\s*no/.test(t) || /^s\.?\s*no/.test(t) || /^sl\.?\s*no/.test(t)) {
+            snoCol = c;
+            break;
+          }
+        }
+        headerRow = r;
+        startCol = snoCol > 0 ? snoCol : Math.max(1, nameCol - 1);
+        break;
+      }
+      if (headerRow < 1) {
+        // Fallback: Total Days worked / Minimum rate wage headers.
+        for (let r = 1; r <= Math.min(45, maxR) && headerRow < 1; r += 1) {
+          for (let c = 1; c <= maxC; c += 1) {
+            const t = norm(cellText(worksheet.getCell(r, c)?.value));
+            if (/total\s+days?\s+worked/.test(t) || /minimum\s+rate\s+of\s+wages/.test(t)) {
+              headerRow = r;
+              startCol = 3;
+              break;
+            }
+          }
+        }
+      }
+      if (headerRow < 1) {
+        if (!sheetLooksFormQ) return;
+        headerRow = 9;
+        startCol = 3;
+      }
+      if (startCol > 7) startCol = 3;
+
+      // Include parent header row above Sr. No. (Working hours / Date of the Month).
+      let bandTop = headerRow;
+      for (let r = Math.max(1, headerRow - 2); r < headerRow; r += 1) {
+        let hit = false;
+        for (let c = startCol; c <= Math.min(startCol + 20, maxC); c += 1) {
+          const t = norm(cellText(worksheet.getCell(r, c)?.value));
+          if (/working\s+hours|interval\s+for\s+rest|date\s+of\s+the\s+month|deductions?/.test(t)) {
+            hit = true;
+            break;
+          }
+        }
+        if (hit) {
+          bandTop = r;
+          break;
+        }
+      }
+
+      let dataStartRow = headerRow + 2;
+      for (let r = headerRow + 1; r <= headerRow + 4; r += 1) {
+        let seqHits = 0;
+        for (let hi = 0; hi < 9; hi += 1) {
+          const t = String(cellText(worksheet.getCell(r, startCol + hi)?.value) || '')
+            .replace(/\s+/g, '')
+            .trim();
+          if (t === String(hi + 1)) seqHits += 1;
+        }
+        if (seqHits >= 4) {
+          dataStartRow = r + 1;
+          break;
+        }
+        let fromToHits = 0;
+        for (let hi = 0; hi < 12; hi += 1) {
+          if (/^(from|to)$/i.test(cellText(worksheet.getCell(r, startCol + hi)?.value))) {
+            fromToHits += 1;
+          }
+        }
+        if (fromToHits >= 2) dataStartRow = Math.max(dataStartRow, r + 1);
+      }
+
+      // Right edge: Signature / last wage header / highest used col.
+      let endCol = startCol + 10;
+      const scanRowTo = Math.min(maxR, dataStartRow + 100);
+      for (let r = bandTop; r <= scanRowTo; r += 1) {
+        for (let c = startCol; c <= maxC; c += 1) {
+          const cell = worksheet.getCell(r, c);
+          const txt = String(cellText(cell?.value) || '').trim();
+          const tNorm = norm(txt);
+          const hasVal = txt !== '';
+          const hasBorder = !!(
+            cell?.border?.top?.style ||
+            cell?.border?.bottom?.style ||
+            cell?.border?.left?.style ||
+            cell?.border?.right?.style
+          );
+          if (hasVal || hasBorder) endCol = Math.max(endCol, c);
+          if (/signature|thumb\s+impression|net\s+payable|date\s+of\s+payment/.test(tNorm)) {
+            endCol = Math.max(endCol, c);
+          }
+        }
+      }
+      // Sr…Rest(10) + days(31) + wage tail(~21) ≈ 62 cols from Sr. No.
+      endCol = Math.max(endCol, startCol + 64, startCol + FORM_Q_WAGE_TAIL_HEADERS.length + 41);
+
+      let lastDataRow = dataStartRow - 1;
+      for (let r = dataStartRow; r <= Math.min(maxR, dataStartRow + 220); r += 1) {
+        let any = false;
+        for (let c = startCol; c <= endCol; c += 1) {
+          if (String(cellText(worksheet.getCell(r, c)?.value) || '').trim() !== '') {
+            any = true;
+            break;
+          }
+        }
+        if (any) lastDataRow = r;
+        else if (lastDataRow >= dataStartRow && r > lastDataRow + 3) break;
+      }
+      if (lastDataRow < dataStartRow) {
+        // Still paint at least a few body rows so empty template boxes match the model.
+        lastDataRow = dataStartRow + Math.max(4, 0);
+      }
+
+      applyExcelJSFullBoxBordersToRange(worksheet, {
+        rowFrom: bandTop,
+        rowTo: lastDataRow,
+        colFrom: startCol,
+        colTo: endCol
+      });
+      touched = true;
+    });
+
+    if (!touched) return blob;
+    const out = await workbook.xlsx.writeBuffer();
+    return new Blob([out], {
+      type: blob.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+  } catch (err) {
+    console.warn('Form Q Maharashtra full borders apply failed:', err);
+    return blob;
+  }
 };
 
 /**
@@ -19290,6 +20151,120 @@ const autofitExcelJSColumns = (worksheet, colFrom, colTo, rowFrom, rowTo, minWid
   }
 };
 
+/** Form XIX RJ / OT templates often ship with hidden title rows — force visible on download. */
+const unhideExcelJSWorksheetRows = (worksheet, rowTo = null) => {
+  if (!worksheet) return;
+  const last = Math.max(
+    1,
+    Number(rowTo) || 0,
+    Number(worksheet.actualRowCount) || 0,
+    Number(worksheet.rowCount) || 0,
+    40
+  );
+  for (let r = 1; r <= last; r += 1) {
+    const row = worksheet.getRow(r);
+    if (row.hidden) row.hidden = false;
+    if (row.height != null && Number(row.height) > 0 && Number(row.height) < 12) {
+      row.height = 18;
+    }
+  }
+};
+
+/** SheetJS path — clear hidden flags preserved from formmaster templates. */
+const unhideSheetJsWorksheetRows = (ws, rowTo = null) => {
+  if (!ws) return;
+  const rowsMeta = ws['!rows'];
+  if (!Array.isArray(rowsMeta) || rowsMeta.length === 0) return;
+  let maxR = Number(rowTo);
+  if (!Number.isFinite(maxR) || maxR < 0) {
+    try {
+      maxR = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']).e.r : rowsMeta.length - 1;
+    } catch (_) {
+      maxR = rowsMeta.length - 1;
+    }
+  }
+  maxR = Math.max(maxR, rowsMeta.length - 1);
+  for (let r = 0; r <= maxR; r += 1) {
+    if (!rowsMeta[r]) continue;
+    if (rowsMeta[r].hidden) rowsMeta[r].hidden = false;
+    if (rowsMeta[r].h != null && Number(rowsMeta[r].h) > 0 && Number(rowsMeta[r].h) < 12) {
+      rowsMeta[r].h = 18;
+    }
+    if (rowsMeta[r].hpt != null && Number(rowsMeta[r].hpt) > 0 && Number(rowsMeta[r].hpt) < 12) {
+      rowsMeta[r].hpt = 18;
+    }
+  }
+};
+
+/**
+ * Form XIX RJ sample body uses tall vertical merges (often 3–4 rows per sample employee).
+ * Writing one employee per Excel row into those merges collapses emp 1–3 into one cell —
+ * only the last write (serial 4+) remains visible. Unmerge before filling the body.
+ */
+const unmergeExcelJSVerticalMergesInRange = (worksheet, rowFrom, rowTo, colFrom, colTo) => {
+  if (!worksheet) return;
+  const merges = worksheet?.model?.merges;
+  if (!Array.isArray(merges) || merges.length === 0) return;
+  const r0 = Math.max(1, rowFrom);
+  const r1 = Math.max(r0, rowTo);
+  const c0 = Math.max(1, colFrom);
+  const c1 = Math.max(c0, colTo);
+  const toRemove = [];
+  for (const range of merges) {
+    const parts = String(range || '').split(':');
+    if (parts.length !== 2) continue;
+    const start = parts[0].match(/^([A-Z]+)(\d+)$/i);
+    const end = parts[1].match(/^([A-Z]+)(\d+)$/i);
+    if (!start || !end) continue;
+    const mr1 = parseInt(start[2], 10);
+    const mr2 = parseInt(end[2], 10);
+    const mc1 = XLSX.utils.decode_col(start[1].toUpperCase()) + 1;
+    const mc2 = XLSX.utils.decode_col(end[1].toUpperCase()) + 1;
+    if (mr2 <= mr1) continue; // horizontal-only merge — keep
+    if (mr2 < r0 || mr1 > r1) continue;
+    if (mc2 < c0 || mc1 > c1) continue;
+    toRemove.push(range);
+  }
+  toRemove.forEach((range) => {
+    try {
+      worksheet.unMergeCells(range);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+};
+
+/** SheetJS: drop vertical body merges so each employee occupies its own row. */
+const unmergeSheetJsVerticalMergesInRange = (ws, rowFrom0, rowTo0, colFrom0, colTo0) => {
+  if (!ws || !Array.isArray(ws['!merges']) || ws['!merges'].length === 0) return;
+  const r0 = Math.max(0, rowFrom0);
+  const r1 = Math.max(r0, rowTo0);
+  const c0 = Math.max(0, colFrom0);
+  const c1 = Math.max(c0, colTo0);
+  ws['!merges'] = ws['!merges'].filter((m) => {
+    if (!m?.s || !m?.e) return true;
+    if (m.e.r <= m.s.r) return true; // keep horizontal merges
+    if (m.e.r < r0 || m.s.r > r1) return true;
+    if (m.e.c < c0 || m.s.c > c1) return true;
+    return false; // remove vertical merge intersecting data body
+  });
+};
+
+/** Remove only merges that straddle header → data (keeps pure header merges and template layout). */
+const unmergeSheetJsHeaderIntoDataVerticalMerges = (ws, dataStartRow0, colFrom0, colTo0) => {
+  if (!ws || !Array.isArray(ws['!merges']) || ws['!merges'].length === 0) return;
+  const ds = Math.max(0, dataStartRow0);
+  const c0 = Math.max(0, colFrom0);
+  const c1 = Math.max(c0, colTo0);
+  ws['!merges'] = ws['!merges'].filter((m) => {
+    if (!m?.s || !m?.e) return true;
+    if (m.e.r <= m.s.r) return true; // horizontal
+    if (m.e.r < ds || m.s.r >= ds) return true; // entirely above or entirely in/below data
+    if (m.e.c < c0 || m.s.c > c1) return true;
+    return false; // straddles header into data
+  });
+};
+
 const STATUTORY_MANAGER_INCHARGE_HEADER_KEYS = ['form_header_manager_incharge'];
 
 const normalizeHeaderLabelForMatch = (label) =>
@@ -22368,6 +23343,17 @@ const isRegisterOfWagesFormContext = (formHeader, rowItem, fileName, tableHeader
       rowItem,
       fileName,
       Array.isArray(tableHeaders) ? tableHeaders.join(' ') : ''
+    )
+  ) {
+    return false;
+  }
+  // Maharashtra Form Q (muster-roll cum wage register attendance grid) — dedicated column map.
+  if (
+    isFormQContext(
+      formHeader,
+      rowItem,
+      fileName,
+      tableHeaders
     )
   ) {
     return false;
@@ -26692,6 +27678,38 @@ const Statutory = ({ userEmail, userRole }) => {
           `${effectiveFormHeader?.title || ''} ${effectiveFormHeader?.subtitle || ''}`
         );
       const isFormTSEDraft = isFormTSEContext(effectiveFormHeader, currentItem, formFileName, '');
+      const isFormQMaharashtraDraft =
+        !isFormQKarnatakaContext(
+          effectiveFormHeader,
+          currentItem,
+          formFileName,
+          ''
+        ) &&
+        (/form[\s_-]*q/i.test(String(formFileName || '')) ||
+          /form[\s_-]*q/i.test(String(effectiveFormHeader?.title || '')) ||
+          /form[\s_-]*q/i.test(String(targetSheetName || '')) ||
+          /form[\s_-]*q/i.test(
+            String(currentItem?.formName || currentItem?.FormName || currentItem?.formFileName || '')
+          ) ||
+          isFormQContext(effectiveFormHeader, currentItem, formFileName, headersToUse) ||
+          (Array.isArray(headersToUse) &&
+            headersToUse.some((h) => /full\s+name\s+of\s+the\s+worker/i.test(String(h || ''))) &&
+            headersToUse.some((h) => /working\s+hours/i.test(String(h || '')))));
+      // Always trust the live sheet: if it has Form Q worker headers, use Form Q write path.
+      let formQSheetHasWorkerGrid = false;
+      if (!isFormQKarnatakaContext(effectiveFormHeader, currentItem, formFileName, '')) {
+        for (let r = 0; r < 35 && !formQSheetHasWorkerGrid; r += 1) {
+          for (let c = 0; c < 50; c += 1) {
+            const ref = XLSX.utils.encode_cell({ r, c });
+            const cell = ws[ref];
+            if (cell?.v != null && /full\s+name\s+of\s+the\s+worker/i.test(String(cell.v))) {
+              formQSheetHasWorkerGrid = true;
+              break;
+            }
+          }
+        }
+      }
+      const useSequentialFormQColsEarly = isFormQMaharashtraDraft || formQSheetHasWorkerGrid;
       const isApFormXXIIIOvertimeRegister = isFormXXIIIOvertimeRegisterContext(
         effectiveFormHeader,
         currentItem,
@@ -26779,13 +27797,19 @@ const Statutory = ({ userEmail, userRole }) => {
             )));
       // Form W / Form XVIII TN have multi-tier merged headers — never write header[i] → col start+i
       // (that shifts Name into "SL.No.in register of workmen" when a leaf column is omitted).
+      // Form Q MH uses its own Sr. No. anchor — must not share Form W band logic.
       const useSequentialRegisterWagesCols =
         (isRegisterWagesDraft || isFormTSEDraft) &&
         !isApFormXXIIIWageRegister &&
         !isFormWDraftExport &&
-        !isFormXVIIIWagesCumMusterDraft;
+        !isFormXVIIIWagesCumMusterDraft &&
+        !isFormQMaharashtraDraft &&
+        !formQSheetHasWorkerGrid;
       const useMappedFormWRegisterCols = isFormWDraftExport || isFormXVIIIWagesCumMusterDraft;
       const useSequentialClraRegisterCols = isFormClraRegisterDraft;
+      // Form Q MH: flat leaf headers align 1:1 from Sr. No. — fuzzy headerRow+1 matching
+      // hits section-index / day-number cells and shifts Name/Age into day columns.
+      const useSequentialFormQCols = useSequentialFormQColsEarly;
       if (effectiveFormHeader?.fields && effectiveFormHeader.fields.length > 0) {
         for (let r = 0; r < headerRowIndex; r++) {
           for (let c = 0; c < 20; c++) {
@@ -27005,6 +28029,8 @@ const Statutory = ({ userEmail, userRole }) => {
       const sheetArr = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
       const headerToCol = new Map();
       let registerWagesWriteStartCol = 0;
+      let formQPriorExportHeaders = null;
+      let useMappedFormQCols = false;
       const normalizeHeader = (txt) =>
         String(txt || '')
           .replace(/\r?\n/g, ' ')
@@ -27064,12 +28090,27 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       // Form A / TN register: sequential cols; AP Form XXIII uses exact template column map.
-      if (isFormA || useSequentialRegisterWagesCols || useSequentialClraRegisterCols) {
+      if (isFormA || useSequentialRegisterWagesCols || useSequentialClraRegisterCols || useSequentialFormQCols) {
         let snoAnchor = null;
         for (let r = 0; r < Math.min(60, sheetArr.length); r++) {
           for (let c = 0; c < 120; c++) {
             const raw = getMergedAwareCellText(r, c);
             if (excelCellLooksLikeSerialHeader(raw)) {
+              // Form Q: prefer "Sr. No." over bare day/section digits farther right.
+              if (useSequentialFormQCols) {
+                const t = String(raw || '')
+                  .replace(/\r?\n/g, ' ')
+                  .replace(/\s+/g, ' ')
+                  .trim()
+                  .toLowerCase();
+                if (
+                  !/^sr\.?\s*no\.?/.test(t) &&
+                  !/^s\.?\s*no\.?/.test(t) &&
+                  !/^sl\.?\s*no\.?/.test(t)
+                ) {
+                  continue;
+                }
+              }
               snoAnchor = { r, c };
               break;
             }
@@ -27077,7 +28118,7 @@ const Statutory = ({ userEmail, userRole }) => {
           if (snoAnchor) break;
         }
         // Prefer S.No column from the sheet. A bad modal tableStartCol can shift writes off-screen.
-        const startCol =
+        let startCol =
           snoAnchor?.c != null
             ? snoAnchor.c
             : tableStartColOpt != null && Number(tableStartColOpt) >= 0
@@ -27086,6 +28127,118 @@ const Statutory = ({ userEmail, userRole }) => {
         if (isFormA) {
           const forcedDataStart = snoAnchor?.r != null ? (snoAnchor.r + 1) : effectiveDataStartIndex;
           effectiveDataStartIndex = forcedDataStart;
+        }
+        if (useSequentialFormQCols) {
+          const formQPriorHdrs = Array.isArray(headersToUse) ? [...headersToUse] : [];
+          const formQDays =
+            formQPriorHdrs.filter((h) => /^date\s+of\s+the\s+month_\d{1,2}$/i.test(String(h || '').trim()))
+              .length || 31;
+          const formQHdrs = resolveFormQDisplayHeaders(
+            stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDays)),
+            formQDays
+          );
+          if (Array.isArray(headersToUse) && formQHdrs.length > 0) {
+            headersToUse.splice(0, headersToUse.length, ...formQHdrs);
+          }
+          formQPriorExportHeaders = formQPriorHdrs;
+
+          // Prefer live template column map (handles From/To / day subs on the row below Sr. No.).
+          const formQColMap = buildFormQMaharashtraExportColMap(ws, headersToUse);
+          let formQAnchorCol =
+            formQColMap?.startCol != null && Number.isFinite(formQColMap.startCol)
+              ? formQColMap.startCol
+              : -1;
+          let formQAnchorRow =
+            formQColMap?.headerRowIndex != null && Number.isFinite(formQColMap.headerRowIndex)
+              ? formQColMap.headerRowIndex
+              : -1;
+
+          // Fallback: Sr. No. on the same row as "Full Name of the worker".
+          if (formQAnchorCol < 0 || formQAnchorCol > 6) {
+            formQAnchorCol = -1;
+            formQAnchorRow = -1;
+            for (let r = 0; r < Math.min(40, sheetArr.length); r += 1) {
+              let nameCol = -1;
+              for (let c = 0; c < 80; c += 1) {
+                const t = String(getMergedAwareCellText(r, c) || '')
+                  .replace(/\r?\n/g, ' ')
+                  .replace(/\s+/g, ' ')
+                  .trim()
+                  .toLowerCase();
+                if (/full\s+name\s+of\s+the\s+worker/.test(t)) {
+                  nameCol = c;
+                  break;
+                }
+              }
+              if (nameCol < 0) continue;
+              for (let c = Math.max(0, nameCol - 6); c <= nameCol; c += 1) {
+                const t = String(getMergedAwareCellText(r, c) || '')
+                  .replace(/\r?\n/g, ' ')
+                  .replace(/\s+/g, ' ')
+                  .trim()
+                  .toLowerCase();
+                if (/^sr\.?\s*no/.test(t) || /^s\.?\s*no/.test(t) || /^sl\.?\s*no/.test(t)) {
+                  formQAnchorCol = c;
+                  formQAnchorRow = r;
+                  break;
+                }
+              }
+              if (formQAnchorCol < 0) {
+                formQAnchorCol = Math.max(0, nameCol - 1);
+                formQAnchorRow = r;
+              }
+              break;
+            }
+          }
+          if (formQAnchorCol < 0) {
+            formQAnchorCol = snoAnchor?.c != null && snoAnchor.c <= 6 ? snoAnchor.c : 2;
+            formQAnchorRow = snoAnchor?.r != null ? snoAnchor.r : headerRowIndex;
+          }
+          // Day band starts ~10 cols after Sr. No. — never begin writes there.
+          if (formQAnchorCol > 6) formQAnchorCol = 2;
+
+          startCol = formQAnchorCol;
+          registerWagesWriteStartCol = formQAnchorCol;
+
+          let dataStart =
+            formQColMap?.dataStartIndex != null && Number.isFinite(formQColMap.dataStartIndex)
+              ? formQColMap.dataStartIndex
+              : formQAnchorRow >= 0
+                ? formQAnchorRow + 2
+                : effectiveDataStartIndex;
+          if (formQAnchorRow >= 0) {
+            for (let r = formQAnchorRow + 1; r <= formQAnchorRow + 4; r += 1) {
+              let seqHits = 0;
+              for (let hi = 0; hi < 9; hi += 1) {
+                const t = String(getMergedAwareCellText(r, formQAnchorCol + hi) || '')
+                  .replace(/\s+/g, '')
+                  .trim();
+                if (t === String(hi + 1)) seqHits += 1;
+              }
+              if (seqHits >= 4) {
+                dataStart = r + 1;
+                break;
+              }
+              let fromToHits = 0;
+              for (let hi = 0; hi < 12; hi += 1) {
+                if (/^(from|to)$/i.test(String(getMergedAwareCellText(r, formQAnchorCol + hi) || '').trim())) {
+                  fromToHits += 1;
+                }
+              }
+              if (fromToHits >= 2) dataStart = Math.max(dataStart, r + 1);
+            }
+          }
+          if (Number.isFinite(dataStartIndex) && dataStartIndex >= 0) {
+            dataStart = Math.max(dataStart, dataStartIndex);
+          }
+          effectiveDataStartIndex = Math.max(effectiveDataStartIndex, dataStart);
+
+          useMappedFormQCols = true;
+          // ALWAYS 1:1 from Sr. No. — never trust fuzzy/template maps (they park Name under day 1).
+          headerToCol.clear();
+          headersToUse.forEach((header, j) => {
+            headerToCol.set(header, formQAnchorCol + j);
+          });
         }
         // Form W / wage registers: write BELOW the full merged header band (not into merge slave cells).
         if (useSequentialRegisterWagesCols && !isFormA) {
@@ -27140,8 +28293,10 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
         registerWagesWriteStartCol = startCol;
-        for (let j = 0; j < headersToUse.length; j++) {
-          headerToCol.set(headersToUse[j], startCol + j);
+        if (!useMappedFormQCols) {
+          for (let j = 0; j < headersToUse.length; j++) {
+            headerToCol.set(headersToUse[j], startCol + j);
+          }
         }
       }
       // Form W Tamil Nadu: map each modal header to the matching Excel leaf column (merged bands).
@@ -27346,11 +28501,34 @@ const Statutory = ({ userEmail, userRole }) => {
 
       let tableRowsForWrite = Array.isArray(formTableData) ? formTableData : [];
       const isFormFinesRegisterDraft = isFormClraRegisterDraft;
+      if (useSequentialFormQCols && Array.isArray(tableRowsForWrite) && tableRowsForWrite.length > 0) {
+        tableRowsForWrite = remapFormQRowsToHeaders(
+          tableRowsForWrite,
+          formQPriorExportHeaders || headersToUse,
+          headersToUse
+        );
+      }
       if (isApFormXXIIIWageRegister) {
         tableRowsForWrite = filterWageRegisterNilPlaceholderRows(
           filterWageRegisterSubstantiveExportRows(tableRowsForWrite, headersToUse),
           headersToUse
         );
+      }
+      if (
+        isApFormXXIIIOvertimeRegister &&
+        isFormXIXRJOvertimeAutofillContext(
+          effectiveFormHeader,
+          currentItem,
+          formFileName,
+          '',
+          headersToUse
+        )
+      ) {
+        tableRowsForWrite = prepareFormXIXRJOvertimeExportRows(tableRowsForWrite, headersToUse);
+        const canonRj = resolveFormXIXRJTableHeaders(headersToUse);
+        if (Array.isArray(headersToUse)) {
+          headersToUse.splice(0, headersToUse.length, ...canonRj);
+        }
       }
 
       const maxCols = Math.max(
@@ -27359,7 +28537,7 @@ const Statutory = ({ userEmail, userRole }) => {
         headersToUse.length,
         20
       );
-      if (!isFormA && !useSequentialRegisterWagesCols && !useMappedFormWRegisterCols && !useSequentialClraRegisterCols && !isApFormXXIIIWageRegister && !isApFormXXIIIOvertimeRegister) {
+      if (!isFormA && !useSequentialRegisterWagesCols && !useMappedFormWRegisterCols && !useSequentialClraRegisterCols && !useSequentialFormQCols && !useMappedFormQCols && !isApFormXXIIIWageRegister && !isApFormXXIIIOvertimeRegister) {
         // Prefer exact mapping from (main header + sub header) so grouped headers (Form X) keep the original column alignment.
         for (let c = 0; c < maxCols; c++) {
           const mainHeader = normalizeHeader(getMergedAwareCellText(headerRowIndex, c));
@@ -27397,6 +28575,13 @@ const Statutory = ({ userEmail, userRole }) => {
         const clearToRow = effectiveDataStartIndex + Math.max(tableRowsForWrite.length, 12) + 4;
         const clearFromCol = registerWagesWriteStartCol;
         const clearToCol = registerWagesWriteStartCol + headersToUse.length;
+        unmergeSheetJsVerticalMergesInRange(
+          ws,
+          effectiveDataStartIndex,
+          clearToRow,
+          clearFromCol,
+          clearToCol - 1
+        );
         for (let r = effectiveDataStartIndex; r < clearToRow; r += 1) {
           for (let c = clearFromCol; c < clearToCol; c += 1) {
             writeCellPreserveStyle(XLSX.utils.encode_cell({ r, c }), '');
@@ -27424,15 +28609,20 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
       }
-      // Form W / sequential wage registers: clear target body rows before write so prior blanks/merges don't hide values.
-      if ((useSequentialRegisterWagesCols || useMappedFormWRegisterCols) && !isFormA && tableRowsForWrite.length > 0) {
-        const clearCols = useMappedFormWRegisterCols
-          ? Array.from(headerToCol.values()).filter((n) => Number.isFinite(n))
-          : null;
+      // Form W / sequential wage registers / Form Q: clear target body rows before write so prior blanks/merges don't hide values.
+      if ((useSequentialRegisterWagesCols || useMappedFormWRegisterCols || useSequentialFormQCols || useMappedFormQCols) && !isFormA && tableRowsForWrite.length > 0) {
+        const clearCols =
+          useMappedFormWRegisterCols || useMappedFormQCols
+            ? Array.from(headerToCol.values()).filter((n) => Number.isFinite(n))
+            : null;
         const clearToRow = effectiveDataStartIndex + Math.max(tableRowsForWrite.length, 8) + 4;
         if (clearCols && clearCols.length > 0) {
           const minC = Math.min(...clearCols);
           const maxC = Math.max(...clearCols);
+          // Form Q: only break merges that straddle header→data (preserve original template merges/widths).
+          if (useSequentialFormQCols || useMappedFormQCols) {
+            unmergeSheetJsHeaderIntoDataVerticalMerges(ws, effectiveDataStartIndex, minC, maxC);
+          }
           for (let r = effectiveDataStartIndex; r < clearToRow; r += 1) {
             for (let c = minC; c <= maxC; c += 1) {
               writeCellPreserveStyle(XLSX.utils.encode_cell({ r, c }), '');
@@ -27440,6 +28630,14 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         } else {
           const clearToCol = registerWagesWriteStartCol + Math.max(headersToUse.length, 8);
+          if (useSequentialFormQCols || useMappedFormQCols) {
+            unmergeSheetJsHeaderIntoDataVerticalMerges(
+              ws,
+              effectiveDataStartIndex,
+              registerWagesWriteStartCol,
+              clearToCol - 1
+            );
+          }
           for (let r = effectiveDataStartIndex; r < clearToRow; r += 1) {
             for (let c = registerWagesWriteStartCol; c < clearToCol; c += 1) {
               writeCellPreserveStyle(XLSX.utils.encode_cell({ r, c }), '');
@@ -27481,7 +28679,7 @@ const Statutory = ({ userEmail, userRole }) => {
           if (/^enter\s+/i.test(String(value ?? '').trim())) value = '';
           // Ensure S.No is always populated for sequential wage registers.
           if (
-            (useSequentialRegisterWagesCols || useMappedFormWRegisterCols || isFormA) &&
+            (useSequentialRegisterWagesCols || useMappedFormWRegisterCols || useSequentialFormQCols || useMappedFormQCols || isFormA) &&
             j === 0 &&
             (value == null || String(value).trim() === '') &&
             excelCellLooksLikeSerialHeader(header)
@@ -27492,7 +28690,7 @@ const Statutory = ({ userEmail, userRole }) => {
             value = String(value).trim();
           }
           const colIdx =
-            useMappedFormWRegisterCols
+            useMappedFormWRegisterCols || useMappedFormQCols
               ? headerToCol.has(header)
                 ? headerToCol.get(header)
                 : null
@@ -27500,7 +28698,7 @@ const Statutory = ({ userEmail, userRole }) => {
               ? headerToCol.has(header)
                 ? headerToCol.get(header)
                 : registerWagesWriteStartCol + j
-              : useSequentialRegisterWagesCols || useSequentialClraRegisterCols || isFormA
+              : useSequentialRegisterWagesCols || useSequentialClraRegisterCols || useSequentialFormQCols || isFormA
                 ? registerWagesWriteStartCol + j
                 : headerToCol.has(header)
                   ? headerToCol.get(header)
@@ -27519,9 +28717,9 @@ const Statutory = ({ userEmail, userRole }) => {
       // expand !ref so the saved workbook actually includes those appended rows.
       if (Array.isArray(tableRowsForWrite) && tableRowsForWrite.length > 0) {
         const writtenCols =
-          useMappedFormWRegisterCols
+          useMappedFormWRegisterCols || useMappedFormQCols
             ? Array.from(headerToCol.values()).filter((n) => Number.isFinite(n))
-            : useSequentialRegisterWagesCols || useSequentialClraRegisterCols || isFormA
+            : useSequentialRegisterWagesCols || useSequentialClraRegisterCols || (useSequentialFormQCols && !useMappedFormQCols) || isFormA
             ? headersToUse.map((_, j) => registerWagesWriteStartCol + j)
             : Array.from(headerToCol.values()).filter((n) => Number.isFinite(n));
         const maxWrittenCol = writtenCols.length > 0
@@ -27545,11 +28743,32 @@ const Statutory = ({ userEmail, userRole }) => {
         }
         ws['!ref'] = XLSX.utils.encode_range(range);
       }
+      if (isApFormXXIIIOvertimeRegister) {
+        unhideSheetJsWorksheetRows(
+          ws,
+          Math.max(
+            effectiveDataStartIndex + Math.max(tableRowsForWrite.length, 0) + 10,
+            40
+          )
+        );
+      }
       // Do not overwrite the header row – keep the original formmaster template layout exactly. Only data rows are filled above.
       if (singleSheetExport || isApFormXXIIIWageRegister || isApFormXXIIIOvertimeRegister) {
         wb = cloneWorkbookSingleSheet(wb, targetSheetName);
       } else if (templateWb?.SheetNames?.length > 1 && sheetNameOpt && targetSheetName) {
         wb = cloneWorkbookSingleSheet(wb, targetSheetName);
+      }
+      // Form Q MH: repair on the FINAL sheet (after clone) so shifts are not discarded.
+      if (useSequentialFormQCols || useMappedFormQCols || formQSheetHasWorkerGrid) {
+        try {
+          const finalSheetName =
+            (targetSheetName && wb.Sheets?.[targetSheetName] && targetSheetName) ||
+            wb.SheetNames?.[0];
+          const finalWs = finalSheetName ? wb.Sheets[finalSheetName] : ws;
+          repairFormQMaharashtraSheetColumnAlignment(finalWs || ws);
+        } catch (formQRepairErr) {
+          console.warn('Form Q Maharashtra column repair skipped:', formQRepairErr);
+        }
       }
     } else {
       if (!allowTemplateFallback) {
@@ -33929,6 +35148,309 @@ const Statutory = ({ userEmail, userRole }) => {
     return { blob, fileName };
   };
 
+  /**
+   * Maharashtra Form Q — write into the original formmaster template via ExcelJS
+   * so merges, column widths, and header bands stay intact (not a new flat sheet).
+   */
+  const buildFormQMaharashtraWorkbookWithTemplateStyles = async ({
+    templateArrayBuffer,
+    mappedData,
+    mappedRowMatrix,
+    headersToUse,
+    parsedHeaderRowIndex,
+    parsedDataStartIndex,
+    parsedFormHeader,
+    headerFormData,
+    formFileName,
+    sheetNameHint = ''
+  }) => {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const hint = String(sheetNameHint || '').trim().toLowerCase();
+    let worksheet =
+      (hint &&
+        workbook.worksheets.find((ws) => String(ws.name || '').trim().toLowerCase() === hint)) ||
+      workbook.worksheets.find((ws) => /form\s*q/i.test(String(ws.name || ''))) ||
+      workbook.worksheets[0];
+    if (!worksheet) throw new Error('Form Q template worksheet not found.');
+
+    const excelCellValueToString = (val) => {
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+      if (val instanceof Date) return val.toISOString();
+      if (typeof val === 'object') {
+        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+        if (val.text != null) return String(val.text);
+        if (val.result != null) return String(val.result);
+      }
+      return '';
+    };
+    const norm = (txt) =>
+      String(txt || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+    const days =
+      (Array.isArray(headersToUse) ? headersToUse : []).filter((h) =>
+        /^date\s+of\s+the\s+month_\d{1,2}$/i.test(String(h || '').trim())
+      ).length || 31;
+    const dataHdrs = resolveFormQDisplayHeaders(
+      stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(days)),
+      days
+    );
+    const priorHdrs = Array.isArray(headersToUse) ? headersToUse : dataHdrs;
+    const sourcePrimary = Array.isArray(mappedData) && mappedData.length > 0
+      ? mappedData
+      : Array.isArray(mappedRowMatrix)
+        ? mappedRowMatrix
+        : [];
+    const sourceRows = remapFormQRowsToHeaders(sourcePrimary, priorHdrs, dataHdrs).filter((row) =>
+      row &&
+      typeof row === 'object' &&
+      Object.values(row).some((v) => String(v ?? '').trim() !== '')
+    );
+
+    // ExcelJS is 1-based. Find Sr. No. on the same row as "Full Name of the worker".
+    let headerRow = -1;
+    let startCol = 3; // column C
+    const maxR = Math.min(40, Math.max(worksheet.rowCount || 40, 40));
+    // Always scan enough columns — columnCount can be understated before dimensions settle.
+    const maxC = Math.max(80, worksheet.columnCount || 0, worksheet.actualColumnCount || 0);
+    for (let r = 1; r <= maxR; r += 1) {
+      let nameCol = -1;
+      for (let c = 1; c <= maxC; c += 1) {
+        const t = norm(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (/full\s+name\s+of\s+the\s+worker/.test(t)) {
+          nameCol = c;
+          break;
+        }
+      }
+      if (nameCol < 0) continue;
+      let snoCol = -1;
+      for (let c = Math.max(1, nameCol - 6); c <= nameCol; c += 1) {
+        const t = norm(excelCellValueToString(worksheet.getCell(r, c)?.value));
+        if (/^sr\.?\s*no/.test(t) || /^s\.?\s*no/.test(t) || /^sl\.?\s*no/.test(t)) {
+          snoCol = c;
+          break;
+        }
+      }
+      headerRow = r;
+      startCol = snoCol > 0 ? snoCol : Math.max(1, nameCol - 1);
+      break;
+    }
+    if (headerRow < 1) {
+      if (parsedHeaderRowIndex != null && parsedHeaderRowIndex >= 0) {
+        headerRow = parsedHeaderRowIndex + 1;
+      } else {
+        headerRow = 9;
+      }
+      startCol = 3;
+    }
+    if (startCol > 7) startCol = 3;
+
+    let dataStartRow =
+      parsedDataStartIndex != null && parsedDataStartIndex >= 0
+        ? parsedDataStartIndex + 1
+        : headerRow + 2;
+    for (let r = headerRow + 1; r <= headerRow + 4; r += 1) {
+      let seqHits = 0;
+      for (let hi = 0; hi < 9; hi += 1) {
+        const t = String(excelCellValueToString(worksheet.getCell(r, startCol + hi)?.value) || '')
+          .replace(/\s+/g, '')
+          .trim();
+        if (t === String(hi + 1)) seqHits += 1;
+      }
+      if (seqHits >= 4) {
+        dataStartRow = r + 1;
+        break;
+      }
+      let fromToHits = 0;
+      for (let hi = 0; hi < 12; hi += 1) {
+        if (/^(from|to)$/i.test(excelCellValueToString(worksheet.getCell(r, startCol + hi)?.value))) {
+          fromToHits += 1;
+        }
+      }
+      if (fromToHits >= 2) dataStartRow = Math.max(dataStartRow, r + 1);
+    }
+
+    // Header band: establishment / employer / month (write values only; keep labels).
+    const headerData = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+    for (let r = 1; r < headerRow; r += 1) {
+      for (let c = 1; c <= Math.min(20, maxC); c += 1) {
+        const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+        if (!raw) continue;
+        let key = null;
+        if (/^name\s+of\s+the\s+establishment\s*:?/i.test(raw)) key = 'form_q_establishment';
+        else if (/^name\s+of\s+the\s+employer\s*:?/i.test(raw)) key = 'form_q_employer';
+        else if (/^month\s*:?/i.test(raw)) key = 'form_q_month';
+        if (!key) continue;
+        const value = headerData[key];
+        if (value == null || String(value).trim() === '') continue;
+        const label = raw.includes(':') ? raw.replace(/\s*$/, '') : `${raw}:`;
+        // Prefer same-cell "Label: value" when template stores them together.
+        const cell = worksheet.getCell(r, c);
+        const next = worksheet.getCell(r, c + 1);
+        const nextEmpty = !String(excelCellValueToString(next?.value) || '').trim();
+        if (/:\s*$/.test(label) || /:\s*.+$/.test(raw)) {
+          cell.value = `${label.replace(/:\s*.*$/, ':')} ${String(value).trim()}`.replace(/:\s+/, ': ');
+        } else if (nextEmpty) {
+          next.value = String(value).trim();
+        } else {
+          cell.value = `${label} ${String(value).trim()}`;
+        }
+      }
+    }
+
+    const getValueForHeader = (row, header, dataIndex) => {
+      if (!row || typeof row !== 'object') return '';
+      if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
+      if (Array.isArray(row) && dataIndex >= 0) return row[dataIndex] ?? '';
+      const nk = norm(header).replace(/[^a-z0-9 ]/g, '');
+      for (const key of Object.keys(row)) {
+        if (norm(key).replace(/[^a-z0-9 ]/g, '') === nk) return row[key];
+      }
+      return '';
+    };
+
+    // Locate day-1 column (after Rest To / second To). Never use section-index row 1,2,3 under Sr. No.
+    let day1Col = -1;
+    const excelRawAt = (r, c) =>
+      String(excelCellValueToString(worksheet.getCell(r, c)?.value) || '')
+        .replace(/\s+/g, '')
+        .trim();
+    const tryExcelDayBandAt = (r) => {
+      for (let c = startCol + 8; c <= startCol + 20; c += 1) {
+        if (excelRawAt(r, c) !== '1') continue;
+        if (excelRawAt(r, c + 1) !== '2' || excelRawAt(r, c + 2) !== '3') continue;
+        if (excelRawAt(r, startCol) === '1' && excelRawAt(r, startCol + 1) === '2') continue;
+        return c;
+      }
+      return -1;
+    };
+    day1Col = tryExcelDayBandAt(headerRow + 1);
+    if (day1Col < 0) day1Col = tryExcelDayBandAt(headerRow);
+    if (day1Col < 0) day1Col = startCol + 10;
+
+    const lastCol = startCol + Math.max(dataHdrs.length - 1, 0);
+    const clearTo = Math.min(sourceRows.length + 40, 200);
+    // Break tall vertical merges in the body so each employee row keeps its own cells under Sr. No.
+    unmergeExcelJSVerticalMergesInRange(
+      worksheet,
+      dataStartRow,
+      dataStartRow + clearTo,
+      startCol,
+      Math.max(lastCol, day1Col + 40)
+    );
+
+    for (let i = 0; i < clearTo; i += 1) {
+      for (let c = startCol; c <= lastCol; c += 1) {
+        const clearCell = worksheet.getCell(dataStartRow + i, c);
+        const cur = clearCell?.value;
+        if (cur && typeof cur === 'object' && Object.prototype.hasOwnProperty.call(cur, 'formula')) continue;
+        clearCell.value = null;
+      }
+    }
+
+    for (let i = 0; i < sourceRows.length; i += 1) {
+      const row = sourceRows[i] || {};
+      for (let j = 0; j < dataHdrs.length; j += 1) {
+        const header = dataHdrs[j];
+        let value = getValueForHeader(row, header, j);
+        if (j === 0 && (value == null || String(value).trim() === '')) value = i + 1;
+        if (value == null || value === '') continue;
+        if (/^enter\s+/i.test(String(value).trim())) continue;
+        const cell = worksheet.getCell(dataStartRow + i, startCol + j);
+        if (
+          typeof value === 'number' ||
+          (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim()))
+        ) {
+          cell.value = Number(value);
+        } else {
+          cell.value = String(value);
+        }
+      }
+    }
+
+    // If worker fields still landed under the day band, shift them left under Sr. No.
+    const shift = day1Col - startCol;
+    if (shift >= 6 && shift <= 16 && sourceRows.length > 0) {
+      for (let i = 0; i < sourceRows.length; i += 1) {
+        const r = dataStartRow + i;
+        const atSno = excelRawAt(r, startCol);
+        const atName = excelCellValueToString(worksheet.getCell(r, startCol + 1)?.value).trim();
+        const atDay1 = excelCellValueToString(worksheet.getCell(r, day1Col)?.value).trim();
+        const atDay2 = excelCellValueToString(worksheet.getCell(r, day1Col + 1)?.value).trim();
+        if (atSno || atName) continue;
+        if (!atDay1 && !atDay2) continue;
+        const day1LooksSerial = /^\d{1,3}$/.test(atDay1);
+        const day2LooksName =
+          /[a-zA-Z]{2,}/.test(atDay2) && !/^(P|A|WO|PH|L|H|HD|OD)$/i.test(atDay2);
+        if (!(day1LooksSerial && day2LooksName)) continue;
+        const width = Math.max(shift + 45, 70);
+        const moved = [];
+        for (let k = 0; k < width; k += 1) {
+          moved.push(worksheet.getCell(r, day1Col + k).value);
+        }
+        for (let k = 0; k < width; k += 1) {
+          worksheet.getCell(r, startCol + k).value = moved[k] ?? null;
+        }
+        for (let c = startCol + width; c < day1Col + width; c += 1) {
+          worksheet.getCell(r, c).value = null;
+        }
+      }
+    }
+
+    if (sourceRows.length > 0) {
+      ensureExcelJSDataRowsWithBorders(worksheet, {
+        dataStartRow,
+        dataRowCount: sourceRows.length,
+        colFrom: startCol,
+        colTo: lastCol,
+        templateRow: headerRow,
+        templateBodyRows: Math.max(1, countExcelJSTemplateBodyRows(worksheet, dataStartRow, startCol, lastCol))
+      });
+      // Include parent header row (Working hours / Date of the Month) when present above Sr. No.
+      let bandTop = headerRow;
+      for (let r = Math.max(1, headerRow - 2); r < headerRow; r += 1) {
+        let hit = false;
+        for (let c = startCol; c <= startCol + 16; c += 1) {
+          const t = norm(excelCellValueToString(worksheet.getCell(r, c)?.value));
+          if (/working\s+hours|interval\s+for\s+rest|date\s+of\s+the\s+month|deductions?/.test(t)) {
+            hit = true;
+            break;
+          }
+        }
+        if (hit) {
+          bandTop = r;
+          break;
+        }
+      }
+      // Full box borders on header + every data cell (days + wage/deduction cols) like template model.
+      applyExcelJSFullBoxBordersToRange(worksheet, {
+        rowFrom: bandTop,
+        rowTo: dataStartRow + sourceRows.length - 1,
+        colFrom: startCol,
+        colTo: lastCol
+      });
+    }
+
+    const out = await workbook.xlsx.writeBuffer();
+    const outName =
+      formFileName ||
+      parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+      `Form_Q_Maharashtra_${Date.now()}.xlsx`;
+    let blob = new Blob([out], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    });
+    // Final SheetJS pass — catches any remaining Sr. No. → day-band shift.
+    blob = await repairFormQMaharashtraDownloadBlob(blob);
+    // SheetJS rewrite drops borders — re-apply full boxes like the template model.
+    blob = await applyFormQMaharashtraFullBordersToBlob(blob);
+    return { blob, fileName: outName };
+  };
+
   const buildFormIWorkbookWithTemplateStyles = async ({
     templateArrayBuffer,
     mappedData,
@@ -35966,9 +37488,21 @@ const Statutory = ({ userEmail, userRole }) => {
     };
 
     let exportRowsBase = Array.isArray(mappedData) ? mappedData : [];
+    const isFormXIXRJExport = isFormXIXRJOvertimeAutofillContext(
+      parsedFormHeader,
+      parseHints?.item,
+      formFileName,
+      String(sheetNameHint || ''),
+      exportHdrs
+    );
     if (isOvertimeExport && exportRowsBase.length > 0 && exportHdrs.length > 0) {
-      exportRowsBase = prepareFormXXIIIOvertimeExportRows(exportRowsBase, exportHdrs);
-      exportRowsBase = normalizeFormXXIIIOvertimeRowsForExport(exportRowsBase, exportHdrs);
+      if (isFormXIXRJExport) {
+        exportRowsBase = prepareFormXIXRJOvertimeExportRows(exportRowsBase, exportHdrs);
+        exportHdrs = resolveFormXIXRJTableHeaders(exportHdrs);
+      } else {
+        exportRowsBase = prepareFormXXIIIOvertimeExportRows(exportRowsBase, exportHdrs);
+        exportRowsBase = normalizeFormXXIIIOvertimeRowsForExport(exportRowsBase, exportHdrs);
+      }
       if (
         isFormXXIIIMPContext(
           parsedFormHeader,
@@ -36002,13 +37536,10 @@ const Statutory = ({ userEmail, userRole }) => {
     const overtimeExportRows = exportRowsBase.filter(
       (row) => row && typeof row === 'object' && formTableRowHasMeaningfulData(row)
     );
+    // OT / Form XIX RJ: keep every meaningful employee row — do not drop early rows via
+    // wage-register "substantive" filtering (people-only rows vanish mid-autofill).
     const sourceRows = isOvertimeExport
-      ? filterWageRegisterNilPlaceholderRows(
-          filterWageRegisterSubstantiveExportRows(overtimeExportRows, exportHdrs).length > 0
-            ? filterWageRegisterSubstantiveExportRows(overtimeExportRows, exportHdrs)
-            : overtimeExportRows,
-          exportHdrs
-        )
+      ? filterWageRegisterNilPlaceholderRows(overtimeExportRows, exportHdrs)
       : filterWageRegisterNilPlaceholderRows(
           filterWageRegisterSubstantiveExportRows(
             formXVIIExport
@@ -36108,6 +37639,7 @@ const Statutory = ({ userEmail, userRole }) => {
     if (isOvertimeExport) {
       for (let r = 1; r <= headerBannerRowEnd; r += 1) {
         const row = worksheet.getRow(r);
+        row.hidden = false;
         row.height = Math.min(Math.max(row.height || 18, 15), 22);
       }
     }
@@ -36125,6 +37657,16 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     const clearToRow = dataStartRow + Math.max(sourceRows.length, 24) + 8;
+    if (isOvertimeExport && sourceRows.length > 0) {
+      // Unmerge tall sample-body cells BEFORE clear/write so emp 1–3 are not collapsed into one cell.
+      unmergeExcelJSVerticalMergesInRange(
+        worksheet,
+        dataStartRow,
+        clearToRow,
+        startCol,
+        tableColMax
+      );
+    }
     for (let r = dataStartRow; r <= clearToRow; r += 1) {
       for (let c = startCol; c <= tableColMax; c += 1) {
         const cellText = excelJsCellText(worksheet.getCell(r, c)?.value).trim();
@@ -36218,6 +37760,23 @@ const Statutory = ({ userEmail, userRole }) => {
         dataStartRow + sourceRows.length + 2,
         12
       );
+      // Form XIX RJ / OT templates often keep title/header rows hidden — force visible.
+      const unhideThrough = Math.max(
+        dataStartRow + sourceRows.length + 10,
+        headerBannerRowEnd + 5,
+        40
+      );
+      unhideExcelJSWorksheetRows(worksheet, unhideThrough);
+      for (let r = 1; r < dataStartRow; r += 1) {
+        const row = worksheet.getRow(r);
+        row.hidden = false;
+        if (!row.height || Number(row.height) < 15) row.height = 18;
+      }
+      for (let r = dataStartRow; r < dataStartRow + Math.max(sourceRows.length, 1); r += 1) {
+        const row = worksheet.getRow(r);
+        row.hidden = false;
+        if (!row.height || Number(row.height) < 15) row.height = Math.max(row.height || 0, 18);
+      }
     } else {
       autofitExcelJSColumns(worksheet, 1, tableColMax, 1, dataStartRow + sourceRows.length + 2, 16);
     }
@@ -37798,8 +39357,20 @@ const Statutory = ({ userEmail, userRole }) => {
         templateMeta.formFileName || resolvedFormFileItem.formFileName || '',
         headersToUse
       );
+      const formQDownloadFnHint =
+        templateMeta.formFileName || resolvedFormFileItem.formFileName || fn || '';
+      const isFormQMaharashtraDownload =
+        !isFormQKarnatakaContext(parsed?.formHeader, item, formQDownloadFnHint, '') &&
+        (/form[\s_-]*q/i.test(String(formQDownloadFnHint)) ||
+          /form[\s_-]*q/i.test(String(resolvedDownloadSheetName || parsed?.sheetName || '')) ||
+          /form[\s_-]*q/i.test(String(parsed?.formHeader?.title || '')) ||
+          isFormQContext(parsed?.formHeader, item, formQDownloadFnHint, headersToUse) ||
+          (Array.isArray(headersToUse) &&
+            headersToUse.some((h) => /full\s+name\s+of\s+the\s+worker/i.test(String(h || ''))) &&
+            headersToUse.some((h) => /working\s+hours/i.test(String(h || '')))));
       const isFormIDownload =
         !isFormIIDownload &&
+        !isFormQMaharashtraDownload &&
         !isFormXIIIWorkmenDownload &&
         !isFormXVContext(parsed?.formHeader, item, templateMeta.formFileName || resolvedFormFileItem.formFileName || fn) &&
         (isFormIRegisterOfFinesContext(
@@ -38632,12 +40203,21 @@ const Statutory = ({ userEmail, userRole }) => {
           formFileModalData.parsedTableHeaders.length > 0
             ? formFileModalData.parsedTableHeaders
             : headersToUse) || [];
-        mappedData = prepareFormXXIIIOvertimeExportRows(
-          copyLiveModalGridRowsForDownload(),
+        const liveOtRows = copyLiveModalGridRowsForDownload();
+        const formXIXRJLiveExport = isFormXIXRJOvertimeAutofillContext(
+          parsed?.formHeader,
+          lineItem,
+          fn,
+          sheetTextForDownload || '',
           modalHdrsForOvertime
         );
+        mappedData = formXIXRJLiveExport
+          ? prepareFormXIXRJOvertimeExportRows(liveOtRows, modalHdrsForOvertime)
+          : prepareFormXXIIIOvertimeExportRows(liveOtRows, modalHdrsForOvertime);
         const modalHdrs = formFileModalData?.parsedTableHeaders;
-        if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
+        if (formXIXRJLiveExport) {
+          headersToUse = resolveFormXIXRJTableHeaders(modalHdrsForOvertime);
+        } else if (Array.isArray(modalHdrs) && modalHdrs.length > 0) {
           headersToUse = [...modalHdrs];
         } else if (mappedData[0] && typeof mappedData[0] === 'object') {
           headersToUse = Object.keys(mappedData[0]);
@@ -42439,6 +44019,13 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
       if (isClraOvertimeRegisterExcelExport) {
+        const formXIXRJOtDownload = isFormXIXRJOvertimeAutofillContext(
+          parsed?.formHeader,
+          lineItem,
+          fn,
+          sheetTextForDownload || '',
+          headersToUse
+        );
         if (
           (isFormFileModalOpen && countMeaningfulFormTableRows(formTableDataRef.current) > 0) ||
           hasAutofillGridForSameLine ||
@@ -42450,11 +44037,15 @@ const Statutory = ({ userEmail, userRole }) => {
             formFileModalData.parsedTableHeaders.length > 0
               ? formFileModalData.parsedTableHeaders
               : headersToUse;
-          mappedData = prepareFormXXIIIOvertimeExportRows(
-            copyLiveModalGridRowsForDownload(),
-            modalHdrs
-          );
-          if (modalHdrs.length > 0) headersToUse = [...modalHdrs];
+          const liveOtRows = copyLiveModalGridRowsForDownload();
+          mappedData = formXIXRJOtDownload
+            ? prepareFormXIXRJOvertimeExportRows(liveOtRows, modalHdrs)
+            : prepareFormXXIIIOvertimeExportRows(liveOtRows, modalHdrs);
+          if (formXIXRJOtDownload) {
+            headersToUse = resolveFormXIXRJTableHeaders(modalHdrs);
+          } else if (modalHdrs.length > 0) {
+            headersToUse = [...modalHdrs];
+          }
           if (formFileModalData?.dataStartIndex != null) {
             downloadDataStartIndex = formFileModalData.dataStartIndex;
           }
@@ -42465,7 +44056,12 @@ const Statutory = ({ userEmail, userRole }) => {
             downloadTableStartCol = formFileModalData.tableStartCol;
           }
         } else {
-          mappedData = prepareFormXXIIIOvertimeExportRows(mappedData, headersToUse);
+          mappedData = formXIXRJOtDownload
+            ? prepareFormXIXRJOvertimeExportRows(mappedData, headersToUse)
+            : prepareFormXXIIIOvertimeExportRows(mappedData, headersToUse);
+          if (formXIXRJOtDownload) {
+            headersToUse = resolveFormXIXRJTableHeaders(headersToUse);
+          }
         }
         const overtimeExportNeedsFetch =
           !downloadSnapshotFastReady &&
@@ -42500,15 +44096,23 @@ const Statutory = ({ userEmail, userRole }) => {
                       exportEnrichedRows,
                       headersToUse
                     )
-                  : prepareFormXXIIIOvertimeExportRows(exportEnrichedRows, headersToUse);
+                  : formXIXRJOtDownload
+                    ? prepareFormXIXRJOvertimeExportRows(exportEnrichedRows, headersToUse)
+                    : prepareFormXXIIIOvertimeExportRows(exportEnrichedRows, headersToUse);
             }
           } catch (overtimeExportEnrichErr) {
             console.warn('Form XXIII overtime export enrich skipped:', overtimeExportEnrichErr);
           }
         }
         if (Array.isArray(mappedData) && mappedData.length > 0) {
-          mappedData = prepareFormXXIIIOvertimeExportRows(mappedData, headersToUse);
-          mappedData = normalizeFormXXIIIOvertimeRowsForExport(mappedData, headersToUse);
+          mappedData = formXIXRJOtDownload
+            ? prepareFormXIXRJOvertimeExportRows(mappedData, headersToUse)
+            : prepareFormXXIIIOvertimeExportRows(mappedData, headersToUse);
+          if (formXIXRJOtDownload) {
+            headersToUse = resolveFormXIXRJTableHeaders(headersToUse);
+          } else {
+            mappedData = normalizeFormXXIIIOvertimeRowsForExport(mappedData, headersToUse);
+          }
           if (
             isFormXXIIIMPContext(
               parsed?.formHeader,
@@ -45768,6 +47372,52 @@ const Statutory = ({ userEmail, userRole }) => {
                         },
                         employees: formXVIIIDownloadEmployees,
                       })
+        : isFormQMaharashtraDownload
+          ? await (async () => {
+              const liveFormQRows = copyLiveModalGridRowsForDownload();
+              let formQRows =
+                Array.isArray(liveFormQRows) && liveFormQRows.length > 0
+                  ? liveFormQRows
+                  : Array.isArray(mappedData)
+                    ? mappedData
+                    : [];
+              const days =
+                (headersToUse || []).filter((h) =>
+                  /^date\s+of\s+the\s+month_\d{1,2}$/i.test(String(h || '').trim())
+                ).length || 31;
+              const formQHdrs = resolveFormQDisplayHeaders(
+                stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(days)),
+                days
+              );
+              formQRows = remapFormQRowsToHeaders(
+                formQRows,
+                Array.isArray(headersToUse) ? headersToUse : formQHdrs,
+                formQHdrs
+              );
+              mappedData = formQRows;
+              headersToUse = formQHdrs;
+              return buildFormQMaharashtraWorkbookWithTemplateStyles({
+                templateArrayBuffer: arrayBuffer,
+                mappedData: formQRows,
+                mappedRowMatrix: null,
+                headersToUse: formQHdrs,
+                parsedHeaderRowIndex:
+                  downloadHeaderRowIndex != null ? downloadHeaderRowIndex : parsed.headerRowIndex,
+                parsedDataStartIndex:
+                  downloadDataStartIndex != null ? downloadDataStartIndex : parsed.dataStartIndex,
+                parsedFormHeader: parsed.formHeader,
+                headerFormData: downloadHeaderFormData,
+                formFileName:
+                  templateMeta.formFileName ||
+                  resolvedFormFileItem.formFileName ||
+                  'Form_Q_Maharashtra.xlsx',
+                sheetNameHint:
+                  resolvedDownloadSheetName ||
+                  formFileModalData?.sheetName ||
+                  parsed.sheetName ||
+                  'FORM Q'
+              });
+            })()
         : buildDraftWorkbook({
             currentItem: item,
             templateWb,
@@ -45801,6 +47451,22 @@ const Statutory = ({ userEmail, userRole }) => {
         !skipSystemGeneratedNote
       ) {
         blob = await appendSystemGeneratedDocumentNoteToStatutoryBlob(blob);
+      }
+      // Form Q MH: last-pass column repair after ExcelJS note/seal round-trips.
+      // Always run — section-index row 1,2,3 under Sr. No. previously disabled repair.
+      {
+        const fnHint =
+          templateMeta.formFileName || resolvedFormFileItem.formFileName || fn || fileName || '';
+        const formQDl =
+          isFormQMaharashtraDownload ||
+          (!isFormQKarnatakaContext(parsed?.formHeader, item, fnHint, '') &&
+            (/form[\s_-]*q/i.test(String(fnHint)) ||
+              /form[\s_-]*q/i.test(String(resolvedDownloadSheetName || parsed?.sheetName || '')) ||
+              isFormQContext(parsed?.formHeader, item, fnHint, headersToUse)));
+        if (formQDl && blob) {
+          blob = await repairFormQMaharashtraDownloadBlob(blob);
+          blob = await applyFormQMaharashtraFullBordersToBlob(blob);
+        }
       }
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -49931,27 +51597,77 @@ const Statutory = ({ userEmail, userRole }) => {
           allowTemplateFallback: false
         }));
       } else {
-        ({ blob, fileName } = buildDraftWorkbook({
-          currentItem,
-          templateWb,
-          headersToUse,
-          headerRowIndex,
-          dataStartIndex,
-          tableStartCol: formFileModalData?.tableStartCol ?? 0,
-          parsedFormHeader: parsedFormHeaderForSave,
-          headerFormData: headerDataForSave,
-          formTableData: tableDataForSave,
-          hasSubColumns,
-          formFileName: draftFileNameForSave,
-          sheetName: resolvedSaveSheetNameForBuild || formFileModalData?.sheetName,
-          originalHeaderRowIndex:
-            formFileModalData?.originalHeaderRowIndex ??
+        const formQSaveHint = String(draftFileNameForSave || formFileModalData?.formFileName || '');
+        const formQSaveActive =
+          !isFormQKarnatakaContext(
+            parsedFormHeaderForSave || formHeader,
+            currentItem,
+            formQSaveHint,
+            ''
+          ) &&
+          (/form[\s_-]*q/i.test(formQSaveHint) ||
+            /form[\s_-]*q/i.test(String(formFileModalData?.sheetName || '')) ||
+            isFormQContext(
+              parsedFormHeaderForSave || formHeader,
+              currentItem,
+              formQSaveHint,
+              headersToUse
+            ));
+        if (formQSaveActive) {
+          const days =
+            (headersToUse || []).filter((h) =>
+              /^date\s+of\s+the\s+month_\d{1,2}$/i.test(String(h || '').trim())
+            ).length || 31;
+          const formQSaveHeaders = resolveFormQDisplayHeaders(
+            stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(days)),
+            days
+          );
+          const formQSaveRows = remapFormQRowsToHeaders(
+            tableDataForSave,
+            headersToUse,
+            formQSaveHeaders
+          );
+          const formQTemplateBuffer =
+            saveTemplateArrayBuffer ||
+            (templateWb ? XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' }) : null);
+          if (!formQTemplateBuffer || !isValidExcelArrayBuffer(formQTemplateBuffer)) {
+            throw new Error('Form Q original template is required to save. Re-open the form and try again.');
+          }
+          ({ blob, fileName } = await buildFormQMaharashtraWorkbookWithTemplateStyles({
+            templateArrayBuffer: formQTemplateBuffer,
+            mappedData: formQSaveRows,
+            mappedRowMatrix: null,
+            headersToUse: formQSaveHeaders,
+            parsedHeaderRowIndex: headerRowIndex,
+            parsedDataStartIndex: dataStartIndex,
+            parsedFormHeader: parsedFormHeaderForSave || formHeader,
+            headerFormData: headerDataForSave,
+            formFileName: draftFileNameForSave,
+            sheetNameHint: resolvedSaveSheetNameForBuild || formFileModalData?.sheetName || 'FORM Q'
+          }));
+        } else {
+          ({ blob, fileName } = buildDraftWorkbook({
+            currentItem,
+            templateWb,
+            headersToUse,
             headerRowIndex,
-          singleSheetExport:
-            templateWb?.SheetNames?.length > 1 &&
-            !!(resolvedSaveSheetNameForBuild || formFileModalData?.sheetName),
-          allowTemplateFallback: false
-        }));
+            dataStartIndex,
+            tableStartCol: formFileModalData?.tableStartCol ?? 0,
+            parsedFormHeader: parsedFormHeaderForSave,
+            headerFormData: headerDataForSave,
+            formTableData: tableDataForSave,
+            hasSubColumns,
+            formFileName: draftFileNameForSave,
+            sheetName: resolvedSaveSheetNameForBuild || formFileModalData?.sheetName,
+            originalHeaderRowIndex:
+              formFileModalData?.originalHeaderRowIndex ??
+              headerRowIndex,
+            singleSheetExport:
+              templateWb?.SheetNames?.length > 1 &&
+              !!(resolvedSaveSheetNameForBuild || formFileModalData?.sheetName),
+            allowTemplateFallback: false
+          }));
+        }
       }
       const isZipSaveDownload = false;
       if (isZipSaveDownload && blob) {
@@ -49966,6 +51682,29 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       if (!isZipSaveDownload && blob) {
         blob = await appendSystemGeneratedDocumentNoteToStatutoryBlob(blob);
+      }
+      // Form Q MH: repair after note round-trip so Sr. No. data stays under column C.
+      if (!isZipSaveDownload && blob) {
+        const formQSaveRepairHint = String(draftFileNameForSave || formFileModalData?.formFileName || '');
+        const formQSaveNeedsRepair =
+          !isFormQKarnatakaContext(
+            parsedFormHeaderForSave || formHeader,
+            currentItem,
+            formQSaveRepairHint,
+            ''
+          ) &&
+          (/form[\s_-]*q/i.test(formQSaveRepairHint) ||
+            /form[\s_-]*q/i.test(String(formFileModalData?.sheetName || '')) ||
+            isFormQContext(
+              parsedFormHeaderForSave || formHeader,
+              currentItem,
+              formQSaveRepairHint,
+              headersToUse
+            ));
+        if (formQSaveNeedsRepair) {
+          blob = await repairFormQMaharashtraDownloadBlob(blob);
+          blob = await applyFormQMaharashtraFullBordersToBlob(blob);
+        }
       }
       // Form T: repair J→A shift if needed, then download + cache + upload the same bytes.
       if (formTSESave && blob && !isZipSaveDownload) {
@@ -60849,6 +62588,7 @@ const Statutory = ({ userEmail, userRole }) => {
             payDate: String(
               cachedBrjTable?.meta?.payDate || cachedBrjTable?.meta?.pay_date || form10PayDate || ''
             ).trim(),
+            monthEndDate: resolveFormQMonthEndDateForAutofill(selectedMonth, formatStatutoryDateDisplay),
             rowIndex: employeePageOffset + index,
             payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
           });
@@ -60967,6 +62707,36 @@ const Statutory = ({ userEmail, userRole }) => {
           selectedMonth,
           formatStatutoryDateDisplay
         );
+        const formQAttPrefetch = buildStatutoryMonthPrefetchOptions(
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        // Warm attendance while identity/payroll paint — Autofill must not wait on Zoho first.
+        prefetchAttendanceData({
+          sdate: formQAttPrefetch.sdate,
+          edate: formQAttPrefetch.edate,
+        });
+        if (formQAttPrefetch.payrollMonthCandidates?.length > 0) {
+          prefetchPayrollTableRowsForMonths(formQAttPrefetch.payrollMonthCandidates);
+        }
+        const { year: formQAttYear, monthIndex: formQAttMonthIdx } =
+          resolveStatutoryAttendanceMonthYear(
+            selectedMonth,
+            modalData?.item || formFileModalData?.item,
+            modalData?.parsedFormHeader?.wagePeriodText ||
+              formFileModalData?.parsedFormHeader?.wagePeriodText ||
+              ''
+          );
+        const cachedFormQAtt =
+          (autofillAttendanceCacheRef.current?.sdate === formQAttPrefetch.sdate &&
+          autofillAttendanceCacheRef.current?.edate === formQAttPrefetch.edate
+            ? autofillAttendanceCacheRef.current.records
+            : null) ||
+          getCachedAttendanceData(formQAttPrefetch.sdate, formQAttPrefetch.edate)?.data ||
+          null;
         const quickFormQRows = buildFastPaginatedStatutoryGridRows(
           employeesForMapping,
           currentHeaders,
@@ -60996,11 +62766,31 @@ const Statutory = ({ userEmail, userRole }) => {
           });
           return row;
         });
+        let formQInstantAttHits = 0;
+        if (cachedFormQAtt) {
+          formQInstantAttHits = applyFormQMaharashtraAttendanceFromCache(
+            quickFormQRows,
+            employeesForMapping,
+            formQHdrsInstant,
+            cachedFormQAtt,
+            {
+              targetYear: formQAttYear,
+              targetMonthIndex: formQAttMonthIdx,
+              getNameCandidates: getEmployeeNameCandidates,
+              sdate: formQAttPrefetch.sdate,
+              edate: formQAttPrefetch.edate,
+            }
+          );
+        }
         mergeMappedIntoFormTable(quickFormQRows, true);
         await yieldToMain();
         setTableAutofillLoading(false);
         setTableAutofillProgress(
-          instantFormQPayrollRows.length > 0 ? 'Updating attendance & leave…' : 'Updating payroll, attendance & leave…'
+          instantFormQPayrollRows.length > 0 && formQInstantAttHits > 0
+            ? ''
+            : instantFormQPayrollRows.length > 0
+              ? 'Updating attendance…'
+              : 'Updating payroll, attendance & leave…'
         );
       }
 
@@ -61528,6 +63318,7 @@ const Statutory = ({ userEmail, userRole }) => {
               sanitizeValue,
               formatStatutoryDateDisplay,
               payDate: form10PayDate,
+              monthEndDate: resolveFormQMonthEndDateForAutofill(selectedMonth, formatStatutoryDateDisplay),
               overwrite: true,
               rowIndexOffset: employeePageOffset,
               payrollRows: brjPayrollRowsEnrich,
@@ -62870,7 +64661,27 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
+          if (formXIXRJOvertimeAutofillContext && isFormXIXRJOvertimeRateHeader(header)) {
+            row[header] = FORM_XIX_RJ_NIL;
+            return;
+          }
+
+          if (formXIXRJOvertimeAutofillContext && isFormXIXRJOvertimeEarningsHeader(header)) {
+            row[header] = FORM_XIX_RJ_NIL;
+            return;
+          }
+
+          if (formXIXRJOvertimeAutofillContext && isFormXIXRJOvertimePaymentDateHeader(header)) {
+            row[header] = FORM_XIX_RJ_NIL;
+            return;
+          }
+
           if (formXIXRJOvertimeAutofillContext && isFormXIXRJNormalHoursHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
+          if (formXIXRJOvertimeAutofillContext && isFormXIXRJNormalRateHeader(header)) {
             row[header] = '';
             return;
           }
@@ -65388,6 +67199,7 @@ const Statutory = ({ userEmail, userRole }) => {
               rowIndex: globalRowIndex,
               formatStatutoryDateDisplay,
               payDate: form10PayDate,
+              monthEndDate: resolveFormQMonthEndDateForAutofill(selectedMonth, formatStatutoryDateDisplay),
               payrollRow: brjPayrollRow && !brjPayrollRow.fetch_error ? brjPayrollRow : null,
             })
           );
@@ -66275,6 +68087,7 @@ const Statutory = ({ userEmail, userRole }) => {
               sanitizeValue,
               formatStatutoryDateDisplay,
               payDate: form10PayDate,
+              monthEndDate: resolveFormQMonthEndDateForAutofill(selectedMonth, formatStatutoryDateDisplay),
               overwrite: true,
               rowIndexOffset: employeePageOffset,
               payrollRows: brjPayrollRowsEarly,
@@ -67447,16 +69260,14 @@ const Statutory = ({ userEmail, userRole }) => {
                   ? await fetchAttendanceData({
                       sdate,
                       edate,
+                      // Form Q / Form 25 day grids: reuse month prefetch / in-flight cache (never force).
                       force:
                         isLikelyForm10 ||
                         formXXIIIAutofillContext ||
                         formXIXKarnatakaAutofillContext ||
                         formTSEAutofillContext ||
                         formDRajasthanAutofillContext ||
-                        form25DayStatusGrid ||
-                        form25DailyHoursGrid ||
-                        formXXIIAutofillContext ||
-                        form25SkipLossPayAndNationalHolidayBenefit,
+                        formXXIIAutofillContext,
                       timeoutMs:
                         isLikelyForm10 ||
                         formXXIIIAutofillContext ||
@@ -67465,10 +69276,11 @@ const Statutory = ({ userEmail, userRole }) => {
                           ? 15000
                           : formDRajasthanAutofillContext
                             ? 8000
-                          : form25DayStatusGrid || form25DailyHoursGrid
-                            ? 8000
-                            : form25SkipLossPayAndNationalHolidayBenefit
-                              ? 3000
+                          : formQAutofillContext ||
+                              form25DayStatusGrid ||
+                              form25DailyHoursGrid ||
+                              form25SkipLossPayAndNationalHolidayBenefit
+                            ? 45000
                               : 2500,
                     }).catch((err) => {
                       console.warn('Attendance autofill fetch failed:', err?.message || err);
@@ -67483,11 +69295,12 @@ const Statutory = ({ userEmail, userRole }) => {
                 formXIXKarnatakaAutofillContext ||
                 formTSEAutofillContext ||
                 formDRajasthanAutofillContext ||
-                form25DayStatusGrid ||
-                form25DailyHoursGrid ||
                 formXXIIAutofillContext ||
-                !fastModalAutofill ||
-                form25SkipLossPayAndNationalHolidayBenefit,
+                (!fastModalAutofill &&
+                  !formQAutofillContext &&
+                  !form25DayStatusGrid &&
+                  !form25DailyHoursGrid &&
+                  !form25SkipLossPayAndNationalHolidayBenefit),
               timeoutMs:
                 statutoryFormDownloadEnrich
                   ? 12000
@@ -67504,14 +69317,13 @@ const Statutory = ({ userEmail, userRole }) => {
                       ? enrichOnlyPhase
                         ? 8000
                         : 15000
-                    : form25DayStatusGrid || form25DailyHoursGrid
+                    : formQAutofillContext ||
+                        form25DayStatusGrid ||
+                        form25DailyHoursGrid ||
+                        form25SkipLossPayAndNationalHolidayBenefit
                       ? 60000
                       : fastModalAutofill
-                        ? form25SkipLossPayAndNationalHolidayBenefit
-                          ? 30000
-                          : 4000
-                        : form25SkipLossPayAndNationalHolidayBenefit
-                          ? 45000
+                        ? 4000
                           : 20000,
             }).catch((err) => {
               console.warn('Attendance autofill fetch failed:', err?.message || err);
@@ -68495,10 +70307,12 @@ const Statutory = ({ userEmail, userRole }) => {
                 );
               }
               if (
-                formTSEAutofillContext &&
+                (formTSEAutofillContext || formQAutofillContext || formPGJAutofillContext) &&
                 !returnMappedData &&
                 !isStaleAutofillRun() &&
-                (attendanceHoursPopulated > 0 || listFormTSEAttendanceDayHeaders(currentHeaders).length > 0)
+                (attendanceHoursPopulated > 0 ||
+                  (formTSEAutofillContext &&
+                    listFormTSEAttendanceDayHeaders(currentHeaders).length > 0))
               ) {
                 mergeMappedIntoFormTable(mappedData, true);
               }
@@ -69994,6 +71808,7 @@ const Statutory = ({ userEmail, userRole }) => {
               sanitizeValue,
               formatStatutoryDateDisplay,
               payDate: form10PayDate,
+              monthEndDate: resolveFormQMonthEndDateForAutofill(selectedMonth, formatStatutoryDateDisplay),
               overwrite: true,
               rowIndexOffset: employeePageOffset,
               payrollRows: brjPayrollRows,
@@ -70714,15 +72529,14 @@ const Statutory = ({ userEmail, userRole }) => {
       let hasOtherLeaveColumn = false;
 
       try {
-        // Form X uses the dedicated leave autofill block below. Form 15 Part 1 also uses
-        // that block, but keep the generic path available as a fallback so leave cells
-        // still fill if dedicated header resolution misses targets.
+        // Form X / Form 15 Part 1 use LeaveData table via the dedicated block below.
         if (
           !formXXIIIAutofillContext &&
           !formXVIIIMPDownloadEnrich &&
           !formFKarnatakaEarlyAutofill &&
           !formXIVMPAutofillContext &&
-          !formXTamilNaduLeaveAutofillContext
+          !formXTamilNaduLeaveAutofillContext &&
+          !form15Part1LeaveAutofillContext
         ) {
         console.log('Fetching leave data...');
         const { fromDate, toDate } = zohoBookedBalanceRangeForUiMonth(selectedMonth);
@@ -71590,7 +73404,7 @@ const Statutory = ({ userEmail, userRole }) => {
         // Don't throw error, just log it - employee data is still populated
       }
 
-      // Form X leave register + Form 15 Part 1 share the same Leave Fetch mapping.
+      // Form X leave register + Form 15 Part 1: load from LeaveData table (not live Zoho API).
       // form15Part1LeaveAutofillContext is resolved above with the same file hints as
       // people autofill (not a weaker modalData.fileName-only check).
       if (
@@ -71600,12 +73414,11 @@ const Statutory = ({ userEmail, userRole }) => {
       ) {
         const { fromDate, toDate } = zohoBookedBalanceRangeForUiMonth(selectedMonth);
         try {
-          let leaveResult = getCachedLeaveData(fromDate, toDate, 'Day');
-          if (!leaveResult || form15Part1LeaveAutofillContext) {
-            leaveResult = await fetchLeaveData({
+          let leaveResult = getCachedStoredLeaveData();
+          if (!leaveResult || form15Part1LeaveAutofillContext || formXTamilNaduLeaveAutofillContext) {
+            leaveResult = await fetchStoredLeaveDataForAutofill({
               fromDate,
               toDate,
-              unit: 'Day',
               force: true,
               timeoutMs: 120000,
             });
@@ -71711,7 +73524,7 @@ const Statutory = ({ userEmail, userRole }) => {
             const summaryLine = formatForm15Part1LeaveTransferSummary(finalized?.summary);
             console.log(
               summaryLine ||
-                `Form 15 Part 1 leave autofill (Form X mapping): ${leaveHits}/${mappedData.length} row(s) for ${fromDate} to ${toDate}`,
+                `Form 15 Part 1 leave autofill (LeaveData table): ${leaveHits}/${mappedData.length} row(s) for ${fromDate} to ${toDate}`,
               finalized?.summary
             );
             if (!returnMappedData && summaryLine) {
@@ -71741,7 +73554,7 @@ const Statutory = ({ userEmail, userRole }) => {
               }
             );
             console.log(
-              `Form X Tamil Nadu leave autofill: ${leaveHits}/${mappedData.length} row(s) for ${fromDate} to ${toDate}`
+              `Form X Tamil Nadu leave autofill (LeaveData table): ${leaveHits}/${mappedData.length} row(s) for ${fromDate} to ${toDate}`
             );
           }
           if (!returnMappedData && !isStaleAutofillRun()) {
@@ -75828,6 +77641,9 @@ const Statutory = ({ userEmail, userRole }) => {
         headersToUse = resolveFormQDisplayHeaders(formQRebuild.expandedHeaders, 31);
         const priorRows = tableData.map((row) => ({ ...row }));
         const formQStartCol = formQRebuild.startCol;
+        if (formQStartCol != null && Number(formQStartCol) >= 0) {
+          tableStartCol = Number(formQStartCol);
+        }
         const hasSubCols = Object.keys(subColumnsData).some((k) => (subColumnsData[k] || []).length > 0);
         if (hasSubCols) {
           let dataStart = headerRowIndex + 2;
@@ -76228,6 +78044,10 @@ const Statutory = ({ userEmail, userRole }) => {
         subColumns: resolved.subColumns,
         headerRowIndex: resolved.headerRowIndex,
         dataStartIndex: resolved.dataStartIndex,
+        tableStartCol:
+          resolved.startCol != null && Number(resolved.startCol) >= 0
+            ? Number(resolved.startCol)
+            : 2,
         columnGroupLabels: null,
         originalHeaderRowIndex: resolved.headerRowIndex,
         sheetName: firstSheetName
@@ -78718,6 +80538,10 @@ const Statutory = ({ userEmail, userRole }) => {
           parsed.subColumns = resolvedFormQ.subColumns;
           parsed.headerRowIndex = resolvedFormQ.headerRowIndex;
           parsed.dataStartIndex = resolvedFormQ.dataStartIndex;
+          parsed.tableStartCol =
+            resolvedFormQ.startCol != null && Number(resolvedFormQ.startCol) >= 0
+              ? Number(resolvedFormQ.startCol)
+              : parsed.tableStartCol ?? 2;
           parsed.columnGroupLabels = null;
           parsed.tableData = remapFormQRowsToHeaders(priorRows, priorHeaders, resolvedFormQ.headers);
           if (resolvedFormQ.headerFields?.length) {
@@ -81173,6 +82997,37 @@ const Statutory = ({ userEmail, userRole }) => {
             formHeaderForModal,
             sheetTextForVariant
           );
+        }
+
+        // Form Q Maharashtra / Form 25: warm attendance + payroll as soon as the modal opens.
+        {
+          const modalFileHint = String(displayFileName || '');
+          const formQModalOpen =
+            /form[\s_-]*q/i.test(modalFileHint) &&
+            !isFormQKarnatakaContext(
+              formHeaderForModal,
+              modalSourceItem,
+              modalFileHint,
+              sheetTextForVariant || ''
+            );
+          const form25ModalOpen =
+            /\bform[\s._-]*25\b/i.test(modalFileHint) ||
+            isForm25StatutoryContext({
+              fileName: modalFileHint,
+              formFileName: modalFileHint,
+              item: modalSourceItem,
+              formHeaderTitle: formHeaderForModal?.title,
+              formHeaderSubtitle: formHeaderForModal?.subtitle,
+              tableHeaders: tableHeadersForModal,
+            });
+          if (formQModalOpen || form25ModalOpen) {
+            runStatutoryBackgroundPrefetch(
+              selectedMonth,
+              modalSourceItem,
+              formHeaderForModal?.wagePeriodText || sheetTextForVariant || ''
+            );
+            prefetchPeopleDataFast();
+          }
         }
 
         const shouldAutofill = forceAutofill || isAutofillMode;
@@ -88308,10 +90163,20 @@ const Statutory = ({ userEmail, userRole }) => {
                             formFileModalData?.parsedFormHeader || {},
                             formFileModalData?.item
                           );
-                          if (form15Part1File) {
+                          const formXLeaveFile = isFormXLeaveSocialSecurityContext(
+                            formFileModalData?.parsedFormHeader || {},
+                            formFileModalData?.item,
+                            String(
+                              formFileModalData?.fileName ||
+                                formFileModalData?.formFileName ||
+                                ''
+                            ),
+                            formFileModalData?.sheetText || ''
+                          );
+                          if (form15Part1File || formXLeaveFile) {
                             const { fromDate, toDate } =
                               zohoBookedBalanceRangeForUiMonth(selectedMonth);
-                            prefetchLeaveData({ fromDate, toDate, unit: 'Day' });
+                            prefetchStoredLeaveData({ fromDate, toDate });
                           }
                           if (
                             isFormFLeaveWithWagesContext(
@@ -88335,7 +90200,18 @@ const Statutory = ({ userEmail, userRole }) => {
                           if (
                             /\bform[\s._-]*25\b/i.test(
                               String(formFileModalData?.fileName || formFileModalData?.formFileName || '')
-                            )
+                            ) ||
+                            (/form[\s_-]*q/i.test(
+                              String(formFileModalData?.fileName || formFileModalData?.formFileName || '')
+                            ) &&
+                              !isFormQKarnatakaContext(
+                                formFileModalData?.parsedFormHeader,
+                                formFileModalData?.item,
+                                String(
+                                  formFileModalData?.fileName || formFileModalData?.formFileName || ''
+                                ),
+                                formFileModalData?.sheetText || ''
+                              ))
                           ) {
                             const attOpts = buildStatutoryMonthPrefetchOptions(
                               selectedMonth,
@@ -88346,6 +90222,9 @@ const Statutory = ({ userEmail, userRole }) => {
                               sdate: attOpts.sdate,
                               edate: attOpts.edate,
                             });
+                            if (attOpts.payrollMonthCandidates?.length > 0) {
+                              prefetchPayrollTableRowsForMonths(attOpts.payrollMonthCandidates);
+                            }
                           }
                           fetchAndPopulateEmployeeData(
                             resolveStatutoryAutofillHeadersFromModal(

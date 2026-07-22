@@ -750,6 +750,95 @@ export function prefetchLeaveData(options = {}) {
   return fetchLeaveData({ fromDate, toDate, unit }).catch(() => null);
 }
 
+const STORED_LEAVE_CACHE_TTL_MS = 5 * 60 * 1000;
+/** @type {Map<string, { ts: number, data: object }>} */
+let storedLeaveMemory = new Map();
+/** @type {Map<string, Promise<object>>} */
+let storedLeaveInflight = new Map();
+
+function storedLeaveCacheKey(monthWise = '') {
+  return `LeaveData|${monthWise || 'all'}`;
+}
+
+function readStoredLeaveCacheRaw(monthWise = '') {
+  const key = storedLeaveCacheKey(monthWise);
+  const entry = storedLeaveMemory.get(key);
+  if (entry && Date.now() - entry.ts < STORED_LEAVE_CACHE_TTL_MS) return entry.data;
+  return null;
+}
+
+function writeStoredLeaveCache(monthWise, data) {
+  storedLeaveMemory.set(storedLeaveCacheKey(monthWise || ''), { ts: Date.now(), data });
+}
+
+/** Synchronous LeaveData table read when prefetch already ran. */
+export function getCachedStoredLeaveData(monthWise = '') {
+  return readStoredLeaveCacheRaw(monthWise) || readStoredLeaveCacheRaw('');
+}
+
+/**
+ * Fetch leave rows from Catalyst LeaveData table (no live Zoho People call).
+ * Used by Tamil Nadu Form 15 Part 1 and Form X.
+ */
+export function fetchStoredLeaveDataForAutofill(options = {}) {
+  const { force = false } = options;
+  const monthWise =
+    (options.monthWise && String(options.monthWise).trim()) ||
+    (options.fromDate && options.toDate
+      ? (() => {
+          const m = String(options.fromDate || '')
+            .trim()
+            .match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+          if (!m) return '';
+          const mon = MONTH_ABBR.findIndex((x) => x.toLowerCase() === m[2].toLowerCase());
+          if (mon < 0) return '';
+          return `${m[3]}-${String(mon + 1).padStart(2, '0')}`;
+        })()
+      : '');
+
+  const cached = readStoredLeaveCacheRaw(monthWise) || (!monthWise ? null : readStoredLeaveCacheRaw(''));
+  if (!force && cached) return Promise.resolve(cached);
+
+  const inflightKey = storedLeaveCacheKey(monthWise);
+  if (!force && storedLeaveInflight.has(inflightKey)) {
+    return storedLeaveInflight.get(inflightKey);
+  }
+
+  const timeoutMs = Math.max(5000, parseInt(options.timeoutMs, 10) || 60000);
+  const params = new URLSearchParams();
+  if (monthWise) params.set('monthWise', monthWise);
+  const qs = params.toString();
+  const url = `/server/leavedata_function/stored${qs ? `?${qs}` : ''}`;
+
+  const task = fetchJsonWithTimeout(
+    url,
+    { cache: 'no-store', credentials: 'include' },
+    timeoutMs
+  )
+    .then(({ resp, json: result }) => {
+      if (!resp.ok) {
+        throw new Error(result.error || result.message || 'Failed to load LeaveData table');
+      }
+      writeStoredLeaveCache(monthWise, result);
+      if (monthWise) writeStoredLeaveCache('', result);
+      return result;
+    })
+    .finally(() => {
+      storedLeaveInflight.delete(inflightKey);
+    });
+
+  storedLeaveInflight.set(inflightKey, task);
+  return task;
+}
+
+export function prefetchStoredLeaveData(options = {}) {
+  const monthWise = options.monthWise || '';
+  if (getCachedStoredLeaveData(monthWise)) {
+    return Promise.resolve(getCachedStoredLeaveData(monthWise));
+  }
+  return fetchStoredLeaveDataForAutofill(options).catch(() => null);
+}
+
 const APPROVED_LEAVE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function approvedLeaveCacheKey(fromDate, toDate) {

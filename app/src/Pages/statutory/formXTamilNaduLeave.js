@@ -1,21 +1,24 @@
 /**
  * Tamil Nadu Form X — Register of Leave and Social Security Benefits.
  *
- * Earned Leave  → Leave Fetch "Leave earned / availed during the Period"
- * Medical Leave → Contingency Leave (Leave API Balance / Booked for the month)
+ * Leave metrics are loaded from the Catalyst LeaveData table (populated by the
+ * Leave page), not from a live Zoho People leave API call.
+ *
+ * Earned Leave  → LeaveData "Leave earned / availed during the Period"
+ * Medical Leave → Contingency Leave (Balance / Booked for the month)
  * Other Leave   → Legacy Earned Leave
  *
- * Earned Leave (Leave Fetch only):
+ * Earned Leave (LeaveData only):
  *   Leave at the beginning of the Month = Leave earned during the Period + Leave availed during the Period
  *   Leave earned during the Period      = 0
  *   Leave availed during the Month      = Leave availed during the Period
  *   Leave balance at the end of the Month = Leave earned during the Period
  *
  * Other:
- *   Beginning of month = Leave API balance + approved LeaveCount for the month
+ *   Beginning of month = LeaveData balance + approved LeaveCount for the month
  *   Availed during month = sum of LeaveCount from approved leaves of that type.
  *
- * Medical (Contingency Leave) — Leave Fetch Balance/Booked only:
+ * Medical (Contingency Leave) — LeaveData Balance/Booked only:
  *   Leave at beginning of the Month = Balance + Booked
  *   Leave availed during the Month  = Booked (corresponding month)
  *   Leave balance at end of the Month = Balance

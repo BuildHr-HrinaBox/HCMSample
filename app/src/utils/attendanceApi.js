@@ -1,6 +1,7 @@
 /** Zoho People getUserReport returns at most 100 employees per request. */
 export const ATTENDANCE_PAGE_SIZE = 100;
-const ATTENDANCE_PAGE_DELAY_MS = 300;
+/** Short gap between Zoho pages — keeps Form Q / Form 25 / muster autofill responsive. */
+const ATTENDANCE_PAGE_DELAY_MS = 80;
 const API_BASE = '/server/attendance_function';
 
 function sleep(ms) {

@@ -1,4 +1,8 @@
-import { flattenPayrollEarningColumns, readPayrollNetPayForStatutory } from '../../utils/payrollEarnings';
+import {
+  flattenPayrollEarningColumns,
+  readForm10GrossPayAmount,
+  readPayrollNetPayForStatutory,
+} from '../../utils/payrollEarnings';
 import { isFormXIXRajasthanOvertimeRegisterContext } from './formXIXAPWageSlip';
 
 /** Rajasthan Form XIX — Register of Overtime [Rule 77(2)(e)] autofill helpers. */
@@ -385,10 +389,16 @@ export function resolveFormXIXRJNetPay(payrollRow) {
   return net === '' || net == null ? '' : String(net);
 }
 
+/** Normal rate ← gross_pay from Payroll / Zoho pay run. */
+export function resolveFormXIXRJGrossPay(payrollRow) {
+  const gross = readForm10GrossPayAmount(payrollRow);
+  return gross === '' || gross == null ? '' : String(gross);
+}
+
 /**
  * Fill Form XIX RJ overtime columns on one employee row.
- * Designation+Department from People; OT date/wages → Nil; Normal Hours → paid_days*8;
- * Normal/Total earnings → net_pay.
+ * Designation+Department from People; OT date/wages/rate/earnings/payment date → Nil;
+ * Normal Hours → paid_days*8; Normal rate → gross_pay; Normal/Total earnings → net_pay.
  */
 export function applyFormXIXRJOvertimeAutofillToRow(
   row,
@@ -411,6 +421,7 @@ export function applyFormXIXRJOvertimeAutofillToRow(
   let changed = false;
   const designationDept = resolveFormXIXRJDesignationAndDepartment(emp || {});
   const normalHours = resolveFormXIXRJNormalHours(payrollRow);
+  const grossPay = resolveFormXIXRJGrossPay(payrollRow);
   const netPay = resolveFormXIXRJNetPay(payrollRow);
 
   headers.forEach((header) => {
@@ -434,13 +445,33 @@ export function applyFormXIXRJOvertimeAutofillToRow(
       changed = true;
       return;
     }
+    if (isFormXIXRJNormalRateHeader(header) && grossPay !== '') {
+      setCell(header, grossPay);
+      changed = true;
+      return;
+    }
+    if (isFormXIXRJOvertimeRateHeader(header)) {
+      setCell(header, FORM_XIX_RJ_NIL);
+      changed = true;
+      return;
+    }
     if (isFormXIXRJNormalEarningsHeader(header) && netPay !== '') {
       setCell(header, netPay);
       changed = true;
       return;
     }
+    if (isFormXIXRJOvertimeEarningsHeader(header)) {
+      setCell(header, FORM_XIX_RJ_NIL);
+      changed = true;
+      return;
+    }
     if (isFormXIXRJTotalEarningsHeader(header) && netPay !== '') {
       setCell(header, netPay);
+      changed = true;
+      return;
+    }
+    if (isFormXIXRJOvertimePaymentDateHeader(header)) {
+      setCell(header, FORM_XIX_RJ_NIL);
       changed = true;
     }
   });
@@ -460,6 +491,41 @@ export function isFormXIXRJOvertimeAutofillContext(formHeader, rowItem, fileName
       /dates?\s+on\s+which\s+over[\s-]*time\s+work\s+was\s+put\s+in/.test(joined));
   if (!looksLikeRjOt) return false;
   return isFormXIXRajasthanOvertimeRegisterContext(formHeader, rowItem, fileName, joined);
+}
+
+/**
+ * Flatten modal/grid rows onto canonical Form XIX RJ headers for Excel download.
+ * Handles blank-spacer shift and renumbers Serial No. 1..N so export matches the autofill grid.
+ */
+export function prepareFormXIXRJOvertimeExportRows(rows, headers = null) {
+  const canon = resolveFormXIXRJTableHeaders(headers);
+  const remapped = remapFormXIXRJRowsToHeaders(
+    Array.isArray(rows) ? rows : [],
+    Array.isArray(headers) && headers.length > 0 ? headers : canon,
+    canon
+  );
+  const out = [];
+  remapped.forEach((row, rowIndex) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return;
+    const next = {};
+    Object.keys(row).forEach((k) => {
+      if (String(k).startsWith('__')) next[k] = row[k];
+    });
+    let hasName = false;
+    canon.forEach((header, colIndex) => {
+      const val = readFormXIXRJRowCell(row, header, colIndex, rowIndex);
+      next[header] = val;
+      if (colIndex === 1 && String(val || '').trim() && /[a-zA-Z]{2,}/.test(String(val))) {
+        hasName = true;
+      }
+    });
+    next[canon[0]] = String(out.length + 1);
+    const meaningful = Object.values(next).some(
+      (v) => v != null && String(v).trim() !== '' && !String(v).startsWith('__')
+    );
+    if (meaningful || hasName) out.push(next);
+  });
+  return out;
 }
 
 export { FORM_XIX_RJ_NIL };

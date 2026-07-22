@@ -584,3 +584,136 @@ export async function saveLeaveDataToBackend({
 
   return lastJson;
 }
+
+/**
+ * Rebuild leave-report-shaped record from a LeaveData datastore row.
+ * Used by Form X / Form 15 Part 1 so they can skip the live Zoho leave API.
+ */
+export function mapLeaveDataRowToLeaveRecord(row) {
+  if (!row || typeof row !== 'object') return null;
+  const employeeRaw = row.Employee ?? row.employee;
+  if (employeeRaw == null || String(employeeRaw).trim() === '') {
+    // Already a leave-report record (e.g. from /stored leaveRecords)
+    if (row.employee && typeof row.employee === 'object') return row;
+    return null;
+  }
+
+  if (row.employee && typeof row.employee === 'object' && row['Earned Leave']) {
+    return row;
+  }
+
+  const empStr = String(employeeRaw).trim();
+  const paren = empStr.match(/^(.*)\(([^)]+)\)\s*$/);
+  const employee = paren
+    ? { name: paren[1].trim(), id: String(paren[2]).trim() }
+    : { name: empStr };
+
+  const earnedBalance = row.LeaveearnedduringthePeriod;
+  const earnedBooked = row.LeaveavailedduringthePeriod;
+  const record = {
+    employee,
+    Employee: empStr,
+    Totals: row.Totals ?? '',
+    MonthWise: row.MonthWise ?? row.monthWise ?? '',
+    'Earned Leave': {
+      paidBalance:
+        earnedBalance != null && String(earnedBalance).trim() !== ''
+          ? String(earnedBalance).trim()
+          : '',
+      paidBooked:
+        earnedBooked != null && String(earnedBooked).trim() !== ''
+          ? String(earnedBooked).trim()
+          : '',
+    },
+  };
+
+  if (row.ContingencyLeave != null && String(row.ContingencyLeave).trim() !== '') {
+    record['Contingency Leave'] = row.ContingencyLeave;
+  }
+  if (row.LegacyEarnedLeave != null && String(row.LegacyEarnedLeave).trim() !== '') {
+    record['Legacy Earned Leave'] = row.LegacyEarnedLeave;
+  }
+  if (row.PaternityLeave != null && String(row.PaternityLeave).trim() !== '') {
+    record['Paternity Leave'] = row.PaternityLeave;
+  }
+  if (row.MaternityLeave != null && String(row.MaternityLeave).trim() !== '') {
+    record['Maternity Leave'] = row.MaternityLeave;
+  }
+  if (row.Absent != null && String(row.Absent).trim() !== '') {
+    record.Absent = row.Absent;
+  }
+  if (row.Earnedleave != null && String(row.Earnedleave).trim() !== '') {
+    record['Earned leave'] = row.Earnedleave;
+  }
+
+  return record;
+}
+
+/**
+ * Load leave rows from Catalyst LeaveData table (no live Zoho People call).
+ * Prefer this for Form 15 Part 1 / Form X autofill after Leave page has saved data.
+ */
+export async function fetchStoredLeaveData({
+  from,
+  to,
+  monthWise,
+  apiBase = API_BASE,
+  timeoutMs = 60000,
+} = {}) {
+  const resolvedMonth =
+    (monthWise && String(monthWise).trim()) || getLeaveMonthWise(from, to) || '';
+  const params = new URLSearchParams();
+  if (resolvedMonth) params.set('monthWise', resolvedMonth);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(5000, timeoutMs));
+  try {
+    const qs = params.toString();
+    const res = await fetch(`${apiBase}/stored${qs ? `?${qs}` : ''}`, {
+      cache: 'no-store',
+      credentials: 'include',
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let json = {};
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error(
+        `LeaveData load returned HTTP ${res.status} (not JSON). Redeploy leavedata_function and check Catalyst logs.`
+      );
+    }
+    if (!res.ok || json.success === false) {
+      throw new Error(json.error || json.message || `LeaveData load failed (HTTP ${res.status})`);
+    }
+
+    const leaveRecords = (
+      Array.isArray(json.leaveRecords)
+        ? json.leaveRecords
+        : Array.isArray(json.records)
+          ? json.records
+          : []
+    )
+      .map((row) => mapLeaveDataRowToLeaveRecord(row) || row)
+      .filter((row) => row && typeof row === 'object');
+
+    return {
+      success: true,
+      leaveRecords,
+      records: leaveRecords,
+      leaveTypeLabels: json.leaveTypeLabels || {},
+      meta: {
+        ...(json.meta && typeof json.meta === 'object' ? json.meta : {}),
+        source: 'LeaveData',
+        monthWise: resolvedMonth || null,
+      },
+    };
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error('LeaveData table request timed out');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}

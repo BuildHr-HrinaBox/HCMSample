@@ -167,23 +167,36 @@ function isFormBRJPlainTotalHeader(h) {
   return s === 'total' || /^total\b/.test(s);
 }
 
-/** Deduction total / deducation — Gross_pay minus net_pay (not Basic+HRA). */
-export function isFormBRJDeductionTotalHeader(header, headers = []) {
+export function isFormBRJOthersHeader(h) {
+  const s = normHeader(h);
+  return s === 'others' || /^others\b/.test(s);
+}
+
+/** Deduction total / deducation — gross_pay − net_pay (not gross_pay). */
+export function isFormBRJDeductionTotalHeader(header, headers = [], headerIndex = null) {
   const s = normHeader(header);
   if (!s) return false;
-  if (s.includes('deduction') || s.includes('deducation')) return true;
+  if (
+    (s.includes('deduction') || s.includes('deducation')) &&
+    (s.includes('total') || s === 'deduction' || s === 'deducation')
+  ) {
+    return true;
+  }
   const list = Array.isArray(headers) ? headers : [];
   if (!isFormBRJPlainTotalHeader(header)) return false;
-  const idx = list.indexOf(header);
+  const idx =
+    Number.isInteger(headerIndex) && headerIndex >= 0 ? headerIndex : list.indexOf(header);
+  if (idx < 0) return false;
   const totalIndices = list
     .map((h, i) => (isFormBRJPlainTotalHeader(h) ? i : -1))
     .filter((i) => i >= 0);
+  // Last plain "Total" is Deduction → Total (duplicate labels break indexOf).
   return totalIndices.length >= 2 && idx === totalIndices[totalIndices.length - 1];
 }
 
 /** Earnings total — Basic + HRA only. */
-export function isFormBRJEarningsTotalHeader(header, headers = []) {
-  if (isFormBRJDeductionTotalHeader(header, headers)) return false;
+export function isFormBRJEarningsTotalHeader(header, headers = [], headerIndex = null) {
+  if (isFormBRJDeductionTotalHeader(header, headers, headerIndex)) return false;
   return isFormBRJPlainTotalHeader(header);
 }
 
@@ -216,6 +229,7 @@ export function isFormBRJSkipPeopleAutofillHeader(h) {
     isFormBRJSpecialBasicHeader(h) ||
     isFormBRJDaHeader(h) ||
     isFormBRJHraHeader(h) ||
+    isFormBRJOthersHeader(h) ||
     isFormBRJEarningsTotalHeader(h) ||
     isFormBRJDeductionTotalHeader(h) ||
     isFormBRJNetPaymentHeader(h) ||
@@ -235,7 +249,14 @@ export function formBRJHeaderAliasBucket(norm) {
   if (/\bover[\s-]*time\b/.test(n) && (n.includes('payment') || n.includes('pay'))) return 'paymentsOvertime';
   if (n === 'basic' || /^basic\b/.test(n)) return 'basic';
   if (n === 'hra' || /\bhra\b/.test(n) || (n.includes('house') && n.includes('rent'))) return 'hra';
-  if (n.includes('deduction') || n.includes('deducation')) return 'deductionTotal';
+  if (n === 'others' || /^others\b/.test(n)) return 'others';
+  if (
+    ((n.includes('deduction') || n.includes('deducation')) && n.includes('total')) ||
+    n === 'deduction' ||
+    n === 'deducation'
+  ) {
+    return 'deductionTotal';
+  }
   if (n.includes('net') && (n.includes('payment') || n.includes('payable') || n.includes('paid'))) {
     return 'netPay';
   }
@@ -348,6 +369,7 @@ function formatBRJPayrollPayDate(payDateRaw) {
 }
 
 export function resolveFormBRajasthanPayrollFields(payrollRow, helpers = {}) {
+  const monthEndDate = String(helpers.monthEndDate || '').trim();
   const empty = {
     paidDays: '',
     overtimeHours: FORM_B_RJ_NIL,
@@ -357,7 +379,7 @@ export function resolveFormBRajasthanPayrollFields(payrollRow, helpers = {}) {
     earningsTotal: '',
     deductionsTotal: '',
     netPay: '',
-    paymentDate: '',
+    paymentDate: monthEndDate,
   };
   if (!payrollRow || payrollRow.fetch_error) return empty;
 
@@ -397,26 +419,24 @@ export function resolveFormBRajasthanPayrollFields(payrollRow, helpers = {}) {
 
   const grossN = parsePayrollNumber(grossPay);
   const netN = parsePayrollNumber(netPay);
-  const deductionsTotal =
-    Number.isFinite(grossN) && Number.isFinite(netN)
-      ? Math.round((grossN - netN) * 100) / 100
-      : '';
+  let deductionsTotal = '';
+  if (Number.isFinite(grossN) && Number.isFinite(netN)) {
+    deductionsTotal = Math.round((grossN - netN) * 100) / 100;
+    if (deductionsTotal < 0) deductionsTotal = '';
+  }
 
   const earningsTotal = sumPayrollNumbers([basic, hra]);
 
-  const payDateRaw =
-    readPayrollTextScalar(
-      { ...flat, ...payrollRow },
-      ['pay_date', 'Pay Date', 'payment_date', 'Payment Date', 'paid_date', 'date_of_payment', 'Date of Payment'],
-      [/^pay_date$/, /payment.*date/i, /^paid_date$/]
-    ) ||
-    String(payrollRow?.pay_date ?? flat?.pay_date ?? helpers.payDate ?? '').trim();
-
+  // Date of Payment → month end (selected wage month), not payroll pay_date.
   const paymentDate =
-    formatBRJPayrollPayDate(payDateRaw) ||
-    (typeof helpers.formatStatutoryDateDisplay === 'function'
-      ? helpers.formatStatutoryDateDisplay(payDateRaw)
-      : payDateRaw);
+    monthEndDate ||
+    formatBRJPayrollPayDate(
+      readPayrollTextScalar(
+        { ...flat, ...payrollRow },
+        ['pay_date', 'Pay Date', 'payment_date', 'Payment Date', 'paid_date', 'date_of_payment', 'Date of Payment'],
+        [/^pay_date$/, /payment.*date/i, /^paid_date$/]
+      ) || String(payrollRow?.pay_date ?? flat?.pay_date ?? helpers.payDate ?? '').trim()
+    );
 
   return {
     paidDays,
@@ -447,6 +467,7 @@ export function enrichFormBRajasthanPayrollRows(mappedData, employees, headers, 
     sanitizeValue = (v) => String(v ?? '').trim(),
     formatStatutoryDateDisplay = (v) => String(v || '').trim(),
     payDate = '',
+    monthEndDate = '',
     overwrite = true,
     rowIndexOffset = 0,
   } = helpers;
@@ -468,6 +489,7 @@ export function enrichFormBRajasthanPayrollRows(mappedData, employees, headers, 
       sanitizeValue,
       formatStatutoryDateDisplay,
       payDate,
+      monthEndDate,
       payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
       rowIndex: rowIndexOffset + rowIndex,
       overwrite,
@@ -487,6 +509,7 @@ export function applyFormBRajasthanEmployeeToRow(row, emp, headers, helpers = {}
     rowIndex = 0,
     formatStatutoryDateDisplay = (v) => String(v || '').trim(),
     payDate = '',
+    monthEndDate = '',
     overwrite = true,
   } = helpers;
 
@@ -504,12 +527,12 @@ export function applyFormBRajasthanEmployeeToRow(row, emp, headers, helpers = {}
 
   const payroll = resolveFormBRajasthanPayrollFields(
     payrollRow && !payrollRow.fetch_error ? payrollRow : null,
-    { formatStatutoryDateDisplay, payDate }
+    { formatStatutoryDateDisplay, payDate, monthEndDate }
   );
   const fullName = readEmployeeFullName(emp);
   if (fullName) out.__employeeLookupName = fullName;
 
-  hdrs.forEach((header) => {
+  hdrs.forEach((header, headerIndex) => {
     if (isFormBRJSerialHeader(header)) {
       setCell(header, String(rowIndex + 1), { allowZero: true });
       return;
@@ -542,11 +565,16 @@ export function applyFormBRajasthanEmployeeToRow(row, emp, headers, helpers = {}
       setCell(header, payroll.hra);
       return;
     }
-    if (isFormBRJDeductionTotalHeader(header, hdrs)) {
+    if (isFormBRJOthersHeader(header)) {
+      // Deduction → Others stays blank (do not fetch payroll residual).
+      if (overwrite || cellIsEmpty(header)) out[header] = '';
+      return;
+    }
+    if (isFormBRJDeductionTotalHeader(header, hdrs, headerIndex)) {
       setCell(header, payroll.deductionsTotal, { allowZero: true });
       return;
     }
-    if (isFormBRJEarningsTotalHeader(header, hdrs)) {
+    if (isFormBRJEarningsTotalHeader(header, hdrs, headerIndex)) {
       setCell(header, payroll.earningsTotal);
       return;
     }
@@ -723,6 +751,15 @@ function detectFormBRajasthanTableLayout(worksheet, hints = {}) {
     if (templateCols.length >= 30) break;
   }
   if (templateCols.length < 4) return null;
+
+  // Disambiguate duplicate plain "Total" columns: last → Deduction Total.
+  const plainTotalIdxs = templateCols
+    .map((entry, i) => (entry.bucket === 'earningsTotal' ? i : -1))
+    .filter((i) => i >= 0);
+  if (plainTotalIdxs.length >= 2) {
+    const lastIdx = plainTotalIdxs[plainTotalIdxs.length - 1];
+    templateCols[lastIdx] = { ...templateCols[lastIdx], bucket: 'deductionTotal' };
+  }
 
   const dataStartRow =
     hints.parsedDataStartIndex != null && hints.parsedDataStartIndex >= 0

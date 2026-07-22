@@ -46,12 +46,46 @@ function cloneExcelJSStyle(style) {
   }
 }
 
-const DEFAULT_ALL_BORDERS = {
+export const EXCELJS_THIN_BLACK_BOX_BORDER = {
   top: { style: 'thin', color: { argb: 'FF000000' } },
   left: { style: 'thin', color: { argb: 'FF000000' } },
   bottom: { style: 'thin', color: { argb: 'FF000000' } },
   right: { style: 'thin', color: { argb: 'FF000000' } }
 };
+
+const DEFAULT_ALL_BORDERS = EXCELJS_THIN_BLACK_BOX_BORDER;
+
+/** Apply a full thin box border to every cell in [rowFrom..rowTo] × [colFrom..colTo] (1-based). */
+export function applyExcelJSFullBoxBordersToRange(
+  worksheet,
+  { rowFrom, rowTo, colFrom, colTo } = {}
+) {
+  if (!worksheet) return;
+  const r0 = Math.max(1, Number(rowFrom) || 1);
+  const r1 = Math.max(r0, Number(rowTo) || r0);
+  const c0 = Math.max(1, Number(colFrom) || 1);
+  const c1 = Math.max(c0, Number(colTo) || c0);
+  for (let r = r0; r <= r1; r += 1) {
+    for (let c = c0; c <= c1; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      // Fresh border object every cell — ExcelJS shares style refs if reused.
+      const box = {
+        top: { style: 'thin', color: { argb: 'FF000000' } },
+        left: { style: 'thin', color: { argb: 'FF000000' } },
+        bottom: { style: 'thin', color: { argb: 'FF000000' } },
+        right: { style: 'thin', color: { argb: 'FF000000' } }
+      };
+      // Set both ways so borders survive ExcelJS writeBuffer after SheetJS round-trips.
+      cell.border = box;
+      try {
+        const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+        cell.style = { ...prev, border: box };
+      } catch (_) {
+        /* border property above is enough for most ExcelJS versions */
+      }
+    }
+  }
+}
 
 /** First row in [rowFrom, rowTo] that has at least one bordered cell. */
 export function findExcelJSTemplateBorderRow(worksheet, rowFrom, rowTo, colFrom, colTo) {
@@ -139,8 +173,6 @@ export function applyExcelJSDataRowBorders(
     }
   }
 
-  const defaultBorder = cloneExcelJSBorder(DEFAULT_ALL_BORDERS);
-
   for (let r = r0; r <= r1; r += 1) {
     for (let c = c0; c <= c1; c += 1) {
       const dst = worksheet.getCell(r, c);
@@ -158,14 +190,38 @@ export function applyExcelJSDataRowBorders(
       }
 
       if (forceFullBox) {
-        dst.border = defaultBorder;
+        // Fresh border object per cell — ExcelJS shares style refs if reused.
+        dst.border = {
+          top: { style: 'thin', color: { argb: 'FF000000' } },
+          left: { style: 'thin', color: { argb: 'FF000000' } },
+          bottom: { style: 'thin', color: { argb: 'FF000000' } },
+          right: { style: 'thin', color: { argb: 'FF000000' } }
+        };
       } else if (!excelJSCellHasFullBoxBorder(dst)) {
         if (excelJSCellHasBorder(src)) {
           const border = cloneExcelJSBorder(src.border);
-          if (border) dst.border = border;
-          else dst.border = defaultBorder;
+          if (border) {
+            dst.border = {
+              top: border.top ? { ...border.top } : undefined,
+              left: border.left ? { ...border.left } : undefined,
+              bottom: border.bottom ? { ...border.bottom } : undefined,
+              right: border.right ? { ...border.right } : undefined
+            };
+          } else {
+            dst.border = {
+              top: { style: 'thin', color: { argb: 'FF000000' } },
+              left: { style: 'thin', color: { argb: 'FF000000' } },
+              bottom: { style: 'thin', color: { argb: 'FF000000' } },
+              right: { style: 'thin', color: { argb: 'FF000000' } }
+            };
+          }
         } else {
-          dst.border = defaultBorder;
+          dst.border = {
+            top: { style: 'thin', color: { argb: 'FF000000' } },
+            left: { style: 'thin', color: { argb: 'FF000000' } },
+            bottom: { style: 'thin', color: { argb: 'FF000000' } },
+            right: { style: 'thin', color: { argb: 'FF000000' } }
+          };
         }
       }
     }

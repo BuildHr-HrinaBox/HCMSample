@@ -1,7 +1,7 @@
 /**
  * Tamil Nadu Form 15 Part I — Register of Leave with Wages.
  *
- * Leave columns use the same Zoho Leave Fetch mapping as Tamil Nadu Form X
+ * Leave columns use the same LeaveData-table mapping as Tamil Nadu Form X
  * (Register of Leave and Social Security Benefits):
  *
  * Earned Leave:
@@ -16,7 +16,7 @@
  *   Leave balance at end of the Month = Balance
  *
  * Other Leave (Legacy Earned Leave), when the template includes that band:
- *   Beginning / availed / end balance from Leave API + approved LeaveCount (Form X rules).
+ *   Beginning / availed / end balance from LeaveData + approved LeaveCount (Form X rules).
  */
 
 import {

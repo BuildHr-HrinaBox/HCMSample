@@ -323,6 +323,178 @@ async function persistLeaveDataRows(catalyst, records, { replaceExisting = true,
   };
 }
 
+function unwrapLeaveDataStoreRow(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const cell = entry[LEAVE_DATA_TABLE] || entry;
+  return cell && typeof cell === 'object' ? cell : null;
+}
+
+function parseEmployeeFromLeaveDataCell(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const m = s.match(/^(.*)\(([^)]+)\)\s*$/);
+  if (m) {
+    return { name: m[1].trim(), id: String(m[2]).trim() };
+  }
+  return { name: s };
+}
+
+/**
+ * Rebuild a leave-report-shaped record from a LeaveData datastore row so Form X /
+ * Form 15 Part 1 can reuse existing leave metric helpers.
+ */
+function mapLeaveDataStoreRowToLeaveRecord(row) {
+  const cell = unwrapLeaveDataStoreRow(row) || row;
+  if (!cell || typeof cell !== 'object') return null;
+  const employeeRaw = cell.Employee ?? cell.employee;
+  const employee = parseEmployeeFromLeaveDataCell(employeeRaw);
+  if (!employee) return null;
+
+  const earnedBalance = cell.LeaveearnedduringthePeriod;
+  const earnedBooked = cell.LeaveavailedduringthePeriod;
+  const record = {
+    employee,
+    Employee: String(employeeRaw).trim(),
+    Totals: cell.Totals ?? '',
+    MonthWise: cell.MonthWise ?? cell.monthWise ?? '',
+    'Earned Leave': {
+      paidBalance:
+        earnedBalance != null && String(earnedBalance).trim() !== ''
+          ? String(earnedBalance).trim()
+          : '',
+      paidBooked:
+        earnedBooked != null && String(earnedBooked).trim() !== ''
+          ? String(earnedBooked).trim()
+          : '',
+    },
+  };
+
+  if (cell.ContingencyLeave != null && String(cell.ContingencyLeave).trim() !== '') {
+    record['Contingency Leave'] = cell.ContingencyLeave;
+  }
+  if (cell.LegacyEarnedLeave != null && String(cell.LegacyEarnedLeave).trim() !== '') {
+    record['Legacy Earned Leave'] = cell.LegacyEarnedLeave;
+  }
+  if (cell.PaternityLeave != null && String(cell.PaternityLeave).trim() !== '') {
+    record['Paternity Leave'] = cell.PaternityLeave;
+  }
+  if (cell.MaternityLeave != null && String(cell.MaternityLeave).trim() !== '') {
+    record['Maternity Leave'] = cell.MaternityLeave;
+  }
+  if (cell.Absent != null && String(cell.Absent).trim() !== '') {
+    record.Absent = cell.Absent;
+  }
+  if (cell.Earnedleave != null && String(cell.Earnedleave).trim() !== '') {
+    record['Earned leave'] = cell.Earnedleave;
+  }
+
+  return record;
+}
+
+async function loadAllLeaveDataStoreRows(catalyst) {
+  const table = catalyst.datastore().table(LEAVE_DATA_TABLE);
+  const byId = new Map();
+
+  const stash = (row) => {
+    const cell = unwrapLeaveDataStoreRow(row);
+    if (!cell) return;
+    const id = cell.ROWID ?? cell.rowid;
+    if (id != null) byId.set(String(id), cell);
+    else byId.set(`anon-${byId.size}`, cell);
+  };
+
+  try {
+    if (typeof table.getIterableRows === 'function') {
+      for await (const row of table.getIterableRows()) {
+        stash(row);
+      }
+    }
+  } catch (err) {
+    console.warn('LeaveData getIterableRows failed:', err.message || err);
+  }
+
+  if (byId.size === 0) {
+    try {
+      const rows = await table.getAllRows();
+      (Array.isArray(rows) ? rows : []).forEach(stash);
+    } catch (err) {
+      console.warn('LeaveData getAllRows failed:', err.message || err);
+    }
+  }
+
+  if (byId.size === 0) {
+    try {
+      const zcql = catalyst.zcql();
+      const rows = await zcql.executeZCQLQuery(`SELECT * FROM ${LEAVE_DATA_TABLE}`);
+      (Array.isArray(rows) ? rows : []).forEach(stash);
+    } catch (err) {
+      console.warn('LeaveData ZCQL SELECT * failed:', err.message || err);
+    }
+  }
+
+  return [...byId.values()];
+}
+
+function filterLeaveDataRowsByMonth(rows, monthWise) {
+  const month = String(monthWise || '').trim();
+  if (!month) return { rows, matchedMonth: null };
+  const exact = rows.filter((row) => String(row.MonthWise || row.monthWise || '').trim() === month);
+  if (exact.length > 0) return { rows: exact, matchedMonth: month };
+
+  // Prefer the newest MonthWise group when the requested month has no snapshot.
+  const months = [
+    ...new Set(
+      rows
+        .map((row) => String(row.MonthWise || row.monthWise || '').trim())
+        .filter(Boolean)
+    ),
+  ].sort();
+  if (months.length === 0) return { rows, matchedMonth: null };
+  const latest = months[months.length - 1];
+  return {
+    rows: rows.filter((row) => String(row.MonthWise || row.monthWise || '').trim() === latest),
+    matchedMonth: latest,
+  };
+}
+
+async function handleLeaveDataStoreGet(req, res) {
+  try {
+    const { catalyst } = res.locals;
+    if (!catalyst) {
+      res.status(500).json({ success: false, error: 'Catalyst init failed' });
+      return;
+    }
+    const monthWise =
+      readQueryParam(req, 'monthWise') ||
+      readQueryParam(req, 'month') ||
+      readQueryParam(req, 'MonthWise') ||
+      '';
+    const allRows = await loadAllLeaveDataStoreRows(catalyst);
+    const { rows, matchedMonth } = filterLeaveDataRowsByMonth(allRows, monthWise);
+    const leaveRecords = rows.map(mapLeaveDataStoreRowToLeaveRecord).filter(Boolean);
+
+    res.status(200).json({
+      success: true,
+      leaveRecords,
+      records: leaveRecords,
+      leaveTypeLabels: {},
+      meta: {
+        source: 'LeaveData',
+        count: leaveRecords.length,
+        requestedMonthWise: monthWise || null,
+        matchedMonthWise: matchedMonth,
+        totalInTable: allRows.length,
+      },
+    });
+  } catch (err) {
+    console.error('leavedata_function stored load error:', err.message || err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to load LeaveData table',
+    });
+  }
+}
+
 const DEFAULT_ZOHO_CLIENT_ID = '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
 const DEFAULT_ZOHO_CLIENT_SECRET = 'b6d3935145d59974934b981d6291b40af69a3ab150';
 const DEFAULT_LEAVE_REFRESH_TOKEN =
@@ -801,8 +973,12 @@ app.use((req, res, next) => {
     res.locals.catalyst = catalystSDK.initialize(req);
     next();
   } catch (err) {
-    // GET fetch does not need Catalyst datastore; only fail hard for POST save.
-    if (String(req.method || '').toUpperCase() === 'POST') {
+    const method = String(req.method || '').toUpperCase();
+    const path = String(req.path || req.url || '');
+    const needsCatalyst =
+      method === 'POST' || /\/stored(?:\?|$)/i.test(path) || path === '/stored';
+    // Live Zoho GET / does not need Catalyst datastore; /stored and POST do.
+    if (needsCatalyst) {
       res.status(500).json({ success: false, error: 'Catalyst init failed' });
       return;
     }
@@ -812,6 +988,7 @@ app.use((req, res, next) => {
 });
 
 app.get('/', handleLeaveFetch);
+app.get('/stored', handleLeaveDataStoreGet);
 
 app.post('/save', async (req, res) => {
   try {

@@ -1,3 +1,8 @@
+import {
+  readForm10GrossPayAmount,
+  readPayrollForm15WageAmounts,
+} from '../../utils/payrollEarnings';
+
 /** Form XXIII Tamil Nadu — Register of Overtime [See Rule 78(1)(a)(iii)]. */
 
 /** Form XXIII TN overtime columns that always default to NIL (no attendance/payroll OT). */
@@ -60,7 +65,14 @@ export function isFormXXIIITamilNaduTotalOvertimeWorkedHeader(h) {
   );
 }
 
-/** Overtime rate of wages */
+/** Normal rate of wages ← SamplePayroll gross_pay */
+export function isFormXXIIITamilNaduNormalRateHeader(h) {
+  const s = normFormXXIIITamilNaduHeader(h);
+  if (!s || /over[\s-]*time/.test(s)) return false;
+  return s.includes('normal') && s.includes('rate') && (s.includes('wage') || s.includes('pay'));
+}
+
+/** Overtime rate of wages ← (Basic / 26 / 8) * 2 */
 export function isFormXXIIITamilNaduOvertimeRateHeader(h) {
   const s = normFormXXIIITamilNaduHeader(h);
   if (!s || /normal/.test(s)) return false;
@@ -86,10 +98,30 @@ export function isFormXXIIITamilNaduOtNilHeader(header) {
   return (
     isFormXXIIITamilNaduOtWorkedDatesHeader(header) ||
     isFormXXIIITamilNaduTotalOvertimeWorkedHeader(header) ||
-    isFormXXIIITamilNaduOvertimeRateHeader(header) ||
     isFormXXIIITamilNaduOvertimeEarningsHeader(header) ||
     isFormXXIIITamilNaduOtWagesPaidDateHeader(header)
   );
+}
+
+/** Normal rate of wages ← gross_pay. */
+export function resolveFormXXIIITamilNaduNormalRate(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const gross = readForm10GrossPayAmount(payrollRow);
+  return gross === '' || gross == null ? '' : String(gross);
+}
+
+/**
+ * Overtime rate of wages = (Basic / 26 / 8) * 2
+ * Basic from payroll wage breakdown (basic / earned_basic).
+ */
+export function resolveFormXXIIITamilNaduOvertimeRate(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const { basic } = readPayrollForm15WageAmounts(payrollRow);
+  const basicNum = Number(basic);
+  if (!Number.isFinite(basicNum) || basicNum <= 0) return '';
+  const rate = (basicNum / 26 / 8) * 2;
+  if (!Number.isFinite(rate) || rate <= 0) return '';
+  return String(Math.round(rate * 100) / 100);
 }
 
 export function applyFormXXIIITamilNaduOtNilToRow(row, headers, helpers = {}) {

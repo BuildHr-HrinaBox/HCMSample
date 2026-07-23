@@ -292,3 +292,135 @@ export function countExcelJSTemplateBodyRows(worksheet, dataStartRow, colFrom, c
   }
   return Math.max(rows, 1);
 }
+
+/** Plain display text from an ExcelJS cell value (for alignment checks). */
+export function statutoryCellValueToPlainText(value) {
+  if (value == null || value === '') return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value).trim();
+  }
+  if (value instanceof Date) {
+    try {
+      return value.toLocaleDateString('en-IN');
+    } catch (_) {
+      return value.toISOString().slice(0, 10);
+    }
+  }
+  if (typeof value === 'object') {
+    if (Array.isArray(value.richText)) {
+      return value.richText
+        .map((p) => p?.text || '')
+        .join('')
+        .trim();
+    }
+    if (value.text != null) return String(value.text).trim();
+    if (value.result != null) return statutoryCellValueToPlainText(value.result);
+    if (value.w != null && String(value.w).trim() !== '') return String(value.w).trim();
+    if (value.hyperlink != null && value.text != null) return String(value.text).trim();
+    if (value.v != null) return statutoryCellValueToPlainText(value.v);
+  }
+  return String(value).trim();
+}
+
+/**
+ * True for pure numeric display values (amounts, counts, hours).
+ * Text / codes / dates with separators stay non-numeric.
+ * e.g. 77765, 7,776.50, ₹1200, 12% → true; hhhbhj, VE123, P, 23-07-2026 → false
+ */
+export function isStatutoryNumericCellValue(value) {
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (value instanceof Date) return false;
+  const raw = statutoryCellValueToPlainText(value);
+  if (!raw) return false;
+  let s = raw.replace(/,/g, '').trim();
+  s = s.replace(/^[₹$€£]\s?/, '').trim();
+  if (/^\((.+)\)$/.test(s)) {
+    s = `-${RegExp.$1}`.replace(/,/g, '').trim();
+  }
+  if (/%$/.test(s)) s = s.replace(/%$/, '').trim();
+  if (!s) return false;
+  return /^-?\d+(\.\d+)?$/.test(s);
+}
+
+/**
+ * Form Number / See Rule / Form Name title band (Form XXIII model).
+ * These stay center-aligned on draft download — never forced left.
+ */
+export function isStatutoryFormTitleBandText(text) {
+  const t = String(text || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t || t.length > 140) return false;
+  const lower = t.toLowerCase();
+
+  // Form number: FORM XXIII, FORM - W, Form XXVI, Form U, Form 25, FORM-W
+  if (
+    /^\*?form[\s._-]*([a-z]{1,5}|[ivxlcdm]+|\d+[a-z]?)\b/i.test(t) &&
+    t.length <= 72 &&
+    !/name and address|nature and location/i.test(lower)
+  ) {
+    return true;
+  }
+
+  // Rule / sub-rule citation line
+  if (
+    (/see\s+(sub-)?rule/i.test(lower) || /^\*?\[?\s*see\s+/i.test(lower) || /\(see\s+/i.test(lower)) &&
+    t.length <= 120
+  ) {
+    return true;
+  }
+
+  // Form name / register title — short, no "Label : value" field
+  if (/name and address|nature and location|principal employer|wage period from/i.test(lower)) {
+    return false;
+  }
+  // Allow "Label: value" only when it is a see-rule line; otherwise field lines stay as-is
+  if (/:/.test(t) && !/see\s+(sub-)?rule/i.test(lower)) return false;
+
+  if (/^register\s+of\b/i.test(t) && t.length <= 100) return true;
+  if (/^muster\s+roll\b/i.test(t) && t.length <= 100) return true;
+  if (/^list\s+of\b/i.test(t) && t.length <= 100) return true;
+  if (/^notice\s+of\b/i.test(t) && t.length <= 100) return true;
+  if (/^identity\s+card\b/i.test(t) && t.length <= 100) return true;
+  if (/^wage\s+slip\b/i.test(t) && t.length <= 100) return true;
+  if (/^combined\s+muster\b/i.test(t) && t.length <= 100) return true;
+  if (/^register\s+of\s+overtime\b/i.test(t)) return true;
+  return false;
+}
+
+/**
+ * Download alignment:
+ * - Form Number / Rule / Form Name → center
+ * - Numeric values → right
+ * - No left-align override for text (keeps template centering)
+ */
+export function applyStatutoryDownloadContentAlignment(worksheet) {
+  if (!worksheet) return;
+  worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+    row.eachCell({ includeEmpty: false }, (cell) => {
+      const text = statutoryCellValueToPlainText(cell?.value);
+      if (!text) return;
+      if (/^this\s+is\s+a\s+system\s+generated\s+document\.?$/i.test(text)) return;
+
+      const next = {
+        ...(cell.alignment || {}),
+        vertical: cell.alignment?.vertical || 'middle',
+        wrapText: cell.alignment?.wrapText != null ? cell.alignment.wrapText : true
+      };
+
+      // Always center Form Number / Rule / Form Name (do not leave/force left).
+      if (rowNumber <= 20 && isStatutoryFormTitleBandText(text)) {
+        next.horizontal = 'center';
+        cell.alignment = next;
+        return;
+      }
+
+      // Numbers only — never force normal text to left.
+      if (isStatutoryNumericCellValue(cell?.value)) {
+        next.horizontal = 'right';
+        cell.alignment = next;
+      }
+    });
+  });
+}

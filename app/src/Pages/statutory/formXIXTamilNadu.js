@@ -35,6 +35,7 @@ export const FORM_XIX_TN_TABLE_HEADERS = [
   'Nature of Work',
   'Basic',
   'Dearness Allowance',
+  'House Rent Allowance',
   'Leave with Wages Including Cash in Lieu of Kinds',
   'Other Allowances',
   'Gross Wages',
@@ -149,6 +150,14 @@ export const FORM_XIX_TN_TEMPLATE_SPECS = [
     group: 'wages',
     match: /^dearness\s+allowance/i,
     valueRow: 10,
+    valueCol: 1,
+  },
+  {
+    key: 'form_xix_tn_hra',
+    label: 'House Rent Allowance',
+    group: 'wages',
+    match: /^house\s+rent\s+allowance|^hra$/i,
+    valueRow: 11,
     valueCol: 1,
   },
   {
@@ -333,6 +342,11 @@ export function isFormXIXTamilNaduDearnessHeader(h) {
   return /dearness\s+allowance/.test(formXIXTamilNaduHeaderNorm(h));
 }
 
+export function isFormXIXTamilNaduHraHeader(h) {
+  const s = formXIXTamilNaduHeaderNorm(h);
+  return /house\s+rent\s+allowance/.test(s) || /^hra$/.test(s);
+}
+
 export function isFormXIXTamilNaduLeaveWagesHeader(h) {
   return /leave\s+with\s+wages/.test(formXIXTamilNaduHeaderNorm(h));
 }
@@ -396,6 +410,7 @@ export function isFormXIXTamilNaduSkipPeopleAutofillHeader(h) {
     isFormXIXTamilNaduNatureOfWorkHeader(h) ||
     isFormXIXTamilNaduBasicHeader(h) ||
     isFormXIXTamilNaduDearnessHeader(h) ||
+    isFormXIXTamilNaduHraHeader(h) ||
     isFormXIXTamilNaduLeaveWagesHeader(h) ||
     isFormXIXTamilNaduOtherAllowancesHeader(h) ||
     isFormXIXTamilNaduGrossHeader(h) ||
@@ -438,6 +453,7 @@ export function resolveFormXIXTamilNaduWageComputationFields(payrollRow) {
     return {
       basic: '',
       dearnessAllowance: '',
+      houseRentAllowance: '',
       leaveWithWages: 'NIL',
       otherAllowances: '',
       grossWages: '',
@@ -455,7 +471,9 @@ export function resolveFormXIXTamilNaduWageComputationFields(payrollRow) {
 
   const basic = moneyText(flat.basic ?? flat.earned_basic);
   const dearnessAllowance = moneyText(flat.dearness_allowance);
-  const hra = moneyText(flat.hra_fbp ?? flat.hra);
+  const houseRentAllowance = moneyText(
+    flat.hra_fbp ?? flat.hra ?? flat.house_rent_allowance ?? flat['House Rent Allowance']
+  );
   const grossWages = moneyText(flat.gross_pay);
   const netWages = moneyText(flat.net_pay);
   let otherAllowances = moneyText(flat.other_allowance);
@@ -463,7 +481,7 @@ export function resolveFormXIXTamilNaduWageComputationFields(payrollRow) {
     const g = Number(grossWages);
     const b = Number(basic) || 0;
     const d = Number(dearnessAllowance) || 0;
-    const h = Number(hra) || 0;
+    const h = Number(houseRentAllowance) || 0;
     if (Number.isFinite(g)) otherAllowances = moneyText(Math.max(0, g - b - d - h));
   }
 
@@ -526,6 +544,7 @@ export function resolveFormXIXTamilNaduWageComputationFields(payrollRow) {
   return {
     basic,
     dearnessAllowance,
+    houseRentAllowance,
     leaveWithWages,
     otherAllowances,
     grossWages,
@@ -712,6 +731,10 @@ export function applyFormXIXTamilNaduEmployeeToRow(row, emp, headers, helpers = 
     }
     if (isFormXIXTamilNaduDearnessHeader(header)) {
       out[header] = sanitizeValue(wages.dearnessAllowance);
+      return;
+    }
+    if (isFormXIXTamilNaduHraHeader(header)) {
+      out[header] = sanitizeValue(wages.houseRentAllowance);
       return;
     }
     if (isFormXIXTamilNaduLeaveWagesHeader(header)) {

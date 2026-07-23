@@ -3,10 +3,10 @@ import { resolveFormWTamilNaduDefaultPayroll } from './formWTamilNadu';
 /**
  * Tamil Nadu Form B — Register of Wages (LWF monthly summary, one row).
  * Form_B_-_TamilNadu.xlsx payroll column mapping:
- * - Total emoluments … → sum of corresponding employees' (basic + hra)
+ * - Total emoluments … → sum of corresponding employees' gross_pay
  * - Other deductions → sum of (gross_pay − basic − hra)
- * - Amount actually paid during the month → sum of gross_pay
- * - Balance due to the employees → sum of net_pay
+ * - Amount actually paid during the month → sum of net_pay
+ * - Balance due to the employees → 0 when (gross_pay − net_pay) equals net_pay (wages paid)
  */
 
 /** True when Form B TN should show company (not site) as establishment. */
@@ -138,6 +138,24 @@ export function computeFormBTamilNaduOtherDeductions(grossPay, basic, hra) {
   return other;
 }
 
+/**
+ * Balance due to the employees.
+ * Rule: if (gross_pay − net_pay) equals net_pay, put 0.
+ * When net_pay is present (amount actually paid), remaining due is also 0.
+ */
+export function computeFormBTamilNaduBalanceDue(totalGrossPay, totalNetPay) {
+  const g = parseFormBTamilNaduMoney(totalGrossPay);
+  const n = parseFormBTamilNaduMoney(totalNetPay);
+  if (!Number.isFinite(g) && !Number.isFinite(n)) return '';
+  const gross = Number.isFinite(g) ? g : 0;
+  const net = Number.isFinite(n) ? n : 0;
+  const diff = roundFormBMoney(gross - net);
+  if (diff === roundFormBMoney(net)) return 0;
+  // Wages paid via net_pay → nothing remains due to employees.
+  if (Number.isFinite(n)) return 0;
+  return diff > 0 ? diff : 0;
+}
+
 /** Total emoluments payable … including basic wages, D.A, O.T., and bonus */
 export function isFormBTamilNaduTotalEmolumentsHeader(h) {
   const s = formBTamilNaduHeaderNorm(h);
@@ -172,6 +190,18 @@ export function isFormBTamilNaduBalanceDueHeader(h) {
   return (
     /balance\s+due\s+to\s+the\s+employees?/.test(s) ||
     (s.includes('balance') && s.includes('due') && s.includes('employee'))
+  );
+}
+
+/** Payroll-driven Form B summary columns — never restore from statutory overlay. */
+export function isFormBTamilNaduPayrollSummaryHeader(h) {
+  return (
+    isFormBTamilNaduTotalEmolumentsHeader(h) ||
+    isFormBTamilNaduOtherDeductionsHeader(h) ||
+    isFormBTamilNaduAmountActuallyPaidHeader(h) ||
+    isFormBTamilNaduBalanceDueHeader(h) ||
+    isFormBTamilNaduFineHeader(h) ||
+    isFormBTamilNaduTotalEmployeeCountHeader(h)
   );
 }
 
@@ -244,8 +274,8 @@ export function formBTamilNaduSummaryHasExportAmounts(values) {
 
 /**
  * Aggregate payroll amounts for the Form B summary row.
- * Total emoluments (basic+hra) includes employees even when gross_pay is missing
- * (e.g. Form W defaults only), so all corresponding location employees are counted.
+ * Total emoluments = sum(gross_pay); Amount actually paid = sum(net_pay);
+ * Balance due = 0 when (gross − net) equals net (or wages were paid).
  * @param {Array<{ gross?: *, basic?: *, hra?: *, net?: * }>} amounts
  */
 export function summarizeFormBTamilNaduPayrollAmounts(amounts) {
@@ -263,14 +293,14 @@ export function summarizeFormBTamilNaduPayrollAmounts(amounts) {
     const hraNum = parseFormBTamilNaduMoney(a.hra);
     const hasBasicOrHra = Number.isFinite(basicNum) || Number.isFinite(hraNum);
 
-    // Emoluments: sum basic+hra for every corresponding employee with wage parts.
+    // Keep basic+hra for Other deductions (gross − basic − hra).
     if (hasBasicOrHra) {
-      emolumentsEmployeeCount += 1;
       totalBasicPlusHra += computeFormBTamilNaduBasicPlusHra(a.basic, a.hra);
     }
 
     if (!Number.isFinite(gross)) return;
     matchedCount += 1;
+    emolumentsEmployeeCount += 1;
     totalGrossPay += gross;
     const other = computeFormBTamilNaduOtherDeductions(a.gross, a.basic, a.hra);
     if (other !== '') totalOtherDeductions += other;
@@ -278,19 +308,23 @@ export function summarizeFormBTamilNaduPayrollAmounts(amounts) {
     if (Number.isFinite(net)) totalNetPay += net;
   });
 
+  const grossTotal = roundFormBMoney(totalGrossPay);
+  const netTotal = roundFormBMoney(totalNetPay);
   const basicHraTotal = roundFormBMoney(totalBasicPlusHra);
   return {
-    matchedCount: Math.max(matchedCount, emolumentsEmployeeCount),
+    matchedCount,
     payrollMatchedCount: matchedCount,
     emolumentsEmployeeCount,
-    totalGrossPay: roundFormBMoney(totalGrossPay),
-    /** Total emoluments = sum(basic + hra) for corresponding employees. */
+    totalGrossPay: grossTotal,
     totalBasicPlusHra: basicHraTotal,
-    totalEmoluments: basicHraTotal,
+    /** Total emoluments = sum(gross_pay) for corresponding employees. */
+    totalEmoluments: grossTotal,
     totalOtherDeductions: roundFormBMoney(totalOtherDeductions),
-    totalNetPay: roundFormBMoney(totalNetPay),
-    /** Product mapping for "Amount actually paid" — sum of gross_pay. */
-    totalAmountActuallyPaid: roundFormBMoney(totalGrossPay),
+    totalNetPay: netTotal,
+    /** Amount actually paid = sum(net_pay). */
+    totalAmountActuallyPaid: netTotal,
+    /** Balance due — 0 when paid / when (gross − net) equals net. */
+    totalBalanceDue: computeFormBTamilNaduBalanceDue(grossTotal, netTotal),
   };
 }
 
@@ -310,26 +344,31 @@ export function applyFormBTamilNaduSummaryTotals(summaryRow, headers, totals, op
   const paidHeader = list.find((h) => isFormBTamilNaduAmountActuallyPaidHeader(h));
   const balanceHeader = list.find((h) => isFormBTamilNaduBalanceDueHeader(h));
   const emolumentsTotal =
-    t.totalBasicPlusHra != null && t.totalBasicPlusHra !== ''
-      ? t.totalBasicPlusHra
-      : t.totalEmoluments;
+    t.totalEmoluments != null && t.totalEmoluments !== ''
+      ? t.totalEmoluments
+      : t.totalGrossPay;
   const paidTotal =
     t.totalAmountActuallyPaid != null && t.totalAmountActuallyPaid !== ''
       ? t.totalAmountActuallyPaid
-      : t.totalGrossPay;
+      : t.totalNetPay;
+  const balanceTotal =
+    t.totalBalanceDue != null && t.totalBalanceDue !== ''
+      ? t.totalBalanceDue
+      : computeFormBTamilNaduBalanceDue(emolumentsTotal, paidTotal);
 
   if (emolHeader && (hasMatch || emolumentsTotal > 0 || t.totalGrossPay > 0)) {
+    // Total emoluments = sum of gross_pay.
     summaryRow[emolHeader] = sanitize(emolumentsTotal);
   }
   if (otherDedHeader && (hasMatch || t.totalOtherDeductions > 0 || t.totalOtherDeductions === 0)) {
     summaryRow[otherDedHeader] = sanitize(t.totalOtherDeductions);
   }
   if (paidHeader && (hasMatch || paidTotal > 0)) {
-    // Amount actually paid = sum of gross_pay.
+    // Amount actually paid = sum of net_pay.
     summaryRow[paidHeader] = sanitize(paidTotal);
   }
-  if (balanceHeader && (hasMatch || t.totalNetPay > 0)) {
-    summaryRow[balanceHeader] = sanitize(t.totalNetPay);
+  if (balanceHeader && (hasMatch || paidTotal > 0 || emolumentsTotal > 0 || balanceTotal === 0)) {
+    summaryRow[balanceHeader] = sanitize(balanceTotal === '' ? 0 : balanceTotal);
   }
   return summaryRow;
 }

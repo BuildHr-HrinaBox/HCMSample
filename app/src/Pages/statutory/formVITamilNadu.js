@@ -886,9 +886,19 @@ export async function buildFormVITamilNaduWorkbookWithTemplateStyles({
     for (let c = 1; c <= FORM_VI_TN_TABLE_COLS; c += 1) {
       const cell = worksheet.getCell(excelRow, c);
       cell.border = border;
+      const cellText = String(cell.value ?? '').trim();
+      const numericText = cellText
+        .replace(/,/g, '')
+        .replace(/^[₹$€£]\s?/, '')
+        .replace(/^\((.+)\)$/, '-$1')
+        .replace(/%$/, '')
+        .trim();
+      const isNumeric =
+        typeof cell.value === 'number' ||
+        (cellText !== '' && /^-?\d+(\.\d+)?$/.test(numericText));
       cell.alignment = {
         ...(cell.alignment || {}),
-        horizontal: 'center',
+        horizontal: cellText ? (isNumeric ? 'right' : 'left') : 'left',
         vertical: 'middle',
         wrapText: true
       };

@@ -1,6 +1,7 @@
 import {
   applyFormBTamilNaduEstablishmentFromCompany,
   applyFormBTamilNaduSummaryTotals,
+  computeFormBTamilNaduBalanceDue,
   computeFormBTamilNaduBasicPlusHra,
   computeFormBTamilNaduOtherDeductions,
   extractFormBTamilNaduSummaryExportValues,
@@ -9,6 +10,7 @@ import {
   isFormBTamilNaduBalanceDueHeader,
   isFormBTamilNaduEstablishmentFromCompanyContext,
   isFormBTamilNaduOtherDeductionsHeader,
+  isFormBTamilNaduPayrollSummaryHeader,
   isFormBTamilNaduTotalEmolumentsHeader,
   resolveFormBTamilNaduBasicAndHra,
   summarizeFormBTamilNaduPayrollAmounts,
@@ -54,7 +56,7 @@ describe('Form B Tamil Nadu payroll summary', () => {
     expect(computeFormBTamilNaduOtherDeductions(50000, '', '')).toBe(50000);
   });
 
-  test('Total emoluments = basic + hra per employee', () => {
+  test('Total emoluments helper still computes basic + hra for other-deduction math', () => {
     expect(computeFormBTamilNaduBasicPlusHra(40000, 20000)).toBe(60000);
     expect(computeFormBTamilNaduBasicPlusHra('67729', '32665')).toBe(100394);
     expect(computeFormBTamilNaduBasicPlusHra(50000, '')).toBe(50000);
@@ -70,23 +72,32 @@ describe('Form B Tamil Nadu payroll summary', () => {
     expect(computeFormBTamilNaduBasicPlusHra(resolved.basic, resolved.hra)).toBe(100394);
   });
 
-  test('summarizes basic+hra emoluments, other deductions, and net for location employees', () => {
+  test('Balance due is 0 when (gross − net) equals net_pay, or when net is paid', () => {
+    // gross − net = net → 0
+    expect(computeFormBTamilNaduBalanceDue(200000, 100000)).toBe(0);
+    // normal paid payroll → 0
+    expect(computeFormBTamilNaduBalanceDue(150000, 135000)).toBe(0);
+    expect(computeFormBTamilNaduBalanceDue(1118499, 1007977)).toBe(0);
+  });
+
+  test('summarizes gross emoluments, net paid, and zero balance for location employees', () => {
     const totals = summarizeFormBTamilNaduPayrollAmounts([
       { gross: 100000, basic: 40000, hra: 20000, net: 90000 },
       { gross: 50000, basic: 30000, hra: 10000, net: 45000 },
       { gross: '', basic: 1, hra: 1, net: 1 },
     ]);
     expect(totals.payrollMatchedCount).toBe(2);
-    expect(totals.emolumentsEmployeeCount).toBe(3);
+    expect(totals.emolumentsEmployeeCount).toBe(2);
     expect(totals.totalGrossPay).toBe(150000);
+    expect(totals.totalEmoluments).toBe(150000);
     expect(totals.totalBasicPlusHra).toBe(100002);
-    expect(totals.totalEmoluments).toBe(100002);
     expect(totals.totalOtherDeductions).toBe(50000);
-    expect(totals.totalAmountActuallyPaid).toBe(150000);
+    expect(totals.totalAmountActuallyPaid).toBe(135000);
     expect(totals.totalNetPay).toBe(135000);
+    expect(totals.totalBalanceDue).toBe(0);
   });
 
-  test('sums basic+hra for all corresponding employees even without payroll gross', () => {
+  test('does not count basic+hra-only rows toward total emoluments (needs gross_pay)', () => {
     const totals = summarizeFormBTamilNaduPayrollAmounts([
       { gross: '', basic: 67729, hra: 32665 },
       { gross: '', basic: 52628, hra: 22476 },
@@ -94,11 +105,10 @@ describe('Form B Tamil Nadu payroll summary', () => {
       { gross: '', basic: 48145, hra: 22647 },
       { gross: '', basic: 43688, hra: 20704 },
     ]);
-    expect(totals.emolumentsEmployeeCount).toBe(5);
-    // 100394 + 75104 + 99409 + 70792 + 64392
-    expect(totals.totalBasicPlusHra).toBe(410091);
-    expect(totals.totalEmoluments).toBe(410091);
+    expect(totals.emolumentsEmployeeCount).toBe(0);
     expect(totals.totalGrossPay).toBe(0);
+    expect(totals.totalEmoluments).toBe(0);
+    expect(totals.totalBasicPlusHra).toBe(410091);
   });
 
   test('Other deductions sums gross − basic − hra across employees', () => {
@@ -107,10 +117,11 @@ describe('Form B Tamil Nadu payroll summary', () => {
       { gross: 194566, basic: 52628, hra: 22476, net: 170000 },
     ]);
     expect(totals.totalGrossPay).toBe(401386);
+    expect(totals.totalEmoluments).toBe(401386);
     expect(totals.totalBasicPlusHra).toBe(67729 + 32665 + 52628 + 22476);
-    expect(totals.totalEmoluments).toBe(67729 + 32665 + 52628 + 22476);
     expect(totals.totalOtherDeductions).toBe(106426 + 119462);
-    expect(totals.totalAmountActuallyPaid).toBe(401386);
+    expect(totals.totalAmountActuallyPaid).toBe(350000);
+    expect(totals.totalBalanceDue).toBe(0);
   });
 
   test('applies totals onto the summary row headers', () => {
@@ -131,19 +142,19 @@ describe('Form B Tamil Nadu payroll summary', () => {
       {
         matchedCount: 2,
         totalGrossPay: 150000,
-        totalBasicPlusHra: 100000,
-        totalEmoluments: 100000,
+        totalEmoluments: 150000,
         totalOtherDeductions: 50000,
-        totalAmountActuallyPaid: 150000,
+        totalAmountActuallyPaid: 135000,
         totalNetPay: 135000,
+        totalBalanceDue: 0,
       },
       { sanitizeValue: (v) => String(v) }
     );
-    expect(row[headers[0]]).toBe('100000');
+    expect(row[headers[0]]).toBe('150000');
     expect(row[headers[1]]).toBe('');
     expect(row[headers[2]]).toBe('50000');
-    expect(row[headers[3]]).toBe('150000');
-    expect(row[headers[4]]).toBe('135000');
+    expect(row[headers[3]]).toBe('135000');
+    expect(row[headers[4]]).toBe('0');
   });
 
   test('extracts Form B summary export values from Parent_Sub headers', () => {
@@ -160,15 +171,26 @@ describe('Form B Tamil Nadu payroll summary', () => {
       [headers[1]]: '150000',
       [headers[2]]: '',
       [headers[3]]: '50000',
-      [headers[4]]: '150000',
-      [headers[5]]: '135000',
+      [headers[4]]: '135000',
+      [headers[5]]: '0',
     };
     const values = extractFormBTamilNaduSummaryExportValues(row, headers);
     expect(values.employeeCount).toBe('5');
     expect(values.totalEmoluments).toBe('150000');
     expect(values.otherDeductions).toBe('50000');
-    expect(values.amountActuallyPaid).toBe('150000');
-    expect(values.balanceDue).toBe('135000');
+    expect(values.amountActuallyPaid).toBe('135000');
+    expect(values.balanceDue).toBe('0');
     expect(formBTamilNaduSummaryHasExportAmounts(values)).toBe(true);
+  });
+
+  test('detects payroll summary headers blocked from statutory overlay', () => {
+    expect(
+      isFormBTamilNaduPayrollSummaryHeader(
+        'Total emoluments payable during the month including basic wages, D.A, O.T., and bonus'
+      )
+    ).toBe(true);
+    expect(isFormBTamilNaduPayrollSummaryHeader('Amount actually paid during the month')).toBe(true);
+    expect(isFormBTamilNaduPayrollSummaryHeader('Balance due to the employees')).toBe(true);
+    expect(isFormBTamilNaduPayrollSummaryHeader('Total number of employees')).toBe(true);
   });
 });

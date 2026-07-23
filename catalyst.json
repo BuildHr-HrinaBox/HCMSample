@@ -52,7 +52,10 @@
       "importdata_function",
       "clra_function",
       "approve_leave_function",
-      "samplepayroll_function"
+      "samplepayroll_function",
+      "leave_job_function",
+      "leaveapi_function",
+      "leavescheduler_job_function"
     ],
     "ignore": [],
     "source": "functions"

@@ -23,7 +23,13 @@ import {
   clearExcelJSTrailingTableCells,
   countExcelJSTemplateBodyRows,
   applyExcelJSFullBoxBordersToRange,
+  applyStatutoryDownloadContentAlignment,
+  isStatutoryNumericCellValue,
 } from '../utils/excelTableBorders';
+import {
+  buildStatutoryDraftPdfBlob,
+  draftFileNameToPdfName,
+} from '../utils/statutoryDraftPdf';
 import {
   fetchAttendanceData,
   fetchFormTemplateArrayBuffer,
@@ -233,6 +239,7 @@ import {
   isFormBTamilNaduBalanceDueHeader,
   isFormBTamilNaduEstablishmentFromCompanyContext,
   isFormBTamilNaduOtherDeductionsHeader,
+  isFormBTamilNaduPayrollSummaryHeader,
   isFormBTamilNaduTotalEmolumentsHeader,
   resolveFormBTamilNaduBasicAndHra,
   summarizeFormBTamilNaduPayrollAmounts,
@@ -274,7 +281,9 @@ import {
 import {
   FORM_I_TAMIL_NADU_NIL_DEFAULT,
   FORM_I_TN_DEFAULT_EMPLOYEES,
+  FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
   applyFormITamilNaduNilDefaultsToRows,
+  applyFormITamilNaduSuspensionNilTableRows,
   buildFormITamilNaduDefaultRows,
   cloneFormITamilNaduWorkmenWorksheetClean,
   ensureFormITamilNaduDefaultEmployeeRows,
@@ -282,7 +291,10 @@ import {
   isFormITamilNaduFinesNilDefaultHeader,
   isFormITamilNaduFinesOrWorkmenDefaultContext,
   isFormITamilNaduNilDefaultHeader,
+  isFormITamilNaduAmountAllowancePaidHeader,
   isFormITamilNaduSkipAutofillHeader,
+  isFormITamilNaduSuspensionFooterLikeValue,
+  formITamilNaduSuspensionRowIsFooterLike,
   isFormITamilNaduSuspensionWorkbookContext,
   sheetLooksLikeFormITamilNaduWorkmenRegister,
 } from './statutory/formITamilNadu';
@@ -680,6 +692,9 @@ import {
   applyFormXXIIITamilNaduOtNilToRow,
   isFormXXIIITamilNaduContext,
   isFormXXIIITamilNaduOtNilHeader,
+  isFormXXIIITamilNaduOvertimeRateHeader,
+  resolveFormXXIIITamilNaduNormalRate,
+  resolveFormXXIIITamilNaduOvertimeRate,
 } from './statutory/formXXIIITamilNadu';
 import {
   applyFormAGJGujaratEmployeeToRow,
@@ -1050,8 +1065,15 @@ function writeSystemGeneratedDocumentNoteToWorksheet(worksheet) {
     });
   });
 
+  // Prefer the sheet's full used width (e.g. Form XXVI empty signature cols 12–14)
+  // so the note sits after the finished column band, not under Sr. No. only.
+  const dimRight =
+    Number(worksheet.dimensions?.right) ||
+    Number(worksheet.actualColumnCount) ||
+    Number(worksheet.columnCount) ||
+    0;
   const noteRow = Math.max(1, lastContentRow + 4);
-  const rightCol = Math.max(lastContentCol || 1, 8);
+  const rightCol = Math.max(lastContentCol || 1, dimRight || 1, 8);
   const leftCol = 1;
   const rightLetter = excelColumnLetterFrom1Based(rightCol);
   const leftLetter = excelColumnLetterFrom1Based(leftCol);
@@ -1080,22 +1102,32 @@ function writeSystemGeneratedDocumentNoteToWorksheet(worksheet) {
   };
 }
 
-async function appendSystemGeneratedDocumentNoteToStatutoryBlob(blob) {
+async function finalizeStatutoryDownloadWorkbookBlob(blob, { appendNote = true } = {}) {
   if (!blob || /zip/i.test(String(blob.type || ''))) return blob;
   try {
     const arrayBuffer = await blob.arrayBuffer();
     if (!arrayBuffer || arrayBuffer.byteLength < 32) return blob;
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(arrayBuffer);
-    (workbook.worksheets || []).forEach(writeSystemGeneratedDocumentNoteToWorksheet);
+    (workbook.worksheets || []).forEach((worksheet) => {
+      // Numbers right; Form Number / Rule / Form Name center — never force text left.
+      applyStatutoryDownloadContentAlignment(worksheet);
+      if (appendNote) writeSystemGeneratedDocumentNoteToWorksheet(worksheet);
+      // Re-apply so title band stays centered after note write.
+      applyStatutoryDownloadContentAlignment(worksheet);
+    });
     const out = await workbook.xlsx.writeBuffer();
     return new Blob([out], {
       type: blob.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
   } catch (err) {
-    console.warn('Statutory workbook: system-generated note append failed:', err);
+    console.warn('Statutory workbook: download finalize failed:', err);
     return blob;
   }
+}
+
+async function appendSystemGeneratedDocumentNoteToStatutoryBlob(blob) {
+  return finalizeStatutoryDownloadWorkbookBlob(blob, { appendNote: true });
 }
 
 /** @returns {(number | 'ellipsis')[]} */
@@ -1846,6 +1878,20 @@ function filterStatutoryRecordsForForm15PayrollAutofill(records, headers) {
     const headerKey = findBaseHeaderForStatutoryColumnName(columnName, headers);
     if (headerKey && isForm15Part2PayrollAutofillHeader(headerKey)) return false;
     if (!headerKey && isForm15Part2PayrollAutofillHeader(columnName)) return false;
+    return true;
+  });
+}
+
+/** Form B TN: keep Autofill payroll totals (Σ gross_pay / Σ net_pay); do not restore stale overlay. */
+function filterStatutoryRecordsForFormBTamilNaduPayrollAutofill(records, headers) {
+  if (!Array.isArray(records) || records.length === 0) return records;
+  if (!Array.isArray(headers) || headers.length === 0) return records;
+  return records.filter((rec) => {
+    const columnName = String(rec?.ColumnName ?? rec?.columnName ?? '').trim();
+    if (!columnName) return true;
+    const headerKey = findBaseHeaderForStatutoryColumnName(columnName, headers);
+    if (headerKey && isFormBTamilNaduPayrollSummaryHeader(headerKey)) return false;
+    if (!headerKey && isFormBTamilNaduPayrollSummaryHeader(columnName)) return false;
     return true;
   });
 }
@@ -11857,6 +11903,15 @@ const statutoryTableHeaderMinWidth = (headerKey) => {
   if (label.length <= 28) return '140px';
   if (label.length <= 42) return '180px';
   return `${Math.min(280, Math.max(200, label.length * 6))}px`;
+};
+
+const resolveStatutoryFormTableCellTextAlign = (
+  value,
+  { form26NilCell, isFormVIHolidayCol, isDayCol } = {}
+) => {
+  if (form26NilCell || isFormVIHolidayCol || isDayCol) return 'center';
+  if (isStatutoryNumericCellValue(value)) return 'right';
+  return 'left';
 };
 
 const statutoryFormFileTableHeaderStyle = (headerKey, extra = {}) => ({
@@ -33001,9 +33056,9 @@ const Statutory = ({ userEmail, userRole }) => {
         'Form B summary amounts are empty. Click Autofill for the correct month, then Download / Save again.'
       );
     }
-    // Emoluments = sum(basic + hra); Amount actually paid = sum(gross_pay).
+    // Emoluments = sum(gross_pay); Amount actually paid = sum(net_pay); Balance due = 0 when paid.
     const emolumentsTotal = values.totalEmoluments;
-    const amountActuallyPaidTotal = values.amountActuallyPaid || values.totalEmoluments;
+    const amountActuallyPaidTotal = values.amountActuallyPaid;
     const otherDeductionTotal = values.otherDeductions;
 
     // Clear a few body rows then write the single summary.
@@ -35866,8 +35921,23 @@ const Statutory = ({ userEmail, userRole }) => {
       sourceHeaders = [...FORM_I_TABLE_HEADERS];
     }
 
+    const formISuspensionExportContext = isFormITamilNaduSuspensionWorkbookContext({
+      fileName: formFileName || '',
+      formFileName: formFileName || '',
+      formHeader: parsedFormHeader,
+      headers: headersToUse,
+      sheetText: `${sheetTopText} ${worksheet?.name || ''}`,
+    });
+
     const getRowValueForHeader = (rowObj, header, headerIndex) => {
       if (!rowObj || typeof rowObj !== 'object' || Array.isArray(rowObj)) return '';
+      // Amount of subsistence allowance paid — never export fetched dates (e.g. 31-05-2026).
+      if (formISuspensionExportContext && isFormITamilNaduAmountAllowancePaidHeader(header)) {
+        return FORM_I_TAMIL_NADU_NIL_DEFAULT;
+      }
+      if (formISuspensionExportContext && isFormITamilNaduSuspensionFooterLikeValue(rowObj?.[header])) {
+        return '';
+      }
       if (header && Object.prototype.hasOwnProperty.call(rowObj, header)) {
         const direct = pickVal(rowObj[header]);
         if (direct !== '') return direct;
@@ -35954,16 +36024,27 @@ const Statutory = ({ userEmail, userRole }) => {
         : Array.isArray(mappedRowMatrix)
           ? mappedRowMatrix
           : [];
+    const amountColIndex = formISuspensionExportContext
+      ? sourceHeaders.findIndex((h) => isFormITamilNaduAmountAllowancePaidHeader(h))
+      : -1;
     const sourceRows = sourcePrimary
-      .filter((row) => rowLooksMeaningful(row))
+      .filter((row) => {
+        if (!rowLooksMeaningful(row)) return false;
+        if (formISuspensionExportContext && formITamilNaduSuspensionRowIsFooterLike(row, sourceHeaders)) {
+          return false;
+        }
+        return true;
+      })
       .map((row, idx) => {
         if (Array.isArray(row)) {
           const out = [...row];
           if (out[0] == null || String(out[0]).trim() === '') out[0] = idx + 1;
+          if (amountColIndex >= 0) out[amountColIndex] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
           return out;
         }
         const arr = sourceHeaders.map((h, j) => getRowValueForHeader(row, h, j));
         if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
+        if (amountColIndex >= 0) arr[amountColIndex] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
         return arr;
       })
       .filter((arr) => Array.isArray(arr) && arr.some((v) => v != null && String(v).trim() !== ''));
@@ -36045,6 +36126,33 @@ const Statutory = ({ userEmail, userRole }) => {
           cell.value = Number(value);
         } else {
           cell.value = String(value);
+        }
+      }
+    }
+
+    // Suspension register: strip leftover template dates / footer spill from the
+    // "Amount of subsistence allowance paid…" column in and below the data block.
+    if (formISuspensionExportContext && amountColIndex >= 0) {
+      const amountExcelCol = startCol + amountColIndex;
+      const scrubTo = Math.min(
+        maxScanRows,
+        Math.max(dataStartRow + sourceRows.length + 12, dataStartRow + 16)
+      );
+      for (let r = dataStartRow; r <= scrubTo; r += 1) {
+        const cell = worksheet.getCell(r, amountExcelCol);
+        if (cell && cell.isMerged && cell.master && cell.master !== cell) continue;
+        const raw = String(excelCellValueToString(cell?.value) || '').trim();
+        if (r < dataStartRow + sourceRows.length) {
+          cell.value = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+          continue;
+        }
+        if (
+          !raw ||
+          isFormITamilNaduSuspensionFooterLikeValue(raw) ||
+          /^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}$/.test(raw) ||
+          /^nil$/i.test(raw)
+        ) {
+          cell.value = null;
         }
       }
     }
@@ -38137,7 +38245,12 @@ const Statutory = ({ userEmail, userRole }) => {
     );
     const hasFormFile = templateMeta?.formFile && templateMeta.formFile !== 'null' && String(templateMeta.formFile).trim() !== '';
     if (!hasFormFile) {
-      setError('No form template available for this row. Use the draft link to open the saved file.');
+      const noTemplateMsg =
+        'No form template available for this row. Use the draft link to open the saved file.';
+      setError(noTemplateMsg);
+      if (generateOptions?.returnBlobOnly) {
+        throw new Error(noTemplateMsg);
+      }
       return;
     }
     try {
@@ -42623,8 +42736,15 @@ const Statutory = ({ userEmail, userRole }) => {
           headers: headersToUse,
           sheetText: parsed?.sheetText || '',
         };
-        if (
-          isFormITamilNaduSuspensionWorkbookContext(formINilHints) ||
+        if (isFormITamilNaduSuspensionWorkbookContext(formINilHints)) {
+          const { fullMonth, year } = resolveForm11MonthYear(selectedMonth, item);
+          const monthYearLabel = buildForm11NilMonthYearLabel(fullMonth, year);
+          mappedData = applyFormITamilNaduSuspensionNilTableRows(headersToUse, mappedData, {
+            nilPrimaryText: FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+            monthYearLabel,
+            force: !usedLiveModalGrid,
+          });
+        } else if (
           isFormIRegisterOfFinesContext(
             resolvedFormFileItem,
             formINilHints.fileName,
@@ -47529,12 +47649,10 @@ const Statutory = ({ userEmail, userRole }) => {
       if (!isFormXVDownload && !isFormXVRJDownload && !isFormXIRJDownload && !isFormXIVMPDownload && !isFormXIXMPDownload && !isFormXIXAPDownload && !isFormXIXKarnatakaDownload && !isFormQKarnatakaDownload && !isFormXIIIWorkmenDownload && !(isFormADownload && /\.zip$/i.test(String(fileName || '')))) {
         blob = await appendApprovedStatutoryHeadHrSignSealToDownloadBlob(blob, item);
       }
-      if (
-        !/\.zip$/i.test(String(fileName || '')) &&
-        !isFormXIIIWorkmenDownload &&
-        !skipSystemGeneratedNote
-      ) {
-        blob = await appendSystemGeneratedDocumentNoteToStatutoryBlob(blob);
+      if (!/\.zip$/i.test(String(fileName || '')) && !isFormXIIIWorkmenDownload) {
+        blob = await finalizeStatutoryDownloadWorkbookBlob(blob, {
+          appendNote: !skipSystemGeneratedNote,
+        });
       }
       // Form Q MH: last-pass column repair after ExcelJS note/seal round-trips.
       // Always run — section-index row 1,2,3 under Sr. No. previously disabled repair.
@@ -47551,7 +47669,14 @@ const Statutory = ({ userEmail, userRole }) => {
         if (formQDl && blob) {
           blob = await repairFormQMaharashtraDownloadBlob(blob);
           blob = await applyFormQMaharashtraFullBordersToBlob(blob);
+          // SheetJS repair strips ExcelJS alignment — re-apply text left / numbers right.
+          blob = await finalizeStatutoryDownloadWorkbookBlob(blob, { appendNote: false });
         }
+      }
+      if (generateOptions?.returnBlobOnly) {
+        setFormFileLoading(false);
+        setSuccess('');
+        return { blob, fileName };
       }
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -47629,6 +47754,7 @@ const Statutory = ({ userEmail, userRole }) => {
     } catch (err) {
       console.error('View Draft File generate error:', err);
       setError(err.message || 'Failed to generate draft. Try opening the form and using Autofill.');
+      if (generateOptions?.returnBlobOnly) throw err;
     } finally {
       setFormFileLoading(false);
     }
@@ -48529,6 +48655,126 @@ const Statutory = ({ userEmail, userRole }) => {
     } catch (err) {
       console.error('Saved draft direct download error:', err);
       setError(err?.message || 'Failed to download saved draft file.');
+    } finally {
+      setFormFileLoading(false);
+    }
+  };
+
+  /** Download PDF of the same Excel data used by Download Draft File. */
+  const handleDownloadDraftPdf = async (draftApiRowId, fileName, sourceItem, resolvedFormFileItem) => {
+    const lineItem = sourceItem || resolvedFormFileItem || {};
+    const pdfTitle =
+      lineItem?.formName ||
+      lineItem?.FormName ||
+      String(fileName || 'Statutory Draft').replace(/\.(xlsx|xls|xlsm|xlsb|zip)$/i, '');
+    const pdfDownloadName = draftFileNameToPdfName(
+      fileName ||
+        sourceItem?.draftFileName ||
+        sourceItem?.DraftFileName ||
+        resolvedFormFileItem?.formFileName ||
+        'statutory-draft.pdf'
+    );
+
+    const triggerPdfDownload = (blob) => {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = pdfDownloadName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    };
+
+    try {
+      setFormFileLoading(true);
+      setError('');
+      setSuccess('Preparing PDF...');
+
+      let arrayBuffer = null;
+      let sourceFileName =
+        fileName ||
+        sourceItem?.draftFileName ||
+        sourceItem?.DraftFileName ||
+        resolvedFormFileItem?.formFileName ||
+        'draft.xlsx';
+
+      // Prefer last Form T export when available (same bytes as Download Draft File).
+      const lastFormT = formTSELastExportRef.current;
+      if (
+        lastFormT?.arrayBuffer &&
+        lastFormT.arrayBuffer.byteLength >= 32 &&
+        isFormTSEContext(null, lineItem, sourceFileName, '')
+      ) {
+        arrayBuffer = lastFormT.arrayBuffer;
+        sourceFileName = lastFormT.fileName || sourceFileName;
+      }
+
+      // Always prefer the same generated Excel/ZIP as Download Draft File (full autofill data).
+      if (!arrayBuffer || arrayBuffer.byteLength < 32) {
+        try {
+          setSuccess('Generating draft for PDF...');
+          const generated = await handleViewDraftFileGenerate(sourceItem || lineItem, resolvedFormFileItem, {
+            sampleStatutoryId: draftApiRowId,
+            draftApiRowId,
+            returnBlobOnly: true
+          });
+          if (generated?.blob) {
+            arrayBuffer = await generated.blob.arrayBuffer();
+            sourceFileName = generated.fileName || sourceFileName;
+          }
+        } catch (genErr) {
+          console.warn('PDF regenerate failed, trying saved draft:', genErr);
+        }
+      }
+
+      // Fallback: saved draft file on server.
+      if ((!arrayBuffer || arrayBuffer.byteLength < 32) && draftApiRowId) {
+        try {
+          const resp = await fetch(
+            `/server/statutoryreg_function/statutory/${draftApiRowId}/file/Draft?disposition=attachment&_ts=${Date.now()}`,
+            { cache: 'no-store' }
+          );
+          if (resp.ok) {
+            const buf = await resp.arrayBuffer();
+            if (buf && buf.byteLength >= 32) {
+              arrayBuffer = buf;
+              const cd = resp.headers.get('content-disposition') || '';
+              const cdMatch = /filename\*?=(?:UTF-8''|")?([^\";]+)/i.exec(cd);
+              if (cdMatch?.[1]) {
+                try {
+                  sourceFileName =
+                    decodeURIComponent(cdMatch[1].replace(/"/g, '').trim()) || sourceFileName;
+                } catch (_) {
+                  sourceFileName = cdMatch[1].replace(/"/g, '').trim() || sourceFileName;
+                }
+              }
+            }
+          }
+        } catch (savedDraftErr) {
+          console.warn('Saved draft PDF fetch skipped:', savedDraftErr);
+        }
+      }
+
+      if (!arrayBuffer || arrayBuffer.byteLength < 32) {
+        throw new Error('No draft Excel data found. Use Autofill → Save, then Download PDF.');
+      }
+
+      setSuccess('Building PDF...');
+      const pdfBlob = await buildStatutoryDraftPdfBlob({
+        arrayBuffer,
+        fileName: sourceFileName,
+        title: pdfTitle,
+        monthLabel: selectedMonth || ''
+      });
+      triggerPdfDownload(pdfBlob);
+      setSuccess('PDF downloaded.');
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err) {
+      console.error('Download draft PDF error:', err);
+      setSuccess('');
+      setError(err?.message || 'Failed to download draft PDF.');
+      setTimeout(() => setError(''), 5000);
     } finally {
       setFormFileLoading(false);
     }
@@ -51789,6 +52035,7 @@ const Statutory = ({ userEmail, userRole }) => {
         if (formQSaveNeedsRepair) {
           blob = await repairFormQMaharashtraDownloadBlob(blob);
           blob = await applyFormQMaharashtraFullBordersToBlob(blob);
+          blob = await finalizeStatutoryDownloadWorkbookBlob(blob, { appendNote: false });
         }
       }
       // Form T: repair J→A shift if needed, then download + cache + upload the same bytes.
@@ -52571,6 +52818,10 @@ const Statutory = ({ userEmail, userRole }) => {
     let skipStatutoryOverlayForFormKGJ = false;
     let skipStatutoryOverlayForFormOGJ = false;
     let skipStatutoryOverlayForFormDRJ = false;
+    let skipStatutoryOverlayForFormBTamilNadu = false;
+    if (formBSummaryTableEarly) {
+      skipStatutoryOverlayForFormBTamilNadu = true;
+    }
     const formMGJAutofillState = { active: false, employees: [] };
     let formNGJEmployerAutofillText = '';
 
@@ -52643,6 +52894,16 @@ const Statutory = ({ userEmail, userRole }) => {
         overlayRecords.length > 0
       ) {
         overlayRecords = filterStatutoryRecordsForFormDRJAutofill(
+          overlayRecords,
+          statutoryOverlayState.headers
+        );
+      }
+      if (
+        skipStatutoryOverlayForFormBTamilNadu &&
+        Array.isArray(overlayRecords) &&
+        overlayRecords.length > 0
+      ) {
+        overlayRecords = filterStatutoryRecordsForFormBTamilNaduPayrollAutofill(
           overlayRecords,
           statutoryOverlayState.headers
         );
@@ -54096,6 +54357,56 @@ const Statutory = ({ userEmail, userRole }) => {
       // Form I Register of Fines — fetch employees (Name / Father / Department). Fine columns stay blank for manual entry.
       // Do not early-return "Nill of the month"; Autofill and Download must use live People data.
 
+      // Form I TN Register of Subsistence Allowance — never fetch People; show "Nill of the month" + period.
+      if (
+        isFormITamilNaduSuspensionWorkbookContext({
+          fileName: String(
+            modalData?.fileName ||
+              modalData?.formFileName ||
+              options?.fileName ||
+              formFileModalData?.fileName ||
+              formFileModalData?.formFileName ||
+              ''
+          ),
+          formFileName: String(
+            modalData?.formFileName ||
+              modalData?.fileName ||
+              formFileModalData?.formFileName ||
+              formFileModalData?.fileName ||
+              ''
+          ),
+          formHeader:
+            modalData?.parsedFormHeader ||
+            options?.parsedFormHeader ||
+            formFileModalData?.parsedFormHeader ||
+            {},
+          headers: currentHeaders,
+          sheetText:
+            modalData?.sheetText || formFileModalData?.sheetText || options?.sheetText || '',
+        })
+      ) {
+        const { fullMonth, year } = resolveForm11MonthYear(selectedMonth, modalData?.item);
+        const monthYearLabel = buildForm11NilMonthYearLabel(fullMonth, year);
+        const nilRows = applyFormITamilNaduSuspensionNilTableRows(currentHeaders, [], {
+          nilPrimaryText: FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+          monthYearLabel,
+          force: true,
+        });
+        if (!returnMappedData) {
+          setFormTableData(nilRows);
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+          setSuccess(
+            monthYearLabel
+              ? `Form I TN subsistence: ${FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT} — ${monthYearLabel}`
+              : `Form I TN subsistence: ${FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT}`
+          );
+          setTimeout(() => setSuccess(''), 5000);
+        }
+        if (returnMappedData) return nilRows;
+        return;
+      }
+
       // AP Form XXVII Quarterly Returns — show "Nill of the month" when no return rows exist (manual entry form).
       if (
         !form27CEarlyContext &&
@@ -54679,6 +54990,10 @@ const Statutory = ({ userEmail, userRole }) => {
             String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
             currentHeaders
           ));
+      if (formBAutofillContext) {
+        // Do not let saved StatutoryData overwrite Σ gross_pay / Σ net_pay (stale e.g. 26781).
+        skipStatutoryOverlayForFormBTamilNadu = true;
+      }
 
       const formDAutofillContext = isFormDAutofillHeaders(currentHeaders);
 
@@ -54721,13 +55036,13 @@ const Statutory = ({ userEmail, userRole }) => {
         return false;
       };
 
-      /** Form B: TN LWF total emoluments — sum of employees' (basic + hra) (one summary row). */
+      /** Form B: TN LWF total emoluments — sum of employees' gross_pay (one summary row). */
       const isFormBTotalEmolumentsBasicEarningsHeader = (h) => isFormBTamilNaduTotalEmolumentsHeader(h);
 
       /** Form B: "Other deductions" — sum of (gross_pay − basic − hra). */
       const isFormBOtherDeductionsOtherAllowanceHeader = (h) => isFormBTamilNaduOtherDeductionsHeader(h);
 
-      /** Form B: Amount actually paid during the month — sum of gross_pay. */
+      /** Form B: Amount actually paid during the month — sum of net_pay. */
       const isFormBAmountActuallyPaidHeader = (h) => isFormBTamilNaduAmountActuallyPaidHeader(h);
 
       const formDHeaderSubLabel = (h) => {
@@ -58639,11 +58954,15 @@ const Statutory = ({ userEmail, userRole }) => {
           normalRate = resolveFormQKarnatakaTotalWageForEmployee(emp, payrollRow, monthCandidates);
         } else if (mpXxiii && emp) {
           normalRate = resolveFormXXIIIMPNormalRateForEmployee(emp, payrollRow, monthCandidates);
+        } else if (tnXxiii) {
+          // Form XXIII TN: Normal rate ← gross_pay
+          normalRate = resolveFormXXIIITamilNaduNormalRate(payrollRow);
         } else if (payrollRow && !payrollRow.fetch_error) {
           normalRate = resolveFormXXIIINetPayAmount(payrollRow);
         }
         if (normalRate !== '') setCellsForHeaderPredicate(isFormXXIIINormalRateOfWagesHeader, normalRate);
-        // Form XXIII MP / Tamil Nadu: OT date / total / rate / earnings / paid date always NIL.
+        // Form XXIII MP: OT date / total / rate / earnings / paid date always NIL.
+        // Form XXIII TN: OT date / total / earnings / paid date → NIL; OT rate ← (Basic/26/8)*2.
         if (mpXxiii || tnXxiii) {
           (Array.isArray(headers) ? headers : []).forEach((header) => {
             const isNilHeader = mpXxiii
@@ -58655,6 +58974,12 @@ const Statutory = ({ userEmail, userRole }) => {
             }
             row[header] = mpXxiii ? FORM_XXIII_MP_OT_NIL : FORM_XXIII_TN_OT_NIL;
           });
+          if (tnXxiii) {
+            const tnOtRate = resolveFormXXIIITamilNaduOvertimeRate(payrollRow);
+            if (tnOtRate !== '') {
+              setCellsForHeaderPredicate(isFormXXIIITamilNaduOvertimeRateHeader, tnOtRate);
+            }
+          }
           const normalRateHeader = findFormXXIIINormalRateOfWagesHeader(headers);
           return Boolean(normalRateHeader && normalRate !== '');
         }
@@ -64645,7 +64970,11 @@ const Statutory = ({ userEmail, userRole }) => {
           }
 
           // Form I TN Register of Subsistence Allowance:
-          // Monthly emoluments — do not fetch; offence/suspension/remarks/signature → NIL
+          // Monthly emoluments — do not fetch; amount paid/date + offence/suspension → NIL
+          if (formITamilNaduSuspensionAutofillContext && isFormITamilNaduAmountAllowancePaidHeader(header)) {
+            row[header] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+            return;
+          }
           if (formITamilNaduSuspensionAutofillContext && isFormITamilNaduSkipAutofillHeader(header)) {
             row[header] = '';
             return;
@@ -66609,6 +66938,10 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           // Default: try to find matching field by checking all emp properties
           else {
+            if (formITamilNaduSuspensionAutofillContext && isFormITamilNaduAmountAllowancePaidHeader(header)) {
+              row[header] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+              return;
+            }
             if (formITamilNaduSuspensionAutofillContext && isFormITamilNaduSkipAutofillHeader(header)) {
               row[header] = '';
               return;
@@ -67354,10 +67687,25 @@ const Statutory = ({ userEmail, userRole }) => {
                 xxiiiPayrollRow,
                 xxiiiMonthForRow
               );
+            } else if (formXXIIITamilNaduAutofillContext) {
+              normalRate = resolveFormXXIIITamilNaduNormalRate(xxiiiPayrollRow);
             } else {
               normalRate = readPayrollNetPayForStatutory(xxiiiPayrollRow);
             }
             if (normalRate !== '') row[normalRateHeader] = sanitizeValue(normalRate);
+          }
+          if (formXXIIITamilNaduAutofillContext) {
+            const otRateHeader = currentHeaders.find(isFormXXIIITamilNaduOvertimeRateHeader);
+            if (otRateHeader) {
+              const xxiiiPayrollRow =
+                typeof resolveXxiiiPayrollRowForGrid === 'function'
+                  ? resolveXxiiiPayrollRowForGrid(emp)
+                  : Array.isArray(statutoryPayrollRows) && statutoryPayrollRows.length > 0
+                    ? resolveFormXIXMPPayrollRowForEmployee(emp, statutoryPayrollRows)
+                    : null;
+              const tnOtRate = resolveFormXXIIITamilNaduOvertimeRate(xxiiiPayrollRow);
+              if (tnOtRate !== '') row[otRateHeader] = sanitizeValue(tnOtRate);
+            }
           }
         }
 
@@ -68506,12 +68854,25 @@ const Statutory = ({ userEmail, userRole }) => {
                 payrollRow,
                 xxiiiMonthEarly
               );
+            } else if (formXXIIITamilNaduAutofillContext) {
+              normalRate = resolveFormXXIIITamilNaduNormalRate(payrollRow);
             } else {
               normalRate = readPayrollNetPayForStatutory(payrollRow);
             }
-            if (normalRate === '') return;
-            row[normalRateHeader] = sanitizeValue(normalRate);
-            xxiiiEarlyHits += 1;
+            if (normalRate !== '') {
+              row[normalRateHeader] = sanitizeValue(normalRate);
+              xxiiiEarlyHits += 1;
+            }
+            if (formXXIIITamilNaduAutofillContext) {
+              const otRateHeader = currentHeaders.find(isFormXXIIITamilNaduOvertimeRateHeader);
+              if (otRateHeader) {
+                const tnOtRate = resolveFormXXIIITamilNaduOvertimeRate(payrollRow);
+                if (tnOtRate !== '') {
+                  row[otRateHeader] = sanitizeValue(tnOtRate);
+                  if (normalRate === '') xxiiiEarlyHits += 1;
+                }
+              }
+            }
           });
         }
         if (formXXIIIMPAutofillContext) {
@@ -68809,12 +69170,13 @@ const Statutory = ({ userEmail, userRole }) => {
               const p = getPayrollPayloadObject(flat);
               const earnings = getEarningsArray(p);
               const wageAmounts = readPayrollForm15WageAmounts(flat);
+              // Total emoluments must use gross_pay only (never total_earnings / monthly_salary).
               gross = firstPresent(
                 readForm10GrossPayAmount(flat),
                 toAmtOrEmpty(flat.gross_pay),
-                toAmtOrEmpty(flat.total_earnings),
+                toAmtOrEmpty(flat['gross_pay']),
                 toAmtOrEmpty(p.gross_pay),
-                toAmtOrEmpty(p.total_earnings),
+                toAmtOrEmpty(p['gross_pay']),
                 toAmtOrEmpty(p.monthly_gross_amount)
               );
               basic = firstPresent(
@@ -68842,12 +69204,11 @@ const Statutory = ({ userEmail, userRole }) => {
                 toAmtOrEmpty(p.monthly_salary)
               );
             }
-            // Force Form W TN Basic/HRA for known employees so Total emoluments =
-            // Σ(basic + hra) across all corresponding people (never one basic alone).
+            // Force Form W TN Basic/HRA for Other deductions (gross − basic − hra).
             const resolved = resolveFormBTamilNaduBasicAndHra({ basic, hra, emp });
             basic = resolved.basic;
             hra = resolved.hra;
-            if (gross === '' && basic === '' && hra === '') return null;
+            if (gross === '' && basic === '' && hra === '' && net === '') return null;
             return { gross, basic, hra, net };
           };
           const formBPayrollAmounts = [];
@@ -68874,7 +69235,30 @@ const Statutory = ({ userEmail, userRole }) => {
               formBPayrollAmounts.push(amounts);
             });
           }
-          const formBTotals = summarizeFormBTamilNaduPayrollAmounts(formBPayrollAmounts);
+          let formBTotals = summarizeFormBTamilNaduPayrollAmounts(formBPayrollAmounts);
+          const expectedEmpCount = formBTotalEmployeeCount || employeesForFormBTotals.length || 0;
+          const grossCoverageLow =
+            formBTotals.totalGrossPay <= 0 ||
+            (expectedEmpCount > 0 &&
+              (formBTotals.emolumentsEmployeeCount || 0) < Math.max(1, Math.ceil(expectedEmpCount * 0.5)));
+          // If people↔payroll gross coverage is weak, sum gross_pay from the full pay-run.
+          if (grossCoverageLow && Array.isArray(payrollRows) && payrollRows.length > 0) {
+            const fromAllPayroll = [];
+            payrollRows.forEach((pr) => {
+              const amounts = extractFormBAmountsFromPayrollRow(pr, null);
+              if (!amounts || amounts.gross === '' || amounts.gross == null) return;
+              fromAllPayroll.push(amounts);
+            });
+            if (fromAllPayroll.length > 0) {
+              const fallbackTotals = summarizeFormBTamilNaduPayrollAmounts(fromAllPayroll);
+              if (
+                fallbackTotals.totalGrossPay > formBTotals.totalGrossPay ||
+                (formBTotals.totalGrossPay <= 0 && fallbackTotals.totalGrossPay > 0)
+              ) {
+                formBTotals = fallbackTotals;
+              }
+            }
+          }
           const summaryRow =
             mappedData[0] && typeof mappedData[0] === 'object'
               ? { ...mappedData[0] }
@@ -68893,17 +69277,18 @@ const Statutory = ({ userEmail, userRole }) => {
           if (
             formBTotals.matchedCount > 0 ||
             formBTotals.totalGrossPay > 0 ||
-            formBTotals.totalBasicPlusHra > 0
+            formBTotals.totalNetPay > 0
           ) {
             currentHeaders.forEach((h) => {
               const s = String(h || '').toLowerCase().replace(/\s+/g, ' ');
               if (
+                isFormBTamilNaduTotalEmolumentsHeader(h) ||
                 (s.includes('emolument') &&
                   (s.includes('payable') || s.includes('including') || s.includes('basic'))) ||
                 (s.includes('basic wage') &&
                   (s.includes('bonus') || s.includes('o.t') || /\bd\.?a\.?\b/.test(s)))
               ) {
-                summaryRow[h] = sanitizeValue(formBTotals.totalBasicPlusHra);
+                summaryRow[h] = sanitizeValue(formBTotals.totalGrossPay || formBTotals.totalEmoluments);
                 return;
               }
               if (/other\s+deductions?/.test(s)) {
@@ -68915,17 +69300,21 @@ const Statutory = ({ userEmail, userRole }) => {
                 return;
               }
               if (s.includes('actually paid')) {
-                summaryRow[h] = sanitizeValue(formBTotals.totalGrossPay);
+                summaryRow[h] = sanitizeValue(formBTotals.totalAmountActuallyPaid);
                 return;
               }
               if (s.includes('balance') && s.includes('due')) {
-                summaryRow[h] = sanitizeValue(formBTotals.totalNetPay);
+                summaryRow[h] = sanitizeValue(
+                  formBTotals.totalBalanceDue != null && formBTotals.totalBalanceDue !== ''
+                    ? formBTotals.totalBalanceDue
+                    : 0
+                );
               }
             });
           }
           mappedData = [summaryRow];
           console.log(
-            `Form B summary: ${formBTotalEmployeeCount || employeesForFormBTotals.length} employees, emoluments(basic+hra)=${formBTotals.totalBasicPlusHra} from ${formBTotals.emolumentsEmployeeCount || 0} emp(s), gross_pay=${formBTotals.totalGrossPay}, otherDed(gross-basic-hra)=${formBTotals.totalOtherDeductions}, net_pay=${formBTotals.totalNetPay}; payrollRowsMatched=${formBTotals.payrollMatchedCount || 0}; matchedKeys=${matchedPayrollKeys.size}; payrollLoaded=${Array.isArray(payrollRows) ? payrollRows.length : 0}; headers=${currentHeaders.length}`
+            `Form B summary: ${formBTotalEmployeeCount || employeesForFormBTotals.length} employees, emoluments(gross_pay)=${formBTotals.totalGrossPay || formBTotals.totalEmoluments} from ${formBTotals.emolumentsEmployeeCount || 0} emp(s), amountPaid(net_pay)=${formBTotals.totalAmountActuallyPaid}, balanceDue=${formBTotals.totalBalanceDue}, otherDed(gross-basic-hra)=${formBTotals.totalOtherDeductions}; payrollRowsMatched=${formBTotals.payrollMatchedCount || 0}; matchedKeys=${matchedPayrollKeys.size}; payrollLoaded=${Array.isArray(payrollRows) ? payrollRows.length : 0}; headers=${currentHeaders.length}`
           );
           if (
             formBTotals.matchedCount === 0 &&
@@ -73725,11 +74114,15 @@ const Statutory = ({ userEmail, userRole }) => {
         console.log('Applied NIL to Form XXIII Tamil Nadu overtime columns');
       }
       if (formITamilNaduSuspensionAutofillContext && Array.isArray(mappedData)) {
-        mappedData = applyFormITamilNaduNilDefaultsToRows(mappedData, currentHeaders, {
-          overwriteNil: true,
+        const { fullMonth, year } = resolveForm11MonthYear(selectedMonth, modalData?.item);
+        const monthYearLabel = buildForm11NilMonthYearLabel(fullMonth, year);
+        mappedData = applyFormITamilNaduSuspensionNilTableRows(currentHeaders, mappedData, {
+          nilPrimaryText: FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+          monthYearLabel,
+          force: true,
         });
         console.log(
-          'Form I TN subsistence: cleared Monthly emoluments; applied NIL to offence/suspension columns'
+          `Form I TN subsistence: ${FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT}${monthYearLabel ? ` — ${monthYearLabel}` : ''} (no People fetch)`
         );
       }
       if (formXXIAPFinesAutofillContext) {
@@ -74998,6 +75391,12 @@ const Statutory = ({ userEmail, userRole }) => {
         }
         if (skipStatutoryOverlayForFormDRJ) {
           overlayRecords = filterStatutoryRecordsForFormDRJAutofill(
+            overlayRecords,
+            currentHeaders
+          );
+        }
+        if (skipStatutoryOverlayForFormBTamilNadu) {
+          overlayRecords = filterStatutoryRecordsForFormBTamilNaduPayrollAutofill(
             overlayRecords,
             currentHeaders
           );
@@ -81823,6 +82222,13 @@ const Statutory = ({ userEmail, userRole }) => {
           tableHeadersForModal,
           sheetTextForVariant
         );
+        const formITamilNaduSuspensionModalOpen = isFormITamilNaduSuspensionWorkbookContext({
+          fileName: displayFileName || resolvedFormFileName,
+          formFileName: resolvedFormFileName || displayFileName,
+          formHeader: formHeaderForModal,
+          headers: tableHeadersForModal,
+          sheetText: sheetTextForVariant || '',
+        });
         // Form XXVII TN Register of Wages — OTHER ALLOWANCES spans 13–17 (not "Column 13").
         if (
           !formXXVIIQuarterlyModalOpen &&
@@ -81889,6 +82295,7 @@ const Statutory = ({ userEmail, userRole }) => {
         );
         const formIWorkmenModalOpen =
           !formXIVMPEmploymentCardModalOpen &&
+          !formITamilNaduSuspensionModalOpen &&
           !isFormXVContext(formHeaderForModal, item, displayFileName) &&
           isFormIRegisterOfWorkmenContext(
           item,
@@ -83269,6 +83676,27 @@ const Statutory = ({ userEmail, userRole }) => {
                       selectedMonth,
                       item
                     )
+                : formITamilNaduSuspensionModalOpen
+                  ? (() => {
+                      const { fullMonth, year } = resolveForm11MonthYear(selectedMonth, item);
+                      const monthYearLabel = buildForm11NilMonthYearLabel(fullMonth, year);
+                      return applyFormITamilNaduSuspensionNilTableRows(
+                        tableHeadersForModal,
+                        filterStatutoryDraftTableRows(
+                          remapFormARowsByColumnIndex(
+                            parsed.tableData || [],
+                            parsed.headers || [],
+                            tableHeadersForModal
+                          ),
+                          tableHeadersForModal
+                        ),
+                        {
+                          nilPrimaryText: FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+                          monthYearLabel,
+                          force: true,
+                        }
+                      );
+                    })()
                 : formXXIIModalOpen
                   ? filterWageRegisterNilPlaceholderRows(
                       filterStatutoryDraftTableRows(
@@ -83321,6 +83749,20 @@ const Statutory = ({ userEmail, userRole }) => {
                   ? []
                 : formXXVIIQuarterlyModalOpen
                   ? applyFormXXVIIQuarterlyNilTableRows(tableHeadersForModal, initialModalRows, selectedMonth, item)
+                : formITamilNaduSuspensionModalOpen
+                  ? (() => {
+                      const { fullMonth, year } = resolveForm11MonthYear(selectedMonth, item);
+                      const monthYearLabel = buildForm11NilMonthYearLabel(fullMonth, year);
+                      return applyFormITamilNaduSuspensionNilTableRows(
+                        tableHeadersForModal,
+                        initialModalRows,
+                        {
+                          nilPrimaryText: FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+                          monthYearLabel,
+                          force: true,
+                        }
+                      );
+                    })()
                 : formXXIIModalOpen
                   ? filterWageRegisterNilPlaceholderRows(initialModalRows, tableHeadersForModal)
                 : form11POWModalOpen
@@ -83513,6 +83955,20 @@ const Statutory = ({ userEmail, userRole }) => {
                           ? prepareForm12AdvancesExportRows(hdrsForRows, remappedSampleRows, selectedMonth, item)
                         : formXXVIIQuarterlyModalOpen
                           ? applyFormXXVIIQuarterlyNilTableRows(hdrsForRows, remappedSampleRows, selectedMonth, item)
+                        : formITamilNaduSuspensionModalOpen
+                          ? (() => {
+                              const { fullMonth, year } = resolveForm11MonthYear(selectedMonth, item);
+                              const monthYearLabel = buildForm11NilMonthYearLabel(fullMonth, year);
+                              return applyFormITamilNaduSuspensionNilTableRows(
+                                hdrsForRows,
+                                remappedSampleRows,
+                                {
+                                  nilPrimaryText: FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+                                  monthYearLabel,
+                                  force: true,
+                                }
+                              );
+                            })()
                         : filterStatutoryDraftTableRows(remappedSampleRows, hdrsForRows, { trustSavedSnapshot: true });
                     // Form 11: ignore serial-only SampleData (blank template rows) so People autofill still runs.
                     if (
@@ -83652,7 +84108,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 setError('Could not load the saved draft. Loading employee data from Zoho People…');
                 setTimeout(() => setError(''), 4000);
               }
-              if (form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formXXVIIQuarterlyModalOpen) {
+              if (form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formXXVIIQuarterlyModalOpen || formITamilNaduSuspensionModalOpen) {
                 setTableAutofillLoading(false);
                 setTableAutofillProgress('');
               } else {
@@ -83680,7 +84136,7 @@ const Statutory = ({ userEmail, userRole }) => {
               });
               }
             }
-          } else if (form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formXXVIIQuarterlyModalOpen) {
+          } else if (form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formXXVIIQuarterlyModalOpen || formITamilNaduSuspensionModalOpen) {
             setTableAutofillLoading(false);
             setTableAutofillProgress('');
           } else {
@@ -83732,6 +84188,20 @@ const Statutory = ({ userEmail, userRole }) => {
                   ? applyForm12AdvancesNilTableRows(tableHeadersForModal, parsed.tableData || [], selectedMonth, item)
                 : formXXVIIQuarterlyModalOpen
                   ? applyFormXXVIIQuarterlyNilTableRows(tableHeadersForModal, parsed.tableData || [], selectedMonth, item)
+                : formITamilNaduSuspensionModalOpen
+                  ? (() => {
+                      const { fullMonth, year } = resolveForm11MonthYear(selectedMonth, item);
+                      const monthYearLabel = buildForm11NilMonthYearLabel(fullMonth, year);
+                      return applyFormITamilNaduSuspensionNilTableRows(
+                        tableHeadersForModal,
+                        parsed.tableData || [],
+                        {
+                          nilPrimaryText: FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+                          monthYearLabel,
+                          force: true,
+                        }
+                      );
+                    })()
                 : form11POWModalOpen
                   ? ensureForm11APTemplateRows(
                       remapForm11PeriodOfWorkRowsToHeaders(
@@ -88304,6 +88774,28 @@ const Statutory = ({ userEmail, userRole }) => {
                                           ? 'Download Draft File'
                                           : 'Download form template'}
                                       </a>
+                                      {(isFormTSEDraftRow ||
+                                        shouldDownloadSavedDraftDirectly ||
+                                        hasSavedDraftFileForDownload ||
+                                        !!draftApiRowId) && (
+                                        <a
+                                          href="#"
+                                          style={{ color: '#7c3aed', textDecoration: 'underline', fontSize: '12px' }}
+                                          title="Download the same draft Excel data as a PDF"
+                                          onClick={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            handleDownloadDraftPdf(
+                                              draftApiRowId,
+                                              draftDownloadFileName,
+                                              draftSourceItem || item,
+                                              resolvedFormFileItem
+                                            );
+                                          }}
+                                        >
+                                          Download PDF
+                                        </a>
+                                      )}
                                     </span>
                                   );
                                 })()
@@ -91024,6 +91516,44 @@ const Statutory = ({ userEmail, userRole }) => {
                                     </td>
                                   );
                                 }
+                                const cellDisplayValue = (() => {
+                                  const fnBlob = [
+                                    formFileModalData?.fileName,
+                                    formFileModalData?.formFileName,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' ');
+                                  const isXixRjGrid = /form[\s._-]*xix[\s._-]*rj|\bxix_rj\b/i.test(fnBlob);
+                                  const raw = formFKarnatakaThead
+                                    ? readFormFKarnatakaRowCell(row, colIndex, header)
+                                    : formTSEModalOpen
+                                      ? getFormTSEKarnatakaRowValueForHeader(row, header)
+                                    : formOGJAutofillGrid
+                                      ? getFormOGJRowValueForHeader(row, header)
+                                    : formLGJAutofillGrid
+                                      ? getFormLGJRowValueForHeader(row, header)
+                                    : formDRJAutofillGrid
+                                      ? getFormDRajasthanRowValueForHeader(row, header, actualRowIndex)
+                                    : isXixRjGrid
+                                      ? readFormXIXRJRowCell(row, header, colIndex, actualRowIndex)
+                                      : row[header] === false || row[header] === 'false' || !row[header]
+                                        ? ''
+                                        : row[header];
+                                  if (
+                                    form15Part1ModalContext &&
+                                    isLeaveRegisterMetricHeader(header) &&
+                                    (isSuspiciousZohoRecordIdValue(raw) ||
+                                      isJunkLeaveRegisterCellValue(raw))
+                                  ) {
+                                    return '';
+                                  }
+                                  return raw;
+                                })();
+                                const cellTextAlign = resolveStatutoryFormTableCellTextAlign(cellDisplayValue, {
+                                  form26NilCell,
+                                  isFormVIHolidayCol,
+                                  isDayCol,
+                                });
                                 return (
                                 <td
                                   key={colIndex}
@@ -91033,7 +91563,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                   border: '1px solid #e5e7eb',
                                   fontSize: '14px',
                                   color: '#374151',
-                                  textAlign: form26NilCell || isFormVIHolidayCol ? 'center' : isDayCol ? 'center' : 'left',
+                                  textAlign: cellTextAlign,
                                   verticalAlign: 'middle',
                                   ...(formVDailyHoursThead &&
                                   colIndex < 2 &&
@@ -91063,39 +91593,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                 }}>
                                   <input
                                     type="text"
-                                    value={(() => {
-                                      const fnBlob = [
-                                        formFileModalData?.fileName,
-                                        formFileModalData?.formFileName,
-                                      ]
-                                        .filter(Boolean)
-                                        .join(' ');
-                                      const isXixRjGrid = /form[\s._-]*xix[\s._-]*rj|\bxix_rj\b/i.test(fnBlob);
-                                      const raw = formFKarnatakaThead
-                                        ? readFormFKarnatakaRowCell(row, colIndex, header)
-                                        : formTSEModalOpen
-                                          ? getFormTSEKarnatakaRowValueForHeader(row, header)
-                                        : formOGJAutofillGrid
-                                          ? getFormOGJRowValueForHeader(row, header)
-                                        : formLGJAutofillGrid
-                                          ? getFormLGJRowValueForHeader(row, header)
-                                        : formDRJAutofillGrid
-                                          ? getFormDRajasthanRowValueForHeader(row, header, actualRowIndex)
-                                        : isXixRjGrid
-                                          ? readFormXIXRJRowCell(row, header, colIndex, actualRowIndex)
-                                          : row[header] === false || row[header] === 'false' || !row[header]
-                                            ? ''
-                                            : row[header];
-                                      if (
-                                        form15Part1ModalContext &&
-                                        isLeaveRegisterMetricHeader(header) &&
-                                        (isSuspiciousZohoRecordIdValue(raw) ||
-                                          isJunkLeaveRegisterCellValue(raw))
-                                      ) {
-                                        return '';
-                                      }
-                                      return raw;
-                                    })()}
+                                    value={cellDisplayValue}
                                     onChange={(e) => {
                                       if (isFormFileReadOnly) return;
                                       const actualRowIndex = formTablePage * FORM_TABLE_PAGE_SIZE + rowIndex;
@@ -91134,7 +91632,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                       border: '1px solid #d1d5db',
                                       borderRadius: '4px',
                                       fontSize: isDayCol ? '12px' : isFormVIHolidayCol ? '13px' : '14px',
-                                      textAlign: form26NilCell || isFormVIHolidayCol ? 'center' : isDayCol ? 'center' : 'left',
+                                      textAlign: cellTextAlign,
                                       backgroundColor: isFormFileReadOnly ? '#f9fafb' : 'white'
                                     }}
                                     placeholder={

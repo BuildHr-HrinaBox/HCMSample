@@ -5,9 +5,12 @@ import {
   isFormXXIIITamilNaduOtNilHeader,
   isFormXXIIITamilNaduOtWorkedDatesHeader,
   isFormXXIIITamilNaduTotalOvertimeWorkedHeader,
+  isFormXXIIITamilNaduNormalRateHeader,
   isFormXXIIITamilNaduOvertimeRateHeader,
   isFormXXIIITamilNaduOvertimeEarningsHeader,
   isFormXXIIITamilNaduOtWagesPaidDateHeader,
+  resolveFormXXIIITamilNaduNormalRate,
+  resolveFormXXIIITamilNaduOvertimeRate,
 } from './formXXIIITamilNadu';
 
 describe('Form XXIII Tamil Nadu overtime NIL columns', () => {
@@ -43,41 +46,43 @@ describe('Form XXIII Tamil Nadu overtime NIL columns', () => {
     ).toBe(false);
   });
 
-  it('recognizes the five OT columns for NIL', () => {
+  it('recognizes OT NIL columns and wage-rate headers', () => {
     expect(isFormXXIIITamilNaduOtWorkedDatesHeader('Dates on which overtime worked')).toBe(true);
     expect(
       isFormXXIIITamilNaduTotalOvertimeWorkedHeader(
         'Total overtime worked or production in case of piece rates'
       )
     ).toBe(true);
+    expect(isFormXXIIITamilNaduNormalRateHeader('Normal rate of wages')).toBe(true);
     expect(isFormXXIIITamilNaduOvertimeRateHeader('Overtime rate of wages')).toBe(true);
     expect(isFormXXIIITamilNaduOvertimeEarningsHeader('Overtime earnings')).toBe(true);
     expect(isFormXXIIITamilNaduOtWagesPaidDateHeader('Date on which overtime wages paid')).toBe(
       true
     );
     expect(isFormXXIIITamilNaduOtNilHeader('Normal rate of wages')).toBe(false);
+    expect(isFormXXIIITamilNaduOtNilHeader('Overtime rate of wages')).toBe(false);
     expect(isFormXXIIITamilNaduOtNilHeader('Name and surname of workmen')).toBe(false);
   });
 
-  it('fills blank OT columns with NIL without touching normal rate', () => {
+  it('fills blank OT columns with NIL without touching normal or overtime rate', () => {
     const rows = applyFormXXIIITamilNaduOtNilToMappedRows(
       [
         {
           'Name and surname of workmen': 'Ravi',
           'Normal rate of wages': '100851',
+          'Overtime rate of wages': '505.08',
           'Dates on which overtime worked': '',
-          'Overtime rate of wages': '',
         },
       ],
       headers
     );
     expect(rows[0]['Name and surname of workmen']).toBe('Ravi');
     expect(rows[0]['Normal rate of wages']).toBe('100851');
+    expect(rows[0]['Overtime rate of wages']).toBe('505.08');
     expect(rows[0]['Dates on which overtime worked']).toBe(FORM_XXIII_TN_OT_NIL);
     expect(rows[0]['Total overtime worked or production in case of piece rates']).toBe(
       FORM_XXIII_TN_OT_NIL
     );
-    expect(rows[0]['Overtime rate of wages']).toBe(FORM_XXIII_TN_OT_NIL);
     expect(rows[0]['Overtime earnings']).toBe(FORM_XXIII_TN_OT_NIL);
     expect(rows[0]['Date on which overtime wages paid']).toBe(FORM_XXIII_TN_OT_NIL);
   });
@@ -99,6 +104,24 @@ describe('Form XXIII Tamil Nadu overtime NIL columns', () => {
     expect(rows[0]['Total overtime worked or production in case of piece rates']).toBe(
       FORM_XXIII_TN_OT_NIL
     );
-    expect(rows[0]['Overtime rate of wages']).toBe(FORM_XXIII_TN_OT_NIL);
+    expect(rows[0]['Overtime rate of wages']).toBe('100');
+  });
+});
+
+describe('Form XXIII Tamil Nadu wage rates', () => {
+  it('resolves Normal rate of wages from gross_pay', () => {
+    expect(resolveFormXXIIITamilNaduNormalRate({ gross_pay: 100851, net_pay: 90000 })).toBe(
+      '100851'
+    );
+    expect(resolveFormXXIIITamilNaduNormalRate({ net_pay: 90000 })).toBe('');
+    expect(resolveFormXXIIITamilNaduNormalRate({ fetch_error: true, gross_pay: 100851 })).toBe('');
+  });
+
+  it('resolves Overtime rate of wages as (Basic/26/8)*2', () => {
+    // 52628 / 26 / 8 * 2 = 506.038… → 506.04
+    expect(resolveFormXXIIITamilNaduOvertimeRate({ basic: 52628 })).toBe('506.04');
+    expect(resolveFormXXIIITamilNaduOvertimeRate({ earned_basic: 26000 })).toBe('250');
+    expect(resolveFormXXIIITamilNaduOvertimeRate({ gross_pay: 100851 })).toBe('');
+    expect(resolveFormXXIIITamilNaduOvertimeRate(null)).toBe('');
   });
 });

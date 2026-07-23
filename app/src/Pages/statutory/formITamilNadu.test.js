@@ -4,11 +4,17 @@ import path from 'path';
 import {
   FORM_I_TAMIL_NADU_NIL_DEFAULT,
   FORM_I_TN_DEFAULT_EMPLOYEES,
+  FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
   applyFormITamilNaduNilDefaultsToRows,
+  applyFormITamilNaduSuspensionNilTableRows,
   buildFormITamilNaduDefaultRows,
+  buildFormITamilNaduSuspensionNilTableRows,
   cloneFormITamilNaduWorkmenWorksheetClean,
   ensureFormITamilNaduDefaultEmployeeRows,
   ensureFormITamilNaduWorkmenTitleLayout,
+  findFormITamilNaduSuspensionNilMonthYearHeader,
+  findFormITamilNaduSuspensionNilPrimaryHeader,
+  isFormITamilNaduAmountAllowancePaidHeader,
   isFormITamilNaduFinesNilDefaultHeader,
   isFormITamilNaduFinesOrWorkmenDefaultContext,
   isFormITamilNaduNilDefaultHeader,
@@ -32,6 +38,9 @@ describe('Form I Tamil Nadu NIL defaults', () => {
   ];
 
   const emolumentsHeader = 'Monthly emoluments (Wages) paid to the employee';
+  const nameHeader = 'Name and Address of the Employee kept under suspension';
+  const amountPaidHeader = 'Amount of subsistence allowance paid and the date of payment';
+  const suspensionHeaders = ['Sl.No', nameHeader, emolumentsHeader, amountPaidHeader, ...nilHeaders.filter((h) => h !== amountPaidHeader)];
 
   it('normalizes header text and recognizes the NIL columns', () => {
     expect(normalizeFormITamilNaduHeaderText('  Date of Suspension  ')).toBe('date of suspension');
@@ -53,6 +62,8 @@ describe('Form I Tamil Nadu NIL defaults', () => {
     ).toBe(false);
     expect(isFormITamilNaduNilDefaultHeader(emolumentsHeader)).toBe(false);
     expect(isFormITamilNaduSkipAutofillHeader(emolumentsHeader)).toBe(true);
+    expect(isFormITamilNaduAmountAllowancePaidHeader(amountPaidHeader)).toBe(true);
+    expect(isFormITamilNaduNilDefaultHeader(amountPaidHeader)).toBe(true);
   });
 
   it('detects the suspension workbook from filename and headers', () => {
@@ -71,6 +82,57 @@ describe('Form I Tamil Nadu NIL defaults', () => {
         sheetText: 'SA Form 1 Register of Employees Placed under suspension'
       })
     ).toBe(true);
+  });
+
+  it('builds a single Nill of the month row with NIL amount paid (no fetched date)', () => {
+    expect(findFormITamilNaduSuspensionNilPrimaryHeader(suspensionHeaders)).toBe(nameHeader);
+    expect(findFormITamilNaduSuspensionNilMonthYearHeader(suspensionHeaders, nameHeader)).toBe(
+      emolumentsHeader
+    );
+    const row = buildFormITamilNaduSuspensionNilTableRows(
+      suspensionHeaders,
+      FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+      'Jul 2026'
+    )[0];
+    expect(row[nameHeader]).toBe(FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT);
+    expect(row[emolumentsHeader]).toBe('Jul 2026');
+    expect(row[amountPaidHeader]).toBe(FORM_I_TAMIL_NADU_NIL_DEFAULT);
+    expect(row['Date of suspension']).toBe(FORM_I_TAMIL_NADU_NIL_DEFAULT);
+  });
+
+  it('forces Amount of subsistence allowance paid to NIL and drops footer-like rows', () => {
+    const peopleRows = [
+      {
+        [nameHeader]: 'rajeshkumar ramasamy',
+        [emolumentsHeader]: '',
+        [amountPaidHeader]: '31-05-2026',
+        [nilHeaders[0]]: 'NIL'
+      },
+      {
+        [nameHeader]: '',
+        [amountPaidHeader]: 'For (Company Name)'
+      },
+      {
+        [amountPaidHeader]: 'Authorised Signatory'
+      }
+    ];
+    const applied = applyFormITamilNaduSuspensionNilTableRows(suspensionHeaders, peopleRows, {
+      nilPrimaryText: FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+      monthYearLabel: 'Jul 2026',
+      force: true
+    });
+    expect(applied).toHaveLength(1);
+    expect(applied[0][nameHeader]).toBe(FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT);
+    expect(applied[0][amountPaidHeader]).toBe(FORM_I_TAMIL_NADU_NIL_DEFAULT);
+    expect(applied[0][emolumentsHeader]).toBe('Jul 2026');
+  });
+
+  it('overwrites fetched payment dates in Amount of subsistence allowance paid', () => {
+    const headers = [amountPaidHeader, emolumentsHeader];
+    const rows = [{ [amountPaidHeader]: '31-05-2026', [emolumentsHeader]: '5000' }];
+    expect(applyFormITamilNaduNilDefaultsToRows(rows, headers)).toEqual([
+      { [amountPaidHeader]: FORM_I_TAMIL_NADU_NIL_DEFAULT, [emolumentsHeader]: '' }
+    ]);
   });
 
   it('clears Monthly emoluments and fills blank NIL columns without overwriting real values', () => {

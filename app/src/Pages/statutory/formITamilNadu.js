@@ -273,9 +273,23 @@ export function isFormITamilNaduSkipAutofillHeader(header) {
   return false;
 }
 
+/** "Amount of subsistence allowance paid and the date of payment" — never fetch; fill NIL. */
+export function isFormITamilNaduAmountAllowancePaidHeader(header) {
+  const text = normalizeFormITamilNaduHeaderText(header);
+  if (!text) return false;
+  return (
+    text.includes('amount') &&
+    text.includes('allowance') &&
+    text.includes('paid') &&
+    text.includes('date') &&
+    text.includes('payment')
+  );
+}
+
 export function isFormITamilNaduNilDefaultHeader(header) {
   const text = normalizeFormITamilNaduHeaderText(header);
   if (!text) return false;
+  if (isFormITamilNaduAmountAllowancePaidHeader(header)) return true;
   if (isFormITamilNaduSkipAutofillHeader(header)) return false;
 
   const hasSuspensionDate =
@@ -296,9 +310,6 @@ export function isFormITamilNaduNilDefaultHeader(header) {
       text.includes('calculated') &&
       text.includes('period for which') &&
       text.includes('calculation made')) ||
-    (text.includes('amount') &&
-      text.includes('allowance paid') &&
-      text.includes('date of payment')) ||
     hasPunishmentText ||
     text === 'remarks' ||
     (text.includes('signature of employee') &&
@@ -360,6 +371,14 @@ export function applyFormITamilNaduNilDefaultsToRows(rows, headers, { overwriteN
     let changed = false;
 
     headers.forEach((header) => {
+      // Amount paid + date: always NIL (never keep fetched month-end dates).
+      if (isFormITamilNaduAmountAllowancePaidHeader(header)) {
+        if (next[header] !== FORM_I_TAMIL_NADU_NIL_DEFAULT) {
+          next[header] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+          changed = true;
+        }
+        return;
+      }
       if (isFormITamilNaduSkipAutofillHeader(header)) {
         if (String(next[header] ?? '').trim() !== '') {
           next[header] = '';
@@ -378,6 +397,156 @@ export function applyFormITamilNaduNilDefaultsToRows(rows, headers, { overwriteN
 
     return changed ? next : row;
   });
+}
+
+/** Register of Subsistence Allowance — no People fetch; single "Nill of the month" row. */
+export const FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT = 'Nill of the month';
+
+export function isFormITamilNaduSuspensionNilMonthValue(v) {
+  return /^nill?\s+of\s+the\s+month/i.test(String(v ?? '').trim());
+}
+
+export function findFormITamilNaduSuspensionNilPrimaryHeader(headers) {
+  for (const h of headers || []) {
+    const text = normalizeFormITamilNaduHeaderText(h);
+    if (!text) continue;
+    if (/name/.test(text) && (/suspension|employee|address|workman|workmen/.test(text))) return h;
+  }
+  for (const h of headers || []) {
+    const text = normalizeFormITamilNaduHeaderText(h);
+    if (/^(s\.?\s*no\.?|sl\.?\s*no\.?|serial(\s+number)?)$/.test(text)) continue;
+    return h;
+  }
+  return headers?.[0] || null;
+}
+
+export function findFormITamilNaduSuspensionNilMonthYearHeader(headers, primaryHdr) {
+  for (const h of headers || []) {
+    if (h === primaryHdr) continue;
+    if (isFormITamilNaduSkipAutofillHeader(h)) return h;
+  }
+  for (const h of headers || []) {
+    if (h === primaryHdr) continue;
+    const text = normalizeFormITamilNaduHeaderText(h);
+    if (/department|designation|nature of offence|date of suspension|remarks/.test(text)) return h;
+  }
+  let pastPrimary = primaryHdr == null;
+  for (const h of headers || []) {
+    const text = normalizeFormITamilNaduHeaderText(h);
+    if (/^(s\.?\s*no\.?|sl\.?\s*no\.?|serial(\s+number)?)$/.test(text)) continue;
+    if (h === primaryHdr) {
+      pastPrimary = true;
+      continue;
+    }
+    if (pastPrimary) return h;
+  }
+  return null;
+}
+
+export function formITamilNaduSuspensionRowIsNilMonthEntry(row, headers) {
+  const primaryHdr = findFormITamilNaduSuspensionNilPrimaryHeader(headers);
+  if (!primaryHdr) return false;
+  return isFormITamilNaduSuspensionNilMonthValue(row?.[primaryHdr]);
+}
+
+/** True only when a real suspension/offence/allowance value exists (not People name autofill). */
+export function formITamilNaduSuspensionRowHasSubstantiveEntry(row, headers) {
+  if (!row || typeof row !== 'object') return false;
+  if (formITamilNaduSuspensionRowIsNilMonthEntry(row, headers)) return false;
+  return (headers || []).some((header) => {
+    // Amount paid column is never treated as a real suspension entry (no fetch).
+    if (isFormITamilNaduAmountAllowancePaidHeader(header)) return false;
+    if (!isFormITamilNaduNilDefaultHeader(header)) return false;
+    const v = String(row[header] ?? '').trim();
+    if (!v || isBlankLikeFormITamilNaduValue(v)) return false;
+    if (/^nil$/i.test(v) || v === FORM_I_TAMIL_NADU_NIL_DEFAULT) return false;
+    if (isFormITamilNaduSuspensionNilMonthValue(v)) return false;
+    if (/^[a-z]{3}\s+\d{4}$/i.test(v)) return false;
+    return true;
+  });
+}
+
+/** Signature / employer footer text that must not appear as table data rows. */
+export function isFormITamilNaduSuspensionFooterLikeValue(value) {
+  const text = String(value ?? '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return false;
+  if (/^for\s*\(/i.test(text)) return true;
+  if (/authorised\s+signatory|authorized\s+signatory/i.test(text)) return true;
+  if (/signature\s+of\s+employer/i.test(text)) return true;
+  if (/manager\s*\/\s*authorised\s+person/i.test(text)) return true;
+  return false;
+}
+
+export function formITamilNaduSuspensionRowIsFooterLike(row, headers) {
+  if (!row || typeof row !== 'object') return false;
+  const list = Array.isArray(headers) && headers.length > 0 ? headers : Object.keys(row);
+  return list.some((header) => {
+    if (String(header || '').startsWith('__')) return false;
+    return isFormITamilNaduSuspensionFooterLikeValue(row[header]);
+  });
+}
+
+export function buildFormITamilNaduSuspensionNilTableRows(
+  headers,
+  nilPrimaryText = FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+  monthYearLabel = ''
+) {
+  const primaryHdr = findFormITamilNaduSuspensionNilPrimaryHeader(headers);
+  const monthHdr = findFormITamilNaduSuspensionNilMonthYearHeader(headers, primaryHdr);
+  const row = {};
+  (headers || []).forEach((h) => {
+    row[h] = '';
+  });
+  (headers || []).forEach((h) => {
+    if (isFormITamilNaduNilDefaultHeader(h) || isFormITamilNaduAmountAllowancePaidHeader(h)) {
+      row[h] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+    }
+  });
+  if (primaryHdr && nilPrimaryText) row[primaryHdr] = nilPrimaryText;
+  if (monthHdr && monthYearLabel) row[monthHdr] = monthYearLabel;
+  return [row];
+}
+
+/**
+ * Subsistence / suspension register: keep real suspension entries; otherwise one
+ * "Nill of the month" + month/year row (do not keep People-fetched employee rows).
+ */
+export function applyFormITamilNaduSuspensionNilTableRows(
+  headers,
+  existingRows,
+  {
+    nilPrimaryText = FORM_I_TN_SUSPENSION_NIL_OF_MONTH_TEXT,
+    monthYearLabel = '',
+    force = false
+  } = {}
+) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const rows = (Array.isArray(existingRows) ? existingRows : []).filter(
+    (r) => !formITamilNaduSuspensionRowIsFooterLike(r, hdrs)
+  );
+  if (!force && rows.some((r) => formITamilNaduSuspensionRowHasSubstantiveEntry(r, hdrs))) {
+    return applyFormITamilNaduNilDefaultsToRows(rows, hdrs, { overwriteNil: true });
+  }
+  if (!force && rows.some((r) => formITamilNaduSuspensionRowIsNilMonthEntry(r, hdrs))) {
+    const primaryHdr = findFormITamilNaduSuspensionNilPrimaryHeader(hdrs);
+    const monthHdr = findFormITamilNaduSuspensionNilMonthYearHeader(hdrs, primaryHdr);
+    return rows.map((r) => {
+      if (!formITamilNaduSuspensionRowIsNilMonthEntry(r, hdrs)) return r;
+      const updated = { ...r };
+      hdrs.forEach((h) => {
+        if (isFormITamilNaduNilDefaultHeader(h) || isFormITamilNaduAmountAllowancePaidHeader(h)) {
+          updated[h] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+        }
+      });
+      if (primaryHdr) updated[primaryHdr] = nilPrimaryText;
+      if (monthHdr && monthYearLabel) updated[monthHdr] = monthYearLabel;
+      return updated;
+    });
+  }
+  return buildFormITamilNaduSuspensionNilTableRows(hdrs, nilPrimaryText, monthYearLabel);
 }
 
 export { FORM_I_TAMIL_NADU_NIL_DEFAULT, normalizeFormITamilNaduHeaderText };

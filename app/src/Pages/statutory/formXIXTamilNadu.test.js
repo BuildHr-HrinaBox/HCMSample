@@ -45,12 +45,13 @@ describe('formXIXTamilNadu', () => {
         overtime: '',
         basic: 50000,
         dearness_allowance: 2000,
+        hra: 8000,
         other_allowance: 3000,
-        gross_pay: 55000,
+        gross_pay: 63000,
         epf_contribution: 1800,
         professional_tax: 200,
         total_deductions: 2000,
-        net_pay: 53000,
+        net_pay: 61000,
         deductions: [
           { type: 'esi', name: 'ESIC', amount: 400 },
           { type: 'lwf', name: 'Labour Welfare Fund', amount: 20 },
@@ -69,16 +70,38 @@ describe('formXIXTamilNadu', () => {
     expect(row['Nature of Work']).toBe('Technician');
     expect(row.Basic).toBe('50000');
     expect(row['Dearness Allowance']).toBe('2000');
+    expect(row['House Rent Allowance']).toBe('8000');
     expect(row['Leave with Wages Including Cash in Lieu of Kinds']).toBe('NIL');
     expect(row['Other Allowances']).toBe('3000');
-    expect(row['Gross Wages']).toBe('55000');
+    expect(row['Gross Wages']).toBe('63000');
     expect(row['Employee Provident Fund']).toBe('1800');
     expect(row.ESIC).toBe('400');
     expect(row['Advance/Loan']).toBe('NIL');
     expect(row['Labour Welfare Fund']).toBe('20');
     expect(row['Professional Tax']).toBe('200');
     expect(row['Total Wage Deductions']).toBe('2000');
-    expect(row['Net Amount of Wages Paid']).toBe('53000');
+    expect(row['Net Amount of Wages Paid']).toBe('61000');
+  });
+
+  it('fetches HRA into House Rent Allowance and derives Other Allowances when missing', () => {
+    const row = applyFormXIXTamilNaduEmployeeToRow(
+      {},
+      { FirstName: 'R', LastName: 'K' },
+      FORM_XIX_TN_TABLE_HEADERS,
+      {
+        sanitizeValue: (v) => String(v ?? '').trim(),
+        payrollRow: {
+          basic: 26781,
+          hra_fbp: 38066,
+          gross_pay: 129694,
+          net_pay: 128994,
+        },
+      }
+    );
+    expect(row['House Rent Allowance']).toBe('38066');
+    expect(row.Basic).toBe('26781');
+    // Other Allowances = gross − basic − DA − HRA
+    expect(row['Other Allowances']).toBe('64847');
   });
 
   it('computes Total Wage Deductions as gross_pay − net_pay', () => {

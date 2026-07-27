@@ -503,7 +503,8 @@ function readEmployeeZohoIds(emp) {
   return [...ids];
 }
 
-function formOGJRecordMatchesWorker(record, workerName, emp, options = {}) {
+/** Shared worker match for Form O / Form N approved-leave autofill. */
+export function formOGJRecordMatchesWorker(record, workerName, emp, options = {}) {
   if (!record) return false;
 
   const { ids: recordIds, names: recordNames } = collectApprovedLeaveIdentityKeys(record);

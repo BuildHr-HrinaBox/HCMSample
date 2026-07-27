@@ -112,6 +112,69 @@ export function getDefaultLeaveReportRange(referenceDate = new Date()) {
   };
 }
 
+/** YYYY-MM-DD for HTML date inputs (local calendar day). */
+export function toIsoDateInput(referenceDate = new Date()) {
+  const d = referenceDate instanceof Date ? referenceDate : new Date(referenceDate);
+  if (Number.isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** Convert HTML date input (YYYY-MM-DD) to Zoho leave date (DD-Mon-YYYY). */
+export function isoToZohoLeaveDate(isoDate) {
+  const m = String(isoDate || '')
+    .trim()
+    .match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  const year = parseInt(m[1], 10);
+  const monthIndex = parseInt(m[2], 10) - 1;
+  const day = parseInt(m[3], 10);
+  if (monthIndex < 0 || monthIndex > 11) return '';
+  const d = new Date(year, monthIndex, day);
+  if (d.getFullYear() !== year || d.getMonth() !== monthIndex || d.getDate() !== day) return '';
+  return `${String(day).padStart(2, '0')}-${MONTH_ABBR[monthIndex]}-${year}`;
+}
+
+/** Display helper: YYYY-MM-DD → DD/MM/YY (e.g. 24/07/26). */
+export function isoToDisplayDate(isoDate) {
+  const m = String(isoDate || '')
+    .trim()
+    .match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  return `${m[3]}/${m[2]}/${m[1].slice(-2)}`;
+}
+
+/** Leave page default: today → today (day-wise). Returns ISO dates for date pickers. */
+export function getTodayLeaveDayRange(referenceDate = new Date()) {
+  const today = toIsoDateInput(referenceDate);
+  return { from: today, to: today };
+}
+
+/** Leave page default: first → last day of the current calendar month (ISO for date pickers). */
+export function getCurrentMonthLeaveRange(referenceDate = new Date()) {
+  const d = referenceDate instanceof Date ? referenceDate : new Date(referenceDate);
+  if (Number.isNaN(d.getTime())) return { from: '', to: '' };
+  const year = d.getFullYear();
+  const month = d.getMonth();
+  const from = toIsoDateInput(new Date(year, month, 1));
+  const to = toIsoDateInput(new Date(year, month + 1, 0));
+  return { from, to };
+}
+
+/** Last calendar day of the month containing an ISO date (YYYY-MM-DD). */
+export function getMonthEndIsoFromIso(isoDate) {
+  const m = String(isoDate || '')
+    .trim()
+    .match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  const year = parseInt(m[1], 10);
+  const monthIndex = parseInt(m[2], 10) - 1;
+  if (monthIndex < 0 || monthIndex > 11) return '';
+  return toIsoDateInput(new Date(year, monthIndex + 1, 0));
+}
+
 const defaultRange = getDefaultLeaveReportRange();
 export const DEFAULT_LEAVE_REPORT_FROM = defaultRange.from;
 export const DEFAULT_LEAVE_REPORT_TO = defaultRange.to;

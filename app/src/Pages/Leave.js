@@ -1,7 +1,10 @@
-import React, { useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import './Leave.css';
 import {
-  getDefaultLeaveReportRange,
+  getCurrentMonthLeaveRange,
+  getMonthEndIsoFromIso,
+  isoToZohoLeaveDate,
+  isoToDisplayDate,
   fetchLeaveReport,
   mapLeaveRecordToLeaveDataRow,
   saveLeaveDataToBackend,
@@ -94,32 +97,48 @@ function formatLeaveTypeCell(val) {
 }
 
 const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
-  const defaultRange = getDefaultLeaveReportRange();
-  const [fromDate, setFromDate] = useState(defaultRange.from);
-  const [toDate, setToDate] = useState(defaultRange.to);
+  const defaultMonth = getCurrentMonthLeaveRange();
+  const [fromDate, setFromDate] = useState(defaultMonth.from);
+  const [toDate, setToDate] = useState(defaultMonth.to);
   const [data, setData] = useState(null);
   const [meta, setMeta] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadStatus, setLoadStatus] = useState('');
   const [error, setError] = useState('');
   const [saveMessage, setSaveMessage] = useState('');
+  const fetchSeqRef = useRef(0);
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async (overrideFrom, overrideTo) => {
+    const fromIso = overrideFrom != null ? overrideFrom : fromDate;
+    const toIso = overrideTo != null ? overrideTo : toDate;
+    const fromZoho = isoToZohoLeaveDate(fromIso);
+    const toZoho = isoToZohoLeaveDate(toIso);
+    if (!fromZoho || !toZoho) {
+      setError('Please pick a valid From and To date.');
+      return;
+    }
+    if (fromIso > toIso) {
+      setError('From date cannot be after To date.');
+      return;
+    }
+
+    const seq = ++fetchSeqRef.current;
     setLoading(true);
     setError('');
-    setLoadStatus('');
+    setLoadStatus(`Fetching leave for ${isoToDisplayDate(fromIso)} to ${isoToDisplayDate(toIso)}…`);
     setSaveMessage('');
     setData(null);
     setMeta(null);
     try {
       const result = await fetchLeaveReport({
-        from: fromDate,
-        to: toDate,
+        from: fromZoho,
+        to: toZoho,
         unit: 'Day',
         fetchAll: true,
         apiBase,
         useCache: true,
         onProgress: ({ pages, total, status }) => {
+          if (seq !== fetchSeqRef.current) return;
           if (status === 'cached') {
             setLoadStatus(`Loaded ${total} employees from cache`);
             return;
@@ -127,6 +146,7 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
           setLoadStatus(`Loading page ${pages} (${total} employees so far)...`);
         },
       });
+      if (seq !== fetchSeqRef.current) return;
       if (!result.success) {
         throw new Error('Invalid response');
       }
@@ -140,12 +160,12 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
             ? result.leaveRecords
             : [];
       const labelsForMap = extracted.leaveTypeLabels || leaveTypeLabels;
-      const monthWise = getLeaveMonthWise(fromDate, toDate);
+      const monthWise = getLeaveMonthWise(fromZoho, toZoho);
       const mappedRows = leaveRecords
         .map((row) =>
           mapLeaveRecordToLeaveDataRow(row, labelsForMap, {
-            from: fromDate,
-            to: toDate,
+            from: fromZoho,
+            to: toZoho,
             monthWise,
           })
         )
@@ -157,12 +177,15 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
         );
         const saveResult = await saveLeaveDataToBackend({
           records: mappedRows,
-          from: fromDate,
-          to: toDate,
+          from: fromZoho,
+          to: toZoho,
           monthWise,
           apiBase,
-          onProgress: setLoadStatus,
+          onProgress: (msg) => {
+            if (seq === fetchSeqRef.current) setLoadStatus(msg);
+          },
         });
+        if (seq !== fetchSeqRef.current) return;
         const inserted = saveResult?.data?.inserted ?? mappedRows.length;
         setSaveMessage(
           monthWise
@@ -173,6 +196,7 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
         setSaveMessage('No leave rows to save to LeaveData.');
       }
 
+      if (seq !== fetchSeqRef.current) return;
       setData({
         raw: result.raw,
         leaveTypeLabels: labelsForMap,
@@ -180,13 +204,26 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
       });
       setMeta(result.meta || null);
     } catch (err) {
+      if (seq !== fetchSeqRef.current) return;
       setError(err.message || 'Failed to fetch leave data');
       setData(null);
       setMeta(null);
       setSaveMessage('');
     } finally {
-      setLoading(false);
+      if (seq === fetchSeqRef.current) setLoading(false);
     }
+  }, [fromDate, toDate, apiBase]);
+
+  const onFromDateChange = (e) => {
+    const next = e.target.value;
+    setFromDate(next);
+    // Keep range month-aligned: To becomes the last day of the From month.
+    const monthEnd = getMonthEndIsoFromIso(next);
+    if (monthEnd) setToDate(monthEnd);
+  };
+
+  const onToDateChange = (e) => {
+    setToDate(e.target.value);
   };
 
   const rawData = data && data.raw !== undefined ? data.raw : data;
@@ -285,42 +322,44 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
       <header className="leave-header">
         <h1 className="leave-title">{pageTitle}</h1>
         <p className="leave-subtitle">
-          Fetch leave booked/balance from Zoho People Leave API. Use the leave year window (typically Apr–Mar);
-          calendar-year ranges often return only empty Absent rows. Earned Leave shows balance for the period
-          and booked days for the same From–To window.
+          Choose the month (From / To), then click Fetch. Leave data loads only when you fetch — nothing syncs
+          automatically. Earned Leave shows balance and booked days for the selected window.
         </p>
       </header>
 
       <div className="leave-actions">
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-          <label className="leave-subtitle" style={{ margin: 0 }}>
+        <div className="leave-date-filters">
+          <label className="leave-date-label">
             From
             <input
-              type="text"
+              type="date"
+              className="leave-date-input"
               value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
-              placeholder="01-Apr-2026"
-              style={{ marginLeft: 8, padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db', width: 130 }}
+              onChange={onFromDateChange}
+              aria-label="From date"
             />
           </label>
-          <label className="leave-subtitle" style={{ margin: 0 }}>
+          <label className="leave-date-label">
             To
             <input
-              type="text"
+              type="date"
+              className="leave-date-input"
               value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
-              placeholder="31-Mar-2027"
-              style={{ marginLeft: 8, padding: '8px 10px', borderRadius: 6, border: '1px solid #d1d5db', width: 130 }}
+              onChange={onToDateChange}
+              aria-label="To date"
             />
           </label>
+          <span className="leave-date-range-hint">
+            {isoToDisplayDate(fromDate) || '—'} to {isoToDisplayDate(toDate) || '—'}
+          </span>
         </div>
         <button
           type="button"
           className="leave-fetch-btn"
-          onClick={fetchData}
+          onClick={() => fetchData()}
           disabled={loading}
         >
-          {loading ? 'Fetching...' : 'Fetch Data'}
+          {loading ? 'Fetching...' : 'Fetch'}
         </button>
       </div>
 
@@ -340,7 +379,7 @@ const Leave = ({ userRole, userEmail, apiBase, pageTitle = 'Leave' }) => {
         <div className="leave-loading">
           {loadStatus || 'Loading leave data...'}
           <div style={{ fontSize: 13, marginTop: 8, color: '#6b7280' }}>
-            Fetching in small batches to respect Zoho API limits. Please do not click Fetch again.
+            Fetching the selected month. Please wait — do not change the dates until loading finishes.
           </div>
         </div>
       )}

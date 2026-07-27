@@ -304,8 +304,25 @@ async function fetchLeaveReportPayload({
   }
 
   const leaveTypeLabels = extractLeaveTypeLabels(rawData);
-  const leaveRecords = renameLeaveRecordKeys(normalizeLeaveResponse(rawData), leaveTypeLabels);
+  let leaveRecords = renameLeaveRecordKeys(normalizeLeaveResponse(rawData), leaveTypeLabels);
   const records = toRecordsMap(rawData, leaveRecords);
+  // UI path uses json.records (report object map). normalizeLeaveResponse alone
+  // often returns [] for Zoho bookedAndBalance — fall back to the map.
+  if (
+    (!Array.isArray(leaveRecords) || leaveRecords.length === 0) &&
+    records &&
+    typeof records === 'object' &&
+    !Array.isArray(records) &&
+    Object.keys(records).length > 0
+  ) {
+    leaveRecords = renameLeaveRecordKeys(
+      Object.entries(records).map(([employeeId, row]) => ({
+        employeeId: String(employeeId),
+        ...(row && typeof row === 'object' ? row : {}),
+      })),
+      leaveTypeLabels
+    );
+  }
   return { rawData, leaveTypeLabels, leaveRecords, records, meta };
 }
 
@@ -342,6 +359,13 @@ async function syncLeaveDataToStore(catalyst, {
       })
     )
     .filter(Boolean);
+
+  console.log('leave sync: mapped LeaveData rows', {
+    leaveRecords: (payload.leaveRecords || []).length,
+    mapped: mappedRows.length,
+    meta: payload.meta || null,
+    monthWise: resolvedMonth,
+  });
 
   if (mappedRows.length === 0) {
     return {
@@ -903,6 +927,23 @@ function zohoAuthHeader(accessToken) {
 function normalizeLeaveResponse(raw) {
   if (!raw || typeof raw !== 'object') return [];
 
+  // Zoho bookedAndBalance returns `report` as an object keyed by employee id
+  // (not an array). Convert with Object.values — same as the Leave UI path.
+  const reportCandidates = [
+    raw.report,
+    raw.leaveReport,
+    raw.response && raw.response.report,
+    raw.result && raw.result.report,
+    raw.data && raw.data.report,
+  ];
+  for (const reportMap of reportCandidates) {
+    if (!reportMap || typeof reportMap !== 'object' || Array.isArray(reportMap)) continue;
+    const values = Object.values(reportMap).filter(
+      (v) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length > 0
+    );
+    if (values.length > 0) return values;
+  }
+
   const findArrayOfObjects = (obj, depth) => {
     if (depth > 4 || !obj) return null;
     if (Array.isArray(obj) && obj.length > 0) {
@@ -918,6 +959,17 @@ function normalizeLeaveResponse(raw) {
       if (!val) continue;
       if (Array.isArray(val) && val.length > 0 && val[0] != null && typeof val[0] === 'object' && Object.keys(val[0]).length > 0) {
         return val;
+      }
+      // Object map under report/records (employeeId -> row)
+      if (
+        typeof val === 'object' &&
+        !Array.isArray(val) &&
+        (key === 'report' || key === 'leaveReport' || key === 'records' || key === 'details')
+      ) {
+        const values = Object.values(val).filter(
+          (v) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length > 0
+        );
+        if (values.length > 0) return values;
       }
       const found = findArrayOfObjects(val, depth + 1);
       if (found) return found;

@@ -214,12 +214,30 @@ export function isFormCGJNameHeader(h) {
   );
 }
 
+/** Sr. Number in Employee / Workman / Worker Register ← People EmployeeID. */
+export function isFormCGJSrNumberRegisterHeader(h) {
+  const s = normCGJHeader(h);
+  if (!s) return false;
+  if (isFormCGJNameHeader(h)) return false;
+  return (
+    /sr\.?\s*(number|no).*employee.*register/.test(s) ||
+    /sr\.?\s*(number|no).*workm[ae]n.*register/.test(s) ||
+    /sr\.?\s*(number|no).*worker.*register/.test(s) ||
+    /serial\s*(number|no).*employee.*register/.test(s) ||
+    /serial\s*(number|no).*register\s+of\s+workm/.test(s) ||
+    (/register/.test(s) &&
+      /(sr|serial|sl)\s*(number|no)/.test(s) &&
+      /(employee|workm[ae]n|worker)/.test(s))
+  );
+}
+
 export function isFormCGJRecoveryTypeHeader(h) {
   const s = normCGJHeader(h);
   return (
     /recovery\s*type/.test(s) ||
     (s.includes('recovery') && s.includes('type')) ||
-    /type\s+of\s+recovery/.test(s)
+    /type\s+of\s+recovery/.test(s) ||
+    /damage\s*\/\s*loss\s*\/\s*fine|advance\s*\/\s*loans\s*\/\s*absence/.test(s)
   );
 }
 
@@ -239,11 +257,101 @@ export function isFormCGJLastMonthYearHeader(h) {
   );
 }
 
+export const FORM_C_GJ_DEDUCTION_NIL_TEXT = 'NIL';
+
+/**
+ * Deduction / recovery columns that default to NIL when no case exists.
+ * Matches Form_C_GJ template columns (Recovery type … Date of Complete Recovery).
+ */
+export function isFormCGJDeductionNilHeader(header) {
+  if (isFormCGJSrNumberRegisterHeader(header)) return false;
+  if (isFormCGJNameHeader(header)) return false;
+  if (isFormCGJRecoveryTypeHeader(header)) return true;
+  if (isFormCGJFirstMonthYearHeader(header)) return true;
+  if (isFormCGJLastMonthYearHeader(header)) return true;
+
+  const s = normCGJHeader(header);
+  if (!s) return false;
+
+  if (/^particulars\b/.test(s) || (s.includes('particular') && !/employ/.test(s))) return true;
+  if (/date\s+of\s+damage|damage\s*\/\s*loss|damage\s+or\s+loss|loss\s*\/\s*absence/.test(s)) {
+    return true;
+  }
+  if (s === 'amount' || /^amount\b/.test(s)) return true;
+  if (/show\s+cause|showed\s+cause|whether\s+show/.test(s)) return true;
+  if (/explanation/.test(s) && (/presence|heard/.test(s) || /person/.test(s))) return true;
+  if (/number\s+of\s+instalment|no\.?\s*of\s+instalment|instalments?/.test(s)) return true;
+  if (/date\s+of\s+complete\s+recovery|complete\s+recovery/.test(s)) return true;
+  if (/recovery\s*type|type\s+of\s+recovery/.test(s)) return true;
+  if (/first\s*month/.test(s) && /year/.test(s)) return true;
+  if (/last\s*month/.test(s) && /year/.test(s)) return true;
+
+  return false;
+}
+
+/** @deprecated Prefer isFormCGJDeductionNilHeader — kept for callers that clear/skip these columns. */
 export function isFormCGJSkipAutofillHeader(h) {
-  return (
-    isFormCGJRecoveryTypeHeader(h) ||
-    isFormCGJFirstMonthYearHeader(h) ||
-    isFormCGJLastMonthYearHeader(h)
+  return isFormCGJDeductionNilHeader(h);
+}
+
+function unwrapFormCGJEmployee(emp) {
+  return emp?.Employee || emp?.employee || emp || null;
+}
+
+export function readFormCGJEmployeeId(emp) {
+  const src = unwrapFormCGJEmployee(emp);
+  if (!src || typeof src !== 'object') return '';
+  const keys = [
+    'EmployeeID',
+    'Employee ID',
+    'Employee_ID',
+    'EmployeeId',
+    'employeeId',
+    'employee_id',
+    'Employee.ID',
+    'erecno',
+    'Erecno',
+    'Zoho_ID',
+    'ZohoID',
+    'zoho_id',
+  ];
+  for (let i = 0; i < keys.length; i += 1) {
+    const raw = src[keys[i]];
+    if (raw == null || raw === '') continue;
+    if (typeof raw === 'object') {
+      const nested = String(raw.displayValue ?? raw.name ?? raw.Name ?? raw.ID ?? '').trim();
+      if (nested) return nested;
+      continue;
+    }
+    const text = String(raw).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+export function applyFormCGJGujaratNilToRow(row, headers, helpers = {}) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const out = row && typeof row === 'object' ? { ...row } : {};
+  const nilText = helpers.nilText != null ? String(helpers.nilText) : FORM_C_GJ_DEDUCTION_NIL_TEXT;
+  const { overwrite = true } = helpers;
+
+  hdrs.forEach((header) => {
+    if (!isFormCGJDeductionNilHeader(header)) return;
+    const existing = String(out[header] ?? '').trim();
+    if (!overwrite && existing && !/^enter\b/i.test(existing) && !/^nil+$/i.test(existing)) return;
+    out[header] = nilText;
+  });
+  return out;
+}
+
+export function applyFormCGJGujaratNilToMappedRows(
+  mappedData,
+  headers,
+  nilText = FORM_C_GJ_DEDUCTION_NIL_TEXT
+) {
+  if (!Array.isArray(mappedData)) return [];
+  return mappedData.map((row) =>
+    applyFormCGJGujaratNilToRow(row, headers, { nilText, overwrite: true })
   );
 }
 
@@ -253,6 +361,7 @@ export function applyFormCGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
   const {
     sanitizeValue = (v) => String(v ?? '').trim(),
     overwrite = true,
+    nilText = FORM_C_GJ_DEDUCTION_NIL_TEXT,
   } = helpers;
 
   const cellIsEmpty = (header) => {
@@ -267,12 +376,18 @@ export function applyFormCGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
     out[header] = sanitizeValue(value);
   };
 
-  const fullName = readFormCGJEmployeeFullName(emp);
+  const fullName = readFormCGJEmployeeFullName(unwrapFormCGJEmployee(emp) || emp);
+  const employeeId = readFormCGJEmployeeId(emp);
   if (fullName) out.__employeeLookupName = fullName;
+  if (employeeId) out.__employeeLookupId = employeeId;
 
   hdrs.forEach((header) => {
-    if (isFormCGJSkipAutofillHeader(header)) {
-      setCell(header, '');
+    if (isFormCGJDeductionNilHeader(header)) {
+      setCell(header, nilText);
+      return;
+    }
+    if (isFormCGJSrNumberRegisterHeader(header)) {
+      setCell(header, employeeId);
       return;
     }
     if (isFormCGJNameHeader(header)) {

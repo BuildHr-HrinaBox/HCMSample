@@ -1,3 +1,10 @@
+import {
+  flattenPayrollEarningColumns,
+  readForm10GrossPayAmount,
+  readForm10NetPayAmount,
+  readPayrollForm15WageAmounts,
+} from '../../utils/payrollEarnings';
+
 /**
  * Tamil Nadu CLRA Form XXVII — Register of Wages [Rule 78(1)(a)].
  * Template Form_XXVII_-_TamilNadu.xlsx multi-tier header (from Excel):
@@ -10,6 +17,16 @@
  *     PROVIDEND FUND | ESI |
  *     OTHER (21–22): PT | UNIFORM DEPOSITS
  *     FINES | OTHER DEDUCTIONS | TOTAL DEDUCTIONS
+ *
+ * Autofill (Sample Payroll):
+ *   DAILY/PIECE/MONTHLY RATED ← gross_pay
+ *   WAGE PERIOD ← "Monthly"
+ *   OVERTIME RATE ← (Basic/26/8)*2
+ *   HRA ← hra
+ *   OTHER ALLOWANCES, ECCA ← gross − basic − hra
+ *   PT ← professional_tax
+ *   OTHER DEDUCTIONS ← (gross − net) − PT − ESI − PF
+ *   TOTAL DEDUCTIONS ← gross_pay − net_pay
  */
 
 export const FORM_XXVII_TN_TITLE = 'FORM XXVII';
@@ -545,4 +562,325 @@ export function formXXVIITamilNaduNeedsOtherAllowancesGroupThead(headers) {
     if (/^column\s*\d+$/i.test(t) || /^\d{1,2}$/.test(t)) hasSynthetic = true;
   }
   return otherLeaves >= 2 || hasSynthetic;
+}
+
+/** Column default for "WAGE PERIOD — WEEKLY/FN/MONTHLY". */
+export const FORM_XXVII_TN_WAGE_PERIOD_DEFAULT = 'Monthly';
+
+function parseFormXXVIITamilNaduMoney(value) {
+  if (value == null || value === '') return NaN;
+  const n = Number(String(value).replace(/,/g, '').trim());
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function moneyTextFormXXVIITamilNadu(value) {
+  const n = parseFormXXVIITamilNaduMoney(value);
+  if (!Number.isFinite(n)) return '';
+  return String(Math.round(n * 100) / 100);
+}
+
+/** DAILY RATED / PIECE RATED / MONTHLY RATED ← gross_pay */
+export function isFormXXVIITamilNaduDailyRatedHeader(header) {
+  const s = formXXVIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (/over[\s-]*time|wage\s*period|units?\s+of\s+work|days?\s+worked|basic\s+wage/.test(s)) {
+    return false;
+  }
+  return (
+    /daily\s+rated/.test(s) ||
+    /piece\s+rated/.test(s) ||
+    /monthly\s+rated/.test(s) ||
+    /daily\s+rate/.test(s) ||
+    (/piece\s+rate/.test(s) && !/over[\s-]*time/.test(s))
+  );
+}
+
+/** Body column "WAGE PERIOD — WEEKLY/FN/MONTHLY" (not banner "Wage Period : April"). */
+export function isFormXXVIITamilNaduWagePeriodColumnHeader(header) {
+  const s = formXXVIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (!/wage\s*period/.test(s)) return false;
+  // Banner line already filled as "Wage Period : <Month>"
+  if (/^wage\s*period\s*:/.test(s) && !/weekly|fortnight|fn|monthly/.test(s)) return false;
+  return true;
+}
+
+/** OVERTIME RATE ← (Basic/26/8)*2 */
+export function isFormXXVIITamilNaduOvertimeRateHeader(header) {
+  const s = formXXVIITamilNaduHeaderNorm(header);
+  if (!s || /earning|wages?\s+earned|normal/.test(s)) return false;
+  return /over[\s-]*time/.test(s) && /rate/.test(s);
+}
+
+/** HRA leaf under ALLOWANCES/CASH PAYMENT */
+export function isFormXXVIITamilNaduHraHeader(header) {
+  const s = formXXVIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  return /^hra$/.test(s) || (/\bhra\b/.test(s) && !/dearness|house\s+rent/.test(s));
+}
+
+/** OTHER ALLOWANCES, ECCA ← gross − basic − hra */
+export function isFormXXVIITamilNaduOtherAllowancesEccaHeader(header) {
+  const s = formXXVIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (/deduction|cash\s+in\s+lieu|wash\s+allow|\bstb\b|^hra$/.test(s)) return false;
+  return (
+    (/other\s+allowances?/.test(s) && /ecca/.test(s)) ||
+    /^other\s+allowances?\s*,?\s*ecca$/.test(s) ||
+    (s.includes('other') && s.includes('allowance') && s.includes('ecca'))
+  );
+}
+
+/** PT under OTHER (deductions) ← Professional Tax */
+export function isFormXXVIITamilNaduPtHeader(header) {
+  const s = formXXVIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  return /^pt$/.test(s) || /professional\s+tax/.test(s);
+}
+
+/** Standalone OTHER DEDUCTIONS ← total − PT − ESI − PF */
+export function isFormXXVIITamilNaduOtherDeductionsHeader(header) {
+  const s = formXXVIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (/total\s+deductions?/.test(s)) return false;
+  if (/^other$/.test(s)) return false;
+  return /other\s+deductions?/.test(s);
+}
+
+/** TOTAL DEDUCTIONS ← gross_pay − net_pay */
+export function isFormXXVIITamilNaduTotalDeductionsHeader(header) {
+  const s = formXXVIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (/other\s+deductions?/.test(s)) return false;
+  return /total\s+deductions?/.test(s) || /^deductions?$/.test(s);
+}
+
+/** TOTAL DEDUCTIONS = gross_pay − net_pay */
+export function computeFormXXVIITamilNaduTotalDeductions(grossPay, netPay) {
+  const g = parseFormXXVIITamilNaduMoney(grossPay);
+  const n = parseFormXXVIITamilNaduMoney(netPay);
+  if (!Number.isFinite(g) || !Number.isFinite(n) || g < n) return '';
+  return Math.round((g - n) * 100) / 100;
+}
+
+export function resolveFormXXVIITamilNaduTotalDeductions(payrollRow, payrollMap = null) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const map = payrollMap && typeof payrollMap === 'object' ? payrollMap : {};
+  const fromMap = firstPresentFormXXVII(map.deductionsFromGrossNet);
+  if (fromMap !== '' && fromMap != null) {
+    const n = parseFormXXVIITamilNaduMoney(fromMap);
+    if (Number.isFinite(n)) return Math.round(n * 100) / 100;
+  }
+  const gross = firstPresentFormXXVII(
+    map.grossPay,
+    map.grossWages,
+    readForm10GrossPayAmount(payrollRow)
+  );
+  const net = firstPresentFormXXVII(
+    map.netPay,
+    map.netWages,
+    readForm10NetPayAmount(payrollRow)
+  );
+  return computeFormXXVIITamilNaduTotalDeductions(gross, net);
+}
+
+/** DAILY/PIECE/MONTHLY RATED ← gross_pay */
+export function resolveFormXXVIITamilNaduDailyRated(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const gross = readForm10GrossPayAmount(payrollRow);
+  return gross === '' || gross == null ? '' : String(gross);
+}
+
+/**
+ * OVERTIME RATE = (Basic / 26 / 8) * 2
+ * Basic from Sample Payroll wage breakdown.
+ */
+export function resolveFormXXVIITamilNaduOvertimeRate(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const { basic } = readPayrollForm15WageAmounts(payrollRow);
+  const basicNum = Number(basic);
+  if (!Number.isFinite(basicNum) || basicNum <= 0) return '';
+  const rate = (basicNum / 26 / 8) * 2;
+  if (!Number.isFinite(rate) || rate <= 0) return '';
+  return String(Math.round(rate * 100) / 100);
+}
+
+/** HRA ← Sample Payroll hra / hra_fbp */
+export function resolveFormXXVIITamilNaduHra(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const wages = readPayrollForm15WageAmounts(payrollRow);
+  return moneyTextFormXXVIITamilNadu(
+    firstPresentFormXXVII(
+      wages.hra_fbp,
+      wages.hra,
+      flat.hra_fbp,
+      flat.hra,
+      payrollRow.hra_fbp,
+      payrollRow.hra
+    )
+  );
+}
+
+function firstPresentFormXXVII(...vals) {
+  for (let i = 0; i < vals.length; i += 1) {
+    const v = vals[i];
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    return v;
+  }
+  return '';
+}
+
+/** OTHER ALLOWANCES, ECCA = gross_pay − basic − hra */
+export function computeFormXXVIITamilNaduOtherAllowancesEcca(grossPay, basic, hra) {
+  const g = parseFormXXVIITamilNaduMoney(grossPay);
+  if (!Number.isFinite(g)) return '';
+  const b = parseFormXXVIITamilNaduMoney(basic);
+  const h = parseFormXXVIITamilNaduMoney(hra);
+  const known = (Number.isFinite(b) ? b : 0) + (Number.isFinite(h) ? h : 0);
+  const other = Math.round((g - known) * 100) / 100;
+  return Number.isFinite(other) ? other : '';
+}
+
+export function resolveFormXXVIITamilNaduOtherAllowancesEcca(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const gross = readForm10GrossPayAmount(payrollRow);
+  const wages = readPayrollForm15WageAmounts(payrollRow);
+  const hra = resolveFormXXVIITamilNaduHra(payrollRow);
+  return computeFormXXVIITamilNaduOtherAllowancesEcca(gross, wages.basic, hra);
+}
+
+/** PT ← Professional Tax from Sample Payroll */
+export function resolveFormXXVIITamilNaduPt(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  return moneyTextFormXXVIITamilNadu(
+    firstPresentFormXXVII(
+      flat.professional_tax,
+      payrollRow.professional_tax,
+      payrollRow['Professional Tax'],
+      payrollRow.pt,
+      payrollRow.PT
+    )
+  );
+}
+
+/**
+ * OTHER DEDUCTIONS = TOTAL DEDUCTIONS − Professional Tax − ESI − PROVIDENT FUND
+ * TOTAL DEDUCTIONS here is gross_pay − net_pay.
+ */
+export function computeFormXXVIITamilNaduOtherDeductions(totalDeductions, professionalTax, esi, providentFund) {
+  const total = parseFormXXVIITamilNaduMoney(totalDeductions);
+  if (!Number.isFinite(total)) return '';
+  const pt = parseFormXXVIITamilNaduMoney(professionalTax);
+  const e = parseFormXXVIITamilNaduMoney(esi);
+  const pf = parseFormXXVIITamilNaduMoney(providentFund);
+  const subtract = (Number.isFinite(pt) ? pt : 0) + (Number.isFinite(e) ? e : 0) + (Number.isFinite(pf) ? pf : 0);
+  const other = Math.round((total - subtract) * 100) / 100;
+  if (!Number.isFinite(other)) return '';
+  return other < 0 ? 0 : other;
+}
+
+export function resolveFormXXVIITamilNaduOtherDeductions(payrollRow, payrollMap = null) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const map = payrollMap && typeof payrollMap === 'object' ? payrollMap : {};
+  // Prefer gross − net as TOTAL DEDUCTIONS (never raw payroll total_deductions alone).
+  const total = firstPresentFormXXVII(
+    resolveFormXXVIITamilNaduTotalDeductions(payrollRow, map),
+    map.deductionsFromGrossNet
+  );
+  const pt = firstPresentFormXXVII(map.pt, resolveFormXXVIITamilNaduPt(payrollRow));
+  const esi = firstPresentFormXXVII(
+    map.esi,
+    flat.esi,
+    flat.esic,
+    flat.esi_contribution,
+    payrollRow.esi,
+    payrollRow.esic
+  );
+  const pf = firstPresentFormXXVII(
+    map.providentFund,
+    flat.epf_contribution,
+    flat.pf,
+    payrollRow.epf_contribution,
+    payrollRow.pf
+  );
+  return computeFormXXVIITamilNaduOtherDeductions(total, pt, esi, pf);
+}
+
+/**
+ * Apply Form XXVII TN Sample Payroll mappings onto a register row.
+ * Returns true when at least one mapped cell was written.
+ */
+export function applyFormXXVIITamilNaduPayrollToRow(row, payrollRow, headers, helpers = {}) {
+  if (!row || !Array.isArray(headers) || headers.length === 0) return false;
+  const { overwrite = false, sanitizeValue = (v) => v, payrollMap = null } = helpers;
+  const cellIsEmpty = (header) => {
+    const v = String(row[header] ?? '').trim();
+    return (
+      !v ||
+      /^enter\b/i.test(v) ||
+      /^nil+$/i.test(v) ||
+      v.toLowerCase() === 'n/a' ||
+      v === '-' ||
+      v === '—'
+    );
+  };
+  const setCell = (header, value) => {
+    if (!header || value === '' || value == null) return false;
+    if (isFormXXVIITamilNaduSkipAutofillHeader(header)) return false;
+    if (!overwrite && !cellIsEmpty(header)) return false;
+    row[header] = sanitizeValue(value);
+    return true;
+  };
+
+  let hit = false;
+  const dailyRated = resolveFormXXVIITamilNaduDailyRated(payrollRow);
+  const otRate = resolveFormXXVIITamilNaduOvertimeRate(payrollRow);
+  const hra = resolveFormXXVIITamilNaduHra(payrollRow);
+  const otherAllow = resolveFormXXVIITamilNaduOtherAllowancesEcca(payrollRow);
+  const pt = resolveFormXXVIITamilNaduPt(payrollRow);
+  const totalDed = resolveFormXXVIITamilNaduTotalDeductions(payrollRow, payrollMap);
+  const otherDed = resolveFormXXVIITamilNaduOtherDeductions(payrollRow, {
+    ...(payrollMap && typeof payrollMap === 'object' ? payrollMap : {}),
+    deductionsFromGrossNet: totalDed !== '' ? totalDed : payrollMap?.deductionsFromGrossNet,
+  });
+
+  headers.forEach((header) => {
+    if (isFormXXVIITamilNaduWagePeriodColumnHeader(header)) {
+      if (setCell(header, FORM_XXVII_TN_WAGE_PERIOD_DEFAULT)) hit = true;
+      return;
+    }
+    if (!payrollRow || payrollRow.fetch_error) return;
+    if (isFormXXVIITamilNaduDailyRatedHeader(header)) {
+      if (setCell(header, dailyRated)) hit = true;
+      return;
+    }
+    if (isFormXXVIITamilNaduOvertimeRateHeader(header)) {
+      if (setCell(header, otRate)) hit = true;
+      return;
+    }
+    if (isFormXXVIITamilNaduHraHeader(header)) {
+      if (setCell(header, hra)) hit = true;
+      return;
+    }
+    if (isFormXXVIITamilNaduOtherAllowancesEccaHeader(header)) {
+      if (setCell(header, otherAllow)) hit = true;
+      return;
+    }
+    if (isFormXXVIITamilNaduPtHeader(header)) {
+      if (setCell(header, pt)) hit = true;
+      return;
+    }
+    if (isFormXXVIITamilNaduTotalDeductionsHeader(header)) {
+      if (setCell(header, totalDed)) hit = true;
+      return;
+    }
+    if (isFormXXVIITamilNaduOtherDeductionsHeader(header)) {
+      if (setCell(header, otherDed)) hit = true;
+    }
+  });
+  return hit;
 }

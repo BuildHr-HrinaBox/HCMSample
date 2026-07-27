@@ -3,14 +3,32 @@ import {
   FORM_XXVII_TN_GROUP_OTHER_DEDUCTIONS,
   FORM_XXVII_TN_OTHER_ALLOWANCE_LEAVES,
   FORM_XXVII_TN_OTHER_DEDUCTION_LEAVES,
+  FORM_XXVII_TN_WAGE_PERIOD_DEFAULT,
+  applyFormXXVIITamilNaduPayrollToRow,
   buildFormXXVIITamilNaduColumnGroupLabels,
   buildFormXXVIITamilNaduWagePeriodLine,
+  computeFormXXVIITamilNaduOtherAllowancesEcca,
+  computeFormXXVIITamilNaduOtherDeductions,
+  computeFormXXVIITamilNaduTotalDeductions,
   formXXVIITamilNaduNeedsOtherAllowancesGroupThead,
   isFormXXVIITamilNaduContext,
+  isFormXXVIITamilNaduDailyRatedHeader,
+  isFormXXVIITamilNaduOtherAllowancesEccaHeader,
+  isFormXXVIITamilNaduOtherDeductionsHeader,
+  isFormXXVIITamilNaduOvertimeRateHeader,
+  isFormXXVIITamilNaduPtHeader,
   isFormXXVIITamilNaduSkipAutofillHeader,
+  isFormXXVIITamilNaduWagePeriodColumnHeader,
   looksLikeFormXXVIITamilNaduWageHeaders,
+  resolveFormXXVIITamilNaduDailyRated,
+  resolveFormXXVIITamilNaduHra,
+  resolveFormXXVIITamilNaduOtherAllowancesEcca,
+  resolveFormXXVIITamilNaduOtherDeductions,
+  resolveFormXXVIITamilNaduOvertimeRate,
   resolveFormXXVIITamilNaduPeriodParts,
+  resolveFormXXVIITamilNaduPt,
   resolveFormXXVIITamilNaduTableHeaders,
+  resolveFormXXVIITamilNaduTotalDeductions,
   sanitizeFormXXVIITamilNaduColumnGroupLabels,
 } from './formXXVIITamilNadu';
 
@@ -126,5 +144,91 @@ describe('formXXVIITamilNadu column grouping', () => {
     expect(resolveFormXXVIITamilNaduPeriodParts('2026-04')).toEqual(
       expect.objectContaining({ monthName: 'April', year: '2026' })
     );
+  });
+});
+
+describe('formXXVIITamilNadu Sample Payroll autofill', () => {
+  const payrollRow = {
+    gross_pay: 104065,
+    basic: 26781,
+    hra: 12000,
+    professional_tax: 200,
+    total_deductions: 5000,
+    epf_contribution: 3000,
+    esi: 500,
+    net_pay: 99065,
+  };
+
+  test('detects daily rated / wage period / overtime rate / ECCA / PT / other deductions headers', () => {
+    expect(isFormXXVIITamilNaduDailyRatedHeader('DAILY RATED WAGES/PIECE RATES')).toBe(true);
+    expect(isFormXXVIITamilNaduDailyRatedHeader('DAILY RATED/ PIECE RATED/MONTHLY RATED')).toBe(
+      true
+    );
+    expect(isFormXXVIITamilNaduWagePeriodColumnHeader('WAGE PERIOD- WEEKLY/FN/MONTHLY')).toBe(
+      true
+    );
+    expect(isFormXXVIITamilNaduOvertimeRateHeader('OVERTIME RATE')).toBe(true);
+    expect(isFormXXVIITamilNaduOtherAllowancesEccaHeader('OTHER ALLOWANCES, ECCA')).toBe(true);
+    expect(isFormXXVIITamilNaduPtHeader('PT')).toBe(true);
+    expect(isFormXXVIITamilNaduOtherDeductionsHeader('OTHER DEDUCTIONS')).toBe(true);
+  });
+
+  test('DAILY RATED ← gross_pay', () => {
+    expect(resolveFormXXVIITamilNaduDailyRated(payrollRow)).toBe('104065');
+  });
+
+  test('OVERTIME RATE ← (Basic/26/8)*2', () => {
+    // 26781 / 26 / 8 * 2 = 257.509… → 257.51
+    expect(resolveFormXXVIITamilNaduOvertimeRate(payrollRow)).toBe('257.51');
+  });
+
+  test('HRA ← Sample Payroll hra', () => {
+    expect(resolveFormXXVIITamilNaduHra(payrollRow)).toBe('12000');
+  });
+
+  test('OTHER ALLOWANCES, ECCA ← gross − basic − hra', () => {
+    expect(computeFormXXVIITamilNaduOtherAllowancesEcca(104065, 26781, 12000)).toBe(65284);
+    expect(resolveFormXXVIITamilNaduOtherAllowancesEcca(payrollRow)).toBe(65284);
+  });
+
+  test('PT ← Professional Tax', () => {
+    expect(resolveFormXXVIITamilNaduPt(payrollRow)).toBe('200');
+  });
+
+  test('OTHER DEDUCTIONS ← TOTAL − PT − ESI − PF', () => {
+    expect(computeFormXXVIITamilNaduOtherDeductions(5000, 200, 500, 3000)).toBe(1300);
+    // TOTAL = gross − net = 104065 − 99065 = 5000; OTHER = 5000 − 200 − 500 − 3000 = 1300
+    expect(resolveFormXXVIITamilNaduOtherDeductions(payrollRow)).toBe(1300);
+  });
+
+  test('TOTAL DEDUCTIONS ← gross_pay − net_pay', () => {
+    expect(computeFormXXVIITamilNaduTotalDeductions(104065, 99065)).toBe(5000);
+    expect(resolveFormXXVIITamilNaduTotalDeductions(payrollRow)).toBe(5000);
+  });
+
+  test('applyFormXXVIITamilNaduPayrollToRow fills mapped columns', () => {
+    const hdrs = [
+      'DAILY RATED WAGES/PIECE RATES',
+      'WAGE PERIOD- WEEKLY/FN/MONTHLY',
+      'OVERTIME RATE',
+      'HRA',
+      'OTHER ALLOWANCES, ECCA',
+      'PT',
+      'OTHER DEDUCTIONS',
+      'TOTAL DEDUCTIONS',
+      'WAGES INCLUDING CASH IN LIEU OF KINDS',
+    ];
+    const row = Object.fromEntries(hdrs.map((h) => [h, '']));
+    applyFormXXVIITamilNaduPayrollToRow(row, payrollRow, hdrs, { overwrite: true });
+    expect(row['DAILY RATED WAGES/PIECE RATES']).toBe('104065');
+    expect(row['WAGE PERIOD- WEEKLY/FN/MONTHLY']).toBe(FORM_XXVII_TN_WAGE_PERIOD_DEFAULT);
+    expect(row['OVERTIME RATE']).toBe('257.51');
+    expect(row.HRA).toBe('12000');
+    expect(row['OTHER ALLOWANCES, ECCA']).toBe(65284);
+    expect(row.PT).toBe('200');
+    expect(row['OTHER DEDUCTIONS']).toBe(1300);
+    expect(row['TOTAL DEDUCTIONS']).toBe(5000);
+    // Manual-only column stays blank.
+    expect(row['WAGES INCLUDING CASH IN LIEU OF KINDS']).toBe('');
   });
 });

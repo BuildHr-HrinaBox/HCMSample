@@ -2,6 +2,7 @@ import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import { headersIndicateFormAGJEmployeeRegisterTable } from './formCGJGujarat';
 import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
+import { flattenPayrollEarningColumns, readPayrollScalar } from '../../utils/payrollEarnings';
 import {
   enrichEstablishmentPrincipalEmployerHeaderFields,
   excelCellValueToString,
@@ -45,7 +46,7 @@ export function headersIndicateFormDGJMusterTable(tableHeaders) {
   if (!Array.isArray(tableHeaders) || tableHeaders.length < 3) return false;
   const joined = tableHeaders.map((h) => formDGJGujaratHeaderNorm(h)).join('\n');
   const hasRelay = /relay\s+or\s+set/.test(joined);
-  const hasSummaryDays = /summary.*days|no\.?\s*of\s+days/.test(joined);
+  const hasSummaryDays = /summary.*days|summery.*days|no\.?\s*of\s+days/.test(joined);
   const hasName = /\bname\b/.test(joined);
   const hasRegisterKeeper = /register\s+keeper|signature/.test(joined);
   const hasSrRegister =
@@ -233,7 +234,7 @@ export function resolveFormDGJGujaratTableLayout(workbook, hints = {}) {
 
     let score = 0;
     if (/relay\s+or\s+set/.test(combinedText)) score += 80;
-    if (/summary\s+no\.?\s*of\s+days/.test(combinedText)) score += 60;
+    if (/summary\s+no\.?\s*of\s+days|summery\s+no\.?\s*of\s+days/.test(combinedText)) score += 60;
     if (/register\s+keeper|signature/.test(combinedText)) score += 40;
     if (/remarks.*hours|no\.?\s*of\s+hours/.test(combinedText)) score += 30;
     if (/sr\.?\s*no.*register/.test(combinedText)) score += 35;
@@ -435,12 +436,237 @@ export function isFormDGJRelayOrSetWorkHeader(h) {
   return /relay\s+or\s+set/.test(s) || (s.includes('relay') && s.includes('set') && s.includes('work'));
 }
 
+/** Summary / Summery No. of Days ← Sample Payroll Paid_days. */
+export function isFormDGJSummaryNoOfDaysHeader(h) {
+  const s = normDGJHeader(h);
+  if (!s) return false;
+  // Exclude neighbouring columns (use word boundaries — avoid matching "name" inside "workman").
+  if (
+    /\bremarks\b/.test(s) ||
+    /\bhours?\b/.test(s) ||
+    /\bsignature\b/.test(s) ||
+    /register\s+keeper/.test(s) ||
+    /relay\s+or\s+set/.test(s) ||
+    /^(sr|sl|s)\s*no\b/.test(s) ||
+    /\bserial\b/.test(s)
+  ) {
+    return false;
+  }
+  // Template / UI may spell "Summary" or "Summery".
+  return (
+    (/summary|summery/.test(s) && /\bdays?\b/.test(s)) ||
+    /^no\.?\s*of\s+days$/.test(s)
+  );
+}
+
+/** Remarks No. of Hours ← Summary No. of Days × 8. */
+export function isFormDGJRemarksNoOfHoursHeader(h) {
+  const s = normDGJHeader(h);
+  if (!s) return false;
+  if (/\bsignature\b/.test(s) || /register\s+keeper/.test(s) || /relay\s+or\s+set/.test(s)) {
+    return false;
+  }
+  if (isFormDGJSummaryNoOfDaysHeader(h)) return false;
+  return (
+    (/\bremarks\b/.test(s) && /\bhours?\b/.test(s)) ||
+    /^no\.?\s*of\s+hours$/.test(s) ||
+    /remarks\s+no\.?\s*(of\s+)?hours?/.test(s)
+  );
+}
+
+/** Remarks hours = Summary / Paid_days × 8. */
+export function computeFormDGJGujaratRemarksHours(paidDays) {
+  const n = Number(String(paidDays ?? '').replace(/,/g, '').trim());
+  if (!Number.isFinite(n) || n < 0) return '';
+  return String(Math.round(n * 8 * 100) / 100);
+}
+
+/** Read Paid_days (and aliases) from a Sample Payroll / Payroll table row. */
+export function readFormDGJGujaratPaidDays(payrollRow) {
+  if (!payrollRow || typeof payrollRow !== 'object' || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const keys = [
+    'Paid_days',
+    'paid_days',
+    'Paid Days',
+    'paidDays',
+    'PaidDays',
+    'days_worked',
+    'Days Worked',
+    'daysWorked',
+    'no_of_days_worked',
+    'effective_paid_days',
+  ];
+  const patterns = [
+    /^paid_days$/,
+    /^paiddays$/,
+    /paid_days/,
+    /daysworked/,
+    /days_present/,
+    /noofdayspresent/,
+    /no_of_days_present/,
+    /effective_paid_days/,
+  ];
+  const fromFlat = readPayrollScalar({ ...flat, ...payrollRow }, keys, patterns);
+  if (fromFlat !== '' && fromFlat != null) {
+    const num = Number(String(fromFlat).replace(/,/g, '').trim());
+    if (Number.isFinite(num) && num >= 0) return String(num);
+  }
+  return '';
+}
+
+function formDGJPayrollNameCandidates(payrollRow) {
+  if (!payrollRow || typeof payrollRow !== 'object') return [];
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  return [
+    flat.employee_name,
+    flat.EmployeeName,
+    flat['Employee Name'],
+    flat.full_name,
+    flat.name,
+    flat.Name,
+    `${flat.first_name || ''} ${flat.last_name || ''}`,
+    `${flat.FirstName || ''} ${flat.LastName || ''}`,
+    payrollRow.employee_name,
+    payrollRow.EmployeeName,
+    `${payrollRow.first_name || ''} ${payrollRow.last_name || ''}`,
+  ]
+    .map((v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' '))
+    .filter((v) => v.length >= 2);
+}
+
+function formDGJRowNameCandidates(row, headers) {
+  if (!row || typeof row !== 'object') return [];
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const names = [];
+  hdrs.forEach((h) => {
+    if (!isFormDGJNameHeader(h)) return;
+    const v = String(row[h] ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (v) names.push(v);
+  });
+  const lookup = String(row.__employeeLookupName || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (lookup) names.push(lookup);
+  return [...new Set(names)];
+}
+
+function formDGJNamesLooselyMatch(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a))) return true;
+  return false;
+}
+
+/**
+ * Fill Summary No. of Days from Sample Payroll Paid_days,
+ * and Remarks No. of Hours = Summary No. of Days × 8.
+ * @returns {number} rows updated
+ */
+export function applyFormDGJGujaratPaidDaysToRows(
+  mappedData,
+  employeesForMapping,
+  tableHeaders,
+  options = {}
+) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  const headers = Array.isArray(tableHeaders) ? tableHeaders : [];
+  const daysHeaders = headers.filter((h) => isFormDGJSummaryNoOfDaysHeader(h));
+  const hoursHeaders = headers.filter((h) => isFormDGJRemarksNoOfHoursHeader(h));
+  if (daysHeaders.length === 0 && hoursHeaders.length === 0) return 0;
+
+  const resolvePayrollRow =
+    typeof options.resolvePayrollRow === 'function' ? options.resolvePayrollRow : null;
+  const unwrapEmp =
+    typeof options.unwrapEmp === 'function'
+      ? options.unwrapEmp
+      : (item) => (item && (item.Employee || item.employee || item)) || null;
+  const sanitize =
+    typeof options.sanitizeValue === 'function' ? options.sanitizeValue : (v) => String(v ?? '').trim();
+  const overwrite = options.overwrite !== false;
+  const payrollList = Array.isArray(options.payrollRows) ? options.payrollRows : [];
+
+  const payrollByName = new Map();
+  payrollList.forEach((pr) => {
+    const paid = readFormDGJGujaratPaidDays(pr);
+    if (paid === '') return;
+    formDGJPayrollNameCandidates(pr).forEach((k) => {
+      if (!payrollByName.has(k)) payrollByName.set(k, pr);
+    });
+  });
+
+  const resolvePayrollForRow = (row, index) => {
+    if (resolvePayrollRow) {
+      const emp = unwrapEmp(Array.isArray(employeesForMapping) ? employeesForMapping[index] : null);
+      const payrollRow = resolvePayrollRow(emp, row, index);
+      if (payrollRow && !payrollRow.fetch_error && readFormDGJGujaratPaidDays(payrollRow) !== '') {
+        return payrollRow;
+      }
+    }
+    const rowNames = formDGJRowNameCandidates(row, headers);
+    for (let i = 0; i < rowNames.length; i += 1) {
+      if (payrollByName.has(rowNames[i])) return payrollByName.get(rowNames[i]);
+    }
+    for (let i = 0; i < rowNames.length; i += 1) {
+      for (const [pk, pr] of payrollByName.entries()) {
+        if (formDGJNamesLooselyMatch(rowNames[i], pk)) return pr;
+      }
+    }
+    return null;
+  };
+
+  const setIfAllowed = (row, key, value) => {
+    if (!key || value == null || value === '') return false;
+    const cur = String(row[key] ?? '').trim();
+    const isPlaceholder = !cur || /^enter\b/i.test(cur);
+    if (!overwrite && cur && !isPlaceholder) return false;
+    row[key] = sanitize(value);
+    return true;
+  };
+
+  let hits = 0;
+  mappedData.forEach((row, index) => {
+    if (!row || typeof row !== 'object') return;
+    const payrollRow = resolvePayrollForRow(row, index);
+    let paidDays = readFormDGJGujaratPaidDays(payrollRow);
+    // If payroll miss but Summary days already on the row, still compute hours.
+    if (paidDays === '') {
+      for (let i = 0; i < daysHeaders.length; i += 1) {
+        const existing = String(row[daysHeaders[i]] ?? '').trim();
+        if (existing && !/^enter\b/i.test(existing)) {
+          paidDays = existing;
+          break;
+        }
+      }
+    }
+    if (paidDays === '') return;
+    const hours = computeFormDGJGujaratRemarksHours(paidDays);
+    let changed = false;
+    daysHeaders.forEach((daysHeader) => {
+      if (setIfAllowed(row, daysHeader, paidDays)) changed = true;
+    });
+    hoursHeaders.forEach((hoursHeader) => {
+      if (setIfAllowed(row, hoursHeader, hours)) changed = true;
+    });
+    // Also write onto any existing row keys that look like Summary days / Remarks hours.
+    Object.keys(row).forEach((key) => {
+      if (isFormDGJSummaryNoOfDaysHeader(key) && !daysHeaders.includes(key)) {
+        if (setIfAllowed(row, key, paidDays)) changed = true;
+      }
+      if (isFormDGJRemarksNoOfHoursHeader(key) && !hoursHeaders.includes(key)) {
+        if (setIfAllowed(row, key, hours)) changed = true;
+      }
+    });
+    if (changed) hits += 1;
+  });
+  return hits;
+}
+
 export function applyFormDGJGujaratEmployeeToRow(row, emp, headers, helpers = {}) {
   const hdrs = Array.isArray(headers) ? headers : [];
   const out = row && typeof row === 'object' ? { ...row } : {};
   const {
     sanitizeValue = (v) => String(v ?? '').trim(),
     overwrite = true,
+    payrollRow = null,
   } = helpers;
 
   const cellIsEmpty = (header) => {
@@ -458,6 +684,8 @@ export function applyFormDGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
   const fullName = readFormDGJEmployeeFullName(emp);
   const designation = readFormDGJDesignation(emp);
   if (fullName) out.__employeeLookupName = fullName;
+  const paidDays = readFormDGJGujaratPaidDays(payrollRow);
+  const remarksHours = computeFormDGJGujaratRemarksHours(paidDays);
 
   hdrs.forEach((header) => {
     if (isFormDGJNameHeader(header)) {
@@ -466,6 +694,14 @@ export function applyFormDGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
     }
     if (isFormDGJRelayOrSetWorkHeader(header)) {
       setCell(header, designation);
+      return;
+    }
+    if (isFormDGJSummaryNoOfDaysHeader(header)) {
+      setCell(header, paidDays);
+      return;
+    }
+    if (isFormDGJRemarksNoOfHoursHeader(header)) {
+      setCell(header, remarksHours);
     }
   });
 
@@ -698,6 +934,20 @@ export function getFormDGJGujaratRowValueForHeader(row, header, rowIndex = 0) {
   if (isFormDGJRelayOrSetWorkHeader(header)) {
     for (const [k, v] of Object.entries(row)) {
       if (isFormDGJRelayOrSetWorkHeader(k) && v != null && String(v).trim() !== '') {
+        return String(v).trim();
+      }
+    }
+  }
+  if (isFormDGJSummaryNoOfDaysHeader(header)) {
+    for (const [k, v] of Object.entries(row)) {
+      if (isFormDGJSummaryNoOfDaysHeader(k) && v != null && String(v).trim() !== '') {
+        return String(v).trim();
+      }
+    }
+  }
+  if (isFormDGJRemarksNoOfHoursHeader(header)) {
+    for (const [k, v] of Object.entries(row)) {
+      if (isFormDGJRemarksNoOfHoursHeader(k) && v != null && String(v).trim() !== '') {
         return String(v).trim();
       }
     }

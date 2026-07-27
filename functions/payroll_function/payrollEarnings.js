@@ -111,6 +111,7 @@ function payrollComponentType(item) {
       item?.deduction_type ??
       item?.tax_type ??
       item?.benefit_type ??
+      item?.plan ??
       item?.salary_component_type ??
       item?.component_type ??
       ''
@@ -194,6 +195,51 @@ function getTaxesArray(row) {
     row.employee_salary?.taxes,
   ].forEach((candidate) => pushPayrollLineItemsFromCandidate(candidate, collected));
   return collected;
+}
+
+function getBenefitsArray(row) {
+  if (!row || typeof row !== 'object') return [];
+  const employee = normalizePayrollEmployee(row);
+  const payrollEmployee =
+    row.payroll_employee && typeof row.payroll_employee === 'object' ? row.payroll_employee : null;
+  const collected = [];
+  [
+    row.benefits,
+    row.benefit,
+    row.employee_benefits,
+    row.benefit_components,
+    row.benefit_details,
+    employee.benefits,
+    payrollEmployee?.benefits,
+    row.employee_salary_details?.benefits,
+    row.salary?.benefits,
+    row.salary_details?.benefits,
+    row.pay_structure?.benefits,
+    row.employee_salary?.benefits,
+  ].forEach((candidate) => pushPayrollLineItemsFromCandidate(candidate, collected));
+  return collected;
+}
+
+function isEmployeeEpfBenefit(type, name) {
+  if (name.includes('voluntary')) return false;
+  if (name.includes('employer') && !name.includes('epf contribution')) return false;
+  return (
+    type === 'epf_contribution' ||
+    type === 'epf' ||
+    type === 'pf' ||
+    name === 'epf contribution' ||
+    name.includes('epf contribution') ||
+    (name.includes('epf') && !name.includes('admin') && !name.includes('edli'))
+  );
+}
+
+function isVoluntaryProvidentFund(type, name) {
+  return (
+    type === 'vpf' ||
+    type === 'voluntary_provident_fund' ||
+    name.includes('voluntary provident') ||
+    name === 'vpf'
+  );
 }
 
 function findPayrollComponentAmount(items, matcher) {
@@ -381,6 +427,7 @@ function flattenPayrollEarningColumns(row) {
   const earnings = getEarningsArray(row);
   const deductions = getDeductionsArray(row);
   const taxes = getTaxesArray(row);
+  const benefits = getBenefitsArray(row);
   const componentColumns = {};
   earnings.forEach((item) => {
     const name = payrollEarningName(item);
@@ -394,6 +441,7 @@ function flattenPayrollEarningColumns(row) {
   });
   indexPayrollLineItems(deductions, componentColumns);
   indexPayrollLineItems(taxes, componentColumns);
+  indexPayrollLineItems(benefits, componentColumns);
 
   const earned_basic = coalesceAmount(
     pickBasicAmount(earnings),
@@ -538,18 +586,24 @@ function flattenPayrollEarningColumns(row) {
     ),
     epf_contribution: coalesceAmount(
       componentColumns.epf_contribution,
-      pickScalarAmount(row, ['epf_contribution', 'EPF Contribution', 'epf', 'EPF']),
-      pickAmountByPatterns(row, [/^epf_contribution$/, /^epf$/]),
-      findPayrollComponentAmount(
-        deductions,
-        (type, name) =>
-          type === 'epf_contribution' ||
-          type === 'epf' ||
-          type === 'pf' ||
-          name.includes('epf contribution') ||
-          name.includes('provident fund') ||
-          (name.includes('epf') && !name.includes('employer'))
-      )
+      pickScalarAmount(row, ['epf_contribution', 'EPF Contribution', 'epf', 'EPF', 'PF', 'pf']),
+      pickAmountByPatterns(row, [/^epf_contribution$/, /^epf$/, /^pf$/]),
+      findPayrollComponentAmount(benefits, isEmployeeEpfBenefit),
+      findPayrollComponentAmount(deductions, isEmployeeEpfBenefit)
+    ),
+    voluntary_provident_fund: coalesceAmount(
+      componentColumns.voluntary_provident_fund,
+      componentColumns.vpf,
+      pickScalarAmount(row, [
+        'voluntary_provident_fund',
+        'Voluntary Provident Fund',
+        'VoluntaryProvidentFund',
+        'vpf',
+        'VPF',
+      ]),
+      pickAmountByPatterns(row, [/^voluntary_provident_fund$/, /^vpf$/]),
+      findPayrollComponentAmount(benefits, isVoluntaryProvidentFund),
+      findPayrollComponentAmount(deductions, isVoluntaryProvidentFund)
     ),
     professional_tax: coalesceAmount(
       componentColumns.professional_tax,
@@ -562,6 +616,44 @@ function flattenPayrollEarningColumns(row) {
       findPayrollComponentAmount(
         deductions,
         (type, name) => type === 'professional_tax' || name.includes('professional tax')
+      )
+    ),
+    income_tax: coalesceAmount(
+      componentColumns.income_tax,
+      pickScalarAmount(row, [
+        'income_tax',
+        'Income Tax',
+        'IncomeTax',
+        'tds',
+        'TDS',
+        'tax_deducted_at_source',
+      ]),
+      pickAmountByPatterns(row, [/^income_tax$/, /^tds$/, /^tax_deducted_at_source$/]),
+      findPayrollComponentAmount(
+        taxes,
+        (type, name) =>
+          type === 'income_tax' ||
+          type === 'tds' ||
+          name.includes('income tax') ||
+          name === 'tds' ||
+          name.includes('tax deducted at source')
+      )
+    ),
+    employer_amount: coalesceAmount(
+      componentColumns.employer_amount,
+      pickScalarAmount(row, [
+        'employer_amount',
+        'employer_pf',
+        'employer_epf',
+        'employer_contribution',
+        'employer_epf_contribution',
+      ]),
+      pickAmountByPatterns(row, [/^employer_amount$/, /^employer_pf$/, /^employer_epf/]),
+      findPayrollComponentAmount(
+        deductions,
+        (type, name) =>
+          type === 'employer_amount' ||
+          ((name.includes('employer') && (name.includes('epf') || name.includes('pf') || name.includes('provident'))))
       )
     ),
   };

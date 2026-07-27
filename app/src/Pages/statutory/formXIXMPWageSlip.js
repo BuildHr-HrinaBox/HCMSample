@@ -1488,6 +1488,14 @@ export function buildFormXIXMPHeaderFields(
     if (typeof getMergedAwareCellText === 'function' && spec.match) {
       coords = findMPStackedLabelCell(getMergedAwareCellText, spec.match, effectiveSheetCols) || {};
     }
+    // Gujarat "if contractor" / stacked template — value always in column E with other headers.
+    if (spec.key === 'form_xix_ap_contractor' && coords.labelRow != null) {
+      coords = {
+        ...coords,
+        valueCol: FORM_XIX_MP_STACKED_VALUE_COL - 1,
+        valueRow: coords.valueRow ?? coords.labelRow,
+      };
+    }
     return buildTemplateField(spec, coords);
   });
 }

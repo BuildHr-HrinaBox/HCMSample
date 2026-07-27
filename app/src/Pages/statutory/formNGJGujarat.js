@@ -1,6 +1,28 @@
 /** Gujarat Form N — Leave Book (See rule 17). */
 
+import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
+import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
+import {
+  buildLeaveRecordLookupMap,
+  findLeaveRecordForFormRow,
+} from '../../utils/leaveMetrics';
+import {
+  getApprovedLeaveRecordUniqueKey,
+  normalizeApprovedLeaveRecord,
+} from './formFKarnataka';
+import {
+  filterApprovedLeaveRecordsForFormOGJMonth,
+  formOGJRecordMatchesWorker,
+  readApprovedLeaveLeaveType,
+} from './formOGJGujarat';
+import {
+  computeFormXLeaveBeginning,
+  FORM_X_MEDICAL_LEAVE_TYPE_ALIASES,
+  getFormXMedicalLeaveApiMetrics,
+  leaveTypeLabelMatchesAliases,
+} from './formXTamilNaduLeave';
 
 export const FORM_NGJ_WORKER_HEADERS = [
   'Name of the worker',
@@ -196,6 +218,15 @@ export function resolveFormNGJGujaratTableHeaders(tableHeaders) {
   const normalizeFlat = (header) => {
     const raw = String(header || '').trim();
     if (!raw) return raw;
+    // Keep Festival/Casual Period_From / Period_To (do not collapse to parent_From).
+    const periodLeaf = raw.match(
+      /^(Details of (?:Festival|Casual) Leave)_(Period)_(From|To)$/i
+    );
+    if (periodLeaf) {
+      const parent = normalizeFormNGJParentLabel(periodLeaf[1]) || periodLeaf[1].trim();
+      const fromTo = /^to$/i.test(periodLeaf[3]) ? 'To' : 'From';
+      return `${parent}_Period_${fromTo}`;
+    }
     const m = raw.match(/^(.+)_([\s\S]+)$/);
     if (!m) return raw;
     const parent = normalizeFormNGJParentLabel(m[1]) || m[1].trim();
@@ -762,6 +793,49 @@ export function resolveFormNGJGujaratHeaderFieldLayout(parsed, workbook, hints =
   const effectiveSheetCols = accessor?.effectiveSheetCols ?? 20;
   const uiFields = buildFormNGJTemplateFields(getMergedAwareCellText, effectiveSheetCols);
 
+  // Keep real sheet table anchors — draft export requires headerRowIndex >= 0.
+  let headers = resolveFormNGJGujaratTableHeaders(parsed?.headers || hints.tableHeaders || []);
+  let headerRowIndex = Number(parsed?.headerRowIndex);
+  let dataStartIndex = Number(parsed?.dataStartIndex);
+  let tableStartCol = Number(parsed?.tableStartCol);
+  if (!Number.isFinite(headerRowIndex)) headerRowIndex = -1;
+  if (!Number.isFinite(dataStartIndex)) dataStartIndex = -1;
+  if (!Number.isFinite(tableStartCol) || tableStartCol < 0) tableStartCol = 0;
+
+  if (workbook && accessor && (headerRowIndex < 0 || dataStartIndex < 0 || headers.length < 8)) {
+    try {
+      const sheetName = accessor.sheetName;
+      const worksheet = sheetName ? workbook.Sheets?.[sheetName] : null;
+      if (worksheet) {
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+        const rebuild = rebuildFormNGJGujaratTableHeadersFromSheet({
+          jsonData,
+          effectiveSheetCols,
+          getMergedAwareCellText,
+          merges: worksheet['!merges'] || [],
+        });
+        if (rebuild?.expandedHeaders?.length >= 8) {
+          headers = resolveFormNGJGujaratTableHeaders(rebuild.expandedHeaders);
+          if (headerRowIndex < 0 && Number.isFinite(Number(rebuild.headerRowIndex))) {
+            headerRowIndex = Number(rebuild.headerRowIndex);
+          }
+          if (dataStartIndex < 0 && Number.isFinite(Number(rebuild.dataStartIndex))) {
+            dataStartIndex = Number(rebuild.dataStartIndex);
+          }
+          if (Number.isFinite(Number(rebuild.startCol))) {
+            tableStartCol = Number(rebuild.startCol);
+          }
+        }
+      }
+    } catch (_) {
+      /* keep parsed anchors */
+    }
+  }
+
+  if (dataStartIndex < 0 && headerRowIndex >= 0) {
+    dataStartIndex = headerRowIndex + 3;
+  }
+
   return {
     formHeader: {
       title: formHeader?.title || 'FORM - N',
@@ -773,14 +847,12 @@ export function resolveFormNGJGujaratHeaderFieldLayout(parsed, workbook, hints =
       fields: uiFields,
       templateFields: uiFields,
     },
-    headers: resolveFormNGJGujaratTableHeaders(parsed?.headers || hints.tableHeaders || []),
-    subColumns: buildFormNGJSubColumnsFromHeaders(
-      resolveFormNGJGujaratTableHeaders(parsed?.headers || hints.tableHeaders || [])
-    ),
-    tableData: [],
-    headerRowIndex: -1,
-    dataStartIndex: 0,
-    tableStartCol: 0,
+    headers,
+    subColumns: buildFormNGJSubColumnsFromHeaders(headers),
+    tableData: Array.isArray(parsed?.tableData) ? parsed.tableData : [],
+    headerRowIndex,
+    dataStartIndex: dataStartIndex >= 0 ? dataStartIndex : 0,
+    tableStartCol,
     sheetName: accessor?.sheetName || hints.preferredSheetName || null,
   };
 }
@@ -857,7 +929,7 @@ export function isFormNGJReceiptHeader(header) {
   return /receipt\s+of\s+level\s+book/i.test(normHeaderLabel(header));
 }
 
-/** Leave / festival columns — manual entry only. */
+/** Leave / festival columns — people overlay skips these (Casual Leave filled from Contingency API). */
 export function isFormNGJSkipPeopleAutofillHeader(header) {
   const n = normHeaderLabel(header);
   if (isFormNGJWorkerNameHeader(header)) return false;
@@ -961,4 +1033,1014 @@ export function applyFormNGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
     }
   });
   return out;
+}
+
+/** Casual Leave on Form N maps to Zoho Contingency Leave (same aliases as Form X Medical). */
+export const FORM_NGJ_CASUAL_LEAVE_TYPE_ALIASES = [...FORM_X_MEDICAL_LEAVE_TYPE_ALIASES];
+
+export function isFormNGJCasualSectionHeader(header) {
+  return /details\s+of\s+casual\s+leave/i.test(String(header || ''));
+}
+
+export function isFormNGJCasualPeriodFromHeader(header) {
+  if (!isFormNGJCasualSectionHeader(header)) return false;
+  const sub = String(header || '')
+    .split('_')
+    .pop();
+  if (/^from$/i.test(String(sub || '').trim())) return true;
+  const n = normHeaderLabel(header);
+  return /\bfrom\b/.test(n) && !/\bto\b/.test(n);
+}
+
+export function isFormNGJCasualPeriodToHeader(header) {
+  if (!isFormNGJCasualSectionHeader(header)) return false;
+  const sub = String(header || '')
+    .split('_')
+    .pop();
+  if (/^to$/i.test(String(sub || '').trim())) return true;
+  const n = normHeaderLabel(header);
+  return /\bto\b/.test(n) && !/\bfrom\b/.test(n);
+}
+
+export function isFormNGJCasualTotalLeaveHeader(header) {
+  return isFormNGJCasualSectionHeader(header) && /total\s+leave/.test(normHeaderLabel(header));
+}
+
+export function isFormNGJCasualAvailedLeaveHeader(header) {
+  return isFormNGJCasualSectionHeader(header) && /availed\s+leave/.test(normHeaderLabel(header));
+}
+
+export function isFormNGJCasualBalanceLeaveHeader(header) {
+  return isFormNGJCasualSectionHeader(header) && /balance\s+leave/.test(normHeaderLabel(header));
+}
+
+export function isFormNGJCasualLeaveAutofillHeader(header) {
+  return (
+    isFormNGJCasualPeriodFromHeader(header) ||
+    isFormNGJCasualPeriodToHeader(header) ||
+    isFormNGJCasualTotalLeaveHeader(header) ||
+    isFormNGJCasualAvailedLeaveHeader(header) ||
+    isFormNGJCasualBalanceLeaveHeader(header)
+  );
+}
+
+export function isApprovedLeaveContingencyForFormNGJ(record) {
+  const leaveType = readApprovedLeaveLeaveType(record);
+  if (!leaveType) return false;
+  return leaveTypeLabelMatchesAliases(leaveType, FORM_NGJ_CASUAL_LEAVE_TYPE_ALIASES);
+}
+
+export function filterApprovedLeaveRecordsForFormNGJCasual(records, monthFrom, monthTo) {
+  const monthFiltered = filterApprovedLeaveRecordsForFormOGJMonth(records, monthFrom, monthTo);
+  return monthFiltered.filter(isApprovedLeaveContingencyForFormNGJ);
+}
+
+function formatFormNGJLeaveNumber(value) {
+  if (value == null || String(value).trim() === '') return '';
+  const n = Number(String(value).replace(/,/g, '').trim());
+  if (!Number.isFinite(n)) return '';
+  return String(Math.round(n * 100) / 100);
+}
+
+function setFormNGJCasualCell(row, header, value, overwrite) {
+  if (value == null || String(value).trim() === '') return false;
+  if (!overwrite && String(row[header] ?? '').trim() !== '') return false;
+  row[header] = String(value).trim();
+  return true;
+}
+
+/**
+ * Find Contingency Leave approved record for a Form N worker row.
+ * Reuses Form O worker identity matching (strict name / Zoho id).
+ */
+export function findApprovedContingencyLeaveForFormNRow(
+  row,
+  tableHeaders,
+  approvedRecords,
+  emp,
+  options = {}
+) {
+  if (!Array.isArray(approvedRecords) || approvedRecords.length === 0) return null;
+
+  const hdrs = resolveFormNGJGujaratTableHeaders(tableHeaders);
+  const workerHeader = hdrs.find(isFormNGJWorkerNameHeader) || '';
+  const workerName = workerHeader
+    ? String(row?.[workerHeader] ?? row?.__employeeLookupName ?? '').trim()
+    : String(row?.__employeeLookupName ?? '').trim();
+  if (!workerName) return null;
+
+  const usedRecordKeys =
+    options.usedRecordKeys instanceof Set ? options.usedRecordKeys : new Set();
+  const monthFrom = options.monthFrom || '';
+  const monthTo = options.monthTo || '';
+  const contingencyRecords = filterApprovedLeaveRecordsForFormNGJCasual(
+    approvedRecords,
+    monthFrom,
+    monthTo
+  );
+
+  for (let i = 0; i < contingencyRecords.length; i += 1) {
+    const rec = contingencyRecords[i];
+    if (!rec) continue;
+    const key = getApprovedLeaveRecordUniqueKey(rec);
+    if (key && usedRecordKeys.has(key)) continue;
+    if (formOGJRecordMatchesWorker(rec, workerName, emp, options)) {
+      return rec;
+    }
+  }
+  return null;
+}
+
+/**
+ * Build Casual Leave metrics:
+ * From / To / Availed → approved Contingency Leave for that period (LeaveCount).
+ * Balance → Contingency LeaveData (end balance).
+ * Total → beginning = balance + availed when both exist.
+ *
+ * Do not use LeaveData YTD `booked` for Availed (it disagrees with Period From/To).
+ * Do not fill defaults when there is no approved Contingency leave.
+ */
+export function buildFormNGJCasualLeaveValues(approvedRecord, leaveRecord, leaveTypeLabels = {}) {
+  const metrics = normalizeApprovedLeaveRecord(approvedRecord || {});
+  const hasApprovedPeriod = !!(metrics.from || metrics.to);
+  if (!hasApprovedPeriod) {
+    return {
+      from: '',
+      to: '',
+      totalLeave: '',
+      availedLeave: '',
+      balanceLeave: '',
+      hasApprovedPeriod: false,
+      hasLeaveMetrics: false,
+    };
+  }
+
+  const apiMetrics = leaveRecord
+    ? getFormXMedicalLeaveApiMetrics(leaveRecord, leaveTypeLabels)
+    : { balance: '', booked: '', hasData: false };
+  // Availed must match Period From/To → that leave's LeaveCount only.
+  const availed = formatFormNGJLeaveNumber(metrics.daysCount);
+  const balance =
+    apiMetrics.hasData && apiMetrics.balance !== '' && apiMetrics.balance != null
+      ? formatFormNGJLeaveNumber(apiMetrics.balance)
+      : '';
+  let total = '';
+  if (availed !== '' && balance !== '') {
+    total = computeFormXLeaveBeginning(balance, availed);
+  }
+  if (!total && availed !== '') total = availed;
+
+  return {
+    from: metrics.from || '',
+    to: metrics.to || '',
+    totalLeave: total || '',
+    availedLeave: availed || '',
+    balanceLeave: balance || '',
+    hasApprovedPeriod: true,
+    hasLeaveMetrics: !!(total || availed || balance),
+  };
+}
+
+export function applyFormNGJGujaratCasualLeaveToRow(
+  row,
+  approvedRecord,
+  leaveRecord,
+  tableHeaders,
+  { overwrite = true, leaveTypeLabels = {} } = {}
+) {
+  if (!row) return 0;
+  const values = buildFormNGJCasualLeaveValues(approvedRecord, leaveRecord, leaveTypeLabels);
+  if (!values.hasApprovedPeriod && !values.hasLeaveMetrics) return 0;
+
+  const hdrs = resolveFormNGJGujaratTableHeaders(tableHeaders);
+  let applied = 0;
+  hdrs.forEach((header) => {
+    if (isFormNGJCasualPeriodFromHeader(header) && values.from) {
+      if (setFormNGJCasualCell(row, header, values.from, overwrite)) applied += 1;
+    } else if (isFormNGJCasualPeriodToHeader(header) && values.to) {
+      if (setFormNGJCasualCell(row, header, values.to, overwrite)) applied += 1;
+    } else if (isFormNGJCasualTotalLeaveHeader(header) && values.totalLeave) {
+      if (setFormNGJCasualCell(row, header, values.totalLeave, overwrite)) applied += 1;
+    } else if (isFormNGJCasualAvailedLeaveHeader(header) && values.availedLeave) {
+      if (setFormNGJCasualCell(row, header, values.availedLeave, overwrite)) applied += 1;
+    } else if (isFormNGJCasualBalanceLeaveHeader(header) && values.balanceLeave) {
+      if (setFormNGJCasualCell(row, header, values.balanceLeave, overwrite)) applied += 1;
+    }
+  });
+  return applied;
+}
+
+/**
+ * Autofill Form N "Details of Casual Leave" from Contingency approved leave
+ * (From/To via Form O match model) + LeaveData Contingency metrics.
+ */
+export function applyFormNGJGujaratCasualLeaveAutofill(
+  mappedData,
+  employeesForMapping,
+  tableHeaders,
+  approvedLeaveRecords,
+  leaveRecords = [],
+  options = {}
+) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+
+  const priorHeaders = Array.isArray(tableHeaders) ? tableHeaders : [];
+  const canonicalHeaders = resolveFormNGJGujaratTableHeaders(tableHeaders);
+  const monthFrom = options.monthFrom || '';
+  const monthTo = options.monthTo || '';
+  const leaveTypeLabels = options.leaveTypeLabels || {};
+  const contingencyRecords = filterApprovedLeaveRecordsForFormNGJCasual(
+    approvedLeaveRecords,
+    monthFrom,
+    monthTo
+  );
+  const leaveLookup = buildLeaveRecordLookupMap(leaveRecords);
+  const workerHeader = canonicalHeaders.find(isFormNGJWorkerNameHeader) || '';
+  const usedRecordKeys = new Set();
+  let hits = 0;
+
+  mappedData.forEach((row, index) => {
+    const normalizedRow = remapFormNGJGujaratRowsToHeaders(
+      [row],
+      priorHeaders,
+      canonicalHeaders
+    )[0];
+    Object.assign(row, normalizedRow);
+
+    const empItem = employeesForMapping[index];
+    const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+    const approvedRecord = findApprovedContingencyLeaveForFormNRow(
+      row,
+      canonicalHeaders,
+      contingencyRecords.length > 0 ? contingencyRecords : approvedLeaveRecords,
+      emp,
+      {
+        usedRecordKeys,
+        monthFrom,
+        monthTo,
+        collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
+      }
+    );
+
+    if (approvedRecord) {
+      const recordKey = getApprovedLeaveRecordUniqueKey(approvedRecord);
+      if (recordKey) usedRecordKeys.add(recordKey);
+    } else {
+      // No Contingency leave → clear all casual columns (no LeaveData defaults).
+      canonicalHeaders.forEach((header) => {
+        if (isFormNGJCasualLeaveAutofillHeader(header)) {
+          row[header] = '';
+        }
+      });
+      return;
+    }
+
+    const leaveRecord =
+      findLeaveRecordForFormRow(leaveLookup, row, '', workerHeader) ||
+      (typeof options.findLeaveRecord === 'function'
+        ? options.findLeaveRecord(row, emp, index)
+        : null);
+
+    const applied = applyFormNGJGujaratCasualLeaveToRow(
+      row,
+      approvedRecord,
+      leaveRecord,
+      canonicalHeaders,
+      { overwrite: options.overwrite !== false, leaveTypeLabels }
+    );
+    if (applied > 0) hits += 1;
+  });
+
+  return hits;
+}
+
+/* -------------------------------------------------------------------------- */
+/* ExcelJS download — preserves template merges (SheetJS buildDraft corrupts) */
+/* -------------------------------------------------------------------------- */
+
+const excelCellValueToString = (val) => {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'object') {
+    if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+    if (val.text != null) return String(val.text);
+    if (val.result != null) return String(val.result);
+  }
+  return '';
+};
+
+function buildMergeTopLeftResolver(worksheet) {
+  const cache = new Map();
+  return (r, c) => {
+    const key = `${r}:${c}`;
+    if (cache.has(key)) return cache.get(key);
+    let topLeft = { r, c };
+    const merges = worksheet.model?.merges;
+    if (Array.isArray(merges)) {
+      for (let mi = 0; mi < merges.length; mi += 1) {
+        const parts = String(merges[mi] || '').split(':');
+        if (parts.length !== 2) continue;
+        const tl = worksheet.getCell(parts[0]);
+        const br = worksheet.getCell(parts[1]);
+        if (!tl || !br) continue;
+        const r1 = tl.fullAddress?.row ?? tl.row;
+        const c1 = tl.fullAddress?.col ?? tl.col;
+        const r2 = br.fullAddress?.row ?? br.row;
+        const c2 = br.fullAddress?.col ?? br.col;
+        if (r >= r1 && r <= r2 && c >= c1 && c <= c2) {
+          topLeft = { r: r1, c: c1 };
+          break;
+        }
+      }
+    }
+    cache.set(key, topLeft);
+    return topLeft;
+  };
+}
+
+function buildMergeSpanEndResolver(worksheet, getMergeTopLeft) {
+  const cache = new Map();
+  return (r, c) => {
+    const tl = getMergeTopLeft(r, c);
+    const key = `${tl.r}:${tl.c}`;
+    if (cache.has(key)) return cache.get(key);
+    let end = { r: tl.r, c: tl.c };
+    const merges = worksheet.model?.merges;
+    if (Array.isArray(merges)) {
+      for (let mi = 0; mi < merges.length; mi += 1) {
+        const parts = String(merges[mi] || '').split(':');
+        if (parts.length !== 2) continue;
+        const mtl = worksheet.getCell(parts[0]);
+        const br = worksheet.getCell(parts[1]);
+        if (!mtl || !br) continue;
+        const r1 = mtl.fullAddress?.row ?? mtl.row;
+        const c1 = mtl.fullAddress?.col ?? mtl.col;
+        const r2 = br.fullAddress?.row ?? br.row;
+        const c2 = br.fullAddress?.col ?? br.col;
+        if (tl.r === r1 && tl.c === c1) {
+          end = { r: r2, c: c2 };
+          break;
+        }
+      }
+    }
+    cache.set(key, end);
+    return end;
+  };
+}
+
+function formNGJExportHeaderBucket(header) {
+  const n = normHeaderLabel(header);
+  if (/name\s+of\s+the\s+worker/.test(n)) return 'workerName';
+  if (/description\s+of\s+the\s+department/.test(n)) return 'department';
+  if (/name\s+of\s+the\s+employer/.test(n)) return 'employer';
+  if (/date\s+of\s+entry\s+into\s+service/.test(n)) return 'dateOfEntry';
+  if (/receipt\s+of\s+le[av]e?\s*book|receipt\s+of\s+level\s+book/.test(n)) return 'receipt';
+  if (/leave\s+due\s+on/.test(n)) return 'leaveDueOn';
+  if (/no\.?\s*of\s+days/.test(n)) return 'noOfDays';
+  if (/from\s*-?\s*to|from\s+to/.test(n) && /leave\s+allowed|allowed/.test(String(header || '').toLowerCase())) {
+    return 'leaveFromTo';
+  }
+  if (/from\s*-?\s*to|^from\s+to$/.test(n)) return 'leaveFromTo';
+  if (/1st\s+moiety/.test(n)) return 'moiety1';
+  if (/2nd\s+moiety/.test(n)) return 'moiety2';
+  if (/application\s+date/.test(n)) return 'applicationDate';
+  if (/date\s+of\s+refusal/.test(n)) return 'dateOfRefusal';
+  if (/date\s+of\s+discharge/.test(n)) return 'dateOfDischarge';
+  if (/date\s+and\s+amount\s+paid/.test(n)) return 'dateAndAmountPaid';
+  if (/signature|thumb\s+impression/.test(n)) return 'signature';
+  if (/^remarks$/.test(n) && !/festival|casual/.test(String(header || '').toLowerCase())) return 'leaveRemarks';
+  if (/details\s+of\s+festival/.test(n) || String(header || '').startsWith(FORM_NGJ_FESTIVAL_PARENT)) {
+    if (/period.*from|period_from|_period_from/.test(n) || /_period_from$/i.test(String(header || ''))) {
+      return 'festivalPeriodFrom';
+    }
+    if (/period.*to|period_to|_period_to/.test(n) || /_period_to$/i.test(String(header || ''))) {
+      return 'festivalPeriodTo';
+    }
+    if (/^period$|_period$/i.test(n) || /_period$/i.test(String(header || ''))) return 'festivalPeriod';
+    if (/total\s+leave/.test(n)) return 'festivalTotal';
+    if (/availed\s+leave/.test(n)) return 'festivalAvailed';
+    if (/balance\s+leave/.test(n)) return 'festivalBalance';
+    if (/payment\s+made\s+in\s+lieu/.test(n)) return 'festivalPayment';
+    if (/remarks/.test(n)) return 'festivalRemarks';
+  }
+  if (/details\s+of\s+casual/.test(n) || String(header || '').startsWith(FORM_NGJ_CASUAL_PARENT)) {
+    if (/period.*from|period_from|_period_from/.test(n) || /_period_from$/i.test(String(header || ''))) {
+      return 'casualPeriodFrom';
+    }
+    if (/period.*to|period_to|_period_to/.test(n) || /_period_to$/i.test(String(header || ''))) {
+      return 'casualPeriodTo';
+    }
+    if (/^period$|_period$/i.test(n) || /_period$/i.test(String(header || ''))) return 'casualPeriod';
+    if (/total\s+leave/.test(n)) return 'casualTotal';
+    if (/availed\s+leave/.test(n)) return 'casualAvailed';
+    if (/balance\s+leave/.test(n)) return 'casualBalance';
+    if (/remarks/.test(n)) return 'casualRemarks';
+  }
+  return n;
+}
+
+export function getFormNGJRowValueForHeader(row, header) {
+  if (!row || !header) return '';
+  const direct = row[header];
+  if (direct != null && String(direct).trim() !== '') return String(direct).trim();
+  const bucket = formNGJExportHeaderBucket(header);
+  for (const [k, v] of Object.entries(row)) {
+    if (String(k).startsWith('__')) continue;
+    if (formNGJExportHeaderBucket(k) === bucket && v != null && String(v).trim() !== '') {
+      return String(v).trim();
+    }
+  }
+  return '';
+}
+
+export function rowHasMeaningfulFormNGJGujaratExportData(row, headers) {
+  const hdrs = resolveFormNGJGujaratTableHeaders(headers);
+  return hdrs.some((header) => getFormNGJRowValueForHeader(row, header) !== '');
+}
+
+export function filterFormNGJGujaratExportRows(rows, headers) {
+  const hdrs = resolveFormNGJGujaratTableHeaders(headers);
+  return (Array.isArray(rows) ? rows : []).filter((row) =>
+    rowHasMeaningfulFormNGJGujaratExportData(row, hdrs)
+  );
+}
+
+function detectFormNGJSectionColumns(worksheet, getMergedAwareCellText, getMergeSpanEnd, titleRe, maxCol) {
+  let titleRow = -1;
+  const maxScan = Math.max(60, worksheet.rowCount + 5);
+  for (let r = 1; r <= maxScan; r += 1) {
+    const parts = [];
+    for (let c = 1; c <= maxCol; c += 1) {
+      const t = getMergedAwareCellText(r, c);
+      if (t) parts.push(t.toLowerCase());
+    }
+    if (titleRe.test(parts.join(' '))) {
+      titleRow = r;
+      break;
+    }
+  }
+  if (titleRow < 1) return null;
+
+  let headerRow = titleRow + 1;
+  for (let r = titleRow + 1; r <= titleRow + 4; r += 1) {
+    const parts = [];
+    for (let c = 1; c <= maxCol; c += 1) {
+      const t = getMergedAwareCellText(r, c);
+      if (t) parts.push(t.toLowerCase());
+    }
+    const joined = parts.join(' ');
+    if (/period/.test(joined) && (/total\s+leave/.test(joined) || /availed/.test(joined))) {
+      headerRow = r;
+      break;
+    }
+  }
+
+  let subRow = -1;
+  for (let r = headerRow + 1; r <= headerRow + 3; r += 1) {
+    const parts = [];
+    for (let c = 1; c <= maxCol; c += 1) {
+      const t = getMergedAwareCellText(r, c);
+      if (t) parts.push(t.toLowerCase());
+    }
+    const joined = parts.join(' ');
+    if (/\bfrom\b/.test(joined) && /\bto\b/.test(joined)) {
+      subRow = r;
+      break;
+    }
+  }
+
+  const cols = [];
+  let c = 1;
+  while (c <= maxCol) {
+    const main = getMergedAwareCellText(headerRow, c);
+    if (!main) {
+      c += 1;
+      continue;
+    }
+    const endC = getMergeSpanEnd(headerRow, c).c;
+    const mainNorm = formNGJGujaratHeaderNorm(main);
+    if (/^period$/i.test(mainNorm) || mainNorm === 'period') {
+      if (subRow > 0) {
+        let fromCol = -1;
+        let toCol = -1;
+        for (let pc = c; pc <= endC; pc += 1) {
+          const sub = formNGJGujaratHeaderNorm(getMergedAwareCellText(subRow, pc));
+          if (/^from$/.test(sub)) fromCol = pc;
+          if (/^to$/.test(sub)) toCol = pc;
+        }
+        if (fromCol > 0) cols.push({ col: fromCol, bucket: 'periodFrom', label: 'Period_From' });
+        if (toCol > 0) cols.push({ col: toCol, bucket: 'periodTo', label: 'Period_To' });
+        if (fromCol < 0 && toCol < 0) {
+          cols.push({ col: c, bucket: 'period', label: 'Period' });
+        }
+      } else {
+        cols.push({ col: c, bucket: 'period', label: 'Period' });
+      }
+    } else if (/total\s+leave/.test(mainNorm)) {
+      cols.push({ col: c, bucket: 'total', label: 'Total Leave' });
+    } else if (/availed\s+leave/.test(mainNorm)) {
+      cols.push({ col: c, bucket: 'availed', label: 'Availed Leave' });
+    } else if (/balance\s+leave/.test(mainNorm)) {
+      cols.push({ col: c, bucket: 'balance', label: 'Balance Leave' });
+    } else if (/payment\s+made\s+in\s+lieu/.test(mainNorm)) {
+      cols.push({ col: c, bucket: 'payment', label: 'Payment made in lieu of Festival Leave, when called' });
+    } else if (/remarks/.test(mainNorm)) {
+      cols.push({ col: c, bucket: 'remarks', label: 'Remarks' });
+    }
+    c = Math.max(c + 1, endC + 1);
+  }
+
+  const dataStartRow = (subRow > 0 ? subRow : headerRow) + 1;
+  return { titleRow, headerRow, subRow, dataStartRow, cols };
+}
+
+function detectFormNGJGujaratSheetLayout(worksheet) {
+  const getMergeTopLeft = buildMergeTopLeftResolver(worksheet);
+  const getMergeSpanEnd = buildMergeSpanEndResolver(worksheet, getMergeTopLeft);
+  const getMergedAwareCellText = (r, c) => {
+    const tl = getMergeTopLeft(r, c);
+    return excelCellValueToString(worksheet.getCell(tl.r, tl.c)?.value).trim();
+  };
+
+  const maxCol = 20;
+  const maxScan = Math.max(45, worksheet.rowCount + 5);
+  let leaveHeaderRow = -1;
+  for (let r = 1; r <= maxScan; r += 1) {
+    const parts = [];
+    for (let c = 1; c <= maxCol; c += 1) {
+      const t = getMergedAwareCellText(r, c);
+      if (t) parts.push(t.toLowerCase());
+    }
+    const joined = parts.join(' ');
+    if (/accumulation\s+of\s+leave/.test(joined) && /leave\s+allowed/.test(joined)) {
+      leaveHeaderRow = r;
+      break;
+    }
+  }
+  if (leaveHeaderRow < 1) return null;
+
+  let leaveSubRow = leaveHeaderRow + 1;
+  for (let r = leaveHeaderRow + 1; r <= leaveHeaderRow + 4; r += 1) {
+    const parts = [];
+    for (let c = 1; c <= maxCol; c += 1) {
+      const t = getMergedAwareCellText(r, c);
+      if (t) parts.push(t.toLowerCase());
+    }
+    const joined = parts.join(' ');
+    if (/leave\s+due\s+on/.test(joined) || /no\.?\s*of\s+days/.test(joined)) {
+      leaveSubRow = r;
+      break;
+    }
+  }
+
+  const leaveCols = [];
+  let c = 1;
+  while (c <= maxCol) {
+    const main = getMergedAwareCellText(leaveHeaderRow, c);
+    if (!main || isFormNGJHeaderMetaLabel(main)) {
+      c += 1;
+      continue;
+    }
+    const endC = getMergeSpanEnd(leaveHeaderRow, c).c;
+    const parent = normalizeFormNGJParentLabel(main);
+    if (!parent) {
+      c = Math.max(c + 1, endC + 1);
+      continue;
+    }
+
+    if (parent === 'Remarks') {
+      leaveCols.push({
+        col: c,
+        bucket: 'leaveRemarks',
+        label: 'Remarks',
+      });
+    } else {
+      let added = false;
+      for (let sc = c; sc <= endC; sc += 1) {
+        const subRaw = getMergedAwareCellText(leaveSubRow, sc);
+        if (!subRaw || isNumericOnly(subRaw)) continue;
+        const sub = normalizeFormNGJSubLabel(subRaw) || subRaw;
+        const label = `${parent}_${sub}`;
+        leaveCols.push({
+          col: sc,
+          bucket: formNGJExportHeaderBucket(label),
+          label,
+        });
+        added = true;
+      }
+      if (!added) {
+        leaveCols.push({
+          col: c,
+          bucket: formNGJExportHeaderBucket(parent),
+          label: parent,
+        });
+      }
+    }
+    c = Math.max(c + 1, endC + 1);
+  }
+
+  const festival = detectFormNGJSectionColumns(
+    worksheet,
+    getMergedAwareCellText,
+    getMergeSpanEnd,
+    /details\s+of\s+festival\s+leave/,
+    maxCol
+  );
+  const casual = detectFormNGJSectionColumns(
+    worksheet,
+    getMergedAwareCellText,
+    getMergeSpanEnd,
+    /details\s+of\s+casual\s+leave/,
+    maxCol
+  );
+
+  return {
+    leaveHeaderRow,
+    leaveSubRow,
+    leaveDataStartRow: leaveSubRow + 1,
+    leaveCols,
+    festival,
+    casual,
+    getMergedAwareCellText,
+    getMergeTopLeft,
+  };
+}
+
+function writeFormNGJValueBesideOrBelowLabel(worksheet, labelRow, labelCol, value, getMergedAwareCellText) {
+  const val = String(value ?? '').trim();
+  if (!val || labelRow < 1 || labelCol < 1) return;
+
+  const rightText = getMergedAwareCellText(labelRow, labelCol + 1);
+  const rightLooksLikeLabel =
+    /name\s+of|description\s+of|date\s+of|receipt\s+of|department|employer|worker|establishment/i.test(
+      rightText
+    );
+  if (!rightText || /^enter\b/i.test(rightText) || rightText === ':') {
+    const cell = worksheet.getCell(labelRow, labelCol + 1);
+    cell.value = val;
+    cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'middle' };
+    return;
+  }
+  if (rightLooksLikeLabel) {
+    const belowText = getMergedAwareCellText(labelRow + 1, labelCol);
+    if (!belowText || /^enter\b/i.test(belowText)) {
+      const cell = worksheet.getCell(labelRow + 1, labelCol);
+      cell.value = val;
+      cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'middle' };
+    }
+    return;
+  }
+  const belowText = getMergedAwareCellText(labelRow + 1, labelCol);
+  if (!belowText || /^enter\b/i.test(belowText)) {
+    const cell = worksheet.getCell(labelRow + 1, labelCol);
+    cell.value = val;
+    cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'middle' };
+  }
+}
+
+function writeFormNGJWorkerHeaderFields(worksheet, layout, values) {
+  const getText = layout.getMergedAwareCellText;
+  const getMergeTopLeft = layout.getMergeTopLeft;
+  const maxRow = Math.max(1, layout.leaveHeaderRow - 1);
+  const specs = [
+    { re: /name\s+of\s+the\s+establishment/i, value: values.establishment },
+    { re: /name\s+of\s+the\s+worker/i, value: values.workerName },
+    { re: /description\s+of\s+the\s+department/i, value: values.department },
+    { re: /name\s+of\s+the\s+employer/i, value: values.employer },
+    { re: /date\s+of\s+entry\s+into\s+service/i, value: values.dateOfEntry },
+    { re: /receipt\s+of\s+le[av]e?\s*book|receipt\s+of\s+level\s+book/i, value: values.receipt },
+  ];
+  const written = new Set();
+
+  for (let r = 1; r <= maxRow; r += 1) {
+    for (let c = 1; c <= 20; c += 1) {
+      const tl = getMergeTopLeft(r, c);
+      if (tl.r !== r || tl.c !== c) continue;
+      const raw = getText(r, c);
+      if (!raw) continue;
+      const labelOnly = String(raw).split(':')[0].trim();
+      for (const spec of specs) {
+        if (written.has(spec.re.source)) continue;
+        if (!spec.re.test(labelOnly) && !spec.re.test(raw)) continue;
+        if (!String(spec.value || '').trim()) {
+          written.add(spec.re.source);
+          continue;
+        }
+        writeFormNGJValueBesideOrBelowLabel(worksheet, r, c, spec.value, getText);
+        written.add(spec.re.source);
+      }
+    }
+  }
+}
+
+function writeFormNGJSectionRow(worksheet, section, rowValuesByBucket) {
+  if (!section?.cols?.length || !(section.dataStartRow >= 1)) return;
+  const targetRow = section.dataStartRow;
+  section.cols.forEach(({ col, bucket }) => {
+    let val = '';
+    if (bucket === 'period') {
+      const from = rowValuesByBucket.periodFrom || '';
+      const to = rowValuesByBucket.periodTo || '';
+      val = [from, to].filter(Boolean).join(' - ');
+    } else if (bucket === 'periodFrom') {
+      val = rowValuesByBucket.periodFrom || '';
+    } else if (bucket === 'periodTo') {
+      val = rowValuesByBucket.periodTo || '';
+    } else {
+      val = rowValuesByBucket[bucket] || '';
+    }
+    const cell = worksheet.getCell(targetRow, col);
+    cell.value = val ? String(val) : '';
+    if (val) {
+      cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'middle' };
+    }
+  });
+}
+
+function collectFormNGJHeaderValuesFromRow(row, headers, headerFormData, formatDate) {
+  const hdrs = resolveFormNGJGujaratTableHeaders(headers);
+  const workerHeader = hdrs.find(isFormNGJWorkerNameHeader);
+  const deptHeader = hdrs.find(isFormNGJDepartmentHeader);
+  const employerHeader = hdrs.find(isFormNGJEmployerHeader);
+  const entryHeader = hdrs.find(isFormNGJDateOfEntryHeader);
+  const receiptHeader = hdrs.find(isFormNGJReceiptHeader);
+  const establishment =
+    String(headerFormData?.form_n_gj_establishment ?? '').trim() ||
+    String(headerFormData?.['Name of the establishment'] ?? '').trim();
+  const dateOfEntryRaw = getFormNGJRowValueForHeader(
+    row,
+    entryHeader || 'Date of entry into service'
+  );
+  return {
+    establishment,
+    workerName: getFormNGJRowValueForHeader(row, workerHeader || 'Name of the worker'),
+    department: getFormNGJRowValueForHeader(
+      row,
+      deptHeader || 'Description of the Department (if applicable)'
+    ),
+    employer: getFormNGJRowValueForHeader(row, employerHeader || 'Name of the employer'),
+    dateOfEntry: dateOfEntryRaw ? formatDate(dateOfEntryRaw) : '',
+    receipt: getFormNGJRowValueForHeader(row, receiptHeader || 'Receipt of level book'),
+  };
+}
+
+function collectFormNGJLeaveValuesFromRow(row, headers, formatDate) {
+  const hdrs = resolveFormNGJGujaratTableHeaders(headers);
+  const pick = (pred, fallbackBucket) => {
+    const header = hdrs.find(pred) || hdrs.find((h) => formNGJExportHeaderBucket(h) === fallbackBucket);
+    const val = header ? getFormNGJRowValueForHeader(row, header) : '';
+    return val;
+  };
+  const leaveDueOn = pick(
+    (h) => formNGJExportHeaderBucket(h) === 'leaveDueOn',
+    'leaveDueOn'
+  );
+  const applicationDate = pick(
+    (h) => formNGJExportHeaderBucket(h) === 'applicationDate',
+    'applicationDate'
+  );
+  const dateOfRefusal = pick(
+    (h) => formNGJExportHeaderBucket(h) === 'dateOfRefusal',
+    'dateOfRefusal'
+  );
+  const dateOfDischarge = pick(
+    (h) => formNGJExportHeaderBucket(h) === 'dateOfDischarge',
+    'dateOfDischarge'
+  );
+  return {
+    leaveDueOn: leaveDueOn ? formatDate(leaveDueOn) : '',
+    noOfDays: pick((h) => formNGJExportHeaderBucket(h) === 'noOfDays', 'noOfDays'),
+    leaveFromTo: pick((h) => formNGJExportHeaderBucket(h) === 'leaveFromTo', 'leaveFromTo'),
+    moiety1: pick((h) => formNGJExportHeaderBucket(h) === 'moiety1', 'moiety1'),
+    moiety2: pick((h) => formNGJExportHeaderBucket(h) === 'moiety2', 'moiety2'),
+    applicationDate: applicationDate ? formatDate(applicationDate) : '',
+    dateOfRefusal: dateOfRefusal ? formatDate(dateOfRefusal) : '',
+    dateOfDischarge: dateOfDischarge ? formatDate(dateOfDischarge) : '',
+    dateAndAmountPaid: pick(
+      (h) => formNGJExportHeaderBucket(h) === 'dateAndAmountPaid',
+      'dateAndAmountPaid'
+    ),
+    signature: pick((h) => formNGJExportHeaderBucket(h) === 'signature', 'signature'),
+    leaveRemarks: pick((h) => formNGJExportHeaderBucket(h) === 'leaveRemarks', 'leaveRemarks'),
+  };
+}
+
+function collectFormNGJSectionValuesFromRow(row, headers, sectionParent, formatDate) {
+  const hdrs = resolveFormNGJGujaratTableHeaders(headers);
+  const findSection = (suffixRe, bucket) => {
+    const header =
+      hdrs.find(
+        (h) =>
+          String(h || '').startsWith(sectionParent) &&
+          (suffixRe.test(String(h || '')) || formNGJExportHeaderBucket(h) === bucket)
+      ) || '';
+    return header ? getFormNGJRowValueForHeader(row, header) : '';
+  };
+  const from = findSection(/period_from|_from$/i, sectionParent.includes('Festival') ? 'festivalPeriodFrom' : 'casualPeriodFrom');
+  const to = findSection(/period_to|_to$/i, sectionParent.includes('Festival') ? 'festivalPeriodTo' : 'casualPeriodTo');
+  return {
+    periodFrom: from ? formatDate(from) : '',
+    periodTo: to ? formatDate(to) : '',
+    total: findSection(/total\s+leave/i, sectionParent.includes('Festival') ? 'festivalTotal' : 'casualTotal'),
+    availed: findSection(
+      /availed\s+leave/i,
+      sectionParent.includes('Festival') ? 'festivalAvailed' : 'casualAvailed'
+    ),
+    balance: findSection(
+      /balance\s+leave/i,
+      sectionParent.includes('Festival') ? 'festivalBalance' : 'casualBalance'
+    ),
+    payment: findSection(/payment\s+made\s+in\s+lieu/i, 'festivalPayment'),
+    remarks: findSection(/remarks/i, sectionParent.includes('Festival') ? 'festivalRemarks' : 'casualRemarks'),
+  };
+}
+
+/**
+ * Write one Form N Leave Book into the original Excel template (ExcelJS keeps merges).
+ */
+export async function buildFormNGJGujaratWorkbookWithTemplateStyles({
+  templateArrayBuffer,
+  mappedData,
+  headersToUse,
+  parsedFormHeader,
+  formFileName,
+  headerFormData,
+  sheetNameHint,
+  formatStatutoryDateDisplay = null,
+}) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateArrayBuffer);
+  const preferred = String(sheetNameHint || '').trim();
+  const worksheet =
+    (preferred && workbook.worksheets.find((ws) => String(ws?.name || '').trim() === preferred)) ||
+    workbook.worksheets[0] ||
+    null;
+  if (!worksheet) throw new Error('Template worksheet not found.');
+
+  const layout = detectFormNGJGujaratSheetLayout(worksheet);
+  if (!layout) throw new Error('Could not locate Gujarat Form N leave table header row.');
+
+  const formatDate =
+    typeof formatStatutoryDateDisplay === 'function'
+      ? formatStatutoryDateDisplay
+      : (v) => String(v || '').trim();
+
+  const normalizedHeaders = resolveFormNGJGujaratTableHeaders(headersToUse);
+  const rows = filterFormNGJGujaratExportRows(
+    remapFormNGJGujaratRowsToHeaders(
+      Array.isArray(mappedData) ? mappedData : [],
+      normalizedHeaders,
+      normalizedHeaders
+    ),
+    normalizedHeaders
+  );
+  const row = rows[0] || (Array.isArray(mappedData) ? mappedData[0] : {}) || {};
+
+  const headerValues = collectFormNGJHeaderValuesFromRow(
+    row,
+    normalizedHeaders,
+    headerFormData && typeof headerFormData === 'object' ? headerFormData : {},
+    formatDate
+  );
+  writeFormNGJWorkerHeaderFields(worksheet, layout, headerValues);
+
+  const leaveValues = collectFormNGJLeaveValuesFromRow(row, normalizedHeaders, formatDate);
+  if (layout.leaveCols.length > 0) {
+    const dataRow = layout.leaveDataStartRow;
+    layout.leaveCols.forEach(({ col, bucket }) => {
+      const val = leaveValues[bucket] || '';
+      const cell = worksheet.getCell(dataRow, col);
+      cell.value = val ? String(val) : '';
+      if (val) {
+        cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'middle' };
+      }
+    });
+    const colFrom = Math.min(...layout.leaveCols.map((x) => x.col));
+    const colTo = Math.max(...layout.leaveCols.map((x) => x.col));
+    ensureExcelJSDataRowsWithBorders(worksheet, {
+      dataStartRow: dataRow,
+      dataRowCount: 1,
+      colFrom,
+      colTo,
+      templateRow: dataRow,
+      templateBodyRows: 1,
+    });
+  }
+
+  writeFormNGJSectionRow(
+    worksheet,
+    layout.festival,
+    collectFormNGJSectionValuesFromRow(row, normalizedHeaders, FORM_NGJ_FESTIVAL_PARENT, formatDate)
+  );
+  writeFormNGJSectionRow(
+    worksheet,
+    layout.casual,
+    collectFormNGJSectionValuesFromRow(row, normalizedHeaders, FORM_NGJ_CASUAL_PARENT, formatDate)
+  );
+
+  const out = await workbook.xlsx.writeBuffer();
+  const fileName =
+    formFileName ||
+    parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+    'Form_N_GJ_Gujarat.xlsx';
+  return {
+    blob: new Blob([out], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }),
+    fileName,
+  };
+}
+
+function sanitizeFormNGJGujaratDownloadFileName(name) {
+  return (
+    String(name || 'Employee')
+      .replace(/[\\/:*?"<>|]+/g, '_')
+      .replace(/\s+/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '')
+      .slice(0, 80) || 'Employee'
+  );
+}
+
+export function resolveFormNGJGujaratEmployeeDownloadBaseName(row, headers, rowIndex = 0) {
+  const lookupName = String(row?.__employeeLookupName || '').trim();
+  if (lookupName) return sanitizeFormNGJGujaratDownloadFileName(lookupName);
+  const hdrs = resolveFormNGJGujaratTableHeaders(headers);
+  const workerHeader = hdrs.find(isFormNGJWorkerNameHeader);
+  const val = getFormNGJRowValueForHeader(row, workerHeader || 'Name of the worker');
+  if (val) return sanitizeFormNGJGujaratDownloadFileName(val.split(/\r?\n/)[0].trim());
+  return sanitizeFormNGJGujaratDownloadFileName(`Employee_${rowIndex + 1}`);
+}
+
+function allocateUniqueFormNGJGujaratDownloadFileName(baseName, usedNames) {
+  const safeBase = sanitizeFormNGJGujaratDownloadFileName(baseName);
+  const count = usedNames.get(safeBase) || 0;
+  usedNames.set(safeBase, count + 1);
+  if (count === 0) return `${safeBase}.xlsx`;
+  return `${safeBase}_${count + 1}.xlsx`;
+}
+
+/** One Leave Book per worker — ZIP when multiple employees. */
+export async function buildFormNGJGujaratPerEmployeeDownload({
+  templateArrayBuffer,
+  mappedData,
+  headersToUse,
+  parsedFormHeader,
+  formFileName,
+  headerFormData,
+  sheetNameHint,
+  formatStatutoryDateDisplay = null,
+}) {
+  const hdrs = resolveFormNGJGujaratTableHeaders(headersToUse);
+  let exportRows = filterFormNGJGujaratExportRows(
+    remapFormNGJGujaratRowsToHeaders(
+      Array.isArray(mappedData) ? mappedData : [],
+      hdrs,
+      hdrs
+    ),
+    hdrs
+  );
+  if (exportRows.length === 0 && Array.isArray(mappedData) && mappedData.length > 0) {
+    exportRows = [mappedData[0]];
+  }
+
+  const workbookArgs = {
+    templateArrayBuffer,
+    headersToUse: hdrs,
+    parsedFormHeader,
+    formFileName,
+    headerFormData,
+    sheetNameHint,
+    formatStatutoryDateDisplay,
+  };
+
+  if (exportRows.length <= 1) {
+    return buildFormNGJGujaratWorkbookWithTemplateStyles({
+      ...workbookArgs,
+      mappedData: exportRows,
+    });
+  }
+
+  const zip = new JSZip();
+  const usedNames = new Map();
+  for (let i = 0; i < exportRows.length; i += 1) {
+    const { blob } = await buildFormNGJGujaratWorkbookWithTemplateStyles({
+      ...workbookArgs,
+      mappedData: [exportRows[i]],
+    });
+    const xlsxBytes = await blob.arrayBuffer();
+    const baseName = resolveFormNGJGujaratEmployeeDownloadBaseName(exportRows[i], hdrs, i);
+    zip.file(allocateUniqueFormNGJGujaratDownloadFileName(baseName, usedNames), xlsxBytes);
+    if (i > 0 && i % 25 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_N_GJ')
+    .replace(/\.xlsx?$/i, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return {
+    blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
+    fileName: `${zipBase}_Employees.zip`,
+  };
 }

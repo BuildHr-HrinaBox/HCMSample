@@ -225,6 +225,30 @@ export function mapSamplePayrollRecordToPayrollRow(record) {
     'TotalDeduction',
     'total_deductions',
   ]);
+  const incomeTax = pickSamplePayrollAmount(record, [
+    'incomeTax',
+    'IncomeTax',
+    'income_tax',
+  ]);
+  const pf = pickSamplePayrollAmount(record, [
+    'pf',
+    'PF',
+    'epf_contribution',
+    'EPF Contribution',
+  ]);
+  const voluntaryProvidentFund = pickSamplePayrollAmount(record, [
+    'voluntaryProvidentFund',
+    'VoluntaryProvidentFund',
+    'voluntary_provident_fund',
+    'Voluntary Provident Fund',
+    'vpf',
+    'VPF',
+  ]);
+  const professionalTax = pickSamplePayrollAmount(record, [
+    'professionalTax',
+    'ProfessionalTax',
+    'professional_tax',
+  ]);
   return flattenPayrollEarningColumns({
     employee_name: employeeName,
     full_name: employeeName,
@@ -254,6 +278,16 @@ export function mapSamplePayrollRecordToPayrollRow(record) {
     net_pay: netpay,
     netPay: netpay,
     total_deductions: totalDeduction,
+    income_tax: incomeTax,
+    IncomeTax: incomeTax,
+    epf_contribution: pf,
+    PF: pf,
+    pf,
+    voluntary_provident_fund: voluntaryProvidentFund,
+    VoluntaryProvidentFund: voluntaryProvidentFund,
+    vpf: voluntaryProvidentFund,
+    professional_tax: professionalTax,
+    ProfessionalTax: professionalTax,
     payrollMonth: record.payrollMonth,
   });
 }

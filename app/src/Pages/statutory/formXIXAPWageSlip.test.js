@@ -301,4 +301,37 @@ describe('Form XIX AP payroll autofill rules', () => {
     // Must not dump wage values into empty column B next to the label.
     expect(String(ws.getCell(12, 2).value || '')).toBe('');
   });
+
+  it('writes Gujarat Form XIX contractor name/address to stacked column E (not H)', async () => {
+    const ExcelJS = require('exceljs');
+    const { writeFormXIXAPFieldsToExcelJsWorksheet } = require('./formXIXAPWageSlip');
+    const { FORM_XIX_MP_STACKED_VALUE_COL } = require('./formXIXMPWageSlip');
+
+    const workbook = new ExcelJS.Workbook();
+    const ws = workbook.addWorksheet('Sheet1');
+    ws.getCell(1, 1).value = 'FORM XIX';
+    ws.getCell(2, 1).value = '[See rule 78 (2)(b)]';
+    ws.getCell(3, 1).value = 'Wage Slip';
+    ws.getCell(7, 1).value = 'Name and address if contractor………………..';
+
+    // No parsed valueCol — scan path previously preferred AP H-band; stacked GJ must use E.
+    writeFormXIXAPFieldsToExcelJsWorksheet(
+      ws,
+      { form_xix_ap_contractor: 'Sample, vvd/14' },
+      {
+        title: 'FORM XIX',
+        formXIXMPTableLayout: true,
+        fields: [
+          {
+            key: 'form_xix_ap_contractor',
+            label: 'Name and address if contractor………………..',
+            group: 'header',
+          },
+        ],
+      }
+    );
+
+    expect(String(ws.getCell(7, FORM_XIX_MP_STACKED_VALUE_COL).value)).toBe('Sample, vvd/14');
+    expect(String(ws.getCell(7, 8).value || '')).toBe('');
+  });
 });

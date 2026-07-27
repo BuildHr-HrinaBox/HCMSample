@@ -29,6 +29,45 @@
   margin-bottom: 24px;
 }
 
+.leave-date-filters {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.leave-date-label {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #6b7280;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.leave-date-input {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #d1d5db;
+  font-size: 0.95rem;
+  color: #111827;
+  background: #fff;
+  min-width: 150px;
+}
+
+.leave-date-input:focus {
+  outline: none;
+  border-color: #2ecc71;
+  box-shadow: 0 0 0 2px rgba(46, 204, 113, 0.2);
+}
+
+.leave-date-range-hint {
+  font-size: 0.9rem;
+  color: #374151;
+  font-weight: 600;
+}
+
 .leave-fetch-btn {
   padding: 12px 24px;
   font-size: 1rem;

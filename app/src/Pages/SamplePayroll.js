@@ -22,6 +22,10 @@ const TABLE_COLUMNS = [
   { key: 'gross', label: 'Gross' },
   { key: 'netpay', label: 'Net Pay' },
   { key: 'totalDeduction', label: 'Total Deduction' },
+  { key: 'incomeTax', label: 'Income Tax' },
+  { key: 'pf', label: 'PF' },
+  { key: 'voluntaryProvidentFund', label: 'Voluntary Provident Fund' },
+  { key: 'professionalTax', label: 'Professional Tax' },
 ];
 
 const getDefaultPayrollMonth = () => {
@@ -108,6 +112,39 @@ function mapPayrollRowToTable(row) {
     gross,
     netpay,
     totalDeduction,
+    incomeTax: pickFirstValue(flat, [
+      'income_tax',
+      'IncomeTax',
+      'incomeTax',
+      'Income Tax',
+      'tds',
+      'TDS',
+      'tax_deducted_at_source',
+    ]),
+    pf: pickFirstValue(flat, [
+      'epf_contribution',
+      'EPF Contribution',
+      'PF',
+      'pf',
+      'employer_pf',
+      'employer_epf',
+    ]),
+    voluntaryProvidentFund: pickFirstValue(flat, [
+      'voluntary_provident_fund',
+      'VoluntaryProvidentFund',
+      'Voluntary Provident Fund',
+      'voluntaryProvidentFund',
+      'vpf',
+      'VPF',
+    ]),
+    professionalTax: pickFirstValue(flat, [
+      'professional_tax',
+      'ProfessionalTax',
+      'professionalTax',
+      'Professional Tax',
+      'pt',
+      'PT',
+    ]),
   };
 }
 
@@ -124,6 +161,10 @@ function mapSamplePayrollRecordToTable(record) {
     gross: record.gross || '',
     netpay: record.netpay || '',
     totalDeduction: record.totalDeduction || '',
+    incomeTax: record.incomeTax || '',
+    pf: record.pf || '',
+    voluntaryProvidentFund: record.voluntaryProvidentFund || '',
+    professionalTax: record.professionalTax || '',
   };
 }
 

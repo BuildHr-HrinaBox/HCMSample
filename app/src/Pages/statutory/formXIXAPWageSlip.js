@@ -216,7 +216,8 @@ export const FORM_XIX_AP_TEMPLATE_SPECS = [
     label: 'Name and address of contractor:',
     group: 'header',
     fieldType: 'textarea',
-    match: /name\s+and\s+address\s+of\s+contractor/i
+    // Gujarat Form XIX wording is "if contractor"; other states use "of contractor".
+    match: /name\s+and\s+address\s+(?:of|if)\s+contractor/i
   },
   {
     key: 'form_xix_ap_workman',
@@ -739,6 +740,10 @@ export function writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, headerFormData
     return bestCol;
   };
 
+  // MP/Gujarat stacked wage slip — header values (incl. contractor) align in column E, not H–L.
+  const stackedHeaderValueCol =
+    parsedFormHeader?.formXIXMPTableLayout && !parsedFormHeader?.formXIXAPTableLayout ? 5 : null;
+
   fields.forEach((field) => {
     const val = headerFormData[field.key];
     if (val == null || String(val).trim() === '') return;
@@ -749,7 +754,12 @@ export function writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, headerFormData
     // Header/footer fields may use parsed coords; wage particulars always locate dotted value band.
     if (!isWageField && field.labelRow != null && field.valueCol != null) {
       const targetRow = (field.valueRow ?? field.labelRow) + 1;
-      writeAt(targetRow, field.valueCol + 1, val);
+      // Gujarat/MP stacked: keep contractor (and other headers) in column E.
+      const col =
+        stackedHeaderValueCol != null && field.key === 'form_xix_ap_contractor'
+          ? stackedHeaderValueCol
+          : field.valueCol + 1;
+      writeAt(targetRow, col, val);
       return;
     }
 
@@ -763,6 +773,11 @@ export function writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, headerFormData
         const score = labelMatchScore(labelNorm, rawNorm);
         const regexHit = matchRe && (matchRe.test(raw) || matchRe.test(rawNorm));
         if (score < 45 && !regexHit) continue;
+        // Stacked MP/GJ: do not let pickValueCol prefer the AP H–L band for header fields.
+        if (stackedHeaderValueCol != null && !isWageField) {
+          writeAt(r, stackedHeaderValueCol, val);
+          return;
+        }
         const col = pickValueCol(r, c, isWageField);
         if (col != null) {
           writeAt(r, col, val);

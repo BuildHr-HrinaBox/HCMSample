@@ -7,7 +7,7 @@ const app = express();
 const TABLE_NAME = 'SamplePayroll';
 const ZCQL_MAX_ROWS = 300;
 const SAMPLE_PAYROLL_SELECT_COLUMNS =
-	'ROWID, EmployeeName, EmployeeID, GIDNumber, Email, DateofBirth, Paid_days, Basic, HRA, Gross, Netpay, TotalDeduction, PayrollMonth, CREATEDTIME, MODIFIEDTIME';
+	'ROWID, EmployeeName, EmployeeID, GIDNumber, Email, DateofBirth, Paid_days, Basic, HRA, Gross, Netpay, TotalDeduction, IncomeTax, PF, VoluntaryProvidentFund, ProfessionalTax, PayrollMonth, CREATEDTIME, MODIFIEDTIME';
 
 app.use(express.json({ limit: '50mb' }));
 
@@ -323,6 +323,10 @@ function mapRow(row) {
 		gross: row.Gross || '',
 		netpay: row.Netpay || '',
 		totalDeduction: row.TotalDeduction || '',
+		incomeTax: row.IncomeTax || '',
+		pf: row.PF || '',
+		voluntaryProvidentFund: row.VoluntaryProvidentFund || '',
+		professionalTax: row.ProfessionalTax || '',
 		payrollMonth: row.PayrollMonth || '',
 		createdTime: row.CREATEDTIME,
 		modifiedTime: row.MODIFIEDTIME,
@@ -360,6 +364,60 @@ function pickField(record, keys) {
 	return null;
 }
 
+function parseBenefitsList(record) {
+	if (!record || typeof record !== 'object') return [];
+	const raw =
+		record.benefits ??
+		record.Benefits ??
+		record.benefit ??
+		record.employee_benefits ??
+		null;
+	if (Array.isArray(raw)) return raw;
+	if (typeof raw === 'string' && raw.trim()) {
+		try {
+			const parsed = JSON.parse(raw);
+			return Array.isArray(parsed) ? parsed : [];
+		} catch (_) {
+			return [];
+		}
+	}
+	return [];
+}
+
+function benefitName(item) {
+	return String(item?.name ?? item?.benefit_name ?? item?.label ?? '')
+		.trim()
+		.toLowerCase();
+}
+
+function benefitPlan(item) {
+	return String(item?.plan ?? item?.type ?? item?.benefit_type ?? '')
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '_');
+}
+
+function benefitAmount(item) {
+	if (!item || typeof item !== 'object') return null;
+	const value = item.amount ?? item.value ?? item.component_amount;
+	if (value == null || value === '') return null;
+	const num = Number(String(value).replace(/,/g, '').trim());
+	return Number.isFinite(num) ? String(num) : null;
+}
+
+function pickBenefitAmount(record, matcher) {
+	const list = parseBenefitsList(record);
+	for (let i = 0; i < list.length; i += 1) {
+		const item = list[i];
+		if (!item || typeof item !== 'object') continue;
+		if (matcher(benefitPlan(item), benefitName(item))) {
+			const amount = benefitAmount(item);
+			if (amount != null) return amount;
+		}
+	}
+	return null;
+}
+
 function mapPayrollRecordToSampleRow(record, payrollMonth) {
 	const gross = pickField(record, ['gross_pay', 'total_earnings', 'gross', 'Gross']);
 	const totalDeduction = pickField(record, [
@@ -381,6 +439,26 @@ function mapPayrollRecordToSampleRow(record, payrollMonth) {
 		const netNum = Number(gross) - Number(totalDeduction);
 		if (Number.isFinite(netNum) && netNum >= 0) netpay = String(netNum);
 	}
+	const pfFromBenefits = pickBenefitAmount(
+		record,
+		(plan, name) =>
+			plan === 'epf_contribution' ||
+			plan === 'epf' ||
+			name === 'epf contribution' ||
+			(name.includes('epf') &&
+				!name.includes('voluntary') &&
+				!name.includes('employer') &&
+				!name.includes('admin') &&
+				!name.includes('edli'))
+	);
+	const vpfFromBenefits = pickBenefitAmount(
+		record,
+		(plan, name) =>
+			plan === 'vpf' ||
+			plan === 'voluntary_provident_fund' ||
+			name.includes('voluntary provident') ||
+			name === 'vpf'
+	);
 	return {
 		EmployeeName: pickField(record, ['employee_name', 'full_name', 'employeeName', 'name']),
 		EmployeeID: pickField(record, ['employee_id', 'employeeId', 'EmployeeID']),
@@ -412,6 +490,41 @@ function mapPayrollRecordToSampleRow(record, payrollMonth) {
 		Gross: gross,
 		Netpay: netpay,
 		TotalDeduction: totalDeduction,
+		IncomeTax: pickField(record, [
+			'income_tax',
+			'IncomeTax',
+			'incomeTax',
+			'Income Tax',
+			'tds',
+			'TDS',
+			'tax_deducted_at_source',
+		]),
+		PF:
+			pickField(record, [
+				'epf_contribution',
+				'EPF Contribution',
+				'PF',
+				'pf',
+				'employer_pf',
+				'employer_epf',
+			]) || pfFromBenefits,
+		VoluntaryProvidentFund:
+			pickField(record, [
+				'voluntary_provident_fund',
+				'VoluntaryProvidentFund',
+				'Voluntary Provident Fund',
+				'voluntaryProvidentFund',
+				'vpf',
+				'VPF',
+			]) || vpfFromBenefits,
+		ProfessionalTax: pickField(record, [
+			'professional_tax',
+			'ProfessionalTax',
+			'professionalTax',
+			'Professional Tax',
+			'pt',
+			'PT',
+		]),
 		PayrollMonth: payrollMonth,
 	};
 }
@@ -510,6 +623,10 @@ function buildRowData(body) {
 		gross,
 		netpay,
 		totalDeduction,
+		incomeTax,
+		pf,
+		voluntaryProvidentFund,
+		professionalTax,
 		payrollMonth,
 	} = body;
 
@@ -525,6 +642,10 @@ function buildRowData(body) {
 		Gross: toNullIfEmpty(gross),
 		Netpay: toNullIfEmpty(netpay),
 		TotalDeduction: toNullIfEmpty(totalDeduction),
+		IncomeTax: toNullIfEmpty(incomeTax),
+		PF: toNullIfEmpty(pf),
+		VoluntaryProvidentFund: toNullIfEmpty(voluntaryProvidentFund),
+		ProfessionalTax: toNullIfEmpty(professionalTax),
 		PayrollMonth: isValidPayrollMonth(payrollMonth) ? payrollMonth.trim() : null,
 	};
 }

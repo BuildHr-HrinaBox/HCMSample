@@ -255,8 +255,11 @@ function isEmployeeEpfBenefit(type, name) {
     type === 'epf_contribution' ||
     type === 'epf' ||
     type === 'pf' ||
+    name === 'pf' ||
+    name === 'epf' ||
     name === 'epf contribution' ||
     name.includes('epf contribution') ||
+    (name.includes('provident fund') && !name.includes('voluntary')) ||
     (name.includes('epf') && !name.includes('admin') && !name.includes('edli'))
   );
 }
@@ -266,7 +269,9 @@ function isVoluntaryProvidentFund(type, name) {
     type === 'vpf' ||
     type === 'voluntary_provident_fund' ||
     name.includes('voluntary provident') ||
-    name === 'vpf'
+    name === 'vpf' ||
+    name === 'voluntary pf' ||
+    (name.includes('voluntary') && name.includes('pf'))
   );
 }
 
@@ -849,22 +854,35 @@ export function flattenPayrollEarningColumns(row) {
     ),
     epf_contribution: coalesceAmount(
       componentColumns.epf_contribution,
-      pickScalarAmount(row, ['epf_contribution', 'EPF Contribution', 'epf', 'EPF', 'PF', 'pf']),
-      pickAmountByPatterns(row, [/^epf_contribution$/, /^epf$/, /^pf$/]),
+      componentColumns.pf,
+      componentColumns.provident_fund,
+      pickScalarAmount(row, [
+        'epf_contribution',
+        'EPF Contribution',
+        'epf',
+        'EPF',
+        'PF',
+        'pf',
+        'provident_fund',
+        'Provident Fund',
+      ]),
+      pickAmountByPatterns(row, [/^epf_contribution$/, /^epf$/, /^pf$/, /^provident_fund$/]),
       findPayrollComponentAmount(benefits, isEmployeeEpfBenefit),
       findPayrollComponentAmount(deductions, isEmployeeEpfBenefit)
     ),
     voluntary_provident_fund: coalesceAmount(
       componentColumns.voluntary_provident_fund,
       componentColumns.vpf,
+      componentColumns.voluntary_pf,
       pickScalarAmount(row, [
         'voluntary_provident_fund',
         'Voluntary Provident Fund',
         'VoluntaryProvidentFund',
+        'voluntaryProvidentFund',
         'vpf',
         'VPF',
       ]),
-      pickAmountByPatterns(row, [/^voluntary_provident_fund$/, /^vpf$/]),
+      pickAmountByPatterns(row, [/^voluntary_provident_fund$/, /^vpf$/, /voluntary.*provident/]),
       findPayrollComponentAmount(benefits, isVoluntaryProvidentFund),
       findPayrollComponentAmount(deductions, isVoluntaryProvidentFund)
     ),
@@ -883,17 +901,28 @@ export function flattenPayrollEarningColumns(row) {
     ),
     income_tax: coalesceAmount(
       componentColumns.income_tax,
+      componentColumns.tds,
       pickScalarAmount(row, [
         'income_tax',
         'Income Tax',
         'IncomeTax',
+        'incomeTax',
         'tds',
         'TDS',
         'tax_deducted_at_source',
       ]),
-      pickAmountByPatterns(row, [/^income_tax$/, /^tds$/, /^tax_deducted_at_source$/]),
+      pickAmountByPatterns(row, [/^income_tax$/, /^incometax$/, /^tds$/, /^tax_deducted_at_source$/]),
       findPayrollComponentAmount(
         taxes,
+        (type, name) =>
+          type === 'income_tax' ||
+          type === 'tds' ||
+          name.includes('income tax') ||
+          name === 'tds' ||
+          name.includes('tax deducted at source')
+      ),
+      findPayrollComponentAmount(
+        deductions,
         (type, name) =>
           type === 'income_tax' ||
           type === 'tds' ||

@@ -68,16 +68,19 @@ async function fetchPayrollTablePayloadOnce(payrollMonth, { timeoutMs = 45000, f
   const task = (async () => {
     const sampleLoad = await fetchSamplePayrollRowsForMonth(month, { timeoutMs });
     if (sampleLoad.records.length > 0) {
+      const payDate = String(
+        sampleLoad.meta?.payDate || sampleLoad.meta?.pay_date || ''
+      ).trim();
       cacheForm15PayrollTableRows(
         sampleLoad.payrollMonth || month,
         sampleLoad.records,
         sampleLoad.meta,
-        '',
+        payDate,
         'sample_payroll'
       );
       return {
         records: sampleLoad.records,
-        meta: sampleLoad.meta,
+        meta: sampleLoad.meta || (payDate ? { payDate, pay_date: payDate } : null),
         payrollMonth: sampleLoad.payrollMonth || month,
         source: sampleLoad.source || 'sample_payroll',
       };
@@ -99,18 +102,21 @@ async function fetchLatestPayrollTablePayload({ timeoutMs = 45000 } = {}) {
   const sampleLatest = await fetchLatestSamplePayrollRows({ timeoutMs });
   if (sampleLatest.records.length > 0) {
     const resolvedMonth = sampleLatest.payrollMonth || '';
+    const payDate = String(
+      sampleLatest.meta?.payDate || sampleLatest.meta?.pay_date || ''
+    ).trim();
     if (resolvedMonth) {
       cacheForm15PayrollTableRows(
         resolvedMonth,
         sampleLatest.records,
-        sampleLatest.meta,
-        '',
+        sampleLatest.meta || (payDate ? { payDate, pay_date: payDate } : null),
+        payDate,
         'sample_payroll'
       );
     }
     return {
       records: sampleLatest.records,
-      meta: sampleLatest.meta,
+      meta: sampleLatest.meta || (payDate ? { payDate, pay_date: payDate } : null),
       payrollMonth: resolvedMonth,
       source: sampleLatest.source || 'sample_payroll_latest',
     };
@@ -189,7 +195,14 @@ async function fetchZohoPayrollListRowsForMonth(
 
   const rows = normalizePayrollTableRecords(merged);
   if (rows.length > 0) {
-    cacheForm15PayrollTableRows(month, rows, meta);
+    const payDate = String(meta?.payDate || meta?.pay_date || '').trim();
+    cacheForm15PayrollTableRows(
+      month,
+      rows,
+      meta || (payDate ? { payDate, pay_date: payDate } : null),
+      payDate,
+      'sample_payroll'
+    );
   }
   return { rows, meta: meta ? { ...meta, total: total ?? meta.total } : null };
 }

@@ -198,7 +198,27 @@ function pickSamplePayrollAmount(record, keys) {
   return '';
 }
 
-export function mapSamplePayrollRecordToPayrollRow(record) {
+function pickSamplePayrollPayDate(record, meta = null) {
+  const fromMeta = String(meta?.payDate || meta?.pay_date || '').trim();
+  if (fromMeta) return fromMeta;
+  if (!record || typeof record !== 'object') return '';
+  for (const key of [
+    'pay_date',
+    'Pay Date',
+    'payDate',
+    'PayDate',
+    'payment_date',
+    'Payment Date',
+    'date_of_payment',
+    'Date of Payment',
+  ]) {
+    const value = String(record[key] ?? '').trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+export function mapSamplePayrollRecordToPayrollRow(record, meta = null) {
   if (!record || typeof record !== 'object') return null;
   const email = String(record.email || '').trim();
   const employeeName = String(record.employeeName || '').trim();
@@ -249,6 +269,7 @@ export function mapSamplePayrollRecordToPayrollRow(record) {
     'ProfessionalTax',
     'professional_tax',
   ]);
+  const payDate = pickSamplePayrollPayDate(record, meta);
   return flattenPayrollEarningColumns({
     employee_name: employeeName,
     full_name: employeeName,
@@ -289,6 +310,10 @@ export function mapSamplePayrollRecordToPayrollRow(record) {
     professional_tax: professionalTax,
     ProfessionalTax: professionalTax,
     payrollMonth: record.payrollMonth,
+    pay_date: payDate,
+    payDate,
+    payment_date: payDate,
+    date_of_payment: payDate,
   });
 }
 
@@ -343,15 +368,20 @@ export async function fetchSamplePayrollRecords(payrollMonth, { timeoutMs = 4500
       timeoutMs
     );
     if (!resp.ok || !isSamplePayrollApiSuccess(json)) {
-      return { records: [], payrollMonth: month };
+      return { records: [], payrollMonth: month, meta: null };
     }
     const raw = Array.isArray(json.data?.records) ? json.data.records : [];
+    const meta =
+      json.data?.meta && typeof json.data.meta === 'object'
+        ? json.data.meta
+        : null;
     return {
-      records: raw.map(mapSamplePayrollRecordToPayrollRow).filter(Boolean),
+      records: raw.map((row) => mapSamplePayrollRecordToPayrollRow(row, meta)).filter(Boolean),
       payrollMonth: json.data?.payrollMonth || month,
+      meta,
     };
   } catch (_) {
-    return { records: [], payrollMonth: month };
+    return { records: [], payrollMonth: month, meta: null };
   }
 }
 
@@ -362,9 +392,15 @@ export async function fetchSamplePayrollTableSnapshot(payrollMonth) {
 
 export async function fetchSamplePayrollRowsForMonth(payrollMonth, { timeoutMs = 45000 } = {}) {
   const listLoad = await fetchSamplePayrollRecords(payrollMonth, { timeoutMs });
+  const payDate = String(listLoad.meta?.payDate || listLoad.meta?.pay_date || '').trim();
+  const meta =
+    listLoad.meta ||
+    (payDate
+      ? { payDate, pay_date: payDate, payrollMonth: listLoad.payrollMonth || payrollMonth }
+      : null);
   return {
     records: listLoad.records,
-    meta: null,
+    meta,
     payrollMonth: listLoad.payrollMonth || payrollMonth,
     source: listLoad.records.length > 0 ? 'sample_payroll' : 'none',
   };
@@ -391,9 +427,22 @@ export async function fetchLatestSamplePayrollRows({ timeoutMs = 45000 } = {}) {
       )
     : listLoad.records;
 
+  // Re-fetch latest month so Pay date meta is resolved for that month.
+  if (latestMonth) {
+    const monthLoad = await fetchSamplePayrollRecords(latestMonth, { timeoutMs });
+    if (monthLoad.records.length > 0) {
+      return {
+        records: monthLoad.records,
+        meta: monthLoad.meta,
+        payrollMonth: latestMonth,
+        source: 'sample_payroll_latest',
+      };
+    }
+  }
+
   return {
     records: monthRows.length > 0 ? monthRows : listLoad.records,
-    meta: null,
+    meta: listLoad.meta,
     payrollMonth: latestMonth,
     source: 'sample_payroll_latest',
   };

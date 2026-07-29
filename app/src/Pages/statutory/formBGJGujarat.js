@@ -7,9 +7,85 @@ import {
 } from '../../utils/payrollEarnings';
 import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
 import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
-import { resolveFormXIXMPPayrollRowForEmployee, resolvePayrollRowByFormTableName } from './formXIXMPWageSlip';
+import {
+  resolveFormXIXMPPayrollRowForEmployee,
+  resolveFormXIXMPPayrollRowsForAutofill,
+  resolvePayrollRowByFormTableName,
+} from './formXIXMPWageSlip';
 
 /** Gujarat Form B — Register of Wages (Shops & Establishments). */
+
+/** True when a Sample Payroll / pay-run row carries PF, VPF, or Income Tax. */
+export function formBGJPayrollRowHasSampleDeductionFields(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return false;
+  const fields = resolveFormBGJGujaratPayrollFields(payrollRow);
+  return (
+    (fields.pf !== '' && fields.pf != null) ||
+    (fields.voluntaryProvidentFund !== '' && fields.voluntaryProvidentFund != null) ||
+    (fields.incomeTax !== '' && fields.incomeTax != null)
+  );
+}
+
+/**
+ * Form B must prefer Sample Payroll table rows (PF / VPF / Income Tax columns).
+ * Zoho pay-run rows often have HRA/Gross but empty deduction scalars.
+ */
+export function resolveFormBGJGujaratPayrollRowsForAutofill(
+  statutoryPayrollRows,
+  monthCandidates = [],
+  helpers = {}
+) {
+  const {
+    cachedSampleRows = null,
+    bulkSampleRows = null,
+    payDate = '',
+  } = helpers;
+
+  const stampPayDate = (rows) => {
+    const date = String(payDate || '').trim();
+    if (!date) return rows;
+    return rows.map((row) => {
+      if (!row || typeof row !== 'object') return row;
+      if (String(row.pay_date || row.payDate || '').trim()) return row;
+      return {
+        ...row,
+        pay_date: date,
+        payDate: date,
+        payment_date: date,
+        date_of_payment: date,
+      };
+    });
+  };
+
+  const preferDeductionRows = (rows) => {
+    const list = (Array.isArray(rows) ? rows : [])
+      .filter((row) => row && typeof row === 'object' && row.fetch_error !== true)
+      .map((row) => flattenPayrollEarningColumns(row));
+    if (list.length === 0) return [];
+    const withDeductions = list.filter((row) => formBGJPayrollRowHasSampleDeductionFields(row));
+    return stampPayDate(withDeductions.length > 0 ? withDeductions : list);
+  };
+
+  const fromCached = preferDeductionRows(cachedSampleRows);
+  if (fromCached.length > 0) return fromCached;
+
+  const fromBulk = preferDeductionRows(bulkSampleRows);
+  if (fromBulk.length > 0) return fromBulk;
+
+  const fromStatutoryPreferred = preferDeductionRows(statutoryPayrollRows);
+  if (
+    fromStatutoryPreferred.length > 0 &&
+    fromStatutoryPreferred.some((row) => formBGJPayrollRowHasSampleDeductionFields(row))
+  ) {
+    return fromStatutoryPreferred;
+  }
+
+  const xix = resolveFormXIXMPPayrollRowsForAutofill(statutoryPayrollRows, monthCandidates);
+  const fromXix = preferDeductionRows(xix);
+  if (fromXix.length > 0) return fromXix;
+
+  return fromStatutoryPreferred;
+}
 
 export function formBGJGujaratHeaderNorm(txt) {
   return String(txt || '')
@@ -118,14 +194,38 @@ export function isFormBGJHraHeader(h) {
   return s === 'hra' || /\bhra\b/.test(s) || (s.includes('house') && s.includes('rent'));
 }
 
+export function isFormBGJVoluntaryPfHeader(h) {
+  const s = normHeader(h);
+  const compact = s.replace(/\s+/g, '');
+  return (
+    compact === 'vpf' ||
+    (s.includes('voluntary') && (s.includes('provident') || s.includes('pf') || compact.includes('vpf'))) ||
+    s.includes('voluntary provident fund')
+  );
+}
+
 export function isFormBGJPfHeader(h) {
   const s = normHeader(h);
-  return s === 'pf' || s.includes('provident fund');
+  if (isFormBGJVoluntaryPfHeader(h)) return false;
+  const compact = s.replace(/\s+/g, '');
+  return (
+    compact === 'pf' ||
+    compact === 'epf' ||
+    s.includes('provident fund') ||
+    s.includes('epf') ||
+    /^p\.?\s*f\.?$/.test(s)
+  );
 }
 
 export function isFormBGJIncomeTaxHeader(h) {
   const s = normHeader(h);
-  return (s.includes('income') && s.includes('tax')) || s === 'tds' || s.includes('tax deducted');
+  const compact = s.replace(/\s+/g, '');
+  return (
+    (s.includes('income') && s.includes('tax')) ||
+    compact === 'tds' ||
+    compact === 'incometax' ||
+    s.includes('tax deducted')
+  );
 }
 
 export function isFormBGJNetPaymentHeader(h) {
@@ -143,7 +243,12 @@ export function isFormBGJBankReceiptHeader(h) {
 
 export function isFormBGJPaymentDateHeader(h) {
   const s = normHeader(h);
-  return s.includes('date') && s.includes('payment');
+  return (
+    (s.includes('date') && s.includes('payment')) ||
+    s === 'pay date' ||
+    s === 'date of payment' ||
+    s === 'payment date'
+  );
 }
 
 export function isFormBGJGrossTotalHeader(header, headers) {
@@ -151,7 +256,11 @@ export function isFormBGJGrossTotalHeader(header, headers) {
   const list = Array.isArray(headers) ? headers : [];
   const idx = list.indexOf(header);
   const dedStart = list.findIndex(
-    (h) => isFormBGJPfHeader(h) || isFormBGJIncomeTaxHeader(h) || isFormBGJDeductionBandHeader(h)
+    (h) =>
+      isFormBGJPfHeader(h) ||
+      isFormBGJVoluntaryPfHeader(h) ||
+      isFormBGJIncomeTaxHeader(h) ||
+      isFormBGJDeductionBandHeader(h)
   );
   if (dedStart >= 0 && idx >= dedStart) return false;
   return true;
@@ -162,7 +271,11 @@ export function isFormBGJDeductionsTotalHeader(header, headers) {
   const list = Array.isArray(headers) ? headers : [];
   const idx = list.indexOf(header);
   const dedStart = list.findIndex(
-    (h) => isFormBGJPfHeader(h) || isFormBGJIncomeTaxHeader(h) || isFormBGJDeductionBandHeader(h)
+    (h) =>
+      isFormBGJPfHeader(h) ||
+      isFormBGJVoluntaryPfHeader(h) ||
+      isFormBGJIncomeTaxHeader(h) ||
+      isFormBGJDeductionBandHeader(h)
   );
   return dedStart >= 0 && idx >= dedStart;
 }
@@ -176,7 +289,12 @@ function isFormBGJTotalHeader(h) {
 
 function isFormBGJDeductionBandHeader(h) {
   const s = normHeader(h);
-  return s.includes('deduction') || isFormBGJPfHeader(h) || isFormBGJIncomeTaxHeader(h);
+  return (
+    s.includes('deduction') ||
+    isFormBGJPfHeader(h) ||
+    isFormBGJVoluntaryPfHeader(h) ||
+    isFormBGJIncomeTaxHeader(h)
+  );
 }
 
 export function isFormBGJRateOfWageHeader(h) {
@@ -232,6 +350,7 @@ export function isFormBGJSkipPeopleAutofillHeader(h) {
     isFormBGJHraHeader(h) ||
     isFormBGJTotalHeader(h) ||
     isFormBGJPfHeader(h) ||
+    isFormBGJVoluntaryPfHeader(h) ||
     isFormBGJIncomeTaxHeader(h) ||
     isFormBGJNetPaymentHeader(h) ||
     isFormBGJPaymentDateHeader(h)
@@ -247,8 +366,25 @@ export function formBGJHeaderAliasBucket(norm) {
   if (/\bover[\s-]*time\b/.test(n) && (n.includes('hour') || n.includes('hrs'))) return 'overtimeHours';
   if (n === 'basic' || /^basic\b/.test(n)) return 'basic';
   if (n === 'hra' || /\bhra\b/.test(n) || (n.includes('house') && n.includes('rent'))) return 'hra';
-  if (n === 'pf' || n.includes('provident fund')) return 'pf';
-  if ((n.includes('income') && n.includes('tax')) || n === 'tds') return 'incomeTax';
+  if (
+    n === 'vpf' ||
+    (n.includes('voluntary') && (n.includes('provident') || n.includes('pf'))) ||
+    n.includes('voluntary provident fund')
+  ) {
+    return 'voluntaryPf';
+  }
+  if (
+    n.replace(/\s+/g, '') === 'pf' ||
+    n.replace(/\s+/g, '') === 'epf' ||
+    n.includes('provident fund') ||
+    n.includes('epf') ||
+    /^p\.?\s*f\.?$/.test(n)
+  ) {
+    return 'pf';
+  }
+  if ((n.includes('income') && n.includes('tax')) || n === 'tds' || n.replace(/\s+/g, '') === 'incometax') {
+    return 'incomeTax';
+  }
   if (n.includes('net') && (n.includes('payment') || n.includes('payable') || n.includes('paid'))) {
     return 'netPay';
   }
@@ -353,6 +489,8 @@ export function resolveFormBGJGujaratPayrollFields(payrollRow, helpers = {}) {
     grossPay: '',
     rateOfWage: '',
     professionalTax: '',
+    pf: '',
+    voluntaryProvidentFund: '',
     incomeTax: '',
     deductionsTotal: '',
     netPay: '',
@@ -361,16 +499,17 @@ export function resolveFormBGJGujaratPayrollFields(payrollRow, helpers = {}) {
   if (!payrollRow || payrollRow.fetch_error) return empty;
 
   const flat = flattenPayrollEarningColumns(payrollRow);
+  const source = { ...payrollRow, ...flat };
   const wageAmounts = readPayrollForm15WageAmounts(payrollRow);
 
   const paidDays = readPayrollScalar(
-    { ...flat, ...payrollRow },
-    ['paid_days', 'Paid Days', 'days_worked', 'Days Worked', 'paidDays', 'no_of_days_worked'],
+    source,
+    ['paid_days', 'Paid Days', 'Paid_days', 'days_worked', 'Days Worked', 'paidDays', 'no_of_days_worked'],
     [/^paid_days$/, /paiddays/, /daysworked/]
   );
 
   let overtimeHours = readPayrollTextScalar(
-    { ...flat, ...payrollRow },
+    source,
     [
       'total_ot_hours',
       'total overtime hours',
@@ -384,7 +523,7 @@ export function resolveFormBGJGujaratPayrollFields(payrollRow, helpers = {}) {
   );
   if (overtimeHours === '') {
     overtimeHours = readPayrollScalar(
-      { ...flat, ...payrollRow },
+      source,
       ['total_ot_hours', 'overtime_hours', 'total_overtime_hours', 'ot_hours'],
       [/total.*ot.*hour/i, /^overtime_hours$/, /^ot_hours$/]
     );
@@ -392,72 +531,156 @@ export function resolveFormBGJGujaratPayrollFields(payrollRow, helpers = {}) {
 
   const basic =
     readPayrollScalar(
-      { ...flat, ...payrollRow },
+      source,
       ['basic', 'Basic', 'earned_basic', 'Earned Basic', 'basic_pay', 'Basic Earnings'],
       [/^basic$/, /^earned_basic$/]
     ) || wageAmounts.basic;
 
   const hra = readPayrollScalar(
-    { ...flat, ...payrollRow },
+    source,
     ['hra', 'HRA', 'hra_fbp', 'HRA FBP', 'house_rent_allowance', 'House Rent Allowance'],
     [/^hra$/, /house.*rent/]
   );
 
   const grossPay = readPayrollScalar(
-    { ...flat, ...payrollRow },
-    ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings'],
-    [/^gross_pay$/, /^total_earnings$/]
+    source,
+    ['gross_pay', 'Gross Pay', 'grossPay', 'gross', 'Gross', 'total_earnings'],
+    [/^gross_pay$/, /^gross$/, /^total_earnings$/]
   );
 
   const professionalTax = readPayrollScalar(
-    { ...flat, ...payrollRow },
-    ['professional_tax', 'Professional Tax', 'pt', 'PT'],
+    source,
+    ['professional_tax', 'Professional Tax', 'ProfessionalTax', 'professionalTax', 'pt', 'PT'],
     [/^professional_tax$/, /^pt$/]
   );
 
-  let incomeTax = readPayrollScalar(
-    { ...flat, ...payrollRow },
-    ['income_tax', 'Income Tax', 'tds', 'TDS', 'tax_deducted_at_source'],
-    [/income.*tax/i, /^tds$/]
+  // Prefer flatten() computed Sample Payroll / benefit columns first.
+  const pickAmount = (...values) => {
+    for (let i = 0; i < values.length; i += 1) {
+      const value = values[i];
+      if (value === '' || value == null) continue;
+      const n = parsePayrollNumber(value);
+      if (Number.isFinite(n)) return n;
+    }
+    return '';
+  };
+
+  const pf = pickAmount(
+    flat.epf_contribution,
+    flat.pf,
+    flat.PF,
+    flat.provident_fund,
+    readPayrollScalar(
+      source,
+      [
+        'pf',
+        'PF',
+        'epf_contribution',
+        'EPF Contribution',
+        'epf',
+        'EPF',
+        'employee_pf',
+        'Employee PF',
+        'provident_fund',
+        'Provident Fund',
+      ],
+      [/^pf$/, /^epf(_contribution)?$/, /^provident_fund$/]
+    )
   );
-  if (incomeTax === '') {
-    incomeTax = readPayrollScalar(
-      { ...flat, ...payrollRow },
-      ['total_taxes', 'Total Taxes', 'totalTaxes'],
-      [/^total_taxes$/]
-    );
-  }
+
+  const voluntaryProvidentFund = pickAmount(
+    flat.voluntary_provident_fund,
+    flat.vpf,
+    flat.VoluntaryProvidentFund,
+    flat.voluntaryProvidentFund,
+    readPayrollScalar(
+      source,
+      [
+        'voluntary_provident_fund',
+        'VoluntaryProvidentFund',
+        'Voluntary Provident Fund',
+        'voluntaryProvidentFund',
+        'vpf',
+        'VPF',
+      ],
+      [/^vpf$/, /voluntary.*provident/i]
+    )
+  );
+
+  const incomeTax = pickAmount(
+    flat.income_tax,
+    flat.IncomeTax,
+    flat.incomeTax,
+    flat.tds,
+    readPayrollScalar(
+      source,
+      [
+        'income_tax',
+        'Income Tax',
+        'IncomeTax',
+        'incomeTax',
+        'tds',
+        'TDS',
+        'tax_deducted_at_source',
+      ],
+      [/income.*tax/i, /^tds$/, /^incometax$/]
+    )
+  );
 
   const totalDeductions = readPayrollScalar(
-    { ...flat, ...payrollRow },
-    ['total_deductions', 'Total Deductions', 'totalDeductions', 'total_employee_deductions'],
+    source,
+    [
+      'total_deductions',
+      'Total Deductions',
+      'totalDeductions',
+      'TotalDeduction',
+      'totalDeduction',
+      'total_employee_deductions',
+    ],
     [/^total_deductions?$/]
   );
   const totalBenefits = readPayrollScalar(
-    { ...flat, ...payrollRow },
+    source,
     ['total_benefits', 'Total Benefits', 'totalBenefits'],
     [/^total_benefits$/]
   );
   const totalTaxes = readPayrollScalar(
-    { ...flat, ...payrollRow },
+    source,
     ['total_taxes', 'Total Taxes', 'totalTaxes'],
     [/^total_taxes$/]
   );
   const deductionsTotal = sumPayrollNumbers([totalDeductions, totalBenefits, totalTaxes]);
 
   const netPay = readPayrollScalar(
-    { ...flat, ...payrollRow },
-    ['net_pay', 'Net Pay', 'netPay', 'monthly_salary'],
-    [/^net_pay$/]
+    source,
+    ['net_pay', 'Net Pay', 'netPay', 'netpay', 'Netpay', 'monthly_salary'],
+    [/^net_pay$/, /^netpay$/]
   );
 
   const payDateRaw =
     readPayrollTextScalar(
-      { ...flat, ...payrollRow },
-      ['pay_date', 'Pay Date', 'payment_date', 'Payment Date', 'paid_date', 'date_of_payment', 'Date of Payment'],
-      [/^pay_date$/, /payment.*date/i, /^paid_date$/]
+      source,
+      [
+        'pay_date',
+        'Pay Date',
+        'payDate',
+        'PayDate',
+        'payment_date',
+        'Payment Date',
+        'paid_date',
+        'date_of_payment',
+        'Date of Payment',
+      ],
+      [/^pay_date$/, /^paydate$/, /payment.*date/i, /^paid_date$/, /date.*payment/i]
     ) ||
-    String(payrollRow?.pay_date ?? flat?.pay_date ?? helpers.payDate ?? '').trim();
+    String(
+      payrollRow?.pay_date ??
+        payrollRow?.payDate ??
+        flat?.pay_date ??
+        flat?.payDate ??
+        helpers.payDate ??
+        ''
+    ).trim();
 
   const paymentDate =
     formatBGJPayrollPayDate(payDateRaw) ||
@@ -475,6 +698,8 @@ export function resolveFormBGJGujaratPayrollFields(payrollRow, helpers = {}) {
     grossPay,
     rateOfWage,
     professionalTax,
+    pf,
+    voluntaryProvidentFund,
     incomeTax,
     deductionsTotal,
     netPay,
@@ -596,8 +821,12 @@ export function applyFormBGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
       setCell(header, payroll.grossPay);
       return;
     }
+    if (isFormBGJVoluntaryPfHeader(header)) {
+      setCell(header, payroll.voluntaryProvidentFund, { allowZero: true });
+      return;
+    }
     if (isFormBGJPfHeader(header)) {
-      setCell(header, payroll.professionalTax, { allowZero: true });
+      setCell(header, payroll.pf, { allowZero: true });
       return;
     }
     if (isFormBGJIncomeTaxHeader(header)) {

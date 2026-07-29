@@ -2,7 +2,11 @@ import React, { useState, useCallback } from 'react';
 import './People.css';
 import { flattenPayrollEarningColumns } from '../utils/payrollEarnings';
 import { fetchZohoPayrollRowsForMonth } from '../utils/payrollTable';
-import { enrichPayrollRowsWithPeopleEmailFromApi } from '../utils/samplePayrollApi';
+import {
+  enrichPayrollRowsWithPeopleEmailFromApi,
+  mapSamplePayrollRecordToPayrollRow,
+} from '../utils/samplePayrollApi';
+import { cacheForm15PayrollTableRows } from '../utils/statutoryAutofillCache';
 
 const API_BASE = '/server/samplepayroll_function';
 const PAYROLL_API_BASE = '/server/payroll_function';
@@ -252,10 +256,15 @@ async function fetchAllPayrollRecordsForMonth(payrollMonth, { onProgress, onRows
   };
 }
 
-async function syncRecordsToSamplePayrollTable(payrollMonth, records, { onProgress } = {}) {
+async function syncRecordsToSamplePayrollTable(
+  payrollMonth,
+  records,
+  { onProgress, payDate = '' } = {}
+) {
   const slimRecords = records.map((row) => mapPayrollRowToTable(row));
   const chunkSize = 40;
   let lastJson = null;
+  const payDateValue = String(payDate || '').trim();
 
   for (let offset = 0; offset < slimRecords.length; offset += chunkSize) {
     const chunk = slimRecords.slice(offset, offset + chunkSize);
@@ -273,6 +282,8 @@ async function syncRecordsToSamplePayrollTable(payrollMonth, records, { onProgre
         records: chunk,
         replaceExisting: offset === 0,
         finalize: isLast,
+        payDate: payDateValue || undefined,
+        pay_date: payDateValue || undefined,
       }),
     });
     const json = await res.json().catch(() => ({}));
@@ -320,11 +331,15 @@ const SamplePayroll = () => {
         },
       });
 
+      const payDate = String(
+        result.meta?.payDate || result.meta?.pay_date || ''
+      ).trim();
+
       setProgress('Saving to SamplePayroll table…');
       const syncResult = await syncRecordsToSamplePayrollTable(
         result.payrollMonth || payrollMonth,
         result.records,
-        { onProgress: setProgress }
+        { onProgress: setProgress, payDate }
       );
 
       const storedFromSync = Array.isArray(syncResult.data?.records)
@@ -335,9 +350,31 @@ const SamplePayroll = () => {
         storedFromSync.length >= storedFromFetch.length ? storedFromSync : storedFromFetch;
 
       const withBasic = stored.filter((row) => amountPresent(row.basic) || amountPresent(row.hra));
+      const resolvedMeta =
+        syncResult.data?.meta ||
+        result.meta ||
+        (payDate ? { payDate, pay_date: payDate, payrollMonth: result.payrollMonth || payrollMonth } : null);
+
+      const cacheMonth = result.payrollMonth || payrollMonth;
+      const cacheRows = (
+        Array.isArray(syncResult.data?.records) && syncResult.data.records.length > 0
+          ? syncResult.data.records
+          : result.records
+      )
+        .map((row) => mapSamplePayrollRecordToPayrollRow(row, resolvedMeta))
+        .filter(Boolean);
+      if (cacheRows.length > 0) {
+        cacheForm15PayrollTableRows(
+          cacheMonth,
+          cacheRows,
+          resolvedMeta,
+          String(resolvedMeta?.payDate || resolvedMeta?.pay_date || payDate || '').trim(),
+          'sample_payroll'
+        );
+      }
 
       setData(stored);
-      setMeta(result.meta || null);
+      setMeta(resolvedMeta);
       setSource(result.source || '');
       setSaveMessage(
         (syncResult.message ||

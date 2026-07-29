@@ -309,6 +309,16 @@ async function loadPayrollTableSnapshot(catalyst, payrollMonth) {
 	};
 }
 
+function pickMappedRowValue(row, keys) {
+	if (!row || typeof row !== 'object') return '';
+	for (let i = 0; i < keys.length; i += 1) {
+		const value = row[keys[i]];
+		if (value == null || value === '') continue;
+		return value;
+	}
+	return '';
+}
+
 function mapRow(row) {
 	return {
 		id: row.ROWID,
@@ -317,16 +327,22 @@ function mapRow(row) {
 		gidNumber: row.GIDNumber || '',
 		email: row.Email || '',
 		dateofBirth: row.DateofBirth || '',
-		paidDays: row.Paid_days || '',
-		basic: row.Basic || '',
-		hra: row.HRA || '',
-		gross: row.Gross || '',
-		netpay: row.Netpay || '',
-		totalDeduction: row.TotalDeduction || '',
-		incomeTax: row.IncomeTax || '',
-		pf: row.PF || '',
-		voluntaryProvidentFund: row.VoluntaryProvidentFund || '',
-		professionalTax: row.ProfessionalTax || '',
+		paidDays: pickMappedRowValue(row, ['Paid_days', 'paid_days', 'PaidDays']),
+		basic: pickMappedRowValue(row, ['Basic', 'basic', 'earned_basic', 'basic_pay']),
+		hra: pickMappedRowValue(row, ['HRA', 'hra', 'hra_fbp']),
+		gross: pickMappedRowValue(row, ['Gross', 'gross', 'gross_pay', 'total_earnings']),
+		netpay: pickMappedRowValue(row, ['Netpay', 'netpay', 'net_pay', 'NetPay']),
+		totalDeduction: pickMappedRowValue(row, ['TotalDeduction', 'totalDeduction', 'total_deductions']),
+		incomeTax: pickMappedRowValue(row, ['IncomeTax', 'incomeTax', 'income_tax']),
+		pf: pickMappedRowValue(row, ['PF', 'pf', 'epf_contribution']),
+		voluntaryProvidentFund: pickMappedRowValue(row, [
+			'VoluntaryProvidentFund',
+			'voluntaryProvidentFund',
+			'voluntary_provident_fund',
+			'vpf',
+			'VPF',
+		]),
+		professionalTax: pickMappedRowValue(row, ['ProfessionalTax', 'professionalTax', 'professional_tax']),
 		payrollMonth: row.PayrollMonth || '',
 		createdTime: row.CREATEDTIME,
 		modifiedTime: row.MODIFIEDTIME,
@@ -418,6 +434,40 @@ function pickBenefitAmount(record, matcher) {
 	return null;
 }
 
+function parseEarningsList(record) {
+	if (!record || typeof record !== 'object') return [];
+	const raw = record.earnings ?? record.Earnings ?? record.earning_details ?? null;
+	if (Array.isArray(raw)) return raw;
+	if (typeof raw === 'string' && raw.trim()) {
+		try {
+			const parsed = JSON.parse(raw);
+			return Array.isArray(parsed) ? parsed : [];
+		} catch (_) {
+			return [];
+		}
+	}
+	return [];
+}
+
+function pickEarningAmount(record, matcher) {
+	const list = parseEarningsList(record);
+	for (let i = 0; i < list.length; i += 1) {
+		const item = list[i];
+		if (!item || typeof item !== 'object') continue;
+		const name = String(item.name ?? item.earning_name ?? item.label ?? '')
+			.trim()
+			.toLowerCase();
+		const type = String(item.type ?? item.earning_type ?? item.component_type ?? '')
+			.trim()
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, '_');
+		if (!matcher(type, name)) continue;
+		const amount = benefitAmount(item);
+		if (amount != null) return amount;
+	}
+	return null;
+}
+
 function mapPayrollRecordToSampleRow(record, payrollMonth) {
 	const gross = pickField(record, ['gross_pay', 'total_earnings', 'gross', 'Gross']);
 	const totalDeduction = pickField(record, [
@@ -459,6 +509,24 @@ function mapPayrollRecordToSampleRow(record, payrollMonth) {
 			name.includes('voluntary provident') ||
 			name === 'vpf'
 	);
+	const basicFromEarnings = pickEarningAmount(
+		record,
+		(type, name) =>
+			type === 'basic' ||
+			type === 'earned_basic' ||
+			name === 'basic' ||
+			name === 'basic earnings' ||
+			name === 'basic pay' ||
+			name === 'earned basic'
+	);
+	const hraFromEarnings = pickEarningAmount(
+		record,
+		(type, name) =>
+			type === 'hra' ||
+			type === 'hra_fbp' ||
+			name === 'hra' ||
+			name.includes('house rent')
+	);
 	return {
 		EmployeeName: pickField(record, ['employee_name', 'full_name', 'employeeName', 'name']),
 		EmployeeID: pickField(record, ['employee_id', 'employeeId', 'EmployeeID']),
@@ -485,8 +553,11 @@ function mapPayrollRecordToSampleRow(record, payrollMonth) {
 			'dob',
 		]),
 		Paid_days: pickField(record, ['paid_days', 'paidDays', 'Paid_days', 'paid_days_in_month']),
-		Basic: pickField(record, ['basic', 'earned_basic', 'Basic', 'basic_pay']),
-		HRA: pickField(record, ['hra', 'hra_fbp', 'HRA', 'house_rent_allowance']),
+		Basic:
+			pickField(record, ['basic', 'earned_basic', 'Basic', 'basic_pay', 'Basic Earnings']) ||
+			basicFromEarnings,
+		HRA:
+			pickField(record, ['hra', 'hra_fbp', 'HRA', 'house_rent_allowance']) || hraFromEarnings,
 		Gross: gross,
 		Netpay: netpay,
 		TotalDeduction: totalDeduction,
@@ -610,6 +681,31 @@ async function syncMonthRecordsToSamplePayroll(catalyst, payrollMonth, records) 
 	});
 }
 
+/** Persist Sample Payroll Pay date onto Payroll table snapshot runMeta when present. */
+async function upsertPayrollSnapshotPayDate(catalyst, payrollMonth, payDate) {
+	const date = String(payDate || '').trim();
+	if (!date || !isValidPayrollMonth(normalizePayrollMonth(payrollMonth))) return false;
+	const snapshot = await loadPayrollTableSnapshot(catalyst, payrollMonth);
+	if (!snapshot?.found || snapshot.rowId == null) return false;
+	try {
+		const table = catalyst.datastore().table('Payroll');
+		const row = await table.getRow(snapshot.rowId);
+		const base = pickPayrollDatastoreRow(row) || row;
+		const parsed = parseDatastoreJson(readRowDataField(base));
+		if (!parsed || typeof parsed !== 'object') return false;
+		const runMeta =
+			parsed.runMeta && typeof parsed.runMeta === 'object' ? { ...parsed.runMeta } : {};
+		runMeta.pay_date = date;
+		runMeta.payDate = date;
+		parsed.runMeta = runMeta;
+		await table.updateRow({ ROWID: snapshot.rowId, Data: JSON.stringify(parsed) });
+		return true;
+	} catch (err) {
+		console.warn('SamplePayroll pay-date snapshot upsert skipped:', err?.message || err);
+		return false;
+	}
+}
+
 function buildRowData(body) {
 	const {
 		employeeName,
@@ -658,6 +754,7 @@ app.post('/samplepayroll/sync-month', async (req, res) => {
 		const records = Array.isArray(body.records) ? body.records : [];
 		const replaceExisting = body.replaceExisting !== false && body.replaceExisting !== '0';
 		const finalize = body.finalize === true || body.finalize === '1';
+		const payDate = String(body.payDate || body.pay_date || '').trim() || null;
 		const { catalyst } = res.locals;
 		const result = await appendMonthRecordsToSamplePayroll(catalyst, payrollMonth, records, {
 			replaceExisting,
@@ -683,15 +780,25 @@ app.post('/samplepayroll/sync-month', async (req, res) => {
 					payrollMonth: result.payrollMonth,
 					sync: result,
 					finalized: false,
+					meta: payDate ? { payDate, pay_date: payDate } : null,
 				},
 			});
 		}
 
 		const month = normalizePayrollMonth(payrollMonth);
+		if (payDate) {
+			await upsertPayrollSnapshotPayDate(catalyst, month, payDate);
+		}
 		const stored = await fetchSamplePayrollRowsPaged(catalyst, {
 			whereClause: `WHERE PayrollMonth = '${month}'`,
 			orderClause: 'ORDER BY ROWID ASC',
 		});
+		const snapshot = await loadPayrollTableSnapshot(catalyst, month).catch(() => null);
+		const metaPayDate =
+			payDate ||
+			snapshot?.meta?.payDate ||
+			snapshot?.meta?.pay_date ||
+			null;
 
 		res.status(200).json({
 			status: 'success',
@@ -701,6 +808,14 @@ app.post('/samplepayroll/sync-month', async (req, res) => {
 				records: stored,
 				sync: result,
 				finalized: true,
+				meta: metaPayDate
+					? {
+							payDate: metaPayDate,
+							pay_date: metaPayDate,
+							payroll_run_id: snapshot?.meta?.payroll_run_id || null,
+							payrollMonth: month,
+						}
+					: null,
 			},
 		});
 	} catch (err) {
@@ -835,6 +950,28 @@ app.get('/samplepayroll', async (req, res) => {
 			records = rows.map((r) => mapRow(r[TABLE_NAME]));
 		}
 
+		let meta = null;
+		const monthForMeta = isValidPayrollMonth(payrollMonth)
+			? String(payrollMonth).trim()
+			: records.length > 0
+				? normalizePayrollMonth(records[0]?.payrollMonth || records[0]?.PayrollMonth || '')
+				: '';
+		if (isValidPayrollMonth(monthForMeta)) {
+			try {
+				const snapshot = await loadPayrollTableSnapshot(catalyst, monthForMeta);
+				if (snapshot?.found && snapshot.meta) {
+					meta = {
+						payDate: snapshot.meta.payDate || snapshot.meta.pay_date || null,
+						pay_date: snapshot.meta.payDate || snapshot.meta.pay_date || null,
+						payroll_run_id: snapshot.meta.payroll_run_id || null,
+						payrollMonth: monthForMeta,
+					};
+				}
+			} catch (metaErr) {
+				console.warn('SamplePayroll list pay-date meta skipped:', metaErr?.message || metaErr);
+			}
+		}
+
 		res.status(200).json({
 			status: 'success',
 			data: {
@@ -842,6 +979,7 @@ app.get('/samplepayroll', async (req, res) => {
 				total,
 				payrollMonth: isValidPayrollMonth(payrollMonth) ? payrollMonth.trim() : null,
 				hasMore: returnAll ? false : page * perPage < total,
+				meta,
 			},
 		});
 	} catch (err) {

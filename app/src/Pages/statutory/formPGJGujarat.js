@@ -108,6 +108,25 @@ const FORM_PGJ_WAGE_TAIL_HEADERS = [
 /** Form P — overtime columns always default to NIL (not fetched). */
 export const FORM_PGJ_OVERTIME_DEFAULT = 'NIL';
 
+/** Form P — Working hours From / To (fixed defaults). */
+export const FORM_PGJ_WORKING_HOURS_FROM = '9 AM';
+export const FORM_PGJ_WORKING_HOURS_TO = '5 PM';
+
+/** Format Sample Payroll Pay date as DD-MM-YYYY when possible. */
+export function formatFormPGJPayrollPayDate(payDateRaw) {
+  const raw = String(payDateRaw || '').trim();
+  if (!raw) return '';
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[3]}-${iso[2]}-${iso[1]}`;
+  const dmy = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+  if (dmy) {
+    const dd = String(dmy[1]).padStart(2, '0');
+    const mm = String(dmy[2]).padStart(2, '0');
+    return `${dd}-${mm}-${dmy[3]}`;
+  }
+  return raw;
+}
+
 /** Full modal / export column list — worker cols, hours, days 1–31, wage summary. */
 export function buildFormPGJGujaratCanonicalHeaders(daysInMonth = 31) {
   const headers = [
@@ -689,7 +708,51 @@ function readPayrollDeductionScalar(flat, payrollRow, keys, patterns = []) {
   return val !== '' && val != null ? val : '';
 }
 
+/** Prefer flatten() computed Sample Payroll / benefit columns first. */
+function pickFormPGJAmount(...values) {
+  for (let i = 0; i < values.length; i += 1) {
+    const value = values[i];
+    if (value === '' || value == null) continue;
+    const n = parsePayrollNumber(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return '';
+}
+
+/** Form P Total Deduction Rs. ← gross_pay − net_pay */
+export function computeFormPGJGujaratTotalDeduction(grossPay, netPay) {
+  const g = parsePayrollNumber(grossPay);
+  const n = parsePayrollNumber(netPay);
+  if (!Number.isFinite(g) || !Number.isFinite(n)) return '';
+  const diff = Math.round((g - n) * 100) / 100;
+  return diff < 0 ? '' : diff;
+}
+
+/** Form P Other Deductions Rs. ← Sample Payroll Total Deduction − Professional Tax */
+export function computeFormPGJGujaratOtherDeductions(payrollTotalDeduction, professionalTax) {
+  if (payrollTotalDeduction === '' || payrollTotalDeduction == null) return '';
+  const total = parsePayrollNumber(payrollTotalDeduction);
+  if (!Number.isFinite(total)) return '';
+  const ptRaw = professionalTax === '' || professionalTax == null ? 0 : parsePayrollNumber(professionalTax);
+  const ptVal = Number.isFinite(ptRaw) ? ptRaw : 0;
+  const diff = Math.round((total - ptVal) * 100) / 100;
+  return diff < 0 ? 0 : diff;
+}
+
 export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
+  const monthEndDate = String(helpers.monthEndDate || '').trim();
+  const payDateFromHelpers = () => {
+    // Date of Payment ← month end (preferred); Pay date only as legacy fallback.
+    if (monthEndDate) return monthEndDate;
+    const raw = String(helpers.payDate || '').trim();
+    if (!raw) return '';
+    return (
+      formatFormPGJPayrollPayDate(raw) ||
+      (typeof helpers.formatStatutoryDateDisplay === 'function'
+        ? helpers.formatStatutoryDateDisplay(raw) || raw
+        : raw)
+    );
+  };
   const empty = {
     paidDays: '',
     basic: '',
@@ -698,17 +761,20 @@ export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
     overtimeHours: FORM_PGJ_OVERTIME_DEFAULT,
     overtimeEarnings: FORM_PGJ_OVERTIME_DEFAULT,
     esi: '',
+    pf: '',
     professionalTax: '',
     incomeTax: '',
+    otherDeductions: '',
     totalDeduction: '',
     netPay: '',
-    paymentDate: '',
+    paymentDate: payDateFromHelpers(),
   };
   if (!payrollRow || payrollRow.fetch_error) return empty;
 
   // Flatten first — raw payrollRow.basic often overwrites computed basic when merged last.
   const flat = flattenPayrollEarningColumns(payrollRow);
   const wages = readPayrollForm15WageAmounts(payrollRow);
+  const source = { ...flat, ...payrollRow };
 
   const paidDays = readPayrollScalar(
     flat,
@@ -728,9 +794,9 @@ export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
         );
 
   const grossPay = readPayrollScalar(
-    flat,
-    ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'Gross Amount Payable'],
-    [/^gross_pay$/, /^total_earnings$/]
+    source,
+    ['gross_pay', 'Gross Pay', 'grossPay', 'gross', 'Gross', 'total_earnings', 'Gross Amount Payable'],
+    [/^gross_pay$/, /^gross$/, /^total_earnings$/]
   );
 
   // Form P: overtime columns are always NIL (not fetched from payroll).
@@ -744,46 +810,121 @@ export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
     [/^esi/, /employee state insurance/]
   );
 
+  // Provident Fund Rs. ← Sample Payroll PF
+  const pf = pickFormPGJAmount(
+    flat.epf_contribution,
+    flat.pf,
+    flat.PF,
+    flat.provident_fund,
+    readPayrollScalar(
+      source,
+      [
+        'pf',
+        'PF',
+        'epf_contribution',
+        'EPF Contribution',
+        'epf',
+        'EPF',
+        'employee_pf',
+        'Employee PF',
+        'provident_fund',
+        'Provident Fund',
+      ],
+      [/^pf$/, /^epf(_contribution)?$/, /^provident_fund$/]
+    )
+  );
+
   const professionalTax = readPayrollDeductionScalar(
     flat,
     payrollRow,
-    ['professional_tax', 'Professional Tax', 'pt', 'PT'],
+    ['professional_tax', 'Professional Tax', 'ProfessionalTax', 'professionalTax', 'pt', 'PT'],
     [/^professional_tax$/, /^pt$/]
   );
 
-  const incomeTax =
-    readPayrollScalar(flat, ['income_tax', 'Income Tax'], [/^income_tax$/]) ||
-    readPayrollDeductionScalar(
-      flat,
-      payrollRow,
-      ['income_tax', 'Income Tax', 'tds', 'TDS', 'tax_deducted_at_source'],
-      [/income.*tax/i, /^tds$/]
-    );
+  // Income Tax Rs. ← Sample Payroll Income Tax
+  const incomeTax = pickFormPGJAmount(
+    flat.income_tax,
+    flat.IncomeTax,
+    flat.incomeTax,
+    flat.tds,
+    readPayrollScalar(
+      source,
+      [
+        'income_tax',
+        'Income Tax',
+        'IncomeTax',
+        'incomeTax',
+        'tds',
+        'TDS',
+        'tax_deducted_at_source',
+      ],
+      [/income.*tax/i, /^tds$/, /^incometax$/]
+    )
+  );
 
-  const totalDeduction = readPayrollScalar(
-    flat,
-    ['total_deductions', 'Total Deductions', 'totalDeductions', 'total_employee_deductions', 'total_deduction'],
-    [/^total_deductions?$/]
+  // Sample Payroll "Total Deduction" column (not Form Total Deduction Rs.).
+  const payrollTotalDeduction = readPayrollScalar(
+    source,
+    [
+      'total_deductions',
+      'Total Deductions',
+      'Total Deduction',
+      'totalDeductions',
+      'totalDeduction',
+      'TotalDeduction',
+      'total_employee_deductions',
+      'total_deduction',
+    ],
+    [/^total_deductions?$/, /^totaldeduction$/]
   );
 
   const netPay = readPayrollScalar(
-    flat,
-    ['net_pay', 'Net Pay', 'netPay', 'monthly_salary', 'Net Payable'],
-    [/^net_pay$/]
+    source,
+    ['net_pay', 'Net Pay', 'netPay', 'netpay', 'Netpay', 'monthly_salary', 'Net Payable'],
+    [/^net_pay$/, /^netpay$/]
   );
 
-  const payDateRaw =
-    readPayrollTextScalar(
-      flat,
-      ['pay_date', 'Pay Date', 'payment_date', 'Payment Date', 'paid_date', 'date_of_payment', 'Date of Payment'],
-      [/^pay_date$/, /payment.*date/i, /^paid_date$/]
-    ) ||
-    String(payrollRow?.pay_date ?? flat?.pay_date ?? helpers.payDate ?? '').trim();
+  // Total Deduction Rs. ← gross_pay − net_pay
+  const totalDeduction = computeFormPGJGujaratTotalDeduction(grossPay, netPay);
 
+  // Other Deductions Rs. ← Sample Payroll Total Deduction − Professional Tax
+  const otherDeductions = computeFormPGJGujaratOtherDeductions(
+    payrollTotalDeduction,
+    professionalTax
+  );
+
+  // Date of Payment ← month end (Form P requirement).
   const paymentDate =
-    typeof helpers.formatStatutoryDateDisplay === 'function'
-      ? helpers.formatStatutoryDateDisplay(payDateRaw) || payDateRaw
-      : payDateRaw;
+    monthEndDate ||
+    (() => {
+      const payDateRaw =
+        readPayrollTextScalar(
+          source,
+          [
+            'pay_date',
+            'Pay Date',
+            'payDate',
+            'PayDate',
+            'payment_date',
+            'Payment Date',
+            'paid_date',
+            'date_of_payment',
+            'Date of Payment',
+          ],
+          [/^pay_date$/, /^paydate$/, /payment.*date/i, /^paid_date$/, /date.*payment/i]
+        ) ||
+        String(payrollRow?.pay_date || '').trim() ||
+        String(payrollRow?.payDate || '').trim() ||
+        String(flat?.pay_date || '').trim() ||
+        String(flat?.payDate || '').trim() ||
+        String(helpers.payDate || '').trim();
+      return (
+        formatFormPGJPayrollPayDate(payDateRaw) ||
+        (typeof helpers.formatStatutoryDateDisplay === 'function'
+          ? helpers.formatStatutoryDateDisplay(payDateRaw) || payDateRaw
+          : payDateRaw)
+      );
+    })();
 
   return {
     paidDays,
@@ -793,8 +934,10 @@ export function resolveFormPGJGujaratPayrollFields(payrollRow, helpers = {}) {
     overtimeHours,
     overtimeEarnings,
     esi,
+    pf,
     professionalTax,
     incomeTax,
+    otherDeductions,
     totalDeduction,
     netPay,
     paymentDate,
@@ -830,6 +973,22 @@ export function isFormPGJOvertimeEarningsHeader(header) {
   return /overtime\s+earnings?/.test(normHeaderLabel(header));
 }
 
+export function isFormPGJPaymentDateHeader(header) {
+  const n = normHeaderLabel(header);
+  return (n.includes('date') && n.includes('payment')) || n === 'pay date' || n === 'payment date';
+}
+
+/** Resolve Sample Payroll Pay date from cached table / meta / helpers. */
+export function resolveFormPGJPayDateFromCache(cached, fallback = '') {
+  return String(
+    cached?.payDate ||
+      cached?.meta?.payDate ||
+      cached?.meta?.pay_date ||
+      fallback ||
+      ''
+  ).trim();
+}
+
 function matchFormPGJWageTailBucket(header) {
   const n = normHeaderLabel(header);
   if (n.includes('total days worked')) return 'paidDays';
@@ -841,14 +1000,14 @@ function matchFormPGJWageTailBucket(header) {
   if (n.includes('gross amount payable')) return 'grossPay';
   if (n.includes('total hours of overtime')) return 'overtimeHours';
   if (n.includes('overtime earnings')) return 'overtimeEarnings';
-  if (n.includes('provident fund')) return 'skip';
+  if (n.includes('provident fund')) return 'pf';
   if (n.includes('family pension')) return 'skip';
   if (n.includes('esi contribution') || (n.includes('esi') && n.includes('contribution'))) return 'esi';
   if (n.includes('professional tax')) return 'professionalTax';
   if (n.includes('income tax')) return 'incomeTax';
   if (n.includes('loan') && n.includes('interest')) return 'skip';
   if (n.includes('advances')) return 'skip';
-  if (n.includes('other deductions')) return 'skip';
+  if (n.includes('other deductions')) return 'otherDeductions';
   if (n.includes('total deduction')) return 'totalDeduction';
   if (n.includes('net payable')) return 'netPay';
   if (n.includes('date of payment')) return 'paymentDate';
@@ -902,11 +1061,12 @@ export function applyFormPGJGujaratPayrollToRow(row, payrollRow, headers, helper
     sanitizeValue = (v) => String(v ?? '').trim(),
     formatStatutoryDateDisplay = (v) => String(v || '').trim(),
     payDate = '',
+    monthEndDate = '',
     overwrite = true,
   } = helpers;
   const payroll = resolveFormPGJGujaratPayrollFields(
     payrollRow && !payrollRow.fetch_error ? payrollRow : null,
-    { formatStatutoryDateDisplay, payDate }
+    { formatStatutoryDateDisplay, payDate, monthEndDate }
   );
   const cellIsEmpty = (header) => {
     const v = String(out[header] || '').trim();
@@ -954,6 +1114,13 @@ export function applyFormPGJGujaratPayrollToRow(row, payrollRow, headers, helper
   }
   stampAliases(isFormPGJOvertimeHoursHeader, FORM_PGJ_OVERTIME_DEFAULT);
   stampAliases(isFormPGJOvertimeEarningsHeader, FORM_PGJ_OVERTIME_DEFAULT);
+  // Working hours From / To ← fixed 9 AM / 5 PM.
+  stampAliases(isFormPGJWorkingHoursFromHeader, FORM_PGJ_WORKING_HOURS_FROM);
+  stampAliases(isFormPGJWorkingHoursToHeader, FORM_PGJ_WORKING_HOURS_TO);
+  // Date of Payment ← Sample Payroll Pay date (stamp all header aliases on the row).
+  if (payroll.paymentDate !== '' && payroll.paymentDate != null) {
+    stampAliases(isFormPGJPaymentDateHeader, payroll.paymentDate);
+  }
   hdrs.forEach((header) => {
     if (isFormPGJWageRateHeader(header)) out[header] = '';
   });
@@ -964,7 +1131,7 @@ export function applyFormPGJGujaratPayrollToRow(row, payrollRow, headers, helper
   return wrote;
 }
 
-/** Apply Form P static defaults (OT NIL, clear Wage Rate) even when payroll is missing. */
+/** Apply Form P static defaults (OT NIL, Working hours 9 AM–5 PM, clear Wage Rate). */
 export function applyFormPGJGujaratStaticDefaults(mappedData, headers, { overwrite = true } = {}) {
   if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
   const hdrs = Array.isArray(headers) && headers.length > 0 ? headers : buildFormPGJGujaratCanonicalHeaders();
@@ -984,6 +1151,8 @@ export function applyFormPGJGujaratStaticDefaults(mappedData, headers, { overwri
       if (isFormPGJOvertimeHoursHeader(header) || isFormPGJOvertimeEarningsHeader(header)) {
         setIf(header, FORM_PGJ_OVERTIME_DEFAULT);
       }
+      if (isFormPGJWorkingHoursFromHeader(header)) setIf(header, FORM_PGJ_WORKING_HOURS_FROM);
+      if (isFormPGJWorkingHoursToHeader(header)) setIf(header, FORM_PGJ_WORKING_HOURS_TO);
     });
     Object.keys(row).forEach((key) => {
       if (String(key).startsWith('__')) return;
@@ -991,6 +1160,8 @@ export function applyFormPGJGujaratStaticDefaults(mappedData, headers, { overwri
       if (isFormPGJOvertimeHoursHeader(key) || isFormPGJOvertimeEarningsHeader(key)) {
         setIf(key, FORM_PGJ_OVERTIME_DEFAULT);
       }
+      if (isFormPGJWorkingHoursFromHeader(key)) setIf(key, FORM_PGJ_WORKING_HOURS_FROM);
+      if (isFormPGJWorkingHoursToHeader(key)) setIf(key, FORM_PGJ_WORKING_HOURS_TO);
     });
     if (touched) hits += 1;
   });
@@ -1004,6 +1175,7 @@ export function enrichFormPGJGujaratPayrollRows(mappedData, employees, headers, 
     sanitizeValue = (v) => String(v ?? '').trim(),
     formatStatutoryDateDisplay = (v) => String(v || '').trim(),
     payDate = '',
+    monthEndDate = '',
     overwrite = true,
     rowIndexOffset = 0,
   } = helpers;
@@ -1035,6 +1207,7 @@ export function enrichFormPGJGujaratPayrollRows(mappedData, employees, headers, 
       sanitizeValue,
       formatStatutoryDateDisplay,
       payDate,
+      monthEndDate,
       overwrite,
     });
     applyFormPGJGujaratStaticDefaults([row], hdrs, { overwrite: true });
@@ -1135,7 +1308,7 @@ function formPGJTemplateBucket(label) {
     if (/minimum\s+rate/.test(n)) return 'skip';
     if (/total\s+production/.test(n)) return 'skip';
     if (/dearness/.test(n)) return 'skip';
-    if (/provident\s+fund|family\s+pension|loan|advances|other\s+deduction|signature|thumb/.test(n)) {
+    if (/family\s+pension|loan|advances|signature|thumb/.test(n)) {
       return 'skip';
     }
   }
@@ -1148,8 +1321,10 @@ function formPGJTemplateBucket(label) {
   if (/net\s+payable/.test(n)) return 'netPay';
   if (/date\s+of\s+payment/.test(n)) return 'paymentDate';
   if (/esi/.test(n)) return 'esi';
+  if (/provident\s+fund/.test(n)) return 'pf';
   if (/professional\s+tax/.test(n)) return 'professionalTax';
   if (/income\s+tax/.test(n)) return 'incomeTax';
+  if (/other\s+deduction/.test(n)) return 'otherDeductions';
   if (/total\s+deduction/.test(n)) return 'totalDeduction';
   return '';
 }
@@ -1227,18 +1402,89 @@ export function detectFormPGJGujaratTableLayout(worksheet) {
     }
 
     let label = main || sub;
+    const sub2 = getText(headerRow + 2, c);
     // Prefer parent label when sub is From/To under Working hours / Interval
     if (/^(from|to)$/i.test(sub) && /working\s+hours|interval\s+for\s+rest/i.test(main)) {
       label = `${main}_${sub}`;
+    } else if (
+      // DEDUCTION is a merged parent — real labels sit on the sub-row (PF / PT / Income Tax / …).
+      (/^deduction$/i.test(mainN) || /^deductions?$/i.test(mainN)) &&
+      sub &&
+      !/^(from|to|\d{1,2})$/i.test(sub)
+    ) {
+      label = sub;
+    } else if (
+      (/^deduction$/i.test(mainN) || /^deductions?$/i.test(mainN)) &&
+      sub2 &&
+      !/^(from|to|\d{1,2})$/i.test(sub2)
+    ) {
+      label = sub2;
+    } else if (main && sub && !formPGJTemplateBucket(main) && formPGJTemplateBucket(sub)) {
+      label = sub;
+    } else if (main && sub2 && !formPGJTemplateBucket(main) && formPGJTemplateBucket(sub2)) {
+      label = sub2;
     } else if (!main && sub) {
       label = sub;
+    } else if (!main && !sub && sub2) {
+      label = sub2;
     }
 
     const bucket = formPGJTemplateBucket(label);
-    if (!bucket || bucket === 'skip' || bucket === 'dateBand') continue;
+    if (!bucket || bucket === 'skip' || bucket === 'dateBand') {
+      // Last resort: try sub / sub2 even when main looked like a section title.
+      const alt = [sub, sub2].find((t) => t && formPGJTemplateBucket(t));
+      if (alt) {
+        const altBucket = formPGJTemplateBucket(alt);
+        if (altBucket && altBucket !== 'skip' && altBucket !== 'dateBand') {
+          if (!(seenBuckets.has(altBucket) && !String(altBucket).startsWith('day:'))) {
+            seenBuckets.add(altBucket);
+            templateCols.push({ col: c, bucket: altBucket, label: alt || altBucket });
+          }
+        }
+      }
+      continue;
+    }
     if (seenBuckets.has(bucket) && !String(bucket).startsWith('day:')) continue;
     seenBuckets.add(bucket);
     templateCols.push({ col: c, bucket, label: label || bucket });
+  }
+
+  // Recover wage-tail columns missed because of merged DEDUCTION / multi-row headers.
+  const neededWageTail = [
+    'pf',
+    'professionalTax',
+    'incomeTax',
+    'otherDeductions',
+    'totalDeduction',
+    'paymentDate',
+    'esi',
+    'overtimeHours',
+    'overtimeEarnings',
+    'grossPay',
+    'netPay',
+  ];
+  const missing = neededWageTail.filter((b) => !seenBuckets.has(b));
+  if (missing.length > 0) {
+    for (let r = Math.max(1, headerRow - 1); r <= headerRow + 3; r += 1) {
+      for (let c = startCol; c <= startCol + 70; c += 1) {
+        // Prefer direct cell text so merged "DEDUCTION" parents do not hide child labels.
+        const direct = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+        const merged = getText(r, c);
+        const candidates = [direct, merged].filter(Boolean);
+        for (let i = 0; i < candidates.length; i += 1) {
+          const bucket = formPGJTemplateBucket(candidates[i]);
+          if (!bucket || !missing.includes(bucket)) continue;
+          if (seenBuckets.has(bucket)) continue;
+          seenBuckets.add(bucket);
+          templateCols.push({ col: c, bucket, label: candidates[i] });
+          const mi = missing.indexOf(bucket);
+          if (mi >= 0) missing.splice(mi, 1);
+          break;
+        }
+        if (missing.length === 0) break;
+      }
+      if (missing.length === 0) break;
+    }
   }
 
   // Fill missing day columns from day1Col if only some were found
@@ -1365,8 +1611,10 @@ function getFormPGJExportValueForBucket(row, bucket, idx = 0) {
   if (bucket === 'netPay') return row['Net Payable Rs.'] || '';
   if (bucket === 'paymentDate') return row['Date of Payment'] || '';
   if (bucket === 'esi') return row['ESI Contribution Rs.'] || '';
+  if (bucket === 'pf') return row['Provident Fund Rs.'] || '';
   if (bucket === 'professionalTax') return row['Professional Tax Rs.'] || '';
   if (bucket === 'incomeTax') return row['Income Tax Rs.'] || '';
+  if (bucket === 'otherDeductions') return row['Other Deductions Rs.'] || '';
   if (bucket === 'totalDeduction') return row['Total Deduction Rs.'] || '';
 
   // Generic: find row key whose template bucket matches

@@ -3,7 +3,11 @@ import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import { labelMatchScore } from './form18APAccidentNotice';
 import {
+  flattenPayrollEarningColumns,
   mergePayrollRunEmployeePayload,
+  payrollRowHasWageBreakdown,
+  readForm10GrossPayAmount,
+  readPayrollForm15WageAmounts,
   readPayrollScalar,
   readStrictPayrollNetPay,
 } from '../../utils/payrollEarnings';
@@ -97,6 +101,12 @@ export function isFormQKarnatakaContext(formHeader, rowItem, fileName, sheetText
     rowItem?.FormName,
     rowItem?.formFileName,
     rowItem?.FormFileName,
+    rowItem?.state,
+    rowItem?.State,
+    rowItem?.act,
+    rowItem?.Act,
+    rowItem?.actName,
+    rowItem?.ActName,
     fileName,
     formHeader?.title,
     formHeader?.subtitle,
@@ -109,6 +119,8 @@ export function isFormQKarnatakaContext(formHeader, rowItem, fileName, sheetText
 
   const hasFormQ = /\bform[\s._-]*q\b/i.test(parts);
   const hasKarnataka = /karnataka/.test(parts);
+  // Karnataka Form Q is the employment / appointment-order particulars register.
+  const hasAppointmentOrder = /appointment\s+order/.test(parts);
 
   const hasAttendanceGrid =
     /full\s+name\s+of\s+the\s+worker/.test(parts) &&
@@ -123,6 +135,7 @@ export function isFormQKarnatakaContext(formHeader, rowItem, fileName, sheetText
 
   if (hasAttendanceGrid && !hasEmploymentParticulars) return false;
   if (hasFormQ && hasKarnataka) return true;
+  if (hasFormQ && hasAppointmentOrder && (hasKarnataka || hasEmploymentParticulars)) return true;
   if (hasFormQ && hasEmploymentParticulars) return true;
   if (hasEmploymentParticulars && /name\s*&\s*address\s+of\s+the\s+establishment/.test(parts)) {
     return true;
@@ -492,29 +505,105 @@ const pickPayrollValue = (flat, payrollRow, keys, patterns = []) => {
   return '';
 };
 
+function parseFormQKarnatakaMoney(value) {
+  if (value === '' || value == null) return NaN;
+  const n = Number(String(value).replace(/,/g, '').trim());
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** Other allowances if any = gross_pay − basic − hra */
+export function computeFormQKarnatakaOtherAllowances(grossPay, basic, hra) {
+  const g = parseFormQKarnatakaMoney(grossPay);
+  if (!Number.isFinite(g)) return '';
+  const b = parseFormQKarnatakaMoney(basic);
+  const h = parseFormQKarnatakaMoney(hra);
+  const known = (Number.isFinite(b) ? b : 0) + (Number.isFinite(h) ? h : 0);
+  const other = Math.round((g - known) * 100) / 100;
+  return Number.isFinite(other) ? String(other) : '';
+}
+
+const formQPayrollAmountToString = (value) => {
+  if (value === '' || value == null) return '';
+  const n = parseFormQKarnatakaMoney(value);
+  if (Number.isFinite(n)) return String(n);
+  const s = String(value).trim();
+  return s || '';
+};
+
+/** Prefer SamplePayroll / pay-run rows that carry Basic (or HRA) wage breakdown. */
+export function filterFormQKarnatakaPayrollRowsWithBasic(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && typeof row === 'object' && row.fetch_error !== true)
+    .map((row) => flattenPayrollEarningColumns(row))
+    .filter((row) => payrollRowHasWageBreakdown(row));
+}
+
+export function preferFormQKarnatakaPayrollRowsWithBasic(resolvedRows, fallbackRows = []) {
+  const fromResolved = filterFormQKarnatakaPayrollRowsWithBasic(resolvedRows);
+  if (fromResolved.length > 0) return fromResolved;
+  const fromFallback = filterFormQKarnatakaPayrollRowsWithBasic(fallbackRows);
+  if (fromFallback.length > 0) return fromFallback;
+  return Array.isArray(resolvedRows) ? resolvedRows : [];
+}
+
 export function resolveFormQKarnatakaPayrollWages(payrollRow) {
   if (!payrollRow || payrollRow.fetch_error) {
     return { basic: '', vda: '', other: '', total: '' };
   }
-  const flat = mergePayrollRunEmployeePayload(payrollRow);
-  const basic = pickPayrollValue(flat, payrollRow, ['basic', 'Basic', 'basic_pay'], [/^basic$/i]);
-  const vda = pickPayrollValue(
-    flat,
-    payrollRow,
-    ['vda', 'VDA', 'dearness_allowance', 'Dearness Allowance'],
-    [/vda|dearness/i]
+  const flattened = flattenPayrollEarningColumns(payrollRow);
+  const merged = mergePayrollRunEmployeePayload(payrollRow);
+  // Flattened wage columns win over empty SamplePayroll / list scalars.
+  const source = { ...payrollRow, ...merged, ...flattened };
+  const wageAmounts = readPayrollForm15WageAmounts(payrollRow);
+  const basicRaw =
+    readPayrollScalar(
+      source,
+      ['basic', 'Basic', 'earned_basic', 'Earned Basic', 'basic_pay', 'Basic Earnings', 'basic_earnings'],
+      [/^basic$/, /^earned_basic$/, /^basic_pay$/, /^basic_earnings$/]
+    ) ||
+    wageAmounts.basic;
+  const basic = formQPayrollAmountToString(basicRaw);
+  const vda = formQPayrollAmountToString(
+    pickPayrollValue(
+      source,
+      payrollRow,
+      ['vda', 'VDA', 'dearness_allowance', 'Dearness Allowance'],
+      [/vda|dearness/i]
+    )
   );
-  const other = pickPayrollValue(
-    flat,
-    payrollRow,
-    ['other_allowance', 'Other Allowance', 'other allowance'],
-    [/^other_allowance$/i]
+  const hraRaw =
+    wageAmounts.hra !== '' && wageAmounts.hra != null
+      ? wageAmounts.hra
+      : pickPayrollValue(
+          source,
+          payrollRow,
+          ['hra', 'HRA', 'hra_fbp', 'house_rent_allowance', 'House Rent Allowance'],
+          [/^hra(_fbp)?$/i, /house.*rent/i]
+        );
+  const hra = formQPayrollAmountToString(hraRaw);
+  const grossRaw = readForm10GrossPayAmount(payrollRow);
+  const gross = formQPayrollAmountToString(
+    grossRaw !== ''
+      ? grossRaw
+      : pickPayrollValue(
+          source,
+          payrollRow,
+          ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings', 'gross', 'Gross'],
+          [/^gross_pay$/i, /^total_earnings$/i, /^gross$/i]
+        )
   );
+  const other = computeFormQKarnatakaOtherAllowances(gross, basic, hra);
   const netPay = readStrictPayrollNetPay(payrollRow);
-  const total =
+  const total = formQPayrollAmountToString(
     netPay !== ''
-      ? String(netPay)
-      : pickPayrollValue(flat, payrollRow, ['net_pay', 'Net Pay', 'netPay'], [/^net_pay$/i]);
+      ? netPay
+      : pickPayrollValue(
+          source,
+          payrollRow,
+          ['net_pay', 'Net Pay', 'netPay', 'netpay', 'Netpay'],
+          [/^net_pay$/i, /^netpay$/i]
+        )
+  );
   return { basic, vda, other, total };
 }
 
@@ -554,12 +643,12 @@ export function applyFormQKarnatakaEmployeeToRow(row, emp, headers, helpers = {}
     'Spouse Name',
   ]);
   const dob = pickEmployeeValue(emp, [
-    'Dateofjoining',
-    'DateofJoining',
-    'Date of Joining',
-    'DateofBirth',
+    'Date_of_birth',
     'Date of Birth',
+    'DateofBirth',
+    'Dateofbirth',
     'DOB',
+    'dob',
   ]);
   const doj = pickEmployeeValue(emp, [
     'Dateofjoining',
@@ -662,19 +751,32 @@ export function enrichFormQKarnatakaPayrollRows(mappedData, employees, headers, 
     );
     const hasWage = wages.basic || wages.vda || wages.other || wages.total || aprilMatch;
     if (!hasWage) return;
-    if (!overwrite && !aprilMatch && wageHeaders.some((h) => String(row?.[h] ?? '').trim())) return;
+    let wrote = false;
+    const cellEmpty = (header) => !String(row?.[header] ?? '').trim();
     hdrs.forEach((header) => {
       if (isFormQKarnatakaBasicHeader(header)) {
-        if (aprilMatch || wages.basic) row[header] = sanitizeValue(wages.basic);
+        if ((aprilMatch || wages.basic) && (overwrite || aprilMatch || cellEmpty(header))) {
+          row[header] = sanitizeValue(wages.basic);
+          wrote = true;
+        }
       } else if (isFormQKarnatakaVdaHeader(header) && wages.vda) {
-        row[header] = sanitizeValue(wages.vda);
+        if (overwrite || cellEmpty(header)) {
+          row[header] = sanitizeValue(wages.vda);
+          wrote = true;
+        }
       } else if (isFormQKarnatakaOtherAllowanceHeader(header) && wages.other) {
-        row[header] = sanitizeValue(wages.other);
+        if (overwrite || cellEmpty(header)) {
+          row[header] = sanitizeValue(wages.other);
+          wrote = true;
+        }
       } else if (isFormQKarnatakaTotalWageHeader(header)) {
-        if (aprilMatch || wages.total) row[header] = sanitizeValue(wages.total);
+        if ((aprilMatch || wages.total) && (overwrite || aprilMatch || cellEmpty(header))) {
+          row[header] = sanitizeValue(wages.total);
+          wrote = true;
+        }
       }
     });
-    hits += 1;
+    if (wrote) hits += 1;
   });
   return hits;
 }
@@ -697,6 +799,127 @@ export function rowHasMeaningfulFormQKarnatakaExportData(row, headers) {
   return hdrs.some((header) => getFormQKarnatakaRowValueForHeader(row, header) !== '');
 }
 
+/** Form Q template keeps Basic/VDA/Other/Total inside one value cell (cols C–E). */
+const FORM_Q_KARNATAKA_VALUE_COL_MAX = 5;
+
+/** Accept only numeric wage amounts — reject values like "7 month(s)". */
+export function sanitizeFormQKarnatakaWageAmount(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return '';
+  if (/month/i.test(s)) return '';
+  const cleaned = s.replace(/,/g, '').replace(/^\u20b9\s*/, '');
+  if (!/^-?\d+(\.\d+)?$/.test(cleaned)) return '';
+  return cleaned.replace(/\.0+$/, '').replace(/\.$/, '');
+}
+
+/**
+ * Always rebuild the rates box as four vertical lines (original template layout).
+ * Amounts sit beside headings; never append "/ month(s)" as a Total value.
+ */
+export function buildFormQKarnatakaWageRatesCellText(wages = {}) {
+  const basic = sanitizeFormQKarnatakaWageAmount(wages.basic);
+  const vda = sanitizeFormQKarnatakaWageAmount(wages.vda);
+  const other = sanitizeFormQKarnatakaWageAmount(wages.other);
+  const total = sanitizeFormQKarnatakaWageAmount(wages.total);
+  const line = (label, amount) => (amount ? `${label}  ${amount}` : label);
+  return [
+    line('1. Basic', basic),
+    line('2. VDA', vda),
+    line('3. Other allowances if any/', other),
+    line('4. Total', total),
+  ].join('\n');
+}
+
+/**
+ * Insert wage amounts next to "1. Basic" / "4. Total" lines inside the rates cell.
+ * Keeps values inside the bordered box instead of spilling into columns F/G.
+ */
+export function patchFormQKarnatakaWageRatesCellText(rawText, wages = {}) {
+  const basic = sanitizeFormQKarnatakaWageAmount(wages.basic);
+  const vda = sanitizeFormQKarnatakaWageAmount(wages.vda);
+  const other = sanitizeFormQKarnatakaWageAmount(wages.other);
+  const total = sanitizeFormQKarnatakaWageAmount(wages.total);
+  if (!basic && !vda && !other && !total) {
+    // Still normalize smashed / rich-text templates back to vertical lines.
+    const raw = String(rawText ?? '');
+    if (!raw.trim()) return raw;
+    if (
+      /\b1[\.\)]\s*Basic\b/i.test(raw) &&
+      /\b4[\.\)]\s*Total\b/i.test(raw) &&
+      !/\r?\n/.test(raw)
+    ) {
+      return buildFormQKarnatakaWageRatesCellText({});
+    }
+    return raw;
+  }
+  return buildFormQKarnatakaWageRatesCellText({ basic, vda, other, total });
+}
+
+function findFormQKarnatakaWageRatesListCell(worksheet, excelCellValueToString, maxScanRows, maxScanCols) {
+  let best = null;
+  let bestScore = 0;
+  for (let r = 1; r <= maxScanRows; r += 1) {
+    for (let c = 1; c <= Math.min(maxScanCols, FORM_Q_KARNATAKA_VALUE_COL_MAX); c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
+      if (!raw || !String(raw).trim()) continue;
+      const n = formQKarnatakaHeaderNorm(raw);
+      // Prefer the value-side list cell (Basic+VDA/Total), not the left "12. Rates..." label alone.
+      let score = 0;
+      if (/\bbasic\b/.test(n)) score += 25;
+      if (/\bvda\b/.test(n)) score += 20;
+      if (/other\s+allowances?/.test(n)) score += 20;
+      if (/\btotal\b/.test(n)) score += 20;
+      if (/rates\s+of\s+wages/.test(n) && score < 40) score += 5;
+      if (score >= 45 && score > bestScore) {
+        bestScore = score;
+        best = { row: r, col: c, raw: String(raw) };
+      }
+    }
+  }
+  return best;
+}
+
+const excelCellValueToStringFallback = (val) => {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'object') {
+    if (Array.isArray(val.richText)) {
+      // Preserve soft line-breaks between rich-text runs (Form Q rates list).
+      return val.richText
+        .map((rt) => String(rt?.text || ''))
+        .join('')
+        .replace(/\r\n/g, '\n');
+    }
+    if (val.text != null) return String(val.text);
+    if (val.result != null) return String(val.result);
+  }
+  return '';
+};
+
+function writeFormQKarnatakaWageRatesIntoBox(worksheet, wages, helpers = {}) {
+  const excelCellValueToString = helpers.excelCellValueToString || excelCellValueToStringFallback;
+  const maxScanRows = Math.max(80, (worksheet?.rowCount || 0) + 10);
+  const maxScanCols = 10;
+  const cell = findFormQKarnatakaWageRatesListCell(
+    worksheet,
+    excelCellValueToString,
+    maxScanRows,
+    maxScanCols
+  );
+  if (!cell) return false;
+  const patched = patchFormQKarnatakaWageRatesCellText(cell.raw, wages);
+  if (patched === cell.raw) return false;
+  const excelCell = worksheet.getCell(cell.row, cell.col);
+  excelCell.value = patched;
+  excelCell.alignment = {
+    ...(excelCell.alignment && typeof excelCell.alignment === 'object' ? excelCell.alignment : {}),
+    wrapText: true,
+    vertical: 'top',
+  };
+  return true;
+}
+
 /** Write header + first employee row back to the Karnataka Form Q template. */
 export function writeFormQKarnatakaFieldsToExcelJsWorksheet(
   worksheet,
@@ -706,20 +929,7 @@ export function writeFormQKarnatakaFieldsToExcelJsWorksheet(
 ) {
   if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
   const excelCellValueToString =
-    helpers.excelCellValueToString ||
-    ((val) => {
-      if (val == null) return '';
-      if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') {
-        return String(val);
-      }
-      if (val instanceof Date) return val.toISOString();
-      if (typeof val === 'object') {
-        if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
-        if (val.text != null) return String(val.text);
-        if (val.result != null) return String(val.result);
-      }
-      return '';
-    });
+    helpers.excelCellValueToString || excelCellValueToStringFallback;
   const normalize = (txt) => formQKarnatakaHeaderNorm(txt);
   const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
   const tableRow = helpers.tableRow || null;
@@ -733,10 +943,11 @@ export function writeFormQKarnatakaFieldsToExcelJsWorksheet(
     worksheet.getCell(row, col).value = text;
   };
 
-  const writeByLabel = (label, value) => {
+  const writeByLabel = (label, value, opts = {}) => {
     const text = String(value ?? '').trim();
     if (!text) return;
     const labelNorm = normalize(String(label || '').replace(/:+$/, ''));
+    const colLimit = Number(opts.maxValueCol) > 0 ? Number(opts.maxValueCol) : maxScanCols + 4;
     let bestRow = -1;
     let bestCol = -1;
     let bestScore = 0;
@@ -752,14 +963,34 @@ export function writeFormQKarnatakaFieldsToExcelJsWorksheet(
       }
     }
     if (bestRow > 0 && bestCol > 0 && bestScore >= 40) {
-      for (let nc = bestCol + 1; nc <= Math.min(bestCol + 6, maxScanCols + 4); nc += 1) {
+      const labelCellRaw = excelCellValueToString(worksheet.getCell(bestRow, bestCol)?.value);
+      // Wage headings already live inside the value box (cols C–E) — append beside the label.
+      if (opts.appendInLabelCell || opts.wageKind) {
+        const patched = patchFormQKarnatakaWageRatesCellText(labelCellRaw, {
+          basic: opts.wageKind === 'basic' ? text : '',
+          vda: opts.wageKind === 'vda' ? text : '',
+          other: opts.wageKind === 'other' ? text : '',
+          total: opts.wageKind === 'total' ? text : '',
+        });
+        if (patched && patched !== labelCellRaw) {
+          writeAt(bestRow, bestCol, patched);
+          return;
+        }
+        if (opts.appendInLabelCell) {
+          const base = String(labelCellRaw || '').trimEnd();
+          writeAt(bestRow, bestCol, base ? `${base}  ${text}` : text);
+          return;
+        }
+      }
+      for (let nc = bestCol + 1; nc <= Math.min(bestCol + 6, colLimit); nc += 1) {
         const nt = normalize(excelCellValueToString(worksheet.getCell(bestRow, nc)?.value));
         if (!nt || nt === ':') {
           writeAt(bestRow, nc, text);
           return;
         }
       }
-      writeAt(bestRow, Math.min(bestCol + 2, maxScanCols + 2), text);
+      const fallbackCol = Math.min(bestCol + 2, colLimit);
+      if (fallbackCol > bestCol) writeAt(bestRow, fallbackCol, text);
     }
   };
 
@@ -774,6 +1005,28 @@ export function writeFormQKarnatakaFieldsToExcelJsWorksheet(
   });
 
   if (tableRow && typeof tableRow === 'object') {
+    const wageValues = {
+      basic: '',
+      vda: '',
+      other: '',
+      total: '',
+    };
+    tableHeaders.forEach((header) => {
+      const value = getFormQKarnatakaRowValueForHeader(tableRow, header);
+      if (!value) return;
+      if (isFormQKarnatakaBasicHeader(header)) wageValues.basic = value;
+      else if (isFormQKarnatakaVdaHeader(header)) wageValues.vda = value;
+      else if (isFormQKarnatakaOtherAllowanceHeader(header)) wageValues.other = value;
+      else if (isFormQKarnatakaTotalWageHeader(header)) wageValues.total = value;
+    });
+    wageValues.basic = sanitizeFormQKarnatakaWageAmount(wageValues.basic);
+    wageValues.vda = sanitizeFormQKarnatakaWageAmount(wageValues.vda);
+    wageValues.other = sanitizeFormQKarnatakaWageAmount(wageValues.other);
+    wageValues.total = sanitizeFormQKarnatakaWageAmount(wageValues.total);
+    const wroteWageRatesInBox = writeFormQKarnatakaWageRatesIntoBox(worksheet, wageValues, {
+      excelCellValueToString,
+    });
+
     const labelMap = [
       ['Name of the Employee', isFormQKarnatakaEmployeeNameHeader],
       ['His/Her Postal Address', isFormQKarnatakaPostalAddressHeader],
@@ -792,23 +1045,30 @@ export function writeFormQKarnatakaFieldsToExcelJsWorksheet(
     tableHeaders.forEach((header) => {
       const value = getFormQKarnatakaRowValueForHeader(tableRow, header);
       if (!value) return;
+      const isWageHeader =
+        isFormQKarnatakaBasicHeader(header) ||
+        isFormQKarnatakaVdaHeader(header) ||
+        isFormQKarnatakaOtherAllowanceHeader(header) ||
+        isFormQKarnatakaTotalWageHeader(header);
+      // Already written beside Basic/Total headings inside the bordered rates cell.
+      if (wroteWageRatesInBox && isWageHeader) return;
       const match = labelMap.find(([, test]) => test(header));
-      writeByLabel(match ? match[0] : header, value);
+      let wageKind = '';
+      if (isFormQKarnatakaBasicHeader(header)) wageKind = 'basic';
+      else if (isFormQKarnatakaVdaHeader(header)) wageKind = 'vda';
+      else if (isFormQKarnatakaOtherAllowanceHeader(header)) wageKind = 'other';
+      else if (isFormQKarnatakaTotalWageHeader(header)) wageKind = 'total';
+      writeByLabel(match ? match[0] : header, value, {
+        // Never spill wage amounts outside the form box (cols F+).
+        maxValueCol: isWageHeader ? FORM_Q_KARNATAKA_VALUE_COL_MAX : undefined,
+        appendInLabelCell: isWageHeader,
+        wageKind,
+      });
     });
   }
 }
 
-const excelCellValueToString = (val) => {
-  if (val == null) return '';
-  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
-  if (val instanceof Date) return val.toISOString();
-  if (typeof val === 'object') {
-    if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
-    if (val.text != null) return String(val.text);
-    if (val.result != null) return String(val.result);
-  }
-  return '';
-};
+const excelCellValueToString = excelCellValueToStringFallback;
 
 export function overlayFormQKarnatakaUserEditsOntoRows(mappedRows, tableRows, headers) {
   const hdrs = resolveFormQKarnatakaTableHeaders(headers);
@@ -874,6 +1134,432 @@ function allocateUniqueFormQKarnatakaDownloadFileName(baseName, usedNames) {
   usedNames.set(baseName, count + 1);
   const suffix = count > 0 ? `_${count + 1}` : '';
   return `Form_Q_Karnataka_${baseName}${suffix}.xlsx`;
+}
+
+const FORM_Q_KA_FAST_ZIP_BATCH = 12;
+
+const FORM_Q_KA_EMPLOYEE_FIELD_SPECS = [
+  { label: 'Name of the Employee', match: isFormQKarnatakaEmployeeNameHeader, isWage: false },
+  { label: 'His/Her Postal Address', match: isFormQKarnatakaPostalAddressHeader, isWage: false },
+  { label: 'His/Her Permanent Address', match: isFormQKarnatakaPermanentAddressHeader, isWage: false },
+  { label: 'Father/Husband Name', match: isFormQKarnatakaFatherHusbandHeader, isWage: false },
+  { label: 'Date of Birth', match: isFormQKarnatakaDateOfBirthHeader, isWage: false },
+  {
+    label: 'Date of his/her entry into employment',
+    match: isFormQKarnatakaEntryDateHeader,
+    isWage: false,
+  },
+  { label: 'Designation', match: isFormQKarnatakaDesignationHeader, isWage: false },
+  {
+    label: 'Nature of work entrusted to him/her',
+    match: isFormQKarnatakaNatureOfWorkHeader,
+    isWage: false,
+  },
+  {
+    label: 'His/Her serial number in the Register of employment',
+    match: isFormQKarnatakaSerialNumberHeader,
+    isWage: false,
+  },
+  { label: 'Basic', match: isFormQKarnatakaBasicHeader, isWage: true, wageKind: 'basic' },
+  { label: 'VDA', match: isFormQKarnatakaVdaHeader, isWage: true, wageKind: 'vda' },
+  {
+    label: 'Other allowances if any',
+    match: isFormQKarnatakaOtherAllowanceHeader,
+    isWage: true,
+    wageKind: 'other',
+  },
+  { label: 'Total', match: isFormQKarnatakaTotalWageHeader, isWage: true, wageKind: 'total' },
+];
+
+const formQKarnatakaSanitizeExportText = (value, { preserveNewlines = false } = {}) => {
+  let s = String(value ?? '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+  if (preserveNewlines) {
+    return s.replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '');
+  }
+  return s.trim();
+};
+
+const formQKarnatakaEscapeXml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const formQKarnatakaColToLetter = (col) => {
+  let result = '';
+  let n = col;
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    result = String.fromCharCode(65 + rem) + result;
+    n = Math.floor((n - 1) / 26);
+  }
+  return result;
+};
+
+const formQKarnatakaToCellRef = (row, col) => `${formQKarnatakaColToLetter(col)}${row}`;
+
+export function formQKarnatakaUpsertInlineStrCell(sheetXml, cellRef, value, options = {}) {
+  const { preserveStyle = true, preserveNewlines = false } = options;
+  // [^>/]* must not consume the "/" of self-closing cells — otherwise
+  // `<c r="C8"/>` matches through the next `</c>` and drops later rows.
+  const cellRe = new RegExp(
+    `<c\\s+r="${cellRef}"(?=[\\s/>])([^>/]*)(?:/>|>([\\s\\S]*?)</c>)`,
+    'i'
+  );
+  const existing = sheetXml.match(cellRe);
+  let styleAttr = '';
+  if (preserveStyle && existing) {
+    const styleMatch = String(existing[1] || '').match(/\ss="(\d+)"/i);
+    if (styleMatch) styleAttr = ` s="${styleMatch[1]}"`;
+  }
+  const sanitized = formQKarnatakaSanitizeExportText(value, { preserveNewlines });
+  // &#10; keeps vertical wage-rate lines inside Excel inlineStr cells.
+  const text = formQKarnatakaEscapeXml(sanitized).replace(/\n/g, '&#10;');
+  const cellXml = text
+    ? `<c r="${cellRef}"${styleAttr} t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`
+    : `<c r="${cellRef}"${styleAttr}/>`;
+  if (existing) {
+    return sheetXml.replace(cellRe, () => cellXml);
+  }
+  const rowNum = cellRef.replace(/^[A-Z]+/i, '');
+  const rowRe = new RegExp(`(<row\\s+r="${rowNum}"[^>]*>)([\\s\\S]*?)(</row>)`, 'i');
+  if (!rowRe.test(sheetXml)) return sheetXml;
+  return sheetXml.replace(rowRe, (_, a, b, c) => `${a}${b}${cellXml}${c}`);
+}
+
+const resolveFormQKarnatakaWorksheetEntry = (zipFiles) =>
+  Object.keys(zipFiles)
+    .filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0] || null;
+
+function findFormQKarnatakaBestLabelCell(
+  worksheet,
+  label,
+  excelCellValueToString,
+  maxScanRows,
+  maxScanCols
+) {
+  const normalize = (txt) => formQKarnatakaHeaderNorm(txt);
+  const labelNorm = normalize(String(label || '').replace(/:+$/, ''));
+  let bestRow = -1;
+  let bestCol = -1;
+  let bestScore = 0;
+  for (let r = 1; r <= maxScanRows; r += 1) {
+    for (let c = 1; c <= maxScanCols; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
+      const score = labelMatchScore(labelNorm, normalize(raw.replace(/:+$/, '')));
+      if (score > bestScore) {
+        bestScore = score;
+        bestRow = r;
+        bestCol = c;
+      }
+    }
+  }
+  if (bestRow > 0 && bestCol > 0 && bestScore >= 40) {
+    return { row: bestRow, col: bestCol, score: bestScore };
+  }
+  return null;
+}
+
+function resolveFormQKarnatakaBesideLabelValueCol(
+  worksheet,
+  labelRow,
+  labelCol,
+  excelCellValueToString,
+  colLimit
+) {
+  for (let nc = labelCol + 1; nc <= Math.min(labelCol + 6, colLimit); nc += 1) {
+    const nt = formQKarnatakaHeaderNorm(
+      excelCellValueToString(worksheet.getCell(labelRow, nc)?.value)
+    );
+    if (!nt || nt === ':') return nc;
+  }
+  return Math.min(labelCol + 2, colLimit);
+}
+
+function resolveFormQKarnatakaFastExportPositions(worksheet, headersToUse = []) {
+  const hdrs = resolveFormQKarnatakaTableHeaders(headersToUse);
+  const excelCellValueToString = excelCellValueToStringFallback;
+  const maxScanRows = Math.max(80, (worksheet?.rowCount || 0) + 10);
+  const maxScanCols = 10;
+  const fieldPositions = [];
+  const seen = new Set();
+
+  const wageRatesCell = findFormQKarnatakaWageRatesListCell(
+    worksheet,
+    excelCellValueToString,
+    maxScanRows,
+    maxScanCols
+  );
+  let wageRatesPosition = null;
+  if (wageRatesCell) {
+    // Force canonical vertical list so ZIP patches never inherit smashed single-line text.
+    const normalizedBase = buildFormQKarnatakaWageRatesCellText({});
+    const excelCell = worksheet.getCell(wageRatesCell.row, wageRatesCell.col);
+    excelCell.value = normalizedBase;
+    excelCell.alignment = {
+      ...(excelCell.alignment && typeof excelCell.alignment === 'object' ? excelCell.alignment : {}),
+      wrapText: true,
+      vertical: 'top',
+    };
+    wageRatesPosition = {
+      row: wageRatesCell.row,
+      col: wageRatesCell.col,
+      cellRef: formQKarnatakaToCellRef(wageRatesCell.row, wageRatesCell.col),
+      baseRaw: normalizedBase,
+    };
+  }
+
+  FORM_Q_KA_EMPLOYEE_FIELD_SPECS.forEach((spec) => {
+    if (wageRatesPosition && spec.isWage) return;
+    const header = hdrs.find((h) => spec.match(h)) || spec.label;
+    if (seen.has(header)) return;
+    const labelCell = findFormQKarnatakaBestLabelCell(
+      worksheet,
+      spec.label,
+      excelCellValueToString,
+      maxScanRows,
+      maxScanCols
+    );
+    if (!labelCell) return;
+    if (spec.isWage) {
+      const baseRaw = excelCellValueToString(
+        worksheet.getCell(labelCell.row, labelCell.col)?.value
+      );
+      fieldPositions.push({
+        header,
+        row: labelCell.row,
+        col: labelCell.col,
+        cellRef: formQKarnatakaToCellRef(labelCell.row, labelCell.col),
+        isWage: true,
+        wageKind: spec.wageKind,
+        baseRaw: String(baseRaw || ''),
+        appendInLabelCell: true,
+      });
+      seen.add(header);
+      return;
+    }
+    const colLimit = maxScanCols + 4;
+    const valueCol = resolveFormQKarnatakaBesideLabelValueCol(
+      worksheet,
+      labelCell.row,
+      labelCell.col,
+      excelCellValueToString,
+      colLimit
+    );
+    if (valueCol <= labelCell.col) return;
+    fieldPositions.push({
+      header,
+      row: labelCell.row,
+      col: valueCol,
+      cellRef: formQKarnatakaToCellRef(labelCell.row, valueCol),
+      isWage: false,
+    });
+    seen.add(header);
+  });
+
+  return { fieldPositions, wageRatesPosition };
+}
+
+function clearFormQKarnatakaPerEmployeeValueCells(worksheet, positions) {
+  if (!worksheet || !positions) return;
+  (positions.fieldPositions || []).forEach((pos) => {
+    if (pos?.appendInLabelCell && pos.baseRaw != null) {
+      worksheet.getCell(pos.row, pos.col).value = pos.baseRaw;
+      return;
+    }
+    if (pos?.row != null && pos?.col != null) {
+      worksheet.getCell(pos.row, pos.col).value = '';
+    }
+  });
+  if (positions.wageRatesPosition?.row != null && positions.wageRatesPosition?.col != null) {
+    const excelCell = worksheet.getCell(
+      positions.wageRatesPosition.row,
+      positions.wageRatesPosition.col
+    );
+    excelCell.value = positions.wageRatesPosition.baseRaw || '';
+    excelCell.alignment = {
+      ...(excelCell.alignment && typeof excelCell.alignment === 'object' ? excelCell.alignment : {}),
+      wrapText: true,
+      vertical: 'top',
+    };
+  }
+}
+
+function collectFormQKarnatakaExportWages(exportRow, hdrs) {
+  const wages = { basic: '', vda: '', other: '', total: '' };
+  (Array.isArray(hdrs) ? hdrs : []).forEach((header) => {
+    const value = getFormQKarnatakaRowValueForHeader(exportRow, header);
+    if (!value) return;
+    if (isFormQKarnatakaBasicHeader(header)) wages.basic = value;
+    else if (isFormQKarnatakaVdaHeader(header)) wages.vda = value;
+    else if (isFormQKarnatakaOtherAllowanceHeader(header)) wages.other = value;
+    else if (isFormQKarnatakaTotalWageHeader(header)) wages.total = value;
+  });
+  return {
+    basic: sanitizeFormQKarnatakaWageAmount(wages.basic),
+    vda: sanitizeFormQKarnatakaWageAmount(wages.vda),
+    other: sanitizeFormQKarnatakaWageAmount(wages.other),
+    total: sanitizeFormQKarnatakaWageAmount(wages.total),
+  };
+}
+
+export function patchFormQKarnatakaFastSheetXml(baseSheetXml, exportRow, positions, headersToUse = []) {
+  let sheetXml = baseSheetXml;
+  const hdrs = resolveFormQKarnatakaTableHeaders(headersToUse);
+  const wages = collectFormQKarnatakaExportWages(exportRow, hdrs);
+
+  if (positions?.wageRatesPosition?.cellRef) {
+    const patched = patchFormQKarnatakaWageRatesCellText(
+      positions.wageRatesPosition.baseRaw || '',
+      wages
+    );
+    sheetXml = formQKarnatakaUpsertInlineStrCell(
+      sheetXml,
+      positions.wageRatesPosition.cellRef,
+      patched,
+      { preserveStyle: true, preserveNewlines: true }
+    );
+  }
+
+  (positions?.fieldPositions || []).forEach((pos) => {
+    if (pos.isWage) {
+      const single = {
+        basic: pos.wageKind === 'basic' ? wages.basic : '',
+        vda: pos.wageKind === 'vda' ? wages.vda : '',
+        other: pos.wageKind === 'other' ? wages.other : '',
+        total: pos.wageKind === 'total' ? wages.total : '',
+      };
+      const patched = patchFormQKarnatakaWageRatesCellText(pos.baseRaw || '', single);
+      const value =
+        patched && patched !== pos.baseRaw
+          ? patched
+          : (() => {
+              const amount = sanitizeFormQKarnatakaWageAmount(single[pos.wageKind] || '');
+              if (!amount) return pos.baseRaw || '';
+              const base = String(pos.baseRaw || '').trimEnd();
+              return base ? `${base}  ${amount}` : amount;
+            })();
+      sheetXml = formQKarnatakaUpsertInlineStrCell(sheetXml, pos.cellRef, value, {
+        preserveStyle: true,
+        preserveNewlines: true,
+      });
+      return;
+    }
+    const value = getFormQKarnatakaRowValueForHeader(exportRow, pos.header);
+    if (value !== '') {
+      sheetXml = formQKarnatakaUpsertInlineStrCell(sheetXml, pos.cellRef, value, {
+        preserveStyle: true,
+      });
+    }
+  });
+
+  return sheetXml;
+}
+
+async function buildFormQKarnatakaFastXlsxBytes(fastTemplate, exportRow, headersToUse) {
+  const { sheetEntry, baseSheetXml, staticFiles, positions } = fastTemplate;
+  const sheetXml = patchFormQKarnatakaFastSheetXml(
+    baseSheetXml,
+    exportRow,
+    positions,
+    headersToUse
+  );
+  const entryZip = new JSZip();
+  Object.entries(staticFiles).forEach(([path, data]) => {
+    entryZip.file(path, data);
+  });
+  entryZip.file(sheetEntry, sheetXml);
+  return entryZip.generateAsync({ type: 'uint8array', compression: 'STORE' });
+}
+
+async function prepareFormQKarnatakaFastZipTemplate({
+  templateArrayBuffer,
+  parsedFormHeader,
+  headerFormData,
+  sheetNameHint,
+  headersToUse = [],
+}) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateArrayBuffer);
+  const sheetCandidates = Array.isArray(workbook.worksheets) ? workbook.worksheets : [];
+  const preferred = String(sheetNameHint || '').trim();
+  const worksheet =
+    (preferred && sheetCandidates.find((ws) => String(ws?.name || '').trim() === preferred)) ||
+    sheetCandidates[0] ||
+    null;
+  if (!worksheet) throw new Error('Template worksheet not found.');
+
+  const hdrs = resolveFormQKarnatakaTableHeaders(headersToUse);
+  // Static establishment/footer only — employee fields are patched per ZIP entry.
+  writeFormQKarnatakaFieldsToExcelJsWorksheet(worksheet, headerFormData, parsedFormHeader, {
+    excelCellValueToString,
+  });
+
+  const positions = resolveFormQKarnatakaFastExportPositions(worksheet, hdrs);
+  clearFormQKarnatakaPerEmployeeValueCells(worksheet, positions);
+
+  const preparedBuffer = await workbook.xlsx.writeBuffer();
+  const templateZip = await JSZip.loadAsync(preparedBuffer);
+  const sheetEntry = resolveFormQKarnatakaWorksheetEntry(templateZip.files);
+  if (!sheetEntry) throw new Error('Template worksheet XML not found.');
+  const baseSheetXml = await templateZip.file(sheetEntry).async('string');
+  const staticFiles = {};
+  await Promise.all(
+    Object.keys(templateZip.files).map(async (path) => {
+      const file = templateZip.files[path];
+      if (!file || file.dir || path === sheetEntry) return;
+      staticFiles[path] = await file.async('uint8array');
+    })
+  );
+  return { sheetEntry, baseSheetXml, staticFiles, positions, hdrs };
+}
+
+async function buildFormQKarnatakaFastZipDownload({
+  exportRows,
+  fastTemplate,
+  formFileName,
+  parsedFormHeader,
+  headersToUse,
+}) {
+  const zip = new JSZip();
+  const usedNames = new Map();
+  const hdrs = resolveFormQKarnatakaTableHeaders(headersToUse);
+  for (let i = 0; i < exportRows.length; i += FORM_Q_KA_FAST_ZIP_BATCH) {
+    const batch = exportRows.slice(i, i + FORM_Q_KA_FAST_ZIP_BATCH);
+    const batchBytes = await Promise.all(
+      batch.map(async (exportRow, batchIndex) => {
+        const index = i + batchIndex;
+        const xlsxBytes = await buildFormQKarnatakaFastXlsxBytes(
+          fastTemplate,
+          exportRow,
+          hdrs
+        );
+        return { xlsxBytes, exportRow, index };
+      })
+    );
+    batchBytes.forEach((entry) => {
+      if (!entry) return;
+      const { xlsxBytes, exportRow, index } = entry;
+      const baseName = resolveFormQKarnatakaEmployeeDownloadBaseName(exportRow, hdrs, index);
+      zip.file(allocateUniqueFormQKarnatakaDownloadFileName(baseName, usedNames), xlsxBytes);
+    });
+    if (i > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_Q_Karnataka')
+    .replace(/\.xlsx?$/i, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return {
+    blob: await zip.generateAsync({
+      type: 'blob',
+      mimeType: 'application/zip',
+      compression: 'STORE',
+    }),
+    fileName: `${zipBase}_Employees.zip`,
+  };
 }
 
 export async function buildFormQKarnatakaWorkbookWithTemplateStyles({
@@ -985,8 +1671,13 @@ export async function buildFormQKarnatakaPerEmployeeDownload({
   }
 
   const baseHeaderData = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
+  // Copy bytes so ExcelJS/JSZip cannot detach the shared template ArrayBuffer across employees.
+  const templateBytes =
+    templateArrayBuffer instanceof ArrayBuffer
+      ? templateArrayBuffer.slice(0)
+      : templateArrayBuffer;
   const workbookArgs = {
-    templateArrayBuffer,
+    templateArrayBuffer: templateBytes,
     parsedFormHeader,
     formFileName,
     sheetNameHint,
@@ -1002,11 +1693,39 @@ export async function buildFormQKarnatakaPerEmployeeDownload({
     });
   }
 
+  try {
+    const fastTemplate = await prepareFormQKarnatakaFastZipTemplate({
+      templateArrayBuffer:
+        templateBytes instanceof ArrayBuffer ? templateBytes.slice(0) : templateBytes,
+      parsedFormHeader,
+      headerFormData: baseHeaderData,
+      sheetNameHint,
+      headersToUse: hdrs,
+    });
+    const hasPatchTargets =
+      (fastTemplate.positions?.fieldPositions?.length || 0) > 0 ||
+      !!fastTemplate.positions?.wageRatesPosition;
+    if (hasPatchTargets) {
+      return buildFormQKarnatakaFastZipDownload({
+        exportRows,
+        fastTemplate,
+        formFileName,
+        parsedFormHeader,
+        headersToUse: hdrs,
+      });
+    }
+  } catch (fastZipErr) {
+    console.warn('Form Q Karnataka fast ZIP export failed, using standard export:', fastZipErr);
+  }
+
   const zip = new JSZip();
   const usedNames = new Map();
   for (let i = 0; i < exportRows.length; i += 1) {
     const { blob } = await buildFormQKarnatakaWorkbookWithTemplateStyles({
       ...workbookArgs,
+      // Fresh copy per employee — avoids ArrayBuffer detach after workbook.xlsx.load.
+      templateArrayBuffer:
+        templateBytes instanceof ArrayBuffer ? templateBytes.slice(0) : templateBytes,
       mappedData: [exportRows[i]],
     });
     const xlsxBytes = new Uint8Array(await blob.arrayBuffer());
@@ -1020,7 +1739,11 @@ export async function buildFormQKarnatakaPerEmployeeDownload({
     .replace(/\.xlsx?$/i, '')
     .replace(/[^a-zA-Z0-9._-]+/g, '_');
   return {
-    blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
+    blob: await zip.generateAsync({
+      type: 'blob',
+      mimeType: 'application/zip',
+      compression: 'STORE',
+    }),
     fileName: `${zipBase}_Employees.zip`,
   };
 }

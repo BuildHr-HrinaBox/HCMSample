@@ -31,8 +31,63 @@ import {
 } from './formXIXMPWageSlip';
 import { leaveTypeLabelMatchesAliases } from './formXTamilNaduLeave';
 
-export const resolveFormXVIIIMPPayrollRowsForAutofill = resolveFormXIXMPPayrollRowsForAutofill;
 export const loadFormXVIIIMPPayrollRowsForAutofill = loadFormXIXMPPayrollRowsForAutofill;
+
+/** True when Sample Payroll / pay-run row carries PF or Professional Tax scalars. */
+export function formXVIIIMPPayrollRowHasSampleDeductionFields(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return false;
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const pf = resolveFormXVIIIMPSamplePayrollPf(flat, payrollRow, payrollRow);
+  const pt = resolveFormXVIIIMPSamplePayrollPt(flat, payrollRow, payrollRow);
+  return (pf !== '' && pf != null) || (pt !== '' && pt != null);
+}
+
+export function formXVIIIMPPayrollRowHasSamplePf(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return false;
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const pf = resolveFormXVIIIMPSamplePayrollPf(flat, payrollRow, payrollRow);
+  return pf !== '' && pf != null;
+}
+
+/**
+ * Prefer Sample Payroll rows that carry PF (Form XVIII MP col 22).
+ * Zoho-only pay-run rows often have Professional Tax / gross but empty PF scalars.
+ */
+export function resolveFormXVIIIMPPayrollRowsForAutofill(statutoryPayrollRows, monthCandidates = []) {
+  const flattenRows = (rows) =>
+    (Array.isArray(rows) ? rows : [])
+      .filter((row) => row && typeof row === 'object' && row.fetch_error !== true)
+      .map((row) => flattenPayrollEarningColumns(row));
+
+  const preferPfRows = (rows) => {
+    const list = flattenRows(rows);
+    if (list.length === 0) return [];
+    const withPf = list.filter((row) => formXVIIIMPPayrollRowHasSamplePf(row));
+    if (withPf.length > 0) return withPf;
+    const withDed = list.filter((row) => formXVIIIMPPayrollRowHasSampleDeductionFields(row));
+    return withDed.length > 0 ? withDed : list;
+  };
+
+  const cached = getCachedForm15PayrollTableRows(monthCandidates);
+  if (cached?.rows?.length > 0) {
+    const fromCache = preferPfRows(cached.rows);
+    if (fromCache.some((row) => formXVIIIMPPayrollRowHasSamplePf(row))) {
+      return fromCache;
+    }
+    if (fromCache.some((row) => formXVIIIMPPayrollRowHasSampleDeductionFields(row))) {
+      return fromCache;
+    }
+    if (fromCache.length > 0) return fromCache;
+  }
+
+  const fromStatutory = preferPfRows(statutoryPayrollRows);
+  if (fromStatutory.some((row) => formXVIIIMPPayrollRowHasSamplePf(row))) {
+    return fromStatutory;
+  }
+
+  const base = resolveFormXIXMPPayrollRowsForAutofill(statutoryPayrollRows, monthCandidates);
+  return preferPfRows(base);
+}
 
 export function buildFormXVIIIMPPayrollRowResolver(payrollRows) {
   return buildFormXIXMPPayrollRowResolver(payrollRows);
@@ -390,6 +445,65 @@ export const FORM_XVIII_MP_SECTION_INDEX_HEADERS = {
   23: 'Net amount payable',
 };
 
+/** Merged parent "Other Deductions Like EPF/ESI/…" used as the first child (PF) column key. */
+export function isFormXVIIIMPOtherDeductionsGroupParentHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s.includes('other') || !s.includes('deduction')) return false;
+  // Exclude "Other allowances" / "Any other Amount" (not the EPF/ESI/Welfare group).
+  if (s.includes('allowance')) return false;
+  if (s.includes('amount') && (s.includes('mention') || /^any\s+other/.test(s))) return false;
+  // Full group title, or shortened "Other Deductions (if any)" / "Other Deductions" from merge bleed.
+  return (
+    s.includes('epf') ||
+    s.includes('esi') ||
+    s.includes('welfare') ||
+    s.includes('provident') ||
+    /\bpf\b/.test(s) ||
+    /^other\s+deductions?(?:\s+if\s+any)?$/.test(s) ||
+    /^other\s+deductions?\s+like\b/.test(s)
+  );
+}
+
+export function isFormXVIIIMPPfHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (isFormXVIIIMPOtherDeductionsGroupParentHeader(header)) return true;
+  if (s.includes('registration') || s.includes('uan') || (s.includes('account') && s.includes('number'))) {
+    return false;
+  }
+  // "Other Deductions…_PF (22)" composite keys from grouped Excel models.
+  if (/_pf(?:\s*\(?\s*\d+\s*\)?)?\s*$/i.test(String(header || '').trim())) return true;
+  if (/\bpf\b/.test(s) && (s.includes('other') || s.includes('deduction'))) return true;
+  return (
+    s === 'pf' ||
+    /^pf\s*\d*$/.test(s) ||
+    /^pf\s+\d+/.test(s) ||
+    s.startsWith('pf ') ||
+    (s.includes('provident') && !s.includes('voluntary'))
+  );
+}
+
+export function isFormXVIIIMPEsicHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (s.includes('registration') || s.includes('number') || s.includes('no')) return false;
+  return s === 'esic' || s.startsWith('esic ') || /^esic\s*\d*/.test(s) || (s.includes('employee') && s.includes('insurance'));
+}
+
+export function isFormXVIIIMPPtHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return (
+    s === 'pt' ||
+    /^pt\s*\d*$/.test(s) ||
+    /^pt\s+\d+/.test(s) ||
+    s.startsWith('pt ') ||
+    s.includes('professional tax')
+  );
+}
+
+export function isFormXVIIIMPLwfHeader(header) {
+  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  return s === 'lwf' || s.startsWith('lwf ') || /^lwf\s*\d*/.test(s) || s.includes('labour welfare') || s.includes('labor welfare');
+}
+
 /** Prefer canonical section label when sheet text is blank or wrongly copied from a merge. */
 export function resolveFormXVIIIMPSectionHeaderLabel(label, sectionIdx, prevLabel = '') {
   const idx = String(sectionIdx || '').trim();
@@ -407,6 +521,15 @@ export function resolveFormXVIIIMPSectionHeaderLabel(label, sectionIdx, prevLabe
   if (prevIsWage && (curIsWage || (curBlankOrColumn && idx !== '13'))) {
     return FORM_XVIII_MP_SECTION_INDEX_HEADERS[14];
   }
+  // Merged parent "Other Deductions Like EPF/ESI/…" — first column of the band is PF.
+  // Leave later duplicate parent labels for repairFormXVIIIMPOtherDeductionsPfHeader.
+  if (
+    isFormXVIIIMPOtherDeductionsGroupParentHeader(cur) &&
+    !isFormXVIIIMPOtherDeductionsGroupParentHeader(prev) &&
+    !isFormXVIIIMPPfHeader(prev)
+  ) {
+    return idx && /^\d+$/.test(idx) ? `PF (${idx})` : 'PF (22)';
+  }
   if (!alias) return cur;
   if (!cur || /^column\s+\d+$/i.test(cur)) return alias;
   if (prevBase && curBase && prevBase === curBase) return alias;
@@ -423,6 +546,53 @@ export function repairFormXVIIIMPDuplicateWageHeaders(headers) {
   for (let i = 1; i < list.length; i += 1) {
     if (isFormXVIIIMPWageRateHeader(list[i]) && isFormXVIIIMPWageRateHeader(list[i - 1])) {
       list[i] = FORM_XVIII_MP_SECTION_INDEX_HEADERS[14];
+    }
+  }
+  return repairFormXVIIIMPOtherDeductionsPfHeader(list);
+}
+
+/**
+ * Merged "Other Deductions Like EPF/ESI/…" parent text on child columns:
+ * 1st → PF (22), 2nd → ESIC (22), 3rd → PT (22), 4th → LWF (22).
+ * Also maps parent bleed after an already-renamed PF (22).
+ */
+export function repairFormXVIIIMPOtherDeductionsPfHeader(headers) {
+  const list = Array.isArray(headers) ? [...headers] : [];
+  const childDefaults = ['PF (22)', 'ESIC (22)', 'PT (22)', 'LWF (22)'];
+  let offset = -1;
+  for (let i = 0; i < list.length; i += 1) {
+    const isParent = isFormXVIIIMPOtherDeductionsGroupParentHeader(list[i]);
+    const isPfOnly =
+      !isParent &&
+      isFormXVIIIMPPfHeader(list[i]) &&
+      (offset < 0 || offset === 0);
+    if (isParent || (isPfOnly && offset < 0)) {
+      offset = offset < 0 ? 0 : offset + 1;
+      if (isParent && offset < childDefaults.length) {
+        list[i] = childDefaults[offset];
+      }
+      continue;
+    }
+    if (offset >= 0) {
+      // Still inside deduction band when leaf ESIC/PT/LWF follows PF.
+      const s = mpCombinedRegisterHeaderNorm(list[i])
+        .replace(/[^a-z0-9 ]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (
+        s.startsWith('esic') ||
+        s === 'pt' ||
+        s.startsWith('pt ') ||
+        s.includes('professional tax') ||
+        s === 'lwf' ||
+        s.startsWith('lwf ') ||
+        s.includes('labour welfare') ||
+        s.includes('labor welfare')
+      ) {
+        offset += 1;
+      } else {
+        offset = -1;
+      }
     }
   }
   return list;
@@ -495,17 +665,35 @@ export function rebuildFormXVIIIMPCombinedRegisterTableHeadersFromSheet({
 
   const pickColumnHeaderLabel = (c, sectionIdx) => {
     const rawMain = String(readRaw(mainRow, c) || '').trim();
+    const findLeafLabel = () => {
+      for (let r = Math.max(0, mainRow - 2); r <= bandEnd; r += 1) {
+        if (r === mainRow) continue;
+        const leaf = String(readRaw(r, c) || '').trim();
+        if (leaf && !isEffectivelyBlankHeaderCell(leaf) && !/^\d+$/.test(leaf)) {
+          return leaf.replace(/\s+/g, ' ').trim();
+        }
+      }
+      return '';
+    };
+    // Merged parent "Other Deductions Like EPF/…" — prefer leaf PF/ESIC/PT/LWF when present.
+    if (rawMain && isFormXVIIIMPOtherDeductionsGroupParentHeader(rawMain)) {
+      const leaf = findLeafLabel();
+      if (leaf && !isFormXVIIIMPOtherDeductionsGroupParentHeader(leaf)) {
+        return leaf;
+      }
+      return rawMain.replace(/\s+/g, ' ').trim();
+    }
     if (rawMain && !isEffectivelyBlankHeaderCell(rawMain) && !/^\d+$/.test(rawMain)) {
       return rawMain.replace(/\s+/g, ' ').trim();
     }
-    for (let r = Math.max(0, mainRow - 2); r <= bandEnd; r += 1) {
-      const leaf = String(readRaw(r, c) || '').trim();
-      if (leaf && !isEffectivelyBlankHeaderCell(leaf) && !/^\d+$/.test(leaf)) {
-        return leaf.replace(/\s+/g, ' ').trim();
-      }
-    }
+    const leafFallback = findLeafLabel();
+    if (leafFallback) return leafFallback;
     const merged = String(getMergedAwareCellText(mainRow, c) || '').trim();
     if (merged && !isEffectivelyBlankHeaderCell(merged) && !/^\d+$/.test(merged)) {
+      if (isFormXVIIIMPOtherDeductionsGroupParentHeader(merged)) {
+        const leaf = findLeafLabel();
+        if (leaf && !isFormXVIIIMPOtherDeductionsGroupParentHeader(leaf)) return leaf;
+      }
       let label = merged.replace(/\s+/g, ' ').trim();
       if (sectionIdx && /^\d+$/.test(sectionIdx) && !/\(\s*\d+\s*\)/.test(label)) {
         label = `${label} (${sectionIdx})`;
@@ -995,20 +1183,11 @@ export function isFormXVIIIMPNilDefaultHeader(header) {
 
 /** PF/ESIC/PT/LWF deduction amount columns — not EPF/UAN registration columns. */
 export function isFormXVIIIMPPayrollDeductionHeader(header) {
-  const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   return (
-    s === 'pf' ||
-    /^pf\s*\(/.test(s) ||
-    s.startsWith('pf ') ||
-    s === 'esic' ||
-    /^esic\s*\(/.test(s) ||
-    s.startsWith('esic ') ||
-    s === 'pt' ||
-    /^pt\s*\(/.test(s) ||
-    s.startsWith('pt ') ||
-    s === 'lwf' ||
-    /^lwf\s*\(/.test(s) ||
-    s.startsWith('lwf ')
+    isFormXVIIIMPPfHeader(header) ||
+    isFormXVIIIMPEsicHeader(header) ||
+    isFormXVIIIMPPtHeader(header) ||
+    isFormXVIIIMPLwfHeader(header)
   );
 }
 
@@ -1207,7 +1386,64 @@ export function readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers = {}) {
     paid_days,
     flat,
     p,
+    pf: resolveFormXVIIIMPSamplePayrollPf(flat, p, payrollPayload),
+    pt: resolveFormXVIIIMPSamplePayrollPt(flat, p, payrollPayload),
   };
+}
+
+/** Prefer Sample Payroll table PF column (then flattened epf_contribution / pf). */
+export function resolveFormXVIIIMPSamplePayrollPf(flat = {}, p = {}, payrollPayload = null) {
+  const sources = [flat, p, payrollPayload].filter((src) => src && typeof src === 'object');
+  const keys = [
+    'epf_contribution',
+    'EPF Contribution',
+    'PF',
+    'pf',
+    'epf',
+    'EPF',
+    'employee_pf',
+    'Employee PF',
+    'provident_fund',
+    'Provident Fund',
+    // Sample Payroll UI also maps employer PF into the PF column when employee EPF is blank.
+    'employer_pf',
+    'employer_epf',
+    'employer_epf_contribution',
+    'employer_amount',
+  ];
+  const patterns = [
+    /^epf(_contribution)?$/,
+    /^pf$/,
+    /^provident_fund$/,
+    /^employer_pf$/,
+    /^employer_epf/,
+  ];
+  for (const src of sources) {
+    const val = readPayrollScalar(src, keys, patterns);
+    if (val !== '' && val != null) return val;
+  }
+  return '';
+}
+
+/** Prefer Sample Payroll table Professional Tax column. */
+export function resolveFormXVIIIMPSamplePayrollPt(flat = {}, p = {}, payrollPayload = null) {
+  const sources = [flat, p, payrollPayload].filter((src) => src && typeof src === 'object');
+  for (const src of sources) {
+    const val = readPayrollScalar(
+      src,
+      [
+        'Professional Tax',
+        'professional_tax',
+        'ProfessionalTax',
+        'professionalTax',
+        'pt',
+        'PT',
+      ],
+      [/^professional_tax$/, /^pt$/]
+    );
+    if (val !== '' && val != null) return val;
+  }
+  return '';
 }
 
 /** Map MP Combined Register payroll columns (gross, PF/ESIC/PT/LWF, net, UTR). */
@@ -1221,7 +1457,7 @@ export function resolveFormXVIIIMPTableHeaders(headers) {
   const findHeader = (testFn) =>
     list.find((h) => {
       const s = norm(h);
-      return s && testFn(s);
+      return s && testFn(s, h);
     }) || null;
   return {
     grossWages: findHeader((s) => {
@@ -1241,10 +1477,10 @@ export function resolveFormXVIIIMPTableHeaders(headers) {
       return t.includes('overtime') && (t.includes('hour') || t.includes('worked'));
     }),
     otherAllowances: findHeader((s) => s.includes('other') && s.includes('allowance')),
-    pf: findHeader((s) => s === 'pf' || s.startsWith('pf ') || s.includes('provident')),
-    esic: findHeader((s) => s.includes('esic') || (s.includes('employee') && s.includes('insurance'))),
-    pt: findHeader((s) => s === 'pt' || s.startsWith('pt ') || s.includes('professional tax')),
-    lwf: findHeader((s) => s.includes('lwf') || s.includes('labour welfare') || s.includes('labor welfare')),
+    pf: findHeader((_s, h) => isFormXVIIIMPPfHeader(h)),
+    esic: findHeader((_s, h) => isFormXVIIIMPEsicHeader(h)),
+    pt: findHeader((_s, h) => isFormXVIIIMPPtHeader(h)),
+    lwf: findHeader((_s, h) => isFormXVIIIMPLwfHeader(h)),
     fines: findHeader((s) => s.includes('fine')),
     advances: findHeader((s) => s.includes('advance') || s.includes('loan')),
     maternityBenefit: findHeader((s) => s.includes('maternity')),
@@ -1438,10 +1674,8 @@ export function enrichFormXVIIIMPEmployeeRows(mappedData, employees, headers, he
 export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, helpers = {}) {
   if (!row || !payrollPayload) return false;
   const sanitizeValue = helpers.sanitizeValue || ((v) => v);
-  const { gross, net, other_allowance, paid_days, p } = readFormXVIIIMPPayrollGrossNet(
-    payrollPayload,
-    helpers
-  );
+  const { gross, net, other_allowance, paid_days, p, pf: samplePf, pt: samplePt } =
+    readFormXVIIIMPPayrollGrossNet(payrollPayload, helpers);
   const headers = Array.isArray(helpers.headers) ? helpers.headers : Object.keys(row || {});
   let hit = false;
 
@@ -1499,43 +1733,67 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
   }
 
   const findDeductionAmount = helpers.findDeductionAmount;
-  if (typeof findDeductionAmount !== 'function') {
-    applyFormXVIIIMPNilDefaultsToRow(row, headers, { nilText: FORM_XVIII_MP_NIL, overwrite: true });
-    return hit;
-  }
-
-  const deductions = helpers.getDeductionsArray ? helpers.getDeductionsArray(p) : [];
+  const deductions =
+    typeof findDeductionAmount === 'function' && helpers.getDeductionsArray
+      ? helpers.getDeductionsArray(p)
+      : typeof findDeductionAmount === 'function'
+        ? []
+        : null;
   const otherAllow = other_allowance;
+  // PF (22) ← Sample Payroll PF; PT (22) ← Sample Payroll Professional Tax.
+  // Fall back to Zoho deduction line items only when Sample Payroll columns are empty.
+  const pfFromDeductions =
+    typeof findDeductionAmount === 'function'
+      ? findDeductionAmount(
+          deductions || [],
+          (t, n) => t === 'pf' || t === 'epf' || n.includes('provident') || n.includes('epf')
+        ) || ''
+      : '';
+  const ptFromDeductions =
+    typeof findDeductionAmount === 'function'
+      ? findDeductionAmount(
+          deductions || [],
+          (t, n) => t === 'pt' || n.includes('professional tax')
+        ) || ''
+      : '';
   const pf =
-    findDeductionAmount(
-      deductions,
-      (t, n) => t === 'pf' || t === 'epf' || n.includes('provident') || n.includes('epf')
-    ) || '';
+    samplePf !== '' && samplePf != null
+      ? samplePf
+      : pfFromDeductions;
   const esic =
-    findDeductionAmount(
-      deductions,
-      (t, n) => t === 'esi' || n.includes('esic') || n.includes('employee state insurance')
-    ) || '';
+    typeof findDeductionAmount === 'function'
+      ? findDeductionAmount(
+          deductions || [],
+          (t, n) => t === 'esi' || n.includes('esic') || n.includes('employee state insurance')
+        ) || ''
+      : '';
   const pt =
-    findDeductionAmount(
-      deductions,
-      (t, n) => t === 'pt' || n.includes('professional tax')
-    ) || '';
+    samplePt !== '' && samplePt != null
+      ? samplePt
+      : ptFromDeductions;
   const lwf =
-    findDeductionAmount(
-      deductions,
-      (t, n) => n.includes('labour welfare') || n.includes('labor welfare') || n.includes('lwf')
-    ) || '';
+    typeof findDeductionAmount === 'function'
+      ? findDeductionAmount(
+          deductions || [],
+          (t, n) => n.includes('labour welfare') || n.includes('labor welfare') || n.includes('lwf')
+        ) || ''
+      : '';
 
-  const normHdr = (h) =>
-    mpCombinedRegisterHeaderNorm(h).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   headers.forEach((h) => {
-    const s = normHdr(h);
-    if (s === 'pf' || /^pf\s*\(/.test(s) || s.startsWith('pf ')) writeAmount(h, pf);
-    if (s === 'esic' || /^esic\s*\(/.test(s) || s.startsWith('esic ')) writeAmount(h, esic);
-    if (s === 'pt' || /^pt\s*\(/.test(s) || s.startsWith('pt ')) writeAmount(h, pt);
-    if (s === 'lwf' || /^lwf\s*\(/.test(s) || s.startsWith('lwf ')) writeAmount(h, lwf);
+    if (isFormXVIIIMPPfHeader(h)) writeAmount(h, pf);
+    if (isFormXVIIIMPEsicHeader(h)) writeAmount(h, esic);
+    if (isFormXVIIIMPPtHeader(h)) writeAmount(h, pt);
+    if (isFormXVIIIMPLwfHeader(h)) writeAmount(h, lwf);
   });
+
+  // Also write PF onto any leftover merged "Other Deductions…" key still present on the row.
+  if (pf !== '' && pf != null) {
+    Object.keys(row || {}).forEach((key) => {
+      if (isFormXVIIIMPOtherDeductionsGroupParentHeader(key) || isFormXVIIIMPPfHeader(key)) {
+        writeAmount(key, pf);
+      }
+    });
+  }
 
   const set = (key, val) => {
     if (!mpHeaders?.[key] || val === '' || val == null) return;
@@ -2063,6 +2321,11 @@ export function remapMPCombinedRegisterRows(rows, oldHeaders, newHeaders) {
     if (isFormXVIIIMPWageRateHeader(a) && isFormXVIIIMPWageRateHeader(b)) return true;
     if (isFormXVIIIMPGrossWagesHeader(a) && isFormXVIIIMPGrossWagesHeader(b)) return true;
     if (isFormXVIIIMPNetPayableHeader(a) && isFormXVIIIMPNetPayableHeader(b)) return true;
+    // PF (22) ↔ merged "Other Deductions Like EPF/…" parent key from the modal grid.
+    if (isFormXVIIIMPPfHeader(a) && isFormXVIIIMPPfHeader(b)) return true;
+    if (isFormXVIIIMPPtHeader(a) && isFormXVIIIMPPtHeader(b)) return true;
+    if (isFormXVIIIMPEsicHeader(a) && isFormXVIIIMPEsicHeader(b)) return true;
+    if (isFormXVIIIMPLwfHeader(a) && isFormXVIIIMPLwfHeader(b)) return true;
     return false;
   };
   const repairedNew = repairFormXVIIIMPDuplicateWageHeaders(newHeaders);
@@ -2074,10 +2337,20 @@ export function remapMPCombinedRegisterRows(rows, oldHeaders, newHeaders) {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
     const out = {};
     const otherSrcKey = Object.keys(row).find((k) => isFormXVIIIMPOtherAllowanceHeader(k));
+    const pfSrcKey = Object.keys(row).find((k) => isFormXVIIIMPPfHeader(k));
+    const ptSrcKey = Object.keys(row).find((k) => isFormXVIIIMPPtHeader(k));
     repairedNew.forEach((nh) => {
       const target = norm(nh);
       if (isFormXVIIIMPOtherAllowanceHeader(nh) && otherSrcKey) {
         out[nh] = row[otherSrcKey];
+        return;
+      }
+      if (isFormXVIIIMPPfHeader(nh) && pfSrcKey) {
+        out[nh] = row[pfSrcKey];
+        return;
+      }
+      if (isFormXVIIIMPPtHeader(nh) && ptSrcKey) {
+        out[nh] = row[ptSrcKey];
         return;
       }
       if (Object.prototype.hasOwnProperty.call(row, nh)) {
@@ -2419,6 +2692,16 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
     for (let i = 0; i < deduped.length; i += 1) effectiveHeaders[i] = deduped[i];
   }
 
+  // Align row keys with repaired headers (Other Deductions… → PF (22), etc.).
+  const sourceMapped =
+    Array.isArray(mappedData) && mappedData.length > 0
+      ? remapMPCombinedRegisterRows(
+          mappedData,
+          trimmedHeaders.length > 0 ? trimmedHeaders : effectiveHeaders,
+          effectiveHeaders
+        )
+      : mappedData;
+
   writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
     headerFormData: headerFormData && typeof headerFormData === 'object' ? headerFormData : {},
     parsedFormHeader,
@@ -2465,10 +2748,32 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
       if (wageKey) return row[wageKey];
       return '';
     }
+    // PF (22) ↔ merged "Other Deductions Like EPF/…" (modal key before download rebuild).
+    if (isFormXVIIIMPPfHeader(header)) {
+      const pfKey = rowKeys.find((k) => isFormXVIIIMPPfHeader(k));
+      if (pfKey && row[pfKey] !== '' && row[pfKey] != null) return row[pfKey];
+      return Object.prototype.hasOwnProperty.call(row, header) ? row[header] : '';
+    }
+    if (isFormXVIIIMPPtHeader(header)) {
+      const ptKey = rowKeys.find((k) => isFormXVIIIMPPtHeader(k));
+      if (ptKey && row[ptKey] !== '' && row[ptKey] != null) return row[ptKey];
+      return Object.prototype.hasOwnProperty.call(row, header) ? row[header] : '';
+    }
+    if (isFormXVIIIMPEsicHeader(header)) {
+      const esicKey = rowKeys.find((k) => isFormXVIIIMPEsicHeader(k));
+      if (esicKey && row[esicKey] !== '' && row[esicKey] != null) return row[esicKey];
+      return Object.prototype.hasOwnProperty.call(row, header) ? row[header] : '';
+    }
+    if (isFormXVIIIMPLwfHeader(header)) {
+      const lwfKey = rowKeys.find((k) => isFormXVIIIMPLwfHeader(k));
+      if (lwfKey && row[lwfKey] !== '' && row[lwfKey] != null) return row[lwfKey];
+      return Object.prototype.hasOwnProperty.call(row, header) ? row[header] : '';
+    }
     const fuzzy = rowKeys.find((k) => {
       const nk = normalize(k);
       if (!nk) return false;
       if (isFormXVIIIMPWageRateHeader(k) || isFormXVIIIMPOtherAllowanceHeader(k)) return false;
+      if (isFormXVIIIMPPfHeader(k) || isFormXVIIIMPPtHeader(k)) return false;
       return nk.includes(target) || target.includes(nk);
     });
     return fuzzy ? row[fuzzy] : '';
@@ -2487,8 +2792,8 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
   };
 
   const sourcePrimary =
-    Array.isArray(mappedData) && mappedData.length > 0
-      ? mappedData
+    Array.isArray(sourceMapped) && sourceMapped.length > 0
+      ? sourceMapped
       : Array.isArray(mappedRowMatrix)
         ? mappedRowMatrix
         : [];
@@ -2537,6 +2842,29 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
       colFrom,
       colTo
     );
+  }
+
+  // Unmerge Other Deductions band (PF/ESIC/PT/LWF) so each child column can hold its own value.
+  {
+    const dedCols = effectiveHeaders
+      .map((h, idx) =>
+        isFormXVIIIMPPfHeader(h) ||
+        isFormXVIIIMPEsicHeader(h) ||
+        isFormXVIIIMPPtHeader(h) ||
+        isFormXVIIIMPLwfHeader(h)
+          ? fieldCols[idx]
+          : null
+      )
+      .filter((c) => Number.isFinite(c) && c > 0);
+    if (dedCols.length > 0 && sourcePrimary.length > 0) {
+      unmergeFormXVIIIExcelJSRowsInRange(
+        worksheet,
+        startRow,
+        startRow + Math.max(sourcePrimary.length, 1) - 1,
+        Math.min(...dedCols),
+        Math.max(...dedCols)
+      );
+    }
   }
 
   const writeCellValue = (excelRow, targetCol, value, useExactCell) => {
@@ -2594,6 +2922,14 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
     if (!Array.isArray(row) && otherWriteVal !== '' && otherHdrForWrite) {
       row[otherHdrForWrite] = otherWriteVal;
     }
+    // Stamp Sample Payroll PF / PT onto the row before cell write (download safety net).
+    if (!Array.isArray(row) && payrollRow && !payrollRow.fetch_error) {
+      applyFormXVIIIMPPayrollToRow(row, payrollRow, mpWriteHeaders, {
+        ...writeHelpers,
+        headers: effectiveHeaders,
+        sanitizeValue: writeHelpers.sanitizeValue || ((v) => v),
+      });
+    }
 
     for (let j = 0; j < effectiveHeaders.length; j += 1) {
       const header = effectiveHeaders[j];
@@ -2616,7 +2952,11 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
         j === otherHeaderIdx ||
         isFormXVIIIMPWageRateHeader(header) ||
         isFormXVIIIMPGrossWagesHeader(header) ||
-        isFormXVIIIMPNetPayableHeader(header);
+        isFormXVIIIMPNetPayableHeader(header) ||
+        isFormXVIIIMPPfHeader(header) ||
+        isFormXVIIIMPPtHeader(header) ||
+        isFormXVIIIMPEsicHeader(header) ||
+        isFormXVIIIMPLwfHeader(header);
       writeCellValue(excelRow, targetCol, value, useExactCell);
     }
 

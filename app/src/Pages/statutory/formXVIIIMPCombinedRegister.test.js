@@ -10,8 +10,11 @@ import {
   isFormXVIIIMPCombinedRegisterContext,
   isFormXVIIIMPMaternityBenefitHeader,
   isFormXVIIIMPNilDefaultHeader,
+  isFormXVIIIMPOtherDeductionsGroupParentHeader,
   isFormXVIIIMPOvertimeHoursHeader,
   isFormXVIIIMPOvertimeWagesHeader,
+  isFormXVIIIMPPayrollDeductionHeader,
+  isFormXVIIIMPPfHeader,
   isFormXVIIIMPWageRateHeader,
   looksLikeKarnatakaFormTSheet,
   looksLikeMPCombinedRegisterSheet,
@@ -19,7 +22,10 @@ import {
   readFormXVIIIMPOtherAllowanceFromRow,
   remapMPCombinedRegisterRows,
   repairFormXVIIIMPDuplicateWageHeaders,
+  repairFormXVIIIMPOtherDeductionsPfHeader,
   resolveFormXVIIIMPOtherAllowanceForWrite,
+  resolveFormXVIIIMPSamplePayrollPf,
+  resolveFormXVIIIMPSamplePayrollPt,
   resolveFormXVIIIMPSectionHeaderLabel,
   resolveFormXVIIIMPTableHeaders,
   restoreFormXVIIIMPDistinctOtherAllowances,
@@ -223,6 +229,155 @@ describe('Form XVIII MP Combined Register mappings', () => {
     expect(row['Other allowances']).toBe('24132');
     expect(row['Wage rate/ pay or (piece rate/ wages per unit)']).toBe('74132');
     expect(row['Total/ gross Wages/ Earnings']).toBe('74132');
+  });
+
+  it('maps PF (22) and PT (22) from Sample Payroll PF / Professional Tax', () => {
+    expect(isFormXVIIIMPPayrollDeductionHeader('PF (22)')).toBe(true);
+    expect(isFormXVIIIMPPayrollDeductionHeader('PT (22)')).toBe(true);
+    expect(resolveFormXVIIIMPSamplePayrollPf({ PF: 1800, professional_tax: 200 })).toBe(1800);
+    expect(resolveFormXVIIIMPSamplePayrollPt({ PF: 1800, 'Professional Tax': 200 })).toBe(200);
+
+    const headers = ['PF (22)', 'PT (22)', 'Total/ gross Wages/ Earnings'];
+    const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+    expect(mpHeaders.pf).toBe('PF (22)');
+    expect(mpHeaders.pt).toBe('PT (22)');
+
+    const row = {};
+    headers.forEach((h) => {
+      row[h] = '';
+    });
+    applyFormXVIIIMPPayrollToRow(
+      row,
+      {
+        gross_pay: 50000,
+        net_pay: 45000,
+        PF: 1800,
+        professional_tax: 200,
+      },
+      mpHeaders,
+      {
+        headers,
+        sanitizeValue: (v) => String(v ?? '').trim(),
+        flattenPayrollEarningColumns: (r) => r,
+      }
+    );
+    expect(row['PF (22)']).toBe('1800');
+    expect(row['PT (22)']).toBe('200');
+  });
+
+  it('fills PF when merged Other Deductions parent is the column key', () => {
+    const otherDed =
+      'Other Deductions Like EPF/ ESI/ Welfare Fund etc. (if any)';
+    expect(isFormXVIIIMPOtherDeductionsGroupParentHeader(otherDed)).toBe(true);
+    expect(isFormXVIIIMPPfHeader(otherDed)).toBe(true);
+    expect(isFormXVIIIMPOtherDeductionsGroupParentHeader('Other Deductions')).toBe(true);
+    expect(isFormXVIIIMPPfHeader('Other Deductions')).toBe(true);
+    expect(
+      repairFormXVIIIMPOtherDeductionsPfHeader([otherDed, 'ESIC (22)', 'PT (22)', 'LWF (22)'])[0]
+    ).toBe('PF (22)');
+    expect(
+      resolveFormXVIIIMPSectionHeaderLabel(otherDed, '22', 'Deductions of Fines imposed, if any')
+    ).toBe('PF (22)');
+
+    const headers = [otherDed, 'ESIC (22)', 'PT (22)', 'LWF (22)'];
+    const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+    expect(mpHeaders.pf).toBe(otherDed);
+    expect(mpHeaders.pt).toBe('PT (22)');
+
+    const row = {};
+    headers.forEach((h) => {
+      row[h] = '';
+    });
+    applyFormXVIIIMPPayrollToRow(
+      row,
+      { PF: 3562, professional_tax: 208, gross_pay: 113708, net_pay: 109938 },
+      mpHeaders,
+      {
+        headers,
+        sanitizeValue: (v) => String(v ?? '').trim(),
+        flattenPayrollEarningColumns: (r) => r,
+      }
+    );
+    expect(row[otherDed]).toBe('3562');
+    expect(row['PT (22)']).toBe('208');
+  });
+
+  it('remaps PF from Other Deductions parent key to PF (22) on download', () => {
+    const otherDed = 'Other Deductions Like EPF/ ESI/ Welfare Fund etc. (if any)';
+    const oldHeaders = [otherDed, 'ESIC (22)', 'PT (22)', 'LWF (22)'];
+    const newHeaders = ['PF (22)', 'ESIC (22)', 'PT (22)', 'LWF (22)'];
+    const remapped = remapMPCombinedRegisterRows(
+      [{ [otherDed]: '3562', 'PT (22)': '208', 'ESIC (22)': '', 'LWF (22)': '' }],
+      oldHeaders,
+      newHeaders
+    );
+    expect(remapped[0]['PF (22)']).toBe('3562');
+    expect(remapped[0]['PT (22)']).toBe('208');
+  });
+
+  it('reads Sample Payroll PF including employer_pf fallback', () => {
+    expect(resolveFormXVIIIMPSamplePayrollPf({ PF: 3562 })).toBe(3562);
+    expect(resolveFormXVIIIMPSamplePayrollPf({ epf_contribution: 3562 })).toBe(3562);
+    expect(resolveFormXVIIIMPSamplePayrollPf({ employer_pf: 3562 })).toBe(3562);
+  });
+
+  it('prefers Sample Payroll PF / Professional Tax over Zoho deduction line items', () => {
+    const headers = ['PF (22)', 'PT (22)'];
+    const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+    const row = {};
+    headers.forEach((h) => {
+      row[h] = '';
+    });
+    applyFormXVIIIMPPayrollToRow(
+      row,
+      {
+        PF: 9211,
+        'Professional Tax': 200,
+        deductions: [
+          { type: 'pf', name: 'PF', amount: 999 },
+          { type: 'pt', name: 'Professional Tax', amount: 50 },
+        ],
+      },
+      mpHeaders,
+      {
+        headers,
+        sanitizeValue: (v) => String(v ?? '').trim(),
+        flattenPayrollEarningColumns: (r) => r,
+        getDeductionsArray: (p) => p?.deductions || [],
+        findDeductionAmount: (list, pred) => {
+          for (const item of list || []) {
+            const n = String(item?.name || '').toLowerCase();
+            const t = String(item?.type || '').toLowerCase();
+            if (pred(t, n) && item?.amount != null) return item.amount;
+          }
+          return '';
+        },
+      }
+    );
+    expect(row['PF (22)']).toBe('9211');
+    expect(row['PT (22)']).toBe('200');
+  });
+
+  it('PF column does not receive Professional Tax', () => {
+    const headers = ['PF (22)', 'PT (22)'];
+    const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+    const row = {};
+    headers.forEach((h) => {
+      row[h] = '';
+    });
+    applyFormXVIIIMPPayrollToRow(
+      row,
+      { pf: 1800, professional_tax: 200 },
+      mpHeaders,
+      {
+        headers,
+        sanitizeValue: (v) => String(v ?? '').trim(),
+        flattenPayrollEarningColumns: (r) => r,
+      }
+    );
+    expect(row['PF (22)']).toBe('1800');
+    expect(row['PF (22)']).not.toBe('200');
+    expect(row['PT (22)']).toBe('200');
   });
 
   it('reads basic/hra from flattened payroll for other allowances', () => {

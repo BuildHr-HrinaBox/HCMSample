@@ -329,6 +329,7 @@ import {
   rebuildFormXVIIIMPCombinedRegisterTableHeadersFromSheet,
   remapMPCombinedRegisterRows,
   repairFormXVIIIMPCombinedRegisterFromWorkbook,
+  repairFormXVIIIMPOtherDeductionsPfHeader,
   resolveFormXVIIIMPPayrollRowForAutofillRow,
   resolveFormXVIIIMPPayrollRowsForAutofill,
   resolveFormXVIIIMPTableHeaders,
@@ -32989,8 +32990,24 @@ const Statutory = ({ userEmail, userRole }) => {
         preferTamilNadu
       });
     }
-    const clearToRow = Math.max(dataStartRow + sourceRows.length + 20, dataStartRow + 20);
     const { usedExportCols } = layout;
+    const tableColFrom =
+      usedExportCols.length > 0 ? Math.min(...usedExportCols) : 1;
+    const tableColTo = preferTamilNadu
+      ? Math.min(6, usedExportCols.length > 0 ? Math.max(...usedExportCols) : 6)
+      : usedExportCols.length > 0
+        ? Math.max(...usedExportCols)
+        : hdrs.length;
+    // Count the template's empty bordered body rows (the blank box under the data)
+    // before clearing values so we can re-apply full borders on download.
+    const templateBodyRows =
+      usedExportCols.length > 0
+        ? countExcelJSTemplateBodyRows(worksheet, dataStartRow, tableColFrom, tableColTo)
+        : 1;
+    const clearToRow = Math.max(
+      dataStartRow + Math.max(sourceRows.length, templateBodyRows) + 20,
+      dataStartRow + 20
+    );
     for (let r = dataStartRow; r <= clearToRow; r += 1) {
       for (let ci = 0; ci < usedExportCols.length; ci += 1) {
         worksheet.getCell(r, usedExportCols[ci]).value = '';
@@ -33012,17 +33029,6 @@ const Statutory = ({ userEmail, userRole }) => {
       ensureFormXVStackedTitleBand(worksheet, layout.headerRow, { preferTamilNadu });
     }
 
-    if (sourceRows.length > 0 && usedExportCols.length > 0) {
-      ensureExcelJSDataRowsWithBorders(worksheet, {
-        dataStartRow,
-        dataRowCount: sourceRows.length,
-        colFrom: Math.min(...usedExportCols),
-        colTo: preferTamilNadu ? Math.min(6, Math.max(...usedExportCols)) : Math.max(...usedExportCols),
-        templateRow: dataStartRow,
-        templateBodyRows: 1
-      });
-    }
-
     // Final sweep: remove any values that still leaked into column G+ on TN templates.
     if (preferTamilNadu) {
       const maxClearRow = Math.max(layout.headerRow + 40, dataStartRow + sourceRows.length + 10);
@@ -33036,6 +33042,25 @@ const Statutory = ({ userEmail, userRole }) => {
         const rowObj = worksheet.getRow(r);
         if (Number(rowObj.height) > 48) rowObj.height = 48;
       }
+    }
+
+    // Full thin box borders on header + data + empty template body (the blank box under the row).
+    if (sourceRows.length > 0 && usedExportCols.length > 0) {
+      const bodyRowsToPaint = Math.max(sourceRows.length, templateBodyRows, 1);
+      ensureExcelJSDataRowsWithBorders(worksheet, {
+        dataStartRow,
+        dataRowCount: bodyRowsToPaint,
+        colFrom: tableColFrom,
+        colTo: tableColTo,
+        templateRow: dataStartRow,
+        templateBodyRows: bodyRowsToPaint
+      });
+      applyExcelJSFullBoxBordersToRange(worksheet, {
+        rowFrom: layout.headerRow,
+        rowTo: dataStartRow + bodyRowsToPaint - 1,
+        colFrom: tableColFrom,
+        colTo: tableColTo
+      });
     }
 
     const out = await workbook.xlsx.writeBuffer();
@@ -57852,11 +57877,31 @@ const Statutory = ({ userEmail, userRole }) => {
       const form18HeadersResolved = formXVIIIAutofillContext
         ? resolveFormXVIIITableHeaders(currentHeaders)
         : null;
+      // Merged "Other Deductions Like EPF/…" parent must become PF (22) before payroll write.
+      if (formXVIIMPAutofillContext && Array.isArray(currentHeaders) && currentHeaders.length > 0) {
+        const repairedMpHeaders = repairFormXVIIIMPOtherDeductionsPfHeader(currentHeaders);
+        const headersChanged =
+          repairedMpHeaders.length === currentHeaders.length &&
+          repairedMpHeaders.some((h, i) => h !== currentHeaders[i]);
+        if (headersChanged) {
+          currentHeaders = repairedMpHeaders;
+          setFormFileModalData((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  tableHeaders: repairedMpHeaders,
+                  parsedTableHeaders: repairedMpHeaders,
+                }
+              : prev
+          );
+        }
+      }
       const form18MPHeadersResolved = formXVIIMPAutofillContext
         ? resolveFormXVIIIMPTableHeaders(currentHeaders)
         : null;
       const isFormXVIIMPPayrollSkipHeader = (h) => {
         if (!form18MPHeadersResolved) return false;
+        if (isFormXVIIIMPPayrollDeductionHeader(h)) return true;
         const payrollHeaders = getFormXVIIIMPPayrollSkipHeaders(form18MPHeadersResolved);
         if (!payrollHeaders.length) return false;
         const s = normalizeLooseHeaderText(h);
@@ -57875,6 +57920,7 @@ const Statutory = ({ userEmail, userRole }) => {
           (s.includes('wage') && (s.includes('rate') || s.includes('pay') || s.includes('piece'))) ||
           (s.includes('gross') && (s.includes('wage') || s.includes('earning'))) ||
           (s.includes('other') && s.includes('allowance')) ||
+          (s.includes('other') && s.includes('deduction')) ||
           (s.includes('category') && s.includes('leave')) ||
           ((s.includes('total') || s.includes('no')) && s.includes('day') && s.includes('work')) ||
           (s.includes('balance') && s.includes('leave')) ||

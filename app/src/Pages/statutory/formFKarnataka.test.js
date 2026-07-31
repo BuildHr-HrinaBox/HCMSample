@@ -256,6 +256,25 @@ describe('Form F Karnataka leave mapping', () => {
     expect(ws.getCell(1, 1).alignment?.horizontal).toBe('center');
     expect(String(ws.getCell(1, 12).value || '')).toBe('');
   });
+
+  test('ensureFormFKarnatakaTitleLayout does not rewrite Form 15 Part II titles', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form 15 Part II');
+    ws.getCell(1, 1).value = 'FORM 15';
+    ws.getCell(2, 1).value = 'PART II';
+    ws.getCell(3, 1).value = 'REGISTER OF LEAVE WITH WAGES';
+    ws.getCell(4, 1).value = '(SEE RULE 95)';
+    ws.getCell(11, 3).value = 'Name of the Worker';
+    ws.getCell(11, 7).value = 'Basic Wages';
+    ws.getCell(11, 13).value = 'Gross Wages';
+
+    const ok = ensureFormFKarnatakaTitleLayout(ws);
+    expect(ok).toBe(false);
+    expect(String(ws.getCell(1, 1).value || '')).toBe('FORM 15');
+    expect(String(ws.getCell(2, 1).value || '')).toBe('PART II');
+    expect(String(ws.getCell(3, 1).value || '')).toBe('REGISTER OF LEAVE WITH WAGES');
+    expect(String(ws.getCell(4, 1).value || '')).toBe('(SEE RULE 95)');
+  });
 });
 
 describe('Form F Karnataka leave availed identity', () => {

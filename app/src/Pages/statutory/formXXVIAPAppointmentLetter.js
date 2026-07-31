@@ -1,9 +1,17 @@
 import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
+import {
+  flattenPayrollEarningColumns,
+  readForm10GrossPayAmount,
+  readPayrollForm15WageAmounts,
+  readPayrollScalar,
+} from '../../utils/payrollEarnings';
 import { isFormXXVITamilNaduClraContext, matchesFormXXVIHint } from './formXXVITamilNaduMuster';
 import { labelMatchScore } from './form18APAccidentNotice';
 import { isForm2APChangeNoticeContext } from './form2APChangeNotice';
 
-/** AP Shops Form XXVI — Letter of Appointment [Rule 30]. Matches the official Excel narrative layout. */
+/** AP Shops Form XXVI — Letter of Appointment [Rule 30]. Header fields + employee table. */
 
 export function formXXVIAPHeaderNorm(txt) {
   return String(txt || '')
@@ -54,6 +62,38 @@ export function isFormXXVIAPAppointmentLetterContext(formHeader, rowItem, fileNa
 
 export function isFormXXVIAPHeaderFieldLayoutFormHeader(formHeader) {
   return !!formHeader?.formXXVIAPHeaderFieldLayout;
+}
+
+export function isFormXXVIAPTableLayoutFormHeader(formHeader) {
+  return !!formHeader?.formXXVIAPTableLayout;
+}
+
+/**
+ * Modal/export employee grid — appointment particulars (clauses 1–4 + To).
+ * Establishment / employer / registration stay in header fields.
+ */
+export const FORM_XXVI_AP_TABLE_HEADERS = [
+  'Name of Employee (Sri / Srimathi / Kumari)',
+  'Son / Wife / Daughter of',
+  'Aged',
+  'Date of Birth',
+  'Appointed as',
+  'With effect from',
+  'Category No.',
+  'Scale of pay / Rate of increment in wages',
+  'Total wages per day / month / week',
+  'Basic Pay',
+  'Dearness Allowance',
+  'Other Allowance',
+  'To (Name and Address of Employee)',
+];
+
+export function resolveFormXXVIAPTableHeaders(tableHeaders) {
+  const list = Array.isArray(tableHeaders)
+    ? tableHeaders.map((h) => String(h || '').trim()).filter(Boolean)
+    : [];
+  if (list.length >= FORM_XXVI_AP_TABLE_HEADERS.length - 2) return list;
+  return [...FORM_XXVI_AP_TABLE_HEADERS];
 }
 
 /**
@@ -162,13 +202,9 @@ export const FORM_XXVI_AP_TEMPLATE_SPECS = [
   }
 ];
 
+/** Header/footer only — appointment particulars render in the employee table. */
 export const FORM_XXVI_AP_FIELD_GROUPS = [
   { id: 'header', title: 'Establishment & Employer' },
-  { id: 'clause1', title: '1. Appointment particulars' },
-  { id: 'clause2', title: '2. Category' },
-  { id: 'clause3', title: '3. Scale of pay' },
-  { id: 'clause4', title: '4. Wages composition' },
-  { id: 'footer', title: 'To' }
 ];
 
 const isNarrativeBlob = (raw) => {
@@ -517,7 +553,9 @@ export function resolveFormXXVIAPHeaderFieldLayout(parsed, workbook, hints = {})
     effectiveSheetCols = accessor.effectiveSheetCols;
   }
 
-  const finalFields = buildFormXXVIAPTemplateFields(getMergedAwareCellText, effectiveSheetCols);
+  const allFields = buildFormXXVIAPTemplateFields(getMergedAwareCellText, effectiveSheetCols);
+  // Appointment particulars live in the table — keep establishment / employer / registration in header fields.
+  const finalFields = allFields.filter((f) => f.group === 'header');
   const title =
     formHeader?.title ||
     (String(sheetText).toLowerCase().includes('letter of appointment')
@@ -527,17 +565,19 @@ export function resolveFormXXVIAPHeaderFieldLayout(parsed, workbook, hints = {})
   return {
     formHeader: {
       title,
-      subtitle: formHeader?.subtitle || '',
-      reference: formHeader?.reference || '',
+      subtitle: formHeader?.subtitle || 'Letter of Appointment',
+      reference: formHeader?.reference || '[Rule 30]',
       formXXVIAPHeaderFieldLayout: true,
+      formXXVIAPTableLayout: true,
       textRows: [],
       fields: finalFields
     },
-    headers: [],
+    headers: resolveFormXXVIAPTableHeaders(parsed?.headers || hints.tableHeaders || null),
     tableData: [],
     headerRowIndex: -1,
     dataStartIndex: 0,
-    tableStartCol: 0
+    tableStartCol: 0,
+    sheetName: accessor?.sheetName || hints.preferredSheetName || null
   };
 }
 
@@ -547,16 +587,9 @@ export function applyFormXXVIAPAutofillFromEmployee(headerData, empItem, siteCon
   const emp = empItem || {};
   const establishmentText = String(siteContext.establishmentText || '').trim();
   const employerText = String(siteContext.employerText || '').trim();
-  const employeeName =
-    emp.Name || emp['Name'] || emp.EmployeeName || emp['Employee Name'] || '';
-  const fatherName =
-    emp.FatherName ||
-    emp['Father Name'] ||
-    emp.SpouseName ||
-    emp['Spouse Name'] ||
-    emp.Father_SpouseName ||
-    '';
-  const dob = emp.DateofBirth || emp['Date of Birth'] || emp.DOB || '';
+  const employeeName = resolveFormXXVIAPEmployeeName(emp);
+  const fatherName = resolveFormXXVIAPFatherHusband(emp);
+  const dob = resolveFormXXVIAPDateOfBirth(emp);
   const doj =
     emp.Dateofjoining ||
     emp['Dateofjoining'] ||
@@ -713,4 +746,513 @@ export function writeFormXXVIAPFieldsToExcelJsWorksheet(worksheet, headerFormDat
       }
     }
   });
+}
+
+function formatPayrollAmount(value) {
+  if (value == null || value === '') return '';
+  const n = Number(String(value).replace(/,/g, '').trim());
+  if (!Number.isFinite(n)) return String(value).trim();
+  return String(Math.round(n * 100) / 100);
+}
+
+export function readFormXXVIAPPayrollBasicPay(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  return formatPayrollAmount(
+    readPayrollScalar(flat, [
+      'earned_basic',
+      'basic_pay',
+      'basic',
+      'Basic',
+      'Basic Pay',
+      'Earned Basic',
+    ]) || flat.earned_basic || flat.basic_pay || flat.basic
+  );
+}
+
+export function readFormXXVIAPPayrollDearnessAllowance(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  return formatPayrollAmount(
+    readPayrollScalar(flat, ['dearness_allowance', 'Dearness Allowance', 'da', 'DA']) ||
+      flat.dearness_allowance
+  );
+}
+
+function parseFormXXVIAPMoney(value) {
+  if (value === '' || value == null) return NaN;
+  const n = Number(String(value).replace(/,/g, '').trim());
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** Other Allowance = gross_pay − basic − hra */
+export function computeFormXXVIAPOtherAllowance(grossPay, basic, hra) {
+  const g = parseFormXXVIAPMoney(grossPay);
+  if (!Number.isFinite(g)) return '';
+  const b = parseFormXXVIAPMoney(basic);
+  const h = parseFormXXVIAPMoney(hra);
+  const known = (Number.isFinite(b) ? b : 0) + (Number.isFinite(h) ? h : 0);
+  const other = Math.round((g - known) * 100) / 100;
+  return Number.isFinite(other) ? other : '';
+}
+
+export function readFormXXVIAPPayrollHra(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const wages = readPayrollForm15WageAmounts(payrollRow);
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  return formatPayrollAmount(
+    readPayrollScalar(flat, [
+      'hra',
+      'HRA',
+      'hra_fbp',
+      'house_rent_allowance',
+      'House Rent Allowance',
+    ]) ||
+      wages.hra_fbp ||
+      wages.hra ||
+      flat.hra_fbp ||
+      flat.hra
+  );
+}
+
+/** Other Allowance ← gross_pay − basic − hra (Sample Payroll). */
+export function readFormXXVIAPPayrollOtherAllowance(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const gross =
+    readForm10GrossPayAmount(payrollRow) ||
+    readFormXXVIAPPayrollTotalWages(payrollRow);
+  const basic = readFormXXVIAPPayrollBasicPay(payrollRow);
+  const hra = readFormXXVIAPPayrollHra(payrollRow);
+  const computed = computeFormXXVIAPOtherAllowance(gross, basic, hra);
+  return computed === '' ? '' : formatPayrollAmount(computed);
+}
+
+export function readFormXXVIAPPayrollTotalWages(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const grossFromForm10 = readForm10GrossPayAmount(payrollRow);
+  if (grossFromForm10 !== '' && grossFromForm10 != null) {
+    return formatPayrollAmount(grossFromForm10);
+  }
+  const gross = readPayrollScalar(flat, [
+    'gross_pay',
+    'Gross Pay',
+    'grossPay',
+    'total_earnings',
+    'monthly_gross_amount',
+  ]);
+  if (gross != null && String(gross).trim() !== '') return formatPayrollAmount(gross);
+  const basic = Number(readFormXXVIAPPayrollBasicPay(payrollRow) || 0);
+  const da = Number(readFormXXVIAPPayrollDearnessAllowance(payrollRow) || 0);
+  const hra = Number(readFormXXVIAPPayrollHra(payrollRow) || 0);
+  const sum = basic + da + hra;
+  return sum > 0 ? formatPayrollAmount(sum) : '';
+}
+
+function resolveFormXXVIAPEmployeeAge(emp = {}, dobRaw = '') {
+  if (emp.Age || emp['Age']) return String(emp.Age || emp['Age']).trim();
+  if (!dobRaw) return '';
+  const d = new Date(dobRaw);
+  if (Number.isNaN(d.getTime())) return '';
+  const today = new Date();
+  let age = today.getFullYear() - d.getFullYear();
+  const md = today.getMonth() - d.getMonth();
+  if (md < 0 || (md === 0 && today.getDate() < d.getDate())) age -= 1;
+  if (age >= 0 && age < 120) return String(age);
+  return '';
+}
+
+/** Prefer EmployeeName from People / Sample Payroll. */
+export function resolveFormXXVIAPEmployeeName(emp = {}) {
+  const fromEmployeeName = String(
+    emp.EmployeeName ||
+      emp['EmployeeName'] ||
+      emp['Employee Name'] ||
+      emp.Employee_Name ||
+      emp.employee_name ||
+      emp.DisplayName ||
+      emp['Display Name'] ||
+      emp.displayName ||
+      ''
+  ).trim();
+  if (fromEmployeeName) return fromEmployeeName;
+  const fn = String(
+    emp.FirstName || emp['FirstName'] || emp.firstName || emp['First Name'] || ''
+  ).trim();
+  const ln = String(
+    emp.LastName || emp['LastName'] || emp.lastName || emp['Last Name'] || ''
+  ).trim();
+  if (fn && ln) return `${fn} ${ln}`;
+  if (fn || ln) return fn || ln;
+  return String(emp.Name || emp['Name'] || emp.full_name || emp['Full Name'] || '').trim();
+}
+
+export function resolveFormXXVIAPDateOfBirth(emp = {}) {
+  return String(
+    emp.Date_of_birth ||
+      emp['Date_of_birth'] ||
+      emp.DateofBirth ||
+      emp['Date of Birth'] ||
+      emp.Dateofbirth ||
+      emp.date_of_birth ||
+      emp.DOB ||
+      emp.dob ||
+      ''
+  ).trim();
+}
+
+function resolveFormXXVIAPFatherHusband(emp = {}) {
+  return String(
+    emp.FatherName ||
+      emp['Father Name'] ||
+      emp.Father_s_Name ||
+      emp['Father_s_Name'] ||
+      emp.SpouseName ||
+      emp['Spouse Name'] ||
+      emp.Father_SpouseName ||
+      emp['Father/Husband Name'] ||
+      ''
+  ).trim();
+}
+
+function resolveFormXXVIAPToAddress(emp = {}) {
+  const name = resolveFormXXVIAPEmployeeName(emp);
+  const address = String(
+    emp.PresentAddress ||
+      emp['Present Address'] ||
+      emp.Address ||
+      emp['Address'] ||
+      emp.PermanentAddress ||
+      emp['Permanent Address'] ||
+      ''
+  ).trim();
+  if (name && address) return `${name}\n${address}`;
+  return name || address || '';
+}
+
+export function isFormXXVIAPEmployeeNameHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  if (/name\s+and\s+address\s+of\s+employee|^to\b/.test(s)) return false;
+  return /name\s+of\s+employee|sri\s*\/\s*srimathi|kumari/.test(s);
+}
+
+export function isFormXXVIAPFatherHusbandHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /son\s*\/\s*wife\s*\/\s*daughter\s+of/.test(s);
+}
+
+export function isFormXXVIAPAgeHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /^aged$/.test(s) || /^age$/.test(s);
+}
+
+export function isFormXXVIAPDateOfBirthHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /date\s+of\s+birth/.test(s);
+}
+
+export function isFormXXVIAPDesignationHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /appointed\s+as|designation/.test(s);
+}
+
+export function isFormXXVIAPAppointmentDateHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /with\s+effect\s+from|date\s+of\s+joining|appointment\s+date/.test(s);
+}
+
+export function isFormXXVIAPCategoryHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /category\s+no/.test(s);
+}
+
+export function isFormXXVIAPScaleOfPayHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /scale\s+of\s+pay|rate\s+of\s+increment/.test(s);
+}
+
+export function isFormXXVIAPTotalWagesHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /total\s+wages|per\s+day\s*\/\s*month\s*\/\s*week/.test(s);
+}
+
+export function isFormXXVIAPBasicPayHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /^basic\s+pay$/.test(s) || /basic\s+pay/.test(s);
+}
+
+export function isFormXXVIAPDearnessAllowanceHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /dearness\s+allowance/.test(s);
+}
+
+export function isFormXXVIAPOtherAllowanceHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /other\s+allowance/.test(s);
+}
+
+export function isFormXXVIAPToAddressHeader(h) {
+  const s = formXXVIAPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  return /^to\b|name\s+and\s+address\s+of\s+employee/.test(s);
+}
+
+/** Map one employee (+ optional payroll) onto Form XXVI AP table columns. */
+export function applyFormXXVIAPEmployeeToRow(row, emp, headers, helpers = {}) {
+  if (!row || !emp || !Array.isArray(headers)) return row;
+  const {
+    sanitizeValue = (v) => String(v ?? '').trim(),
+    formatStatutoryDateDisplay = (v) => String(v || '').trim(),
+    payrollRow = null,
+  } = helpers;
+  const out = { ...row };
+  const employeeSource =
+    payrollRow && !payrollRow.fetch_error
+      ? {
+          ...emp,
+          EmployeeName:
+            emp.EmployeeName ||
+            emp['Employee Name'] ||
+            emp.Name ||
+            payrollRow.EmployeeName ||
+            payrollRow.employee_name ||
+            payrollRow['Employee Name'] ||
+            payrollRow.full_name ||
+            '',
+          Date_of_birth:
+            emp.Date_of_birth ||
+            emp.DateofBirth ||
+            emp['Date of Birth'] ||
+            payrollRow.Date_of_birth ||
+            payrollRow.DateofBirth ||
+            payrollRow.date_of_birth ||
+            '',
+        }
+      : emp;
+  const employeeName = resolveFormXXVIAPEmployeeName(employeeSource);
+  const fatherName = resolveFormXXVIAPFatherHusband(emp);
+  const dobRaw = resolveFormXXVIAPDateOfBirth(employeeSource);
+  const dojRaw =
+    emp.Dateofjoining ||
+    emp['Dateofjoining'] ||
+    emp['Date of Joining'] ||
+    emp.DateofJoining ||
+    '';
+  const designation = emp.Designation || emp['Designation'] || '';
+  const category =
+    emp.Category ||
+    emp['Category'] ||
+    emp.CategoryNo ||
+    emp['Category No'] ||
+    emp.EmployeeCategory ||
+    '';
+  const scaleOfPay =
+    emp.ScaleOfPay ||
+    emp['Scale of Pay'] ||
+    emp.PayScale ||
+    emp['Pay Scale'] ||
+    emp.RateOfIncrement ||
+    '';
+
+  headers.forEach((header) => {
+    if (isFormXXVIAPEmployeeNameHeader(header)) {
+      out[header] = sanitizeValue(employeeName);
+      return;
+    }
+    if (isFormXXVIAPFatherHusbandHeader(header)) {
+      out[header] = sanitizeValue(fatherName);
+      return;
+    }
+    if (isFormXXVIAPAgeHeader(header)) {
+      out[header] = sanitizeValue(resolveFormXXVIAPEmployeeAge(emp, dobRaw));
+      return;
+    }
+    if (isFormXXVIAPDateOfBirthHeader(header)) {
+      out[header] = sanitizeValue(formatStatutoryDateDisplay(dobRaw));
+      return;
+    }
+    if (isFormXXVIAPDesignationHeader(header)) {
+      out[header] = sanitizeValue(designation);
+      return;
+    }
+    if (isFormXXVIAPAppointmentDateHeader(header)) {
+      out[header] = sanitizeValue(formatStatutoryDateDisplay(dojRaw));
+      return;
+    }
+    if (isFormXXVIAPCategoryHeader(header)) {
+      out[header] = sanitizeValue(category);
+      return;
+    }
+    if (isFormXXVIAPScaleOfPayHeader(header)) {
+      out[header] = sanitizeValue(scaleOfPay);
+      return;
+    }
+    if (isFormXXVIAPTotalWagesHeader(header)) {
+      out[header] = sanitizeValue(readFormXXVIAPPayrollTotalWages(payrollRow));
+      return;
+    }
+    if (isFormXXVIAPBasicPayHeader(header)) {
+      out[header] = sanitizeValue(readFormXXVIAPPayrollBasicPay(payrollRow));
+      return;
+    }
+    if (isFormXXVIAPDearnessAllowanceHeader(header)) {
+      out[header] = sanitizeValue(readFormXXVIAPPayrollDearnessAllowance(payrollRow));
+      return;
+    }
+    if (isFormXXVIAPOtherAllowanceHeader(header)) {
+      out[header] = sanitizeValue(readFormXXVIAPPayrollOtherAllowance(payrollRow));
+      return;
+    }
+    if (isFormXXVIAPToAddressHeader(header)) {
+      out[header] = sanitizeValue(resolveFormXXVIAPToAddress(employeeSource));
+    }
+  });
+  return out;
+}
+
+/** Map modal table row cells onto form_xxvi_ap_* header keys for Excel export. */
+export function mergeFormXXVIAPTableRowIntoHeaderData(
+  headerData,
+  row,
+  headers = FORM_XXVI_AP_TABLE_HEADERS
+) {
+  const out = headerData && typeof headerData === 'object' ? { ...headerData } : {};
+  const hdrs = resolveFormXXVIAPTableHeaders(headers);
+  const read = (pred) => {
+    const header = hdrs.find(pred);
+    if (!header || !row || typeof row !== 'object') return '';
+    return String(row[header] ?? '').trim();
+  };
+  const setIf = (key, value) => {
+    const text = String(value ?? '').trim();
+    if (!text || !key) return;
+    out[key] = text;
+  };
+
+  setIf('form_xxvi_ap_employee_name', read(isFormXXVIAPEmployeeNameHeader));
+  setIf('form_xxvi_ap_father_husband', read(isFormXXVIAPFatherHusbandHeader));
+  setIf('form_xxvi_ap_age', read(isFormXXVIAPAgeHeader));
+  setIf('form_xxvi_ap_date_of_birth', read(isFormXXVIAPDateOfBirthHeader));
+  setIf('form_xxvi_ap_designation', read(isFormXXVIAPDesignationHeader));
+  setIf('form_xxvi_ap_appointment_date', read(isFormXXVIAPAppointmentDateHeader));
+  setIf('form_xxvi_ap_category_no', read(isFormXXVIAPCategoryHeader));
+  setIf('form_xxvi_ap_scale_of_pay', read(isFormXXVIAPScaleOfPayHeader));
+  setIf('form_xxvi_ap_total_wages', read(isFormXXVIAPTotalWagesHeader));
+  setIf('form_xxvi_ap_basic_pay', read(isFormXXVIAPBasicPayHeader));
+  setIf('form_xxvi_ap_dearness_allowance', read(isFormXXVIAPDearnessAllowanceHeader));
+  setIf('form_xxvi_ap_other_allowance', read(isFormXXVIAPOtherAllowanceHeader));
+  setIf('form_xxvi_ap_to_address', read(isFormXXVIAPToAddressHeader));
+  return out;
+}
+
+function formXXVIAPRowHasExportData(row, headers) {
+  if (!row || typeof row !== 'object') return false;
+  const hdrs = resolveFormXXVIAPTableHeaders(headers);
+  return hdrs.some((h) => String(row[h] ?? '').trim() !== '');
+}
+
+function sanitizeFormXXVIAPHeaderFormData(headerFormData) {
+  const out = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
+  Object.keys(out).forEach((key) => {
+    if (out[key] == null) return;
+    out[key] = String(out[key]).trim();
+  });
+  return out;
+}
+
+function resolveFormXXVIAPEmployeeDownloadBaseName(row, headers, index) {
+  const hdrs = resolveFormXXVIAPTableHeaders(headers);
+  const nameHeader = hdrs.find(isFormXXVIAPEmployeeNameHeader);
+  const raw = nameHeader ? String(row?.[nameHeader] ?? '').split(/\r?\n/)[0].trim() : '';
+  const safe = String(raw || `Employee_${index + 1}`)
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 60);
+  return safe || `Employee_${index + 1}`;
+}
+
+function allocateUniqueFormXXVIAPDownloadFileName(baseName, usedNames) {
+  const root = String(baseName || 'Employee').replace(/\.xlsx?$/i, '');
+  const count = usedNames.get(root) || 0;
+  usedNames.set(root, count + 1);
+  const suffix = count > 0 ? `_${count + 1}` : '';
+  return `Form_XXVI_AP_${root}${suffix}.xlsx`;
+}
+
+/** One appointment letter XLSX per employee, packaged as ZIP. */
+export async function buildFormXXVIAPPerEmployeeDownload({
+  templateArrayBuffer,
+  mappedData,
+  headersToUse,
+  parsedFormHeader,
+  formFileName,
+  headerFormData,
+  sheetNameHint,
+}) {
+  if (!templateArrayBuffer) {
+    throw new Error('Original form template buffer is required for Form XXVI AP export.');
+  }
+
+  const hdrs = resolveFormXXVIAPTableHeaders(headersToUse);
+  const exportRows = (Array.isArray(mappedData) ? mappedData : []).filter((row) =>
+    formXXVIAPRowHasExportData(row, hdrs)
+  );
+  const rowsForZip = exportRows.length > 0 ? exportRows : [null];
+  const baseHeaderData = sanitizeFormXXVIAPHeaderFormData(headerFormData);
+
+  // Export must include clause/footer particulars (modal UI keeps them only in the table).
+  const formXXVIFields = FORM_XXVI_AP_TEMPLATE_SPECS.map((spec) => {
+    const fromParsed = Array.isArray(parsedFormHeader?.fields)
+      ? parsedFormHeader.fields.find((f) => f?.key === spec.key)
+      : null;
+    return {
+      key: spec.key,
+      label: fromParsed?.label || spec.label,
+      group: spec.group,
+      fieldType: spec.fieldType || 'text',
+      ...(fromParsed || {}),
+      key: spec.key,
+      label: fromParsed?.label || spec.label,
+      group: spec.group,
+    };
+  });
+  const headerForWrite = {
+    ...(parsedFormHeader || {}),
+    fields: formXXVIFields,
+    formXXVIAPHeaderFieldLayout: true,
+    formXXVIAPTableLayout: true,
+  };
+
+  const zip = new JSZip();
+  const usedNames = new Map();
+  for (let i = 0; i < rowsForZip.length; i += 1) {
+    const row = rowsForZip[i];
+    const mergedHeaderData = mergeFormXXVIAPTableRowIntoHeaderData(baseHeaderData, row, hdrs);
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(templateArrayBuffer);
+    const sheetCandidates = Array.isArray(workbook.worksheets) ? workbook.worksheets : [];
+    const preferred = String(sheetNameHint || '').trim();
+    const worksheet =
+      (preferred && sheetCandidates.find((ws) => String(ws?.name || '').trim() === preferred)) ||
+      sheetCandidates.find((ws) => /appointment|letter\s+of\s+appointment/i.test(String(ws?.name || ''))) ||
+      sheetCandidates.find((ws) => /xxvi/i.test(String(ws?.name || ''))) ||
+      sheetCandidates[0] ||
+      null;
+    if (!worksheet) throw new Error('Template worksheet not found.');
+    writeFormXXVIAPFieldsToExcelJsWorksheet(worksheet, mergedHeaderData, headerForWrite);
+    const out = await workbook.xlsx.writeBuffer();
+    const xlsxBytes = out instanceof Uint8Array ? out : new Uint8Array(out);
+    const baseName = resolveFormXXVIAPEmployeeDownloadBaseName(row, hdrs, i);
+    zip.file(allocateUniqueFormXXVIAPDownloadFileName(baseName, usedNames), xlsxBytes);
+    if (i > 0 && i % 15 === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_XXVI_AP')
+    .replace(/\.xlsx?$/i, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return {
+    blob: await zip.generateAsync({ type: 'blob', compression: 'STORE' }),
+    fileName: `${zipBase}_Employees.zip`,
+  };
 }

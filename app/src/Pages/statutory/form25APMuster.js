@@ -288,7 +288,151 @@ export function resolveForm25APMusterDayCount(parsedHeaders, dayColumnMap, month
     return Math.min(31, fromMonth);
   }
   if (!fromHeaders && !fromSheet) return 31;
-  return Math.min(31, Math.max(fromHeaders, fromSheet, 31));
+  return Math.min(31, Math.max(fromHeaders, fromSheet));
+}
+
+/** Drop day columns beyond the selected calendar month (e.g. no 31 for April). */
+export function filterForm25APMusterHeadersForMonthDays(headers, monthDayCount) {
+  const days = Math.min(Math.max(Number(monthDayCount) || 31, 1), 31);
+  return (Array.isArray(headers) ? headers : []).filter((h) => {
+    const day = resolveForm25APMusterDayNumberFromHeader(h);
+    if (day >= 1 && day <= 31) return day <= days;
+    return true;
+  });
+}
+
+function form25APColLettersToNumber(letters) {
+  let n = 0;
+  for (const ch of String(letters || '').toUpperCase()) {
+    if (ch < 'A' || ch > 'Z') return 0;
+    n = n * 26 + (ch.charCodeAt(0) - 64);
+  }
+  return n;
+}
+
+function form25APNumberToColLetters(num) {
+  let n = Number(num) || 0;
+  let s = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+/**
+ * Shrink / drop Excel merges that spill into columns past lastVisibleCol
+ * (e.g. month-year band that spanned days 16–31 when day 31 is hidden).
+ */
+export function shrinkForm25APMusterMergesPastColumn(worksheet, lastVisibleCol) {
+  const merges = worksheet?.model?.merges;
+  if (!worksheet || !Array.isArray(merges) || !Number.isFinite(lastVisibleCol) || lastVisibleCol < 1) {
+    return;
+  }
+  const snapshot = [...merges];
+  snapshot.forEach((range) => {
+    const parts = String(range || '').split(':');
+    if (parts.length !== 2) return;
+    const start = parts[0].match(/^([A-Z]+)(\d+)$/i);
+    const end = parts[1].match(/^([A-Z]+)(\d+)$/i);
+    if (!start || !end) return;
+    const c1 = form25APColLettersToNumber(start[1]);
+    const c2 = form25APColLettersToNumber(end[1]);
+    const r1 = parseInt(start[2], 10);
+    const r2 = parseInt(end[2], 10);
+    if (!c1 || !c2 || c2 <= lastVisibleCol) return;
+    try {
+      worksheet.unMergeCells(range);
+    } catch (_) {
+      /* ignore */
+    }
+    if (c1 > lastVisibleCol) return;
+    const newEnd = `${form25APNumberToColLetters(lastVisibleCol)}${r2}`;
+    const newStart = `${form25APNumberToColLetters(c1)}${r1}`;
+    if (newStart === newEnd) return;
+    try {
+      worksheet.mergeCells(`${newStart}:${newEnd}`);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+}
+
+/**
+ * Hide day columns beyond the selected month so they do not appear on download
+ * (e.g. hide day 31 for April/June/September/November).
+ * dayColumnMap values are 0-based sheet columns.
+ */
+export function hideForm25APMusterExtraDayColumns(
+  worksheet,
+  dayColumnMap,
+  monthDayCount,
+  { headerRow = 1, clearRowTo = 120 } = {}
+) {
+  if (!worksheet || !dayColumnMap || typeof dayColumnMap.has !== 'function') return [];
+  const days = Math.min(Math.max(Number(monthDayCount) || 31, 1), 31);
+  const hiddenCols = [];
+  const rowTo = Math.max(1, Number(clearRowTo) || 1);
+  const rowFrom = Math.max(1, Number(headerRow) || 1);
+  for (let day = days + 1; day <= 31; day += 1) {
+    if (!dayColumnMap.has(day)) continue;
+    const col = Number(dayColumnMap.get(day)) + 1;
+    if (!Number.isFinite(col) || col < 1) continue;
+    hiddenCols.push(col);
+    for (let r = Math.max(1, rowFrom - 1); r <= rowTo; r += 1) {
+      try {
+        worksheet.getCell(r, col).value = null;
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    try {
+      const column = worksheet.getColumn(col);
+      column.hidden = true;
+      column.width = 0.1;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  if (hiddenCols.length > 0) {
+    shrinkForm25APMusterMergesPastColumn(worksheet, Math.min(...hiddenCols) - 1);
+  }
+  return hiddenCols;
+}
+
+/**
+ * Keep Remarks header, clear all body values on download.
+ * remarksCol is 1-based Excel column.
+ */
+export function clearForm25APMusterRemarksColumn(
+  worksheet,
+  remarksCol,
+  { headerRow = 1, clearRowTo = 120 } = {}
+) {
+  if (!worksheet || !Number.isFinite(remarksCol) || remarksCol < 1) return;
+  const rowTo = Math.max(1, Number(clearRowTo) || 1);
+  const hr = Math.max(1, Number(headerRow) || 1);
+  for (let r = hr + 1; r <= rowTo; r += 1) {
+    try {
+      worksheet.getCell(r, remarksCol).value = null;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  // Also clear the numeric day-marker row immediately under the Remarks label when present.
+  for (let r = Math.max(1, hr - 1); r <= hr + 2; r += 1) {
+    if (r === hr) continue;
+    const raw = String(worksheet.getCell(r, remarksCol)?.value ?? '').trim();
+    if (!raw || /^remarks?$/i.test(raw)) continue;
+    // Leave day-number marker rows alone only for day columns; Remarks body should stay empty.
+    if (/^\d{1,2}$/.test(raw)) continue;
+    try {
+      worksheet.getCell(r, remarksCol).value = null;
+    } catch (_) {
+      /* ignore */
+    }
+  }
 }
 
 export function headersIndicateForm25APMusterTable(tableHeaders) {
@@ -327,7 +471,13 @@ function buildForm25ContextBlob(formHeader, rowItem, fileName, tableHeaders, she
 /** Tamil Nadu Form 25 — festival holidays block + native Excel layout (not AP Muster). */
 export function isForm25TamilNaduContext(partsOrBlob) {
   const p = String(partsOrBlob || '').toLowerCase();
-  return /tamil[\s._-]*nadu|tamilnadu|form_25[_\s-]*tamil|form[\s._-]*25[_\s-]*tamil/.test(p);
+  if (/tamil[\s._-]*nadu|tamilnadu|form_25[_\s-]*tamil|form[\s._-]*25[_\s-]*tamil/.test(p)) {
+    return true;
+  }
+  // FORM No. 25 — Muster Roll and Register of Compensatory Holidays (TN Factories Rules 77(4), 103)
+  if (/muster\s+roll\s+and\s+register\s+of\s+compensatory\s+holidays/.test(p)) return true;
+  if (/\bform[\s._-]*25\b/.test(p) && /compensatory\s+holidays/.test(p)) return true;
+  return false;
 }
 
 export function form25HasFestivalHolidayHeaderBlock(partsOrBlob) {
@@ -462,6 +612,9 @@ export function isForm25APPeriodOfWorkHeader(h) {
   return /^period\s+of\s+work$/i.test(form25APMusterHeaderNorm(h));
 }
 
+/** Default Period of work for AP Form 25 Muster autofill. */
+export const FORM_25_AP_PERIOD_OF_WORK_DEFAULT = '9 AM to 5 PM';
+
 /** Shift name or "start - end" for Form 25 AP Muster "Period of work" column. */
 export function formatForm25APPeriodOfWorkValue({ shiftName = '', shiftStart = '', shiftEnd = '' } = {}) {
   const name = String(shiftName || '').trim();
@@ -473,17 +626,17 @@ export function formatForm25APPeriodOfWorkValue({ shiftName = '', shiftStart = '
   }
   if (start && start !== '-') return start;
   if (end && end !== '-') return end;
-  return '';
+  return FORM_25_AP_PERIOD_OF_WORK_DEFAULT;
 }
 
 export function isForm25APMusterSkipAutofillHeader(h, normalizeLooseHeaderText) {
   const s = normalizeLooseHeaderText(h);
   if (!s) return false;
   if (isForm25APMusterDayHeaderKey(h)) return false;
+  if (isForm25APPeriodOfWorkHeader(h)) return false;
   if (/^group$/.test(s.replace(/\s+/g, ' ').trim())) return true;
   if (/relay/.test(s)) return true;
   if (/shift/.test(s) && /number/.test(s)) return true;
-  if (/period\s+of\s+work/.test(s)) return true;
   if (/^remarks?$/.test(s.replace(/\s+/g, ' ').trim())) return true;
   return false;
 }

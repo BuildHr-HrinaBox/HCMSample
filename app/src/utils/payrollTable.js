@@ -14,9 +14,10 @@ import {
 const payrollTableInflight = new Map();
 const PAYROLL_DETAIL_BATCH_DELAY_MS = 350;
 const PAYROLL_DETAIL_BATCH_RETRIES = 3;
-/** Load salary breakdown / Sample Payroll: 25 employees per Zoho detail call, one call per minute. */
+/** Load salary breakdown / Sample Payroll: 25 employees per Zoho detail call. */
 const PAYRUN_DETAIL_BATCH_SIZE = 25;
-const PAYRUN_DETAIL_BATCH_INTERVAL_MS = 60_000;
+/** Short gap between Zoho detail batches — keep UI responsive without 60s stalls. */
+const PAYRUN_DETAIL_BATCH_INTERVAL_MS = 3_000;
 /** Above this count, server-side month batches hit Catalyst timeouts — use per-employee detail. */
 const PAYRUN_DETAIL_ONLY_THRESHOLD = 20;
 
@@ -348,7 +349,7 @@ async function enrichPayrollRowsWithMonthDetailBatches(
   });
 }
 
-/** Pay-run detail for Basic / HRA — 25 employees per API call, one call per minute. */
+/** Pay-run detail for Basic / HRA — 25 employees per API call, short pause between batches. */
 async function enrichPayrollRowsWithPayrunDetail(
   rows,
   payrollRunId,

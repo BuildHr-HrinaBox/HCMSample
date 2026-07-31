@@ -715,17 +715,18 @@
 .nd-metric {
   background: var(--nd-card);
   border-radius: var(--nd-radius);
-  padding: 16px 14px;
+  padding: 16px 10px;
   box-shadow: var(--nd-shadow);
   display: flex;
-  gap: 12px;
+  gap: 8px;
   align-items: flex-start;
   min-width: 0;
+  overflow: hidden;
 }
 
 .nd-metric-icon-wrap {
-  width: 48px;
-  height: 48px;
+  width: 40px;
+  height: 40px;
   border-radius: 12px;
   display: flex;
   align-items: center;
@@ -758,14 +759,17 @@
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  flex: 1;
 }
 
 .nd-metric-label {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--nd-text-muted);
   font-weight: 500;
   white-space: nowrap;
   line-height: 1.25;
+  overflow: hidden;
+  text-overflow: clip;
 }
 
 .nd-metric-value {

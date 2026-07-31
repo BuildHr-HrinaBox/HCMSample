@@ -3,7 +3,8 @@ import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statut
 import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
 
 export function isForm26NilMonthLineValue(v) {
-  return /^nil\s+for\s+the\s+month/i.test(String(v ?? '').trim());
+  const text = String(v ?? '').trim();
+  return /^nil\s+for\s+the\s+month/i.test(text) || /^nill?\s+of\s+the\s+month/i.test(text);
 }
 
 export function findForm26ACalendarYearHeader(headers) {
@@ -213,15 +214,11 @@ export async function buildForm26AWorkbookWithTemplateStyles({
       const endColIdx =
         orderedCols[Math.min(nilSpanInfo.startIdx + nilSpanInfo.span - 1, orderedCols.length - 1)];
       if (startColIdx != null && endColIdx != null && endColIdx >= startColIdx) {
+        // Leave Calendar Year blank on nil-month rows (year is already in the nil line).
         if (calendarHeader) {
           const calIdx = hdrs.indexOf(calendarHeader);
           if (calIdx >= 0 && orderedCols[calIdx] != null) {
-            const calVal = sanitizeForm26AExportCell(
-              Array.isArray(rowObj) ? rowValues[calIdx] : rowObj?.[calendarHeader],
-              calendarHeader,
-              calendarHeader
-            );
-            if (calVal !== '') worksheet.getCell(targetRowNum, orderedCols[calIdx]).value = String(calVal);
+            worksheet.getCell(targetRowNum, orderedCols[calIdx]).value = '';
           }
         }
         for (let c = startColIdx; c <= endColIdx; c += 1) {

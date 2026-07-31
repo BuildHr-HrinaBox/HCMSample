@@ -648,6 +648,28 @@
   background: #dbeafe;
   color: #1e3a8a;
 }
+
+/* checklistbulk_function due dates (after .selected so pink wins) */
+.calendar-day.has-due:not(.selected) {
+  background: #fce7f3;
+  color: #9d174d;
+  border-color: #f9a8d4;
+  font-weight: 600;
+}
+
+.calendar-day.has-due:not(.selected):hover {
+  background: #fbcfe8;
+  border-color: #f472b6;
+}
+
+.calendar-day.has-due.selected,
+.calendar-day.today.has-due.selected {
+  background: #fce7f3;
+  color: #9d174d;
+  font-weight: 600;
+  border-color: #ec4899;
+  box-shadow: none;
+}
   
 .calendar-day.empty {
   cursor: default;

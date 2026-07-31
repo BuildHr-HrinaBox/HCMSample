@@ -521,24 +521,40 @@ export function getPayrollBulkRowsForAutofill() {
 /** Let the browser paint and process scroll/input before heavy autofill work continues. */
 export function yieldToMain() {
   return new Promise((resolve) => {
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(resolve);
-      });
+    const sched =
+      typeof window !== 'undefined' && window.scheduler && typeof window.scheduler.yield === 'function'
+        ? window.scheduler
+        : null;
+    if (sched) {
+      sched.yield().then(resolve, () => setTimeout(resolve, 0));
       return;
     }
+    // Prefer a macrotask so scroll/wheel handlers can run between autofill chunks.
     setTimeout(resolve, 0);
   });
 }
 
+/** Wait while the UI is busy (e.g. user scrolling the autofill modal). */
+export async function waitWhileUiBusy(isUiBusy, idleMs = 80) {
+  if (typeof isUiBusy !== 'function') return;
+  let spins = 0;
+  while (isUiBusy() && spins < 120) {
+    spins += 1;
+    await new Promise((resolve) => setTimeout(resolve, idleMs));
+  }
+}
+
 /** Run a synchronous per-item handler in chunks so scroll/input stay responsive. */
-export async function processInChunks(items, chunkSize, handler) {
+export async function processInChunks(items, chunkSize, handler, options = {}) {
   const list = Array.isArray(items) ? items : [];
   const size = Math.max(1, chunkSize || 1);
+  const isUiBusy = typeof options.isUiBusy === 'function' ? options.isUiBusy : null;
   for (let i = 0; i < list.length; i += 1) {
+    if (isUiBusy) await waitWhileUiBusy(isUiBusy);
     handler(list[i], i);
     if ((i + 1) % size === 0) {
       await yieldToMain();
+      if (isUiBusy) await waitWhileUiBusy(isUiBusy);
     }
   }
   if (list.length % size !== 0) {
@@ -716,7 +732,8 @@ export function fetchLeaveData(options = {}) {
   if (!force && cached) return Promise.resolve(cached);
 
   const inflightKey = leaveCacheKey(fromDate, toDate, unit);
-  if (!force && leaveInflight.has(inflightKey)) {
+  // Reuse in-flight even when force — avoids duplicate Zoho leave calls during autofill.
+  if (leaveInflight.has(inflightKey)) {
     return leaveInflight.get(inflightKey);
   }
 

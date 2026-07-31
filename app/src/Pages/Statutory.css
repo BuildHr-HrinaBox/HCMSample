@@ -2120,9 +2120,10 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
     flex: 1;
     min-height: 0;
     overflow-x: hidden;
-    overflow-y: auto;
+    overflow-y: auto !important;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
+    overflow-anchor: none;
   }
 
   .form-file-modal-body .form-file-modal-excel-panel {

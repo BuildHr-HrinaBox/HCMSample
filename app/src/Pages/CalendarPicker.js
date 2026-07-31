@@ -1,6 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import './CalendarPicker.css';
-import { fetchAllowedActCategoriesFromSites, getActCategoryFromActSector } from '../utils/siteInchargeScope';
+import {
+  fetchInchargeDisplayScopeFromSites,
+  getActCategoryFromActSector,
+  industryLabelToActCategory,
+  sectorMatchesInchargeSiteIndustries,
+  statesFieldMatchesInchargeSiteStates,
+} from '../utils/siteInchargeScope';
 
 const CalendarPicker = ({ userEmail, userRole }) => {
   // Initialize with current date and year
@@ -28,7 +34,12 @@ const CalendarPicker = ({ userEmail, userRole }) => {
   // State for statutory master data (from statutorymaster_function)
   const [statutoryMasterData, setStatutoryMasterData] = useState([]);
   const [loadingStatutoryMaster, setLoadingStatutoryMaster] = useState(false);
-  const [allowedActCategoryList, setAllowedActCategoryList] = useState(null);
+  const [inchargeDisplayScope, setInchargeDisplayScope] = useState({
+    ready: false,
+    actCategories: null,
+    industryLabels: null,
+    stateLabels: null,
+  });
 
   const monthNames = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -37,6 +48,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
 
   const dayNames = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
 
+  const allowedActCategoryList = inchargeDisplayScope.actCategories;
   const hasSiteBasedScope = Array.isArray(allowedActCategoryList) && allowedActCategoryList.length > 0;
   
   // Check if user is admin (App Administrator role)
@@ -45,13 +57,80 @@ const CalendarPicker = ({ userEmail, userRole }) => {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const cats = await fetchAllowedActCategoriesFromSites(userEmail);
-      if (!cancelled) setAllowedActCategoryList(cats);
+      setInchargeDisplayScope({
+        ready: false,
+        actCategories: null,
+        industryLabels: null,
+        stateLabels: null,
+      });
+      try {
+        const scope = await fetchInchargeDisplayScopeFromSites(userEmail);
+        if (!cancelled) {
+          setInchargeDisplayScope({
+            ready: true,
+            actCategories: scope.actCategories,
+            industryLabels: scope.industryLabels,
+            stateLabels: scope.stateLabels,
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setInchargeDisplayScope({
+            ready: true,
+            actCategories: null,
+            industryLabels: null,
+            stateLabels: null,
+          });
+        }
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, [userEmail]);
+
+  /**
+   * Site-incharge filter (aligned with Statutory / Act Description):
+   * - act category from Site Management Industry (factories / shops / clra)
+   * - reject sectors that clearly belong to another industry
+   * - when row has a state, it must match the incharge site state(s)
+   */
+  const rowMatchesInchargeSiteScope = (row) => {
+    if (!hasSiteBasedScope) return true;
+    const act = row?.act || row?.Act || '';
+    const sector = row?.sector || row?.Sector || '';
+    const cat = getActCategoryFromActSector(act, sector);
+    if (!allowedActCategoryList.includes(cat)) return false;
+
+    // Sector clearly maps to a different industry (e.g. Shops row on a Factories site)
+    if (String(sector || '').trim()) {
+      const sectorCat =
+        industryLabelToActCategory(sector) || getActCategoryFromActSector('', sector);
+      if (sectorCat && sectorCat !== 'other' && !allowedActCategoryList.includes(sectorCat)) {
+        return false;
+      }
+      const inds = inchargeDisplayScope.industryLabels;
+      if (
+        inds &&
+        inds.length > 0 &&
+        sectorCat &&
+        sectorCat !== 'other' &&
+        !sectorMatchesInchargeSiteIndustries(sector, inds)
+      ) {
+        return false;
+      }
+    }
+
+    const sts = inchargeDisplayScope.stateLabels;
+    if (sts && sts.length > 0) {
+      const stateField = row?.states || row?.state || row?.State || '';
+      // Blank state kept (checklist rows often omit it); explicit other states excluded
+      if (String(stateField || '').trim() && !statesFieldMatchesInchargeSiteStates(stateField, sts)) {
+        return false;
+      }
+    }
+    return true;
+  };
 
   // Fetch site management data to get available industries
   const fetchSiteManagementData = async () => {
@@ -241,11 +320,22 @@ const CalendarPicker = ({ userEmail, userRole }) => {
 
   const statutoryMasterDates = getStatutoryMasterDatesSet();
 
+  // Canonical month keys used in calendar deadline maps (must match getDaysInMonth lookup)
+  const CALENDAR_MONTH_KEYS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
   // Parse a single due date string to { monthKey, day } for calendar (e.g. "15-Feb" -> { monthKey: "Feb", day: "15" })
   const parseDueDateToMonthDay = (dueDate) => {
     const s = String(dueDate || '').trim();
     if (!s) return null;
-    const monthAbbr = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'June', 'July', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthAbbr = CALENDAR_MONTH_KEYS;
+    // ISO: 2026-07-07 or 2026/07/07
+    const iso = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    if (iso) {
+      const monthNum = parseInt(iso[2], 10);
+      const day = parseInt(iso[3], 10);
+      if (day >= 1 && day <= 31 && monthNum >= 1 && monthNum <= 12)
+        return { monthKey: monthAbbr[monthNum - 1], day: String(day) };
+    }
     // Match "15-Feb", "15-Feb-2026", "15 Feb", "Feb 15", "15/02", "15-02", "31-Dec"
     const ddm = s.match(/^(\d{1,2})[-/](\d{1,2})(?:[-/]\d{2,4})?$/); // 15-02 or 15/02
     if (ddm) {
@@ -254,21 +344,40 @@ const CalendarPicker = ({ userEmail, userRole }) => {
       if (day >= 1 && day <= 31 && monthNum >= 1 && monthNum <= 12)
         return { monthKey: monthAbbr[monthNum - 1], day: String(day) };
     }
-    const dm = s.match(/^(\d{1,2})[-/\s]([A-Za-z]{3,})/); // 15-Feb or 15 Feb
+    const dm = s.match(/^(\d{1,2})(?:st|nd|rd|th)?[-/\s]([A-Za-z]{3,})/i); // 15-Feb, 7th Jul
     if (dm) {
       const day = parseInt(dm[1], 10);
       const mon = dm[2].toLowerCase();
-      const mi = monthAbbr.findIndex(m => m.toLowerCase().startsWith(mon));
+      const mi = monthAbbr.findIndex(m => m.toLowerCase().startsWith(mon.substring(0, 3)));
       if (day >= 1 && day <= 31 && mi >= 0)
         return { monthKey: monthAbbr[mi], day: String(day) };
     }
-    const md = s.match(/([A-Za-z]{3,})[-/\s](\d{1,2})/); // Feb 15 or Feb-15
+    const md = s.match(/([A-Za-z]{3,})[-/\s](\d{1,2})(?:st|nd|rd|th)?/i); // Feb 15 or Jul-7
     if (md) {
       const mon = md[1].toLowerCase();
-      const mi = monthAbbr.findIndex(m => m.toLowerCase().startsWith(mon));
+      const mi = monthAbbr.findIndex(m => m.toLowerCase().startsWith(mon.substring(0, 3)));
       const day = parseInt(md[2], 10);
       if (day >= 1 && day <= 31 && mi >= 0)
         return { monthKey: monthAbbr[mi], day: String(day) };
+    }
+    return null;
+  };
+
+  const extractChecklistDayOfMonth = (dueDate) => {
+    if (dueDate == null || dueDate === '') return null;
+    if (typeof dueDate === 'number' && Number.isInteger(dueDate) && dueDate >= 1 && dueDate <= 31) {
+      return dueDate;
+    }
+    const s = String(dueDate).trim();
+    if (/^\d{1,2}$/.test(s)) {
+      const day = parseInt(s, 10);
+      if (day >= 1 && day <= 31) return day;
+    }
+    // Excel serial day-of-month quirk: 1900-01-N
+    const legacy = s.match(/^1900-01-(\d{1,2})$/);
+    if (legacy) {
+      const recovered = parseInt(legacy[1], 10) + 1;
+      if (recovered >= 1 && recovered <= 31) return recovered;
     }
     return null;
   };
@@ -280,26 +389,31 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     try {
       if (!Array.isArray(bulkData)) return calendarData;
       
-      const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'June', 'July', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-      
       bulkData.forEach(item => {
         if (!item || typeof item !== 'object') return;
         
-        const dueDate = item.dueDate || '';
-        const formName = item.formName || 'N/A';
-        const description = item.description || 'No description available';
-        const sector = item.sector || 'General';
+        const dueDate = item.dueDate || item.DueDate || '';
+        const frequency = String(item.frequency || item.Frequency || '').toLowerCase();
+        const formName = item.formName || item.FormName || 'N/A';
+        const description = item.description || item.Description || 'No description available';
+        const sector = item.sector || item.Sector || 'General';
         const dueDateStr = String(dueDate).toLowerCase().trim();
-        const isMonthlyBasis = dueDateStr.includes('monthly') || dueDateStr === 'monthly basis';
+        const bareDay = extractChecklistDayOfMonth(dueDate);
+        const isMonthlyBasis =
+          frequency.includes('monthly') ||
+          dueDateStr.includes('monthly') ||
+          bareDay != null;
         
         if (isMonthlyBasis) {
-          let dayNumber = 15;
-          const dueDateDayMatch = String(dueDate).match(/\b(\d{1,2})\b/);
-          if (dueDateDayMatch) {
-            const extractedDay = parseInt(dueDateDayMatch[1], 10);
-            if (extractedDay >= 1 && extractedDay <= 31) dayNumber = extractedDay;
+          let dayNumber = bareDay != null ? bareDay : 15;
+          if (bareDay == null) {
+            const dueDateDayMatch = String(dueDate).match(/\b(\d{1,2})\b/);
+            if (dueDateDayMatch) {
+              const extractedDay = parseInt(dueDateDayMatch[1], 10);
+              if (extractedDay >= 1 && extractedDay <= 31) dayNumber = extractedDay;
+            }
           }
-          monthNames.forEach(month => {
+          CALENDAR_MONTH_KEYS.forEach(month => {
             calendarData.push({
               rule: formName,
               schedule: description,
@@ -326,13 +440,20 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     return calendarData;
   };
 
+  const checklistItemMatchesCalendarDate = (item, date) => {
+    if (!item?.deadlines || !date) return false;
+    const targetMonth = normalizeMonthKey(CALENDAR_MONTH_KEYS[date.getMonth()]);
+    const dayStr = String(date.getDate());
+    return Object.entries(item.deadlines).some(
+      ([monthKey, day]) => normalizeMonthKey(monthKey) === targetMonth && String(day) === dayStr
+    );
+  };
+
   const displayChecklistBulkData = (() => {
+    if (!inchargeDisplayScope.ready) return [];
     if (!checklistBulkData || checklistBulkData.length === 0) return [];
     if (hasSiteBasedScope) {
-      const allow = new Set(allowedActCategoryList);
-      return checklistBulkData.filter((item) =>
-        allow.has(getActCategoryFromActSector(item.act || item.Act || '', item.sector || item.Sector || ''))
-      );
+      return checklistBulkData.filter((item) => rowMatchesInchargeSiteScope(item));
     }
     return checklistBulkData;
   })();
@@ -427,12 +548,11 @@ const CalendarPicker = ({ userEmail, userRole }) => {
   };
 
   const filteredStatutoryData = (() => {
+    if (!inchargeDisplayScope.ready) return [];
     if (!Array.isArray(statutoryData) || statutoryData.length === 0) return [];
     if (hasSiteBasedScope) {
-      const allow = new Set(allowedActCategoryList);
-      return statutoryData.filter((item) =>
-        allow.has(getActCategoryFromActSector(item.act || item.Act || '', item.sector || item.Sector || ''))
-      );
+      // Site login: only Yet to Complete / status rows for this site's industry + state
+      return statutoryData.filter((item) => rowMatchesInchargeSiteScope(item));
     }
     return statutoryData;
   })();
@@ -491,7 +611,6 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     if (!statutoryRowMatchesTransactionMonth(row, date)) return false;
     const monthKey = normalizeMonthKey(monthNames[date.getMonth()].substring(0, 3));
     const dayStr = String(date.getDate());
-    if (dayStr === '15') return true;
     const parsed = parseDueDateToMonthDay(row.dueDate || row.DueDate);
     if (parsed) {
       return normalizeMonthKey(parsed.monthKey) === monthKey && String(parsed.day) === dayStr;
@@ -502,7 +621,38 @@ const CalendarPicker = ({ userEmail, userRole }) => {
       const monthlyDay = dayMatch ? String(parseInt(dayMatch[1], 10)) : '15';
       return monthlyDay === dayStr;
     }
-    return false;
+    // Month-scoped row with no parseable day — treat as due on the 15th
+    return dayStr === '15';
+  };
+
+  const statutoryRowToCalendarItem = (row) => {
+    const rule = String(row.formName || row.FormName || 'N/A').trim() || 'N/A';
+    const schedule = String(
+      row.description || row.Description || row.act || row.Act || 'No description available'
+    ).trim();
+    return { rule, schedule, _statutoryRow: row };
+  };
+
+  /** All Statutory forms for the viewed month (same logic every month). */
+  const buildCalendarItemsFromStatutoryForMonth = (date) => {
+    if (!date) return [];
+    const seen = new Set();
+    const out = [];
+    filteredStatutoryData.forEach((row) => {
+      if (!statutoryRowMatchesTransactionMonth(row, date)) return;
+      const rule = String(row.formName || row.FormName || 'N/A').trim() || 'N/A';
+      const schedule = String(
+        row.description || row.Description || row.act || row.Act || 'No description available'
+      ).trim();
+      const rowId = row.id ?? row.ROWID ?? row.StatutoryId;
+      const key = rowId != null && String(rowId).trim() !== ''
+        ? `id:${String(rowId)}`
+        : `${normLabel(rule)}|${normLabel(schedule)}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(statutoryRowToCalendarItem(row));
+    });
+    return out;
   };
 
   const buildCalendarItemsFromStatutoryForDate = (date) => {
@@ -521,10 +671,13 @@ const CalendarPicker = ({ userEmail, userRole }) => {
         : `${normLabel(rule)}|${normLabel(schedule)}`;
       if (seen.has(key)) return;
       seen.add(key);
-      out.push({ rule, schedule, _statutoryRow: row });
+      out.push(statutoryRowToCalendarItem(row));
     });
     return out;
   };
+
+  const statutorySendForApprovalIsSent = (row) =>
+    /^sent$/i.test(String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim());
 
   const isStatutoryRowReturned = (row) => {
     const rawA = row?.approval ?? row?.Approval ?? '';
@@ -535,7 +688,30 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     return sNorm === 'rejected' || sNorm === 'reject';
   };
 
+  /** Same display status rules as Statutory Transaction Status column. */
   const getStatutoryTransactionDisplayStatus = (row) => {
+    const raw = row?.status != null && row.status !== '' ? row.status : row?.Status;
+    const norm = String(raw || '').trim();
+    const normalized = norm.toLowerCase();
+    const rawApproval = row?.approval != null && row.approval !== '' ? row.approval : row?.Approval;
+    const approvalNorm = String(rawApproval || '').trim().toLowerCase();
+    if (
+      approvalNorm === 'approved' ||
+      approvalNorm === 'approve' ||
+      normalized === 'approved' ||
+      normalized === 'approve'
+    ) {
+      return 'Approved';
+    }
+    if (
+      approvalNorm === 'rejected' ||
+      approvalNorm === 'reject' ||
+      normalized === 'rejected' ||
+      normalized === 'reject'
+    ) {
+      return 'Returned';
+    }
+    if (statutorySendForApprovalIsSent(row)) return 'Pending';
     const draftVal = row?.draftFile ?? row?.DraftFile ?? null;
     const hasDraftFile =
       draftVal != null &&
@@ -543,14 +719,11 @@ const CalendarPicker = ({ userEmail, userRole }) => {
       String(draftVal).trim() !== 'null' &&
       String(draftVal).trim() !== 'undefined';
     if (!hasDraftFile) return 'Yet to Complete';
-    const raw = row?.status != null && row.status !== '' ? row.status : row?.Status;
-    const norm = String(raw || '').trim();
-    const normalized = norm.toLowerCase();
     if (norm === '' || norm === '-' || norm === '—') return 'Pending';
-    if (normalized === 'rejected' || normalized === 'reject') return 'Returned';
-    if (normalized === 'approved' || normalized === 'approve') return 'Approved';
     if (normalized === 'pending') return 'Pending';
-    if (normalized === 'yet to complete') return 'Yet to Complete';
+    if (normalized === 'yet to complete' || normalized === 'yet to comply') {
+      return statutorySendForApprovalIsSent(row) ? 'Pending' : 'Yet to Complete';
+    }
     return norm || 'Pending';
   };
 
@@ -567,13 +740,47 @@ const CalendarPicker = ({ userEmail, userRole }) => {
   const filterReturnedCalendarItems = (items) =>
     (items || []).filter((item) => getCalendarItemDisplayStatus(item) === 'Returned');
 
-  const getCalendarItemsForDate = (date) =>
-    filterApprovedCalendarItems(buildCalendarItemsFromStatutoryForDate(date));
+  const filterPendingCalendarItems = (items) =>
+    (items || []).filter((item) => getCalendarItemDisplayStatus(item) === 'Pending');
 
-  const getScheduleItemsForDate = (date, statusFilter) => {
-    const all = buildCalendarItemsFromStatutoryForDate(date);
-    if (statusFilter === 'Returned') return filterReturnedCalendarItems(all);
-    return filterApprovedCalendarItems(all);
+  const filterYetToCompleteCalendarItems = (items) =>
+    (items || []).filter((item) => getCalendarItemDisplayStatus(item) === 'Yet to Complete');
+
+  /** Left panel: checklistbulk forms due on the selected calendar day. */
+  const buildCalendarItemsFromChecklistForDate = (date) => {
+    if (!date) return [];
+    const seen = new Set();
+    const out = [];
+    calendarData.forEach((item) => {
+      if (!checklistItemMatchesCalendarDate(item, date)) return;
+      const rule = String(item.rule || 'N/A').trim() || 'N/A';
+      const schedule = String(item.schedule || 'No description available').trim();
+      const key = `${normLabel(rule)}|${normLabel(schedule)}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ rule, schedule, industry: item.industry });
+    });
+    return out;
+  };
+
+  const getCalendarItemsForDate = (date) => buildCalendarItemsFromChecklistForDate(date);
+
+  const getChecklistDueDaysInMonth = (year, month) => {
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const dueDays = [];
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      if (buildCalendarItemsFromChecklistForDate(new Date(year, month, day)).length > 0) {
+        dueDays.push(day);
+      }
+    }
+    return dueDays;
+  };
+
+  const pickNearestChecklistDueDay = (dueDays, preferredDay) => {
+    const days = [...dueDays].filter((day) => day != null).sort((a, b) => a - b);
+    if (!days.length) return null;
+    const upcoming = days.filter((day) => day >= preferredDay);
+    return upcoming.length ? upcoming[0] : days[0];
   };
 
   
@@ -607,17 +814,13 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     // Add days from current month
     for (let day = 1; day <= daysInMonth; day++) {
       const currentDate = new Date(year, month, day);
-      const monthName = monthNames[month].substring(0, 3);
-      const dayStr = day.toString();
       
-      // Check if this date has checklist bulk and/or Statutory Transaction due dates
-      const hasScheduleData = calendarData.some(item => 
-        item.deadlines && item.deadlines[monthName] === dayStr
+      // Pink highlight: checklistbulk_function due dates for this day
+      const hasChecklistDue = calendarData.some((item) =>
+        checklistItemMatchesCalendarDate(item, currentDate)
       );
-      const hasStatutoryTransactionDue =
-        filterApprovedCalendarItems(buildCalendarItemsFromStatutoryForDate(currentDate)).length > 0;
       const hasStatutoryMasterData = statutoryMasterDates.has(currentDate.toDateString());
-      const hasData = hasScheduleData || hasStatutoryTransactionDue || hasStatutoryMasterData;
+      const hasData = hasChecklistDue || hasStatutoryMasterData;
       const isToday = currentDate.toDateString() === today.toDateString();
       
       days.push({
@@ -626,6 +829,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
         isSelected: currentDate.toDateString() === selectedDate.toDateString(),
         isEmpty: false,
         hasData: hasData,
+        hasChecklistDue,
         isToday: isToday
       });
     }
@@ -651,6 +855,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
   const handleDateSelect = (date, event) => {
     setSelectedDate(date);
     setSelectedNotificationId(null);
+    setActiveStatusFilter(null); // show all checklistbulk forms for the selected due date
     const items = getCalendarItemsForDate(date);
     setTooltipData(items);
     setShowTooltip(true);
@@ -797,49 +1002,35 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     };
   }, [showTooltip, selectedNotificationId, firstNotificationId]);
 
-  // On load / month change: show Statutory Transaction forms for the 15th (monthly due day), else first notification
+  // On load / month change: select nearest checklistbulk due day and list those forms
   useEffect(() => {
     if (loadingCalendarData) return;
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth();
-    const monthlyDueDate = new Date(year, month, 15);
-    const statutoryFor15 = filterApprovedCalendarItems(buildCalendarItemsFromStatutoryForDate(monthlyDueDate));
-    if (statutoryFor15.length > 0) {
-      setSelectedDate(monthlyDueDate);
-      setSelectedNotificationId(null);
-      setTooltipData(statutoryFor15);
-      setShowTooltip(true);
-      return;
-    }
-    if (notificationForms.length > 0 && !selectedNotificationId && !showTooltip) {
-      const firstNotification = notificationForms[0];
-      setFirstNotificationId(firstNotification.id);
-      setSelectedNotificationId(firstNotification.id);
-      if (firstNotification.calendarItems && firstNotification.calendarItems.length > 0) {
-        setTooltipData(firstNotification.calendarItems);
-        setShowTooltip(true);
-      } else {
-        const monthName = monthNames[firstNotification.dateObj.getMonth()].substring(0, 3);
-        const dayStr = firstNotification.dateObj.getDate().toString();
-        const relevantData = calendarData.filter(
-          (item) => item.deadlines && item.deadlines[monthName] === dayStr
-        );
-        if (relevantData.length > 0) {
-          setTooltipData(relevantData);
-          setShowTooltip(true);
-        } else {
-          setTooltipData([
-            {
-              rule: firstNotification.title,
-              schedule: firstNotification.description,
-              deadlines: { [monthName]: dayStr },
-            },
-          ]);
-          setShowTooltip(true);
-        }
-      }
-    }
-  }, [loadingCalendarData, statutoryData, currentDate, notificationForms.length, calendarData.length]);
+    const todayRef = new Date();
+    const preferredDay =
+      selectedDate &&
+      selectedDate.getFullYear() === year &&
+      selectedDate.getMonth() === month
+        ? selectedDate.getDate()
+        : todayRef.getFullYear() === year && todayRef.getMonth() === month
+          ? todayRef.getDate()
+          : 1;
+
+    const dueDays = getChecklistDueDaysInMonth(year, month);
+    const dueDay = pickNearestChecklistDueDay(dueDays, preferredDay);
+    const selectedInViewedMonth =
+      dueDay != null
+        ? new Date(year, month, dueDay)
+        : new Date(year, month, preferredDay);
+
+    const itemsForDay = getCalendarItemsForDate(selectedInViewedMonth);
+    setSelectedDate(selectedInViewedMonth);
+    setSelectedNotificationId(null);
+    setActiveStatusFilter(null); // show all checklistbulk forms for the due date
+    setTooltipData(itemsForDay);
+    setShowTooltip(true);
+  }, [loadingCalendarData, checklistBulkData, inchargeDisplayScope, currentDate]);
 
   // Handle notification card click - update left panel with rule forms
   const handleNotificationClick = (notification, event) => {
@@ -896,25 +1087,19 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     const monthNamesShort = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 
     if (selectedNotificationId && tooltipData) {
-      data =
-        activeStatusFilter === 'Returned'
-          ? filterReturnedCalendarItems(tooltipData)
-          : filterApprovedCalendarItems(tooltipData);
+      data = tooltipData;
       const selectedNotification = notificationForms.find((n) => n.id === selectedNotificationId);
       if (selectedNotification) {
         dateInfo = { date: selectedNotification.date, dateObj: selectedNotification.dateObj };
       }
     } else if (selectedDate) {
-      data = getScheduleItemsForDate(selectedDate, activeStatusFilter);
+      data = getCalendarItemsForDate(selectedDate);
       dateInfo = {
         date: `${selectedDate.getDate()} ${monthNamesShort[selectedDate.getMonth()]}`,
         dateObj: selectedDate,
       };
     } else if (tooltipData && tooltipData.length > 0) {
-      data =
-        activeStatusFilter === 'Returned'
-          ? filterReturnedCalendarItems(tooltipData)
-          : filterApprovedCalendarItems(tooltipData);
+      data = tooltipData;
     } else {
       data = [];
     }
@@ -960,15 +1145,11 @@ const CalendarPicker = ({ userEmail, userRole }) => {
 
   const getTaskStatusByIndex = (index) => transactionStatusByIndex[index] || null;
 
-  const isApprovedTransactionStatus = (status) => status === 'Approved';
-
-  const countDateForStatusChips =
-    dateInfo?.dateObj ||
-    selectedDate ||
-    new Date(currentDate.getFullYear(), currentDate.getMonth(), 15);
-  const allScheduleItemsForCounts = buildCalendarItemsFromStatutoryForDate(countDateForStatusChips);
-  const returnedCount = filterReturnedCalendarItems(allScheduleItemsForCounts).length;
-  const approvedCount = filterApprovedCalendarItems(allScheduleItemsForCounts).length;
+  // Status chip counts for checklistbulk forms due on the selected day
+  const returnedCount = transactionStatusByIndex.filter((s) => s === 'Returned').length;
+  const approvedCount = transactionStatusByIndex.filter((s) => s === 'Approved').length;
+  const pendingCount = transactionStatusByIndex.filter((s) => s === 'Pending').length;
+  const yetToCompleteCount = transactionStatusByIndex.filter((s) => s === 'Yet to Complete').length;
 
   const statusTagClassName = (statusKey, toneClass) => {
     const isActive = activeStatusFilter === statusKey;
@@ -990,13 +1171,28 @@ const CalendarPicker = ({ userEmail, userRole }) => {
   const visibleTooltipData = (currentTooltipData || [])
     .map((item, index) => ({ item, index }))
     .filter(({ index }) => {
-      const status = getTaskStatusByIndex(index);
-      if (activeStatusFilter === 'Returned') return status === 'Returned';
-      return isApprovedTransactionStatus(status);
+      if (!activeStatusFilter) return true;
+      return getTaskStatusByIndex(index) === activeStatusFilter;
     });
 
   const handleStatusTagClick = (status) => {
     setActiveStatusFilter((prev) => (prev === status ? null : status));
+  };
+
+  const statusLabelStyle = (status) => {
+    if (status === 'Returned') return { color: '#dc2626' };
+    if (status === 'Approved') return { color: '#16a34a' };
+    if (status === 'Pending') return { color: '#ca8a04' };
+    if (status === 'Yet to Complete') return { color: '#ea580c' };
+    return { color: '#6b7280' };
+  };
+
+  const emptyStatusLabel = () => {
+    if (activeStatusFilter === 'Returned') return 'returned';
+    if (activeStatusFilter === 'Approved') return 'approved';
+    if (activeStatusFilter === 'Pending') return 'pending';
+    if (activeStatusFilter === 'Yet to Complete') return 'yet to complete';
+    return '';
   };
 
   return (
@@ -1019,11 +1215,38 @@ const CalendarPicker = ({ userEmail, userRole }) => {
             <h2 className="notifications-title">Schedule Of Submission/ Maintenance</h2>
             {hasSiteBasedScope && (
               <span className="notifications-subtitle" style={{ fontSize: '12px', color: '#6b7280', marginLeft: '8px', fontWeight: 'normal' }}>
-                (filtered by Site Management industry scope: {allowedActCategoryList.join(', ')})
+                (site login
+                {inchargeDisplayScope.industryLabels?.length
+                  ? ` · Industry: ${inchargeDisplayScope.industryLabels.join(', ')}`
+                  : ` · ${allowedActCategoryList.join(', ')}`}
+                {inchargeDisplayScope.stateLabels?.length
+                  ? ` · State: ${inchargeDisplayScope.stateLabels.join(', ')}`
+                  : ''}
+                )
               </span>
             )}
           </div>
           <div className="notification-status-tags">
+            <button
+              type="button"
+              className={statusTagClassName('Yet to Complete', 'yet-to-complete')}
+              onClick={() => handleStatusTagClick('Yet to Complete')}
+              aria-pressed={activeStatusFilter === 'Yet to Complete'}
+              style={{ cursor: 'pointer' }}
+              title="Show yet to complete forms (Statutory Transaction)"
+            >
+              Yet to Complete ({yetToCompleteCount})
+            </button>
+            <button
+              type="button"
+              className={statusTagClassName('Pending', 'status-pending')}
+              onClick={() => handleStatusTagClick('Pending')}
+              aria-pressed={activeStatusFilter === 'Pending'}
+              style={{ cursor: 'pointer' }}
+              title="Show pending forms (Statutory Transaction)"
+            >
+              Pending ({pendingCount})
+            </button>
             <button
               type="button"
               className={statusTagClassName('Approved', 'completed')}
@@ -1081,14 +1304,16 @@ const CalendarPicker = ({ userEmail, userRole }) => {
                     </div>
                     <div className="rule-form-card-body">
                       {item.schedule}
-                      {taskStatus === 'Returned' && (
-                        <div style={{ marginTop: '6px', fontSize: '11px', color: '#dc2626', fontWeight: 600 }}>
-                          Returned
-                        </div>
-                      )}
-                      {isApprovedTransactionStatus(taskStatus) && (
-                        <div style={{ marginTop: '6px', fontSize: '11px', color: '#16a34a', fontWeight: 600 }}>
-                          Approved
+                      {taskStatus && (
+                        <div
+                          style={{
+                            marginTop: '6px',
+                            fontSize: '11px',
+                            fontWeight: 600,
+                            ...statusLabelStyle(taskStatus),
+                          }}
+                        >
+                          {taskStatus}
                         </div>
                       )}
                     </div>
@@ -1099,13 +1324,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
           ) : (
             <div className="no-notifications">
               <p>
-                No{' '}
-                {activeStatusFilter === 'Returned'
-                  ? 'returned'
-                  : activeStatusFilter === 'Approved'
-                    ? 'approved'
-                    : ''}{' '}
-                rule forms available
+                No{emptyStatusLabel() ? ` ${emptyStatusLabel()}` : ''} rule forms available
               </p>
               <p className="no-notifications-subtitle">
                 {activeStatusFilter
@@ -1200,9 +1419,15 @@ const CalendarPicker = ({ userEmail, userRole }) => {
               <button
                 key={index}
                 type="button"
-                className={`calendar-day ${day.isToday ? 'today' : ''} ${day.isSelected ? 'selected' : ''} ${day.hasData ? 'has-data' : ''}${day.returnedCount > 0 ? ' has-returned' : ''}`}
+                className={`calendar-day ${day.isToday ? 'today' : ''} ${day.isSelected ? 'selected' : ''} ${day.hasChecklistDue ? 'has-due' : day.hasData ? 'has-data' : ''}${day.returnedCount > 0 ? ' has-returned' : ''}`}
                 onClick={(e) => handleDateSelect(day.date, e)}
-                title={day.returnedCount > 0 ? `${day.returnedCount} returned` : undefined}
+                title={
+                  day.hasChecklistDue
+                    ? `${buildCalendarItemsFromChecklistForDate(day.date).length} form(s) due`
+                    : day.returnedCount > 0
+                      ? `${day.returnedCount} returned`
+                      : undefined
+                }
               >
                 <span className="calendar-day-number">{day.date.getDate()}</span>
                 {day.returnedCount > 0 ? (

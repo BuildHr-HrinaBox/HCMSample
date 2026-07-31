@@ -773,6 +773,11 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     match: /for\s+the\s+period\s+from/i,
     label: 'For the period From',
     key: 'form_d_gj_period'
+  },
+  {
+    match: /name\s+and\s+address\s+of\s+the\s+factory/i,
+    label: 'Name and Address of the Factory:',
+    key: 'statutory_factory_name_address'
   }
 ];
 
@@ -1112,6 +1117,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
   {
     headerFormData,
     parsedFormHeader,
+    headerRowStart,
     headerRowEnd,
     maxScanRows,
     maxScanCols,
@@ -1125,7 +1131,8 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
   if (fields.length === 0 && specs.length === 0) return;
 
   const normalize = normalizeStatutoryHeaderLabel;
-  const rowEnd = Math.max(1, Number(headerRowEnd) || 35);
+  const rowStart = Math.max(1, Number(headerRowStart) || 1);
+  const rowEnd = Math.max(rowStart, Number(headerRowEnd) || 35);
   const colLimit = Math.max(20, Number(maxScanCols) || 80);
   const scanColMax =
     Number(colRightBound) > 0 ? Math.min(colLimit, Number(colRightBound)) : colLimit;
@@ -1137,14 +1144,26 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
   const writtenSpecKeys = new Set();
 
   const writeCombinedOnLabelRow = (row, startCol, label, rawLabel, value) => {
+    // Never rewrite Form XXIII AP title / vide-rule rows — merge:value writes break the centered band.
+    if (row <= 2) {
+      const existing = excelCellValueToString(worksheet.getCell(row, startCol)?.value).trim();
+      if (
+        /form\s*xxiii|register\s+of\s+wages|vide\s+rule|shops\s*&\s*establishment\s+rules/i.test(
+          existing
+        )
+      ) {
+        return;
+      }
+    }
     const text = formatStatutoryHeaderLabelValueExport(label, rawLabel || label, value);
     if (!String(text).trim()) return;
     // Prefer a short merge (label + a few value columns). Wide merges cause Excel to show
-    // truncated fragments ("VA" / "VAYONA ENER") in every column of the band.
-    const mergeEndCol =
-      Number(colRightBound) > startCol
-        ? Number(colRightBound)
-        : Math.min(startCol + 3, scanColMax);
+    // truncated fragments ("VA" / "VAYONA ENER") in every column of the band and can unmerge
+    // the Form XXIII title row (Excel then opens as [Repaired] with a vertical title).
+    let mergeEndCol = Math.min(startCol + 3, scanColMax);
+    if (Number(colRightBound) > startCol && Number(colRightBound) <= startCol + 8) {
+      mergeEndCol = Number(colRightBound);
+    }
     if (mergeEndCol > startCol) {
       try {
         worksheet.mergeCells(row, startCol, row, mergeEndCol);
@@ -1161,7 +1180,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
       horizontal: 'left'
     };
     const wsRow = worksheet.getRow(row);
-    if (wsRow) {
+    if (wsRow && row > 2) {
       wsRow.height = Math.min(Math.max(wsRow.height || 18, 15), 22);
     }
   };
@@ -1174,7 +1193,14 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
     for (let ac = startCol + 1; ac <= adjMax; ac += 1) {
       const adj = excelCellValueToString(worksheet.getCell(row, ac)?.value).trim();
       if (!adj || /^enter\b/i.test(adj)) {
-        worksheet.getCell(row, ac).value = val;
+        const cell = worksheet.getCell(row, ac);
+        cell.value = val;
+        cell.alignment = {
+          ...(cell.alignment || {}),
+          wrapText: false,
+          vertical: 'middle',
+          horizontal: 'left'
+        };
         return;
       }
     }
@@ -1217,7 +1243,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
     return rawNorm.includes(labelNorm) || labelNorm.includes(rawNorm);
   };
 
-  for (let r = 1; r <= rowEnd; r += 1) {
+  for (let r = rowStart; r <= rowEnd; r += 1) {
     for (let c = 1; c <= scanColMax; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
       if (!raw) continue;
@@ -1265,7 +1291,7 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
   }
 
   // Repair pass: label-only template cells (no "Label : value" yet).
-  for (let r = 1; r <= rowEnd; r += 1) {
+  for (let r = rowStart; r <= rowEnd; r += 1) {
     for (let c = 1; c <= scanColMax; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
       if (!raw || (/:/.test(raw) && cellLooksLikeCompletedExport(raw))) continue;
@@ -1276,7 +1302,8 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
         if (fieldKey && writtenFieldKeys.has(fieldKey)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, field);
         if (val) {
-          writeCombinedOnLabelRow(r, c, label, raw, val);
+          if (useCombined) writeCombinedOnLabelRow(r, c, label, raw, val);
+          else if (useAdjacent) writeAdjacentValue(r, c, val);
           if (fieldKey) writtenFieldKeys.add(fieldKey);
         }
         break;
@@ -1288,7 +1315,8 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
         if (specKey && writtenSpecKeys.has(specKey)) continue;
         const val = resolveHeaderFieldExportValue(headerFormData, { key: spec.key, label: spec.label });
         if (val) {
-          writeCombinedOnLabelRow(r, c, spec.label, raw, val);
+          if (useCombined) writeCombinedOnLabelRow(r, c, spec.label, raw, val);
+          else if (useAdjacent) writeAdjacentValue(r, c, val);
           if (specKey) writtenSpecKeys.add(specKey);
         }
         break;

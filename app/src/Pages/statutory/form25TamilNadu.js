@@ -2,7 +2,17 @@
  * Form 25 Tamil Nadu — Excel export column alignment.
  * Prefix + day-number columns (1–31) + trailing summary columns (Total Days / Hours / LOP / …).
  * Same failure mode as Form V: incomplete day headers caused summary values to land under day columns.
+ *
+ * Header autofill (Muster Roll and Register of Compensatory Holidays):
+ * - Name and Address of the Factory ← company name + address
+ * - For the period from 1st {Month} {Year} to {last} {Month} {Year}
  */
+
+import { excelCellValueToString } from '../../utils/statutorySiteCompanyHeaders';
+
+export const FORM25_TN_FACTORY_HEADER_KEY = 'statutory_factory_name_address';
+export const FORM25_TN_FACTORY_HEADER_LABEL = 'Name and Address of the Factory:';
+export const FORM25_TN_PERIOD_HEADER_KEY = 'statutory_period_from';
 
 export function form25TamilNaduHeaderNorm(txt) {
   return String(txt || '')
@@ -10,6 +20,111 @@ export function form25TamilNaduHeaderNorm(txt) {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+export function isForm25TamilNaduFactoryHeaderLabel(label) {
+  const s = form25TamilNaduHeaderNorm(label);
+  return /name\s+and\s+address\s+of\s+the\s+factory/.test(s);
+}
+
+export function isForm25TamilNaduPeriodHeaderLabel(label) {
+  return /for\s+the\s+period\s+from/i.test(String(label || ''));
+}
+
+/** Ensure factory (+ optional period) header fields exist for modal / Excel writers. */
+export function ensureForm25TamilNaduHeaderFields(formHeader) {
+  const base = formHeader && typeof formHeader === 'object' ? { ...formHeader } : {};
+  const fields = Array.isArray(base.fields) ? [...base.fields] : [];
+  if (!fields.some((f) => isForm25TamilNaduFactoryHeaderLabel(f?.label) || f?.key === FORM25_TN_FACTORY_HEADER_KEY)) {
+    fields.unshift({
+      label: FORM25_TN_FACTORY_HEADER_LABEL,
+      value: '',
+      key: FORM25_TN_FACTORY_HEADER_KEY
+    });
+  } else {
+    fields.forEach((f, i) => {
+      if (isForm25TamilNaduFactoryHeaderLabel(f?.label) && !f.key) {
+        fields[i] = { ...f, key: FORM25_TN_FACTORY_HEADER_KEY };
+      }
+    });
+  }
+  return { ...base, fields };
+}
+
+/**
+ * Form 25 TN display header: keep factory field; set wage-period banner from month/year.
+ * periodLine example: "For the period from 1st April 2022 to 30th April 2022"
+ */
+export function enrichForm25TamilNaduDisplayHeader(formHeader, periodLine = '') {
+  const base = ensureForm25TamilNaduHeaderFields(formHeader);
+  const line = String(periodLine || '').trim();
+  if (!line) return base;
+  return { ...base, wagePeriodText: line };
+}
+
+/** Put period line into headerFormData keys used by Excel export resolvers. */
+export function applyForm25TamilNaduPeriodToHeaderData(headerData, periodLine) {
+  const line = String(periodLine || '').trim();
+  if (!line) return headerData && typeof headerData === 'object' ? headerData : {};
+  const out = headerData && typeof headerData === 'object' ? { ...headerData } : {};
+  out[FORM25_TN_PERIOD_HEADER_KEY] = line;
+  if (!String(out.form_d_gj_period || '').trim()) out.form_d_gj_period = line;
+  if (!Object.prototype.hasOwnProperty.call(out, FORM25_TN_FACTORY_HEADER_KEY)) {
+    out[FORM25_TN_FACTORY_HEADER_KEY] = '';
+  }
+  return out;
+}
+
+function centerForm25TamilNaduHeaderCell(cell) {
+  if (!cell) return;
+  cell.alignment = {
+    ...(cell.alignment || {}),
+    horizontal: 'center',
+    vertical: 'middle',
+    wrapText: true
+  };
+}
+
+/**
+ * Center Form 25 TN banner rows:
+ * - [Prescribed under rules 77(4), 103]
+ * - For the period from 1st May 2026 to 31st May 2026
+ * Also replaces the period cell text when periodText is provided.
+ */
+export function centerForm25TamilNaduHeaderBannerRows(worksheet, headerRowEnd = 25, periodText = '') {
+  if (!worksheet) return { centeredPrescribed: false, centeredPeriod: false };
+  const rowEnd = Math.max(1, Number(headerRowEnd) || 25);
+  const line = String(periodText || '').trim();
+  let centeredPrescribed = false;
+  let centeredPeriod = false;
+  for (let r = 1; r <= rowEnd; r += 1) {
+    for (let c = 1; c <= 40; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      const raw = excelCellValueToString(cell?.value).trim();
+      if (!raw) continue;
+      if (!centeredPrescribed && /\[?\s*prescribed\s+under\s+rules?\s*77/i.test(raw)) {
+        centerForm25TamilNaduHeaderCell(cell);
+        centeredPrescribed = true;
+        continue;
+      }
+      if (/for\s+the\s+period\s+from/i.test(raw)) {
+        if (line) cell.value = line;
+        centerForm25TamilNaduHeaderCell(cell);
+        centeredPeriod = true;
+      }
+    }
+  }
+  return { centeredPrescribed, centeredPeriod };
+}
+
+/** Replace template "For the period From … To …" cell with the resolved period sentence (centered). */
+export function writeForm25TamilNaduPeriodToWorksheet(worksheet, periodText, headerRowEnd = 25) {
+  const { centeredPeriod } = centerForm25TamilNaduHeaderBannerRows(
+    worksheet,
+    headerRowEnd,
+    periodText
+  );
+  return centeredPeriod;
 }
 
 export function resolveForm25TamilNaduDayNumberFromHeader(header) {

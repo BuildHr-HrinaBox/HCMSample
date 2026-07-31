@@ -1,9 +1,16 @@
+import ExcelJS from 'exceljs';
+import { isForm25TamilNaduContext } from './form25APMuster';
 import {
   applyForm25TamilNaduExportColumnWidths,
+  applyForm25TamilNaduPeriodToHeaderData,
   applyForm25TamilNaduPrefixColumnsToRows,
   buildForm25TamilNaduOrderedExcelCols,
+  enrichForm25TamilNaduDisplayHeader,
   ensureForm25TamilNaduDayColumnHeaders,
+  ensureForm25TamilNaduHeaderFields,
   ensureForm25TamilNaduPrefixHeaders,
+  FORM25_TN_FACTORY_HEADER_KEY,
+  FORM25_TN_PERIOD_HEADER_KEY,
   form25TamilNaduSummaryColForHeader,
   getForm25TamilNaduEmployeeName,
   isForm25TamilNaduSerialInRegisterHeader,
@@ -13,7 +20,50 @@ import {
   resolveForm25TamilNaduExportCellValue,
   resolveForm25TamilNaduExportHeaders,
   trimForm25TamilNaduHeadersAfterRemarks,
+  writeForm25TamilNaduPeriodToWorksheet,
 } from './form25TamilNadu';
+
+describe('Form 25 Tamil Nadu header autofill (Compensatory Holidays)', () => {
+  test('detects muster roll and register of compensatory holidays as TN Form 25', () => {
+    expect(
+      isForm25TamilNaduContext(
+        'FORM No - 25 MUSTER ROLL AND REGISTER OF COMPENSATORY HOLIDAYS'
+      )
+    ).toBe(true);
+  });
+
+  test('ensureForm25TamilNaduHeaderFields adds Name and Address of the Factory', () => {
+    const header = ensureForm25TamilNaduHeaderFields({ title: 'FORM No. 25', fields: [] });
+    expect(header.fields[0].key).toBe(FORM25_TN_FACTORY_HEADER_KEY);
+    expect(header.fields[0].label).toMatch(/Name and Address of the Factory/i);
+  });
+
+  test('enrichForm25TamilNaduDisplayHeader sets period banner', () => {
+    const period = 'For the period from 1st April 2022 to 30th April 2022';
+    const header = enrichForm25TamilNaduDisplayHeader({ title: 'FORM No. 25' }, period);
+    expect(header.wagePeriodText).toBe(period);
+    expect(header.fields.some((f) => f.key === FORM25_TN_FACTORY_HEADER_KEY)).toBe(true);
+  });
+
+  test('applyForm25TamilNaduPeriodToHeaderData stores period keys', () => {
+    const period = 'For the period from 1st April 2022 to 30th April 2022';
+    const data = applyForm25TamilNaduPeriodToHeaderData({}, period);
+    expect(data[FORM25_TN_PERIOD_HEADER_KEY]).toBe(period);
+    expect(data.form_d_gj_period).toBe(period);
+  });
+
+  test('writeForm25TamilNaduPeriodToWorksheet replaces period cell and centers banner rows', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('25');
+    ws.getCell(3, 1).value = '[Prescribed under rules 77(4), 103]';
+    ws.getCell(4, 1).value = 'For the period From ………………………. To …………………………';
+    const period = 'For the period from 1st May 2026 to 31st May 2026';
+    expect(writeForm25TamilNaduPeriodToWorksheet(ws, period, 10)).toBe(true);
+    expect(ws.getCell(4, 1).value).toBe(period);
+    expect(ws.getCell(3, 1).alignment?.horizontal).toBe('center');
+    expect(ws.getCell(4, 1).alignment?.horizontal).toBe('center');
+  });
+});
 
 describe('Form 25 Tamil Nadu Excel alignment', () => {
   test('resolves day numbers from bare and Dates_N headers', () => {

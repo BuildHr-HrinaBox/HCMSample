@@ -335,7 +335,7 @@ function pickPayrollGidNumber(row) {
   return '';
 }
 
-function samplePayrollRowMatchesEmployeeId(row, employeeId) {
+export function samplePayrollRowMatchesEmployeeId(row, employeeId) {
   const id = String(employeeId || '').trim();
   if (!id || !row) return false;
   if (pickPayrollEmployeeId(row) === id) return true;
@@ -356,32 +356,88 @@ function normalizePayrollMonthCandidates(monthCandidates) {
   return out;
 }
 
-export async function fetchSamplePayrollRecords(payrollMonth, { timeoutMs = 45000 } = {}) {
+const SAMPLE_PAYROLL_MONTH_CACHE_TTL_MS = 5 * 60 * 1000;
+/** @type {Map<string, { ts: number, payload: { records: any[], payrollMonth: string, meta: any } }>} */
+const samplePayrollMonthMemory = new Map();
+/** @type {Map<string, Promise<{ records: any[], payrollMonth: string, meta: any }>>} */
+const samplePayrollMonthInflight = new Map();
+
+function samplePayrollMonthCacheKey(payrollMonth) {
   const month = String(payrollMonth || '').trim();
+  return /^\d{4}-\d{2}$/.test(month) ? month : '__all__';
+}
+
+function readSamplePayrollMonthCache(payrollMonth) {
+  const key = samplePayrollMonthCacheKey(payrollMonth);
+  const entry = samplePayrollMonthMemory.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts >= SAMPLE_PAYROLL_MONTH_CACHE_TTL_MS) {
+    samplePayrollMonthMemory.delete(key);
+    return null;
+  }
+  return entry.payload;
+}
+
+function writeSamplePayrollMonthCache(payrollMonth, payload) {
+  const key = samplePayrollMonthCacheKey(payrollMonth);
+  samplePayrollMonthMemory.set(key, { ts: Date.now(), payload });
+}
+
+/** Clear SamplePayroll month cache (tests / after sync). */
+export function clearSamplePayrollMonthCache() {
+  samplePayrollMonthMemory.clear();
+  samplePayrollMonthInflight.clear();
+}
+
+export async function fetchSamplePayrollRecords(payrollMonth, { timeoutMs = 45000, force = false } = {}) {
+  const month = String(payrollMonth || '').trim();
+  const cacheKey = samplePayrollMonthCacheKey(month);
+
+  if (!force) {
+    const cached = readSamplePayrollMonthCache(month);
+    if (cached) return cached;
+    if (samplePayrollMonthInflight.has(cacheKey)) {
+      return samplePayrollMonthInflight.get(cacheKey);
+    }
+  }
+
   const qs = new URLSearchParams({ fetch_all: '1' });
   if (/^\d{4}-\d{2}$/.test(month)) qs.set('payroll_month', month);
 
-  try {
-    const { resp, json } = await fetchJsonWithTimeout(
-      `${SAMPLE_PAYROLL_API_BASE}/samplepayroll?${qs.toString()}`,
-      { cache: 'no-store' },
-      timeoutMs
-    );
-    if (!resp.ok || !isSamplePayrollApiSuccess(json)) {
+  const task = (async () => {
+    try {
+      const { resp, json } = await fetchJsonWithTimeout(
+        `${SAMPLE_PAYROLL_API_BASE}/samplepayroll?${qs.toString()}`,
+        { cache: 'no-store' },
+        timeoutMs
+      );
+      if (!resp.ok || !isSamplePayrollApiSuccess(json)) {
+        return { records: [], payrollMonth: month, meta: null };
+      }
+      const raw = Array.isArray(json.data?.records) ? json.data.records : [];
+      const meta =
+        json.data?.meta && typeof json.data.meta === 'object'
+          ? json.data.meta
+          : null;
+      const payload = {
+        records: raw.map((row) => mapSamplePayrollRecordToPayrollRow(row, meta)).filter(Boolean),
+        payrollMonth: json.data?.payrollMonth || month,
+        meta,
+      };
+      if (payload.records.length > 0) {
+        writeSamplePayrollMonthCache(month, payload);
+      }
+      return payload;
+    } catch (_) {
       return { records: [], payrollMonth: month, meta: null };
     }
-    const raw = Array.isArray(json.data?.records) ? json.data.records : [];
-    const meta =
-      json.data?.meta && typeof json.data.meta === 'object'
-        ? json.data.meta
-        : null;
-    return {
-      records: raw.map((row) => mapSamplePayrollRecordToPayrollRow(row, meta)).filter(Boolean),
-      payrollMonth: json.data?.payrollMonth || month,
-      meta,
-    };
-  } catch (_) {
-    return { records: [], payrollMonth: month, meta: null };
+  })();
+
+  if (!force) samplePayrollMonthInflight.set(cacheKey, task);
+  try {
+    return await task;
+  } finally {
+    samplePayrollMonthInflight.delete(cacheKey);
   }
 }
 
@@ -448,6 +504,40 @@ export async function fetchLatestSamplePayrollRows({ timeoutMs = 45000 } = {}) {
   };
 }
 
+/**
+ * Load SamplePayroll rows once for the given months (shared cache / inflight).
+ * Prefer this over calling fetchSamplePayrollEmployeeRow inside employee loops.
+ */
+export async function fetchSamplePayrollRowsForMonthCandidates(
+  monthCandidates = [],
+  { timeoutMs = 45000 } = {}
+) {
+  const months = normalizePayrollMonthCandidates(monthCandidates);
+  if (months.length === 0) {
+    const listLoad = await fetchSamplePayrollRecords('', { timeoutMs });
+    return {
+      records: listLoad.records,
+      payrollMonth: listLoad.payrollMonth || '',
+      meta: listLoad.meta,
+      source: listLoad.records.length > 0 ? 'sample_payroll' : 'none',
+    };
+  }
+
+  for (let i = 0; i < months.length; i += 1) {
+    const listLoad = await fetchSamplePayrollRecords(months[i], { timeoutMs });
+    if (listLoad.records.length > 0) {
+      return {
+        records: listLoad.records,
+        payrollMonth: listLoad.payrollMonth || months[i],
+        meta: listLoad.meta,
+        source: 'sample_payroll',
+      };
+    }
+  }
+
+  return { records: [], payrollMonth: months[0] || '', meta: null, source: 'none' };
+}
+
 export async function fetchSamplePayrollEmployeeRow(
   employeeId,
   monthCandidates = [],
@@ -457,17 +547,7 @@ export async function fetchSamplePayrollEmployeeRow(
   if (!id) return null;
 
   const months = normalizePayrollMonthCandidates(monthCandidates);
-  for (let i = 0; i < months.length; i += 1) {
-    const listLoad = await fetchSamplePayrollRecords(months[i], { timeoutMs });
-    const listHit = listLoad.records.find((row) => samplePayrollRowMatchesEmployeeId(row, id));
-    if (listHit) return listHit;
-  }
-
-  if (months.length === 0) {
-    const listLoad = await fetchSamplePayrollRecords('', { timeoutMs });
-    const listHit = listLoad.records.find((row) => samplePayrollRowMatchesEmployeeId(row, id));
-    if (listHit) return listHit;
-  }
-
-  return null;
+  // Load once via shared month cache — never re-download the full table per employee.
+  const listLoad = await fetchSamplePayrollRowsForMonthCandidates(months, { timeoutMs });
+  return listLoad.records.find((row) => samplePayrollRowMatchesEmployeeId(row, id)) || null;
 }

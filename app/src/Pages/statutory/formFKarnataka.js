@@ -1574,12 +1574,14 @@ function formFExcelJsCellText(value) {
 
 function looksLikeFormFKarnatakaMainTitle(text) {
   const n = formFKarnatakaHeaderNorm(text).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  // Exact "FORM F" only — never "FORM 15", "FORM XV", etc.
   return n === 'form f' || /^form\s*f$/.test(n);
 }
 
 function looksLikeFormFKarnatakaReference(text) {
   const n = formFKarnatakaHeaderNorm(text);
-  return /see\s+rule\s*8/.test(n) || /^\(?\s*see\s+rule/.test(n);
+  // Karnataka Form F is Rule 8 only — do not match Form 15 "(SEE RULE …)" lines.
+  return /see\s+rule\s*8\b/.test(n);
 }
 
 function looksLikeFormFKarnatakaSubtitle(text) {
@@ -1594,25 +1596,56 @@ function looksLikeFormFKarnatakaPartBanner(text) {
 
 function looksLikeFormFKarnatakaPartIiBanner(text) {
   const n = formFKarnatakaHeaderNorm(text);
-  return /part\s*[-–]?\s*ii/.test(n);
+  // Require Sick/Accident wording so Form 15 "PART II" wage registers are not rewritten.
+  return /part\s*[-–]?\s*ii/.test(n) && /sick|accident/.test(n);
+}
+
+function looksLikeForm15LeaveRegisterSheet(worksheet) {
+  if (!worksheet) return false;
+  const name = String(worksheet.name || '').toLowerCase();
+  if (/form[\s._-]*15\b/.test(name) || /form[\s._-]*xv\b/.test(name)) return true;
+  for (let r = 1; r <= 8; r += 1) {
+    for (let c = 1; c <= 16; c += 1) {
+      const t = formFExcelJsCellText(worksheet.getCell(r, c)?.value);
+      if (!t) continue;
+      const n = formFKarnatakaHeaderNorm(t).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (/^form\s*15\b/.test(n) || /^form\s*xv\b/.test(n)) return true;
+    }
+  }
+  return false;
 }
 
 function worksheetLooksLikeFormFKarnataka(worksheet) {
   if (!worksheet) return false;
+  // Form 15 Part I/II share "REGISTER OF LEAVE WITH WAGES" — never treat as Form F.
+  if (looksLikeForm15LeaveRegisterSheet(worksheet)) return false;
+
   const name = String(worksheet.name || '').toLowerCase();
-  if (/form[\s._-]*f/.test(name) && /karnataka|leave/.test(name)) return true;
-  let hits = 0;
+  const sheetNameIsFormF =
+    (/\bform[\s._-]*f\b/.test(name) || /^form\s*f\b/.test(name)) &&
+    !/form[\s._-]*15\b/.test(name) &&
+    !/form[\s._-]*xv\b/.test(name);
+
+  let hasMainTitle = false;
+  let hasRule8 = false;
+  let hasSubtitle = false;
+  let hasPartI = false;
   for (let r = 1; r <= 12; r += 1) {
     for (let c = 1; c <= 16; c += 1) {
       const t = formFExcelJsCellText(worksheet.getCell(r, c)?.value);
       if (!t) continue;
-      if (looksLikeFormFKarnatakaMainTitle(t)) hits += 1;
-      if (looksLikeFormFKarnatakaReference(t)) hits += 1;
-      if (looksLikeFormFKarnatakaSubtitle(t)) hits += 1;
-      if (looksLikeFormFKarnatakaPartBanner(t)) hits += 1;
+      if (looksLikeFormFKarnatakaMainTitle(t)) hasMainTitle = true;
+      if (looksLikeFormFKarnatakaReference(t)) hasRule8 = true;
+      if (looksLikeFormFKarnatakaSubtitle(t)) hasSubtitle = true;
+      if (looksLikeFormFKarnatakaPartBanner(t)) hasPartI = true;
     }
   }
-  return hits >= 2;
+
+  // Require an explicit FORM F title (or Form F sheet name) so finalize-download
+  // cannot rewrite Form 15 / other leave registers into FORM F.
+  if (hasMainTitle && (hasRule8 || hasSubtitle || hasPartI || sheetNameIsFormF)) return true;
+  if (sheetNameIsFormF && (hasRule8 || hasSubtitle || hasPartI)) return true;
+  return false;
 }
 
 function parseFormFMergeLabel(label) {
@@ -1655,17 +1688,14 @@ export function ensureFormFKarnatakaTitleLayout(worksheet, options = {}) {
     return -1;
   };
 
-  const titleRow = findRow(looksLikeFormFKarnatakaMainTitle, 6) > 0
-    ? findRow(looksLikeFormFKarnatakaMainTitle, 6)
-    : 1;
-  const referenceRow = findRow(looksLikeFormFKarnatakaReference, 6) > 0
-    ? findRow(looksLikeFormFKarnatakaReference, 6)
-    : 2;
-  const subtitleRow = findRow(looksLikeFormFKarnatakaSubtitle, 8) > 0
-    ? findRow(looksLikeFormFKarnatakaSubtitle, 8)
-    : 4;
+  // Only rewrite rows that already exist on the template — never invent FORM F
+  // titles onto an unrelated leave/wage register (e.g. Form 15 Part II).
+  const titleRow = findRow(looksLikeFormFKarnatakaMainTitle, 6);
+  const referenceRow = findRow(looksLikeFormFKarnatakaReference, 6);
+  const subtitleRow = findRow(looksLikeFormFKarnatakaSubtitle, 8);
   const partIRow = findRow(looksLikeFormFKarnatakaPartBanner, 16);
   const partIiRow = findRow(looksLikeFormFKarnatakaPartIiBanner, 40);
+  if (titleRow < 1 && referenceRow < 1 && subtitleRow < 1) return false;
 
   const mergeLabels = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
   const unmergeCovering = (r1, c1, r2, c2) => {

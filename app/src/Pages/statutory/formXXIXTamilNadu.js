@@ -79,11 +79,21 @@ export function looksLikeFormXXIXTamilNaduTableHeaders(headers) {
   ) {
     return false;
   }
+  // Form I TN Register of Subsistence Allowance — father + "date of payment" + signature
+  // must not look like Form XXIX advances/damage/fines bands.
+  if (
+    /subsistence\s+allowance|date\s+of\s+suspension|kept\s+under\s+suspension|revocation\s+of\s+suspension|employees\s+placed\s+under\s+suspension/.test(
+      joined
+    )
+  ) {
+    return false;
+  }
   const hasIdentity =
     /name of (?:the )?workm[ae]n|father|husband|employee\s+number|designation/.test(joined);
-  // "Net Amount Paid" must not count as advance "Amount Paid".
+  // "Net Amount Paid" / subsistence "…paid and the date of payment" must not count as advance band.
+  // Require leaf-level "Amount Paid" / "Date of Payment", or advance/instalment/recovery wording.
   const hasAdvanceBand =
-    /advance\s+paid|(?:^|\|)\s*amount\s+paid\s*(?:\||$)|installment|instalment|date\s+of\s+payment|recovery\s+completed/.test(
+    /advance\s+paid|(?:^|\|)\s*amount\s+paid\s*(?:\||$)|installment|instalment|(?:^|\|)\s*date\s+of\s+payment\s*(?:\||$)|recovery\s+completed/.test(
       joined
     );
   const hasDamageOrFinesOrSignature =
@@ -205,6 +215,26 @@ function buildFormXXIXContextBlob(formHeader, rowItem, fileName, tableHeaders, s
     .toLowerCase();
 }
 
+/** Form I / Form 1 TN Register of Subsistence Allowance — never Form XXIX. */
+export function matchesFormITamilNaduSubsistenceHint(blob) {
+  const parts = String(blob || '').toLowerCase();
+  if (!parts) return false;
+  if (
+    /subsistence\s+allowance|date\s+of\s+suspension|kept\s+under\s+suspension|revocation\s+of\s+suspension|employees\s+placed\s+under\s+suspension|sa\s*form\s*1/.test(
+      parts
+    )
+  ) {
+    return true;
+  }
+  // Form_1_TN_-_TamilNadu.xlsx / Form_I_-_TamilNadu.xlsx (not Form XXIX).
+  const looksLikeFormITnFile =
+    /form[\s._-]*1[\s._-]*tn\b/i.test(parts) ||
+    /form[\s._-]*i[\s._-]*tn\b/i.test(parts) ||
+    (/form[\s._-]*i(?![a-z])/i.test(parts) && /tamil[\s._-]*nadu|tamilnadu/i.test(parts)) ||
+    (/form[\s._-]*1(?!\d)/i.test(parts) && /tamil[\s._-]*nadu|tamilnadu/i.test(parts));
+  return looksLikeFormITnFile && !matchesFormXXIXHint(parts);
+}
+
 export function isFormXXIXTamilNaduContext(
   formHeader,
   rowItem,
@@ -215,6 +245,10 @@ export function isFormXXIXTamilNaduContext(
   const parts = buildFormXXIXContextBlob(formHeader, rowItem, fileName, tableHeaders, sheetText);
   const fileBlob = String(fileName || rowItem?.formFileName || rowItem?.FormFileName || '')
     .toLowerCase();
+  // Form_1_TN_-_TamilNadu.xlsx is Register of Subsistence Allowance — never rewrite as XXIX.
+  if (matchesFormITamilNaduSubsistenceHint(parts) || matchesFormITamilNaduSubsistenceHint(fileBlob)) {
+    return false;
+  }
   const hasTN =
     /tamil[\s._-]*nadu|tamilnadu|\(tn\)|\btn\b/.test(parts) ||
     /\bform[\s._-]*xxix[\s._-]*tamil/.test(parts) ||

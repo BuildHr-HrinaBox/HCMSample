@@ -45,6 +45,26 @@ export function isForm2APHeaderFieldLayoutFormHeader(formHeader) {
   return !!formHeader?.form2APColumnBoxLayout;
 }
 
+export const FORM_2AP_DISPLAY_TITLE =
+  'Form No. 2-A – Notice of Change of Manager / Occupier';
+export const FORM_2AP_DISPLAY_SUBTITLE =
+  'Prescribed under Rule 12 (Andhra Pradesh Factories Rules)';
+
+/** Keep Form 2-A modal title/subtitle even if a prior parse left Form 11 (etc.) headers. */
+export function enrichForm2APDisplayHeader(formHeader, fileName = '', item = null, sheetText = '') {
+  if (
+    !isForm2APHeaderFieldLayoutFormHeader(formHeader) &&
+    !isForm2APChangeNoticeContext(formHeader, item, fileName, sheetText)
+  ) {
+    return formHeader;
+  }
+  const base = formHeader && typeof formHeader === 'object' ? { ...formHeader } : {};
+  base.title = FORM_2AP_DISPLAY_TITLE;
+  base.subtitle = FORM_2AP_DISPLAY_SUBTITLE;
+  base.form2APColumnBoxLayout = true;
+  return base;
+}
+
 const FORM_2AP_FALLBACK_LABELS = [
   'Full name and Address of the Factory',
   'Licence Number',
@@ -328,12 +348,8 @@ export function resolveForm2APHeaderFieldLayout(parsed, workbook, hints = {}) {
     return {
       formHeader: {
         ...(formHeader || {}),
-        title:
-          formHeader?.title ||
-          'Form No. 2-A – Notice of Change of Manager / Occupier',
-        subtitle:
-          formHeader?.subtitle ||
-          'Prescribed under Rule 12 (Andhra Pradesh Factories Rules)',
+        title: FORM_2AP_DISPLAY_TITLE,
+        subtitle: FORM_2AP_DISPLAY_SUBTITLE,
         form2APColumnBoxLayout: true,
         fields
       },
@@ -348,12 +364,8 @@ export function resolveForm2APHeaderFieldLayout(parsed, workbook, hints = {}) {
   return {
     formHeader: {
       ...(formHeader || {}),
-      title:
-        formHeader?.title ||
-        'Form No. 2-A – Notice of Change of Manager / Occupier',
-      subtitle:
-        formHeader?.subtitle ||
-        'Prescribed under Rule 12 (Andhra Pradesh Factories Rules)',
+      title: FORM_2AP_DISPLAY_TITLE,
+      subtitle: FORM_2AP_DISPLAY_SUBTITLE,
       form2APColumnBoxLayout: true,
       fields: buildForm2APFallbackFields()
     },

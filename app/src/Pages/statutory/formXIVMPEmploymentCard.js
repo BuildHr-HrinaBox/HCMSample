@@ -2787,10 +2787,18 @@ export function triggerFormXIVMPZipDownload(blob, fileName) {
   const link = document.createElement('a');
   link.href = downloadUrl;
   link.download = fileName;
+  link.style.display = 'none';
+  link.rel = 'noopener';
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
-  URL.revokeObjectURL(downloadUrl);
+  setTimeout(() => {
+    try {
+      URL.revokeObjectURL(downloadUrl);
+    } catch (_) {
+      /* ignore */
+    }
+  }, 60_000);
 }
 
 export async function buildFormXIVMPPerEmployeeDownload({

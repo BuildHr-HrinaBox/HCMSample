@@ -32,7 +32,7 @@ const DEFAULT_METRICS = [
   },
   {
     key: 'approvals',
-    label: 'Pending Approvals',
+    label: 'Pending for Approval',
     value: 0,
     icon: ClipboardList,
     tone: 'blue',
@@ -571,7 +571,7 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
               return (
                 <article key={m.key} className={`nd-metric nd-metric--${m.tone}`}>
                   <div className="nd-metric-icon-wrap">
-                    <Icon size={22} strokeWidth={2} />
+                    <Icon size={20} strokeWidth={2} />
                   </div>
                   <div className="nd-metric-body">
                     <span className="nd-metric-label">{m.label}</span>

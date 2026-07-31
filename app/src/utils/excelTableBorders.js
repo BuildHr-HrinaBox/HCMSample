@@ -253,6 +253,68 @@ export function ensureExcelJSDataRowsWithBorders(
   });
 }
 
+/**
+ * After ExcelJS removeWorksheet(), workbook.views often keep activeTab/firstSheet
+ * pointing at a removed sheet index. Excel then opens the file as [Repaired]
+ * (Form XXIII AP multi-tab templates are a common case).
+ */
+export function resetExcelJsWorkbookActiveSheet(workbook) {
+  if (!workbook) return;
+  const sheetCount = Array.isArray(workbook.worksheets) ? workbook.worksheets.length : 0;
+  if (sheetCount < 1) return;
+  const maxIdx = Math.max(0, sheetCount - 1);
+  const base =
+    (Array.isArray(workbook.views) && workbook.views[0] && typeof workbook.views[0] === 'object'
+      ? workbook.views[0]
+      : null) || {
+      x: 0,
+      y: 0,
+      width: 12000,
+      height: 16000,
+      visibility: 'visible',
+    };
+  let activeTab = Number(base.activeTab);
+  let firstSheet = Number(base.firstSheet);
+  if (!Number.isFinite(activeTab) || activeTab < 0 || activeTab > maxIdx) activeTab = 0;
+  if (!Number.isFinite(firstSheet) || firstSheet < 0 || firstSheet > maxIdx) firstSheet = 0;
+  workbook.views = [{ ...base, activeTab, firstSheet }];
+}
+
+/**
+ * ExcelJS writeBuffer throws when a shared-formula clone's master was cleared or
+ * overwritten ("Shared Formula master must exist above and or left of clone").
+ * Convert orphaned clones to their cached result (or empty) so download can finish.
+ */
+export function detachOrphanedExcelJSSharedFormulas(worksheet) {
+  if (!worksheet || typeof worksheet.eachRow !== 'function') return 0;
+  let fixed = 0;
+  worksheet.eachRow({ includeEmpty: false }, (row) => {
+    row.eachCell({ includeEmpty: false }, (cell) => {
+      const v = cell.value;
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return;
+      // Clone: points at master address, no own formula text.
+      if (!v.sharedFormula || v.formula) return;
+      let masterOk = false;
+      try {
+        const master = worksheet.getCell(String(v.sharedFormula));
+        const mv = master?.value;
+        masterOk = !!(
+          mv &&
+          typeof mv === 'object' &&
+          !Array.isArray(mv) &&
+          (typeof mv.formula === 'string' || mv.shareType === 'shared')
+        );
+      } catch (_) {
+        masterOk = false;
+      }
+      if (masterOk) return;
+      cell.value = v.result != null && v.result !== undefined ? v.result : null;
+      fixed += 1;
+    });
+  });
+  return fixed;
+}
+
 /** Remove values and borders from cells to the right of the table (template stray boxes). */
 export function clearExcelJSTrailingTableCells(
   worksheet,
@@ -363,9 +425,13 @@ export function isStatutoryFormTitleBandText(text) {
     return true;
   }
 
-  // Rule / sub-rule citation line
+  // Rule / sub-rule citation line (See Rule… or A.P. Vide Rule…)
   if (
-    (/see\s+(sub-)?rule/i.test(lower) || /^\*?\[?\s*see\s+/i.test(lower) || /\(see\s+/i.test(lower)) &&
+    (/see\s+(sub-)?rule/i.test(lower) ||
+      /vide\s+rule/i.test(lower) ||
+      /^\*?\[?\s*see\s+/i.test(lower) ||
+      /\(see\s+/i.test(lower) ||
+      /\(vide\s+/i.test(lower)) &&
     t.length <= 120
   ) {
     return true;
@@ -405,13 +471,16 @@ export function applyStatutoryDownloadContentAlignment(worksheet) {
 
       const next = {
         ...(cell.alignment || {}),
-        vertical: cell.alignment?.vertical || 'middle',
-        wrapText: cell.alignment?.wrapText != null ? cell.alignment.wrapText : true
+        vertical: cell.alignment?.vertical || 'middle'
       };
+      // Preserve template wrapText — do not force wrap on every cell (shreds Form XXIII headers).
 
       // Always center Form Number / Rule / Form Name (do not leave/force left).
+      // Keep wrapText false on title band so a narrow column cannot stack the title vertically.
       if (rowNumber <= 20 && isStatutoryFormTitleBandText(text)) {
         next.horizontal = 'center';
+        next.wrapText = false;
+        next.textRotation = 0;
         cell.alignment = next;
         return;
       }

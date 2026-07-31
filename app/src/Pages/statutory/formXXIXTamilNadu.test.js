@@ -69,6 +69,44 @@ describe('Form XXIX Tamil Nadu Register of Advances', () => {
     ).toBe(false);
   });
 
+  it('does not treat Form_1_TN Register of Subsistence Allowance as Form XXIX', () => {
+    const subsistenceHeaders = [
+      'Sl.No',
+      'Name and Address of the Employee kept under suspension',
+      "Father/Husband's Name",
+      'Monthly emoluments (Wages) paid to the employee',
+      'Date of suspension',
+      'Amount of subsistence allowance paid and the date of payment',
+      'Signature of employee with date for receiving money or postal acknowledgement of money order',
+      'Remarks',
+    ];
+    expect(looksLikeFormXXIXTamilNaduTableHeaders(subsistenceHeaders)).toBe(false);
+    expect(
+      isFormXXIXTamilNaduContext(
+        {
+          title: 'FORM I',
+          subtitle: 'Register of Subsistence Allowance',
+        },
+        { state: 'Tamil Nadu', formName: 'Register of Subsistence Allowance' },
+        'Form_1_TN_-_TamilNadu.xlsx',
+        subsistenceHeaders,
+        'Register of Subsistence Allowance SA Form 1'
+      )
+    ).toBe(false);
+    expect(
+      enrichFormXXIXTamilNaduDisplayHeader(
+        { title: 'FORM I', subtitle: 'Register of Subsistence Allowance', fields: [] },
+        { state: 'Tamil Nadu' },
+        'Form_1_TN_-_TamilNadu.xlsx',
+        subsistenceHeaders,
+        'Register of Subsistence Allowance'
+      ).title
+    ).toBe('FORM I');
+    // Filename alone must not be rewritten as Form XXIX.
+    expect(isFormXXIXTamilNaduContext({}, null, 'Form_1_TN_-_TamilNadu.xlsx')).toBe(false);
+    expect(isFormXXIXTamilNaduContext({}, null, 'Form_I_-_TamilNadu.xlsx')).toBe(false);
+  });
+
   it('does not treat Form_XVIII_-_TamilNadu.xlsx wages-cum-muster as Form XXIX', () => {
     const formXviiiHeaders = [
       'Name of employee',

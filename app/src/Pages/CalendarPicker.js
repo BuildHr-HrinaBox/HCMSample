@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import './CalendarPicker.css';
 import {
   fetchInchargeDisplayScopeFromSites,
@@ -8,7 +9,22 @@ import {
   statesFieldMatchesInchargeSiteStates,
 } from '../utils/siteInchargeScope';
 
+const DISPLAY_STATUS = {
+  YET: 'Yet to Complete',
+  PENDING: 'Pending',
+  APPROVED: 'Approved',
+  RETURNED: 'Returned',
+};
+
+const STATUS_LABEL = {
+  [DISPLAY_STATUS.YET]: 'Yet to Submit',
+  [DISPLAY_STATUS.PENDING]: 'Pending',
+  [DISPLAY_STATUS.APPROVED]: 'Approved',
+  [DISPLAY_STATUS.RETURNED]: 'Returned',
+};
+
 const CalendarPicker = ({ userEmail, userRole }) => {
+  const navigate = useNavigate();
   // Initialize with current date and year
   const today = new Date();
   const [currentDate, setCurrentDate] = useState(new Date(today.getFullYear(), today.getMonth(), 1)); // Current month and year
@@ -17,8 +33,10 @@ const CalendarPicker = ({ userEmail, userRole }) => {
   const [showTooltip, setShowTooltip] = useState(false);
   const [tooltipData, setTooltipData] = useState(null);
   const [selectedNotificationId, setSelectedNotificationId] = useState(null);
-  const [activeStatusFilter, setActiveStatusFilter] = useState(null);
+  const [activeStatusFilter, setActiveStatusFilter] = useState(null); // null = All
+  const [listExpanded, setListExpanded] = useState(false);
   const [error, setError] = useState(null);
+  const [submittingStatutoryRowId, setSubmittingStatutoryRowId] = useState('');
   
   // State for site management data and industry filtering
   const [siteManagementData, setSiteManagementData] = useState([]);
@@ -46,7 +64,8 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     'July', 'August', 'September', 'October', 'November', 'December'
   ];
 
-  const dayNames = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const FORM_ICON_COLORS = ['#7c3aed', '#db2777', '#0891b2', '#16a34a', '#ea580c', '#2563eb', '#ca8a04'];
 
   const allowedActCategoryList = inchargeDisplayScope.actCategories;
   const hasSiteBasedScope = Array.isArray(allowedActCategoryList) && allowedActCategoryList.length > 0;
@@ -450,8 +469,8 @@ const CalendarPicker = ({ userEmail, userRole }) => {
   };
 
   const displayChecklistBulkData = (() => {
-    if (!inchargeDisplayScope.ready) return [];
     if (!checklistBulkData || checklistBulkData.length === 0) return [];
+    if (!inchargeDisplayScope.ready) return checklistBulkData;
     if (hasSiteBasedScope) {
       return checklistBulkData.filter((item) => rowMatchesInchargeSiteScope(item));
     }
@@ -548,8 +567,8 @@ const CalendarPicker = ({ userEmail, userRole }) => {
   };
 
   const filteredStatutoryData = (() => {
-    if (!inchargeDisplayScope.ready) return [];
     if (!Array.isArray(statutoryData) || statutoryData.length === 0) return [];
+    if (!inchargeDisplayScope.ready) return statutoryData;
     if (hasSiteBasedScope) {
       // Site login: only Yet to Complete / status rows for this site's industry + state
       return statutoryData.filter((item) => rowMatchesInchargeSiteScope(item));
@@ -579,7 +598,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     return !itemMonth || itemMonth === targetMonth;
   };
 
-  /** Same month matching as Statutory Transaction when May (etc.) is selected in the month filter. */
+  /** Same month matching as Statutory Transaction (incl. nomonth / monthly / bare day). */
   const statutoryRowMatchesTransactionMonth = (row, calendarDate) => {
     if (!calendarDate) return false;
     const calMonthName = monthNames[calendarDate.getMonth()];
@@ -588,9 +607,11 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     const storedMonthNorm = String(storedMonth).trim().toLowerCase().substring(0, 3);
     if (storedMonthNorm) return storedMonthNorm === selectedMonthNorm;
     const dueRaw = row.dueDate || row.DueDate;
-    if (!dueRaw) return false;
-    const dueDateLower = String(dueRaw).toLowerCase().trim();
-    if (dueDateLower.includes('monthly basis')) return true;
+    const dueDateLower = String(dueRaw || '').toLowerCase().trim();
+    // nomonth rows: empty, monthly, or bare day-of-month match any selected month
+    if (!dueDateLower) return true;
+    if (dueDateLower.includes('monthly')) return true;
+    if (/^\d{1,2}$/.test(dueDateLower)) return true;
     const monthNamesFull = [
       'january', 'february', 'march', 'april', 'may', 'june',
       'july', 'august', 'september', 'october', 'november', 'december',
@@ -621,8 +642,13 @@ const CalendarPicker = ({ userEmail, userRole }) => {
       const monthlyDay = dayMatch ? String(parseInt(dayMatch[1], 10)) : '15';
       return monthlyDay === dayStr;
     }
-    // Month-scoped row with no parseable day — treat as due on the 15th
-    return dayStr === '15';
+    // Bare numeric due date (e.g. "7", "07", Excel-recovered day) should match that exact day.
+    const recoveredDay = extractChecklistDayOfMonth(row.dueDate || row.DueDate);
+    if (recoveredDay != null) {
+      return String(recoveredDay) === dayStr;
+    }
+    // If no reliable day can be inferred, do not force a fake 15th-day due marker.
+    return false;
   };
 
   const statutoryRowToCalendarItem = (row) => {
@@ -763,7 +789,27 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     return out;
   };
 
-  const getCalendarItemsForDate = (date) => buildCalendarItemsFromChecklistForDate(date);
+  /** Prefer Statutory Transaction rows for the day; fall back to checklist. */
+  const getCalendarItemsForDate = (date) => {
+    if (!date) return [];
+    const itemKey = (item) => `${normLabel(item?.rule)}|${normLabel(item?.schedule)}`;
+    const checklistItems = buildCalendarItemsFromChecklistForDate(date);
+    const statutoryItems = buildCalendarItemsFromStatutoryForDate(date);
+    if (checklistItems.length === 0) return statutoryItems;
+    if (statutoryItems.length === 0) return checklistItems;
+
+    // Keep checklist as base for "All" due forms, then enrich with statutory status rows.
+    const statutoryByKey = new Map(statutoryItems.map((item) => [itemKey(item), item]));
+    const mergedChecklist = checklistItems.map((item) => {
+      const matched = statutoryByKey.get(itemKey(item));
+      return matched?._statutoryRow ? { ...item, _statutoryRow: matched._statutoryRow } : item;
+    });
+
+    // Include statutory-only rows not present in checklist, so nothing is hidden.
+    const mergedKeys = new Set(mergedChecklist.map((item) => itemKey(item)));
+    const statutoryOnly = statutoryItems.filter((item) => !mergedKeys.has(itemKey(item)));
+    return [...mergedChecklist, ...statutoryOnly];
+  };
 
   const getChecklistDueDaysInMonth = (year, month) => {
     const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -856,6 +902,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     setSelectedDate(date);
     setSelectedNotificationId(null);
     setActiveStatusFilter(null); // show all checklistbulk forms for the selected due date
+    setListExpanded(false);
     const items = getCalendarItemsForDate(date);
     setTooltipData(items);
     setShowTooltip(true);
@@ -1123,6 +1170,67 @@ const CalendarPicker = ({ userEmail, userRole }) => {
 
   const STATUS_PRIORITY = ['Returned', 'Approved', 'Pending', 'Yet to Complete'];
 
+  const getStatusPriorityIndex = (status) => {
+    const index = STATUS_PRIORITY.indexOf(status);
+    return index === -1 ? STATUS_PRIORITY.length : index;
+  };
+
+  const getBestMatchingStatutoryRowForCalendarItem = (calendarItem, targetMonth) => {
+    if (calendarItem?._statutoryRow) return calendarItem._statutoryRow;
+    const matches = filteredStatutoryData.filter(
+      (stat) => statutoryMonthMatches(stat, targetMonth) && calendarRowMatchesStatutoryRow(calendarItem, stat)
+    );
+    if (matches.length === 0) return null;
+    const ranked = matches
+      .map((row) => ({ row, status: getStatutoryTransactionDisplayStatus(row) }))
+      .sort((a, b) => getStatusPriorityIndex(a.status) - getStatusPriorityIndex(b.status));
+    return ranked[0]?.row || null;
+  };
+
+  const getDueDateFromStatutoryRow = (row, anchorDate) => {
+    if (!row || !anchorDate) return null;
+    const rawDueDate = row.dueDate ?? row.DueDate ?? '';
+    const parsed = parseDueDateToMonthDay(rawDueDate);
+    const anchorYear = anchorDate.getFullYear();
+    const anchorMonth = anchorDate.getMonth();
+    if (parsed?.day) {
+      const parsedDay = parseInt(parsed.day, 10);
+      if (!Number.isNaN(parsedDay) && parsedDay >= 1 && parsedDay <= 31) {
+        const parsedMonthIndex = CALENDAR_MONTH_KEYS.findIndex(
+          (key) => normalizeMonthKey(key) === normalizeMonthKey(parsed.monthKey)
+        );
+        const monthIndex = parsedMonthIndex >= 0 ? parsedMonthIndex : anchorMonth;
+        return new Date(anchorYear, monthIndex, parsedDay);
+      }
+    }
+    const recoveredDay = extractChecklistDayOfMonth(rawDueDate);
+    if (recoveredDay != null) {
+      return new Date(anchorYear, anchorMonth, recoveredDay);
+    }
+    return null;
+  };
+
+  const getDueDateFromChecklistItem = (item, anchorDate) => {
+    if (!item?.deadlines || !anchorDate) return null;
+    const selectedMonthNorm = normalizeMonthKey(CALENDAR_MONTH_KEYS[anchorDate.getMonth()]);
+    const entry = Object.entries(item.deadlines).find(
+      ([monthKey, day]) => normalizeMonthKey(monthKey) === selectedMonthNorm && String(day || '').trim() !== ''
+    );
+    if (!entry) return null;
+    const dayNumber = parseInt(String(entry[1]), 10);
+    if (Number.isNaN(dayNumber) || dayNumber < 1 || dayNumber > 31) return null;
+    return new Date(anchorDate.getFullYear(), anchorDate.getMonth(), dayNumber);
+  };
+
+  const getCalendarItemDueDate = (calendarItem, anchorDate, targetMonth) => {
+    const row = getBestMatchingStatutoryRowForCalendarItem(calendarItem, targetMonth);
+    const statutoryDueDate = getDueDateFromStatutoryRow(row, anchorDate);
+    if (statutoryDueDate) return statutoryDueDate;
+    const checklistDueDate = getDueDateFromChecklistItem(calendarItem, anchorDate);
+    if (checklistDueDate) return checklistDueDate;
+    return anchorDate;
+  };
+
   const getCalendarItemTransactionStatus = (calendarItem, targetMonth) => {
     if (calendarItem._statutoryRow) {
       return getCalendarItemDisplayStatus(calendarItem);
@@ -1145,176 +1253,539 @@ const CalendarPicker = ({ userEmail, userRole }) => {
 
   const getTaskStatusByIndex = (index) => transactionStatusByIndex[index] || null;
 
-  // Status chip counts for checklistbulk forms due on the selected day
-  const returnedCount = transactionStatusByIndex.filter((s) => s === 'Returned').length;
-  const approvedCount = transactionStatusByIndex.filter((s) => s === 'Approved').length;
-  const pendingCount = transactionStatusByIndex.filter((s) => s === 'Pending').length;
-  const yetToCompleteCount = transactionStatusByIndex.filter((s) => s === 'Yet to Complete').length;
+  const countByStatus = (statuses) => ({
+    yet: statuses.filter((s) => s === DISPLAY_STATUS.YET).length,
+    pending: statuses.filter((s) => s === DISPLAY_STATUS.PENDING).length,
+    approved: statuses.filter((s) => s === DISPLAY_STATUS.APPROVED).length,
+    returned: statuses.filter((s) => s === DISPLAY_STATUS.RETURNED).length,
+  });
 
-  const statusTagClassName = (statusKey, toneClass) => {
-    const isActive = activeStatusFilter === statusKey;
-    const isInactive = activeStatusFilter && activeStatusFilter !== statusKey;
-    return `status-tag ${toneClass}${isActive ? ' is-active' : ''}${isInactive ? ' is-inactive' : ''}`;
+  /** Primary: unique checklist forms due in the viewed month. */
+  const getUniqueChecklistFormsDueInMonth = (year, month) => {
+    const monthKey = normalizeMonthKey(CALENDAR_MONTH_KEYS[month]);
+    const seen = new Set();
+    const items = [];
+    calendarData.forEach((item) => {
+      if (!item.deadlines) return;
+      const hasDeadlineInMonth = Object.entries(item.deadlines).some(
+        ([mk, day]) => normalizeMonthKey(mk) === monthKey && day
+      );
+      if (!hasDeadlineInMonth) return;
+      const key = `${normLabel(item.rule)}|${normLabel(item.schedule)}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      items.push(item);
+    });
+    return items;
   };
 
-  const countReturnedStatutoryForDate = (date) =>
-    filteredStatutoryData.filter(
-      (stat) => isStatutoryRowReturned(stat) && statutoryRowMatchesCalendarDate(stat, date)
-    ).length;
+  const viewedMonthNorm = normalizeMonthKey(CALENDAR_MONTH_KEYS[currentDate.getMonth()]);
+  const monthChecklistItems = getUniqueChecklistFormsDueInMonth(
+    currentDate.getFullYear(),
+    currentDate.getMonth()
+  );
+  const primaryStatuses = monthChecklistItems.map((item) =>
+    getCalendarItemTransactionStatus(item, viewedMonthNorm)
+  );
+  const primaryCounts = countByStatus(primaryStatuses);
+  const primaryTotal =
+    primaryCounts.yet + primaryCounts.pending + primaryCounts.approved + primaryCounts.returned;
 
-  const daysWithReturnedCounts = days.map((day) => {
+  const dayFallbackCounts = countByStatus(transactionStatusByIndex);
+
+  const monthAnchorForCounts = currentDate;
+  const statutoryFallbackCounts = (() => {
+    let yet = 0;
+    let pending = 0;
+    let approved = 0;
+    let returned = 0;
+    filteredStatutoryData.forEach((row) => {
+      if (!statutoryRowMatchesTransactionMonth(row, monthAnchorForCounts)) return;
+      const status = isStatutoryRowReturned(row)
+        ? DISPLAY_STATUS.RETURNED
+        : getStatutoryTransactionDisplayStatus(row);
+      if (status === DISPLAY_STATUS.RETURNED) returned += 1;
+      else if (status === DISPLAY_STATUS.APPROVED) approved += 1;
+      else if (status === DISPLAY_STATUS.PENDING) pending += 1;
+      else yet += 1;
+    });
+    return { yet, pending, approved, returned };
+  })();
+
+  const kpiCounts =
+    primaryTotal > 0
+      ? primaryCounts
+      : dayFallbackCounts.yet +
+          dayFallbackCounts.pending +
+          dayFallbackCounts.approved +
+          dayFallbackCounts.returned >
+        0
+        ? dayFallbackCounts
+        : statutoryFallbackCounts;
+
+  const yetToCompleteCount = kpiCounts.yet;
+  const pendingCount = kpiCounts.pending;
+  const approvedCount = kpiCounts.approved;
+  const returnedCount = kpiCounts.returned;
+
+  const getDayStatusSummary = (date) => {
+    if (!date) {
+      return { total: 0, pending: 0, approved: 0, returned: 0, yet: 0 };
+    }
+    const items = getCalendarItemsForDate(date);
+    const monthKey = normalizeMonthKey(monthNames[date.getMonth()].substring(0, 3));
+    let pending = 0;
+    let approved = 0;
+    let returned = 0;
+    let yet = 0;
+    items.forEach((item) => {
+      const status = getCalendarItemTransactionStatus(item, monthKey);
+      if (status === DISPLAY_STATUS.RETURNED) returned += 1;
+      else if (status === DISPLAY_STATUS.APPROVED) approved += 1;
+      else if (status === DISPLAY_STATUS.PENDING) pending += 1;
+      else yet += 1;
+    });
+    return { total: items.length, pending, approved, returned, yet };
+  };
+
+  const daysWithStatus = days.map((day) => {
     if (day.isEmpty || !day.date) return day;
-    const returnedOnDay = countReturnedStatutoryForDate(day.date);
-    return { ...day, returnedCount: returnedOnDay };
+    const summary = getDayStatusSummary(day.date);
+    const yetDueCount = summary.yet || 0;
+    return { ...day, statusSummary: summary, dueCount: yetDueCount };
   });
 
   const visibleTooltipData = (currentTooltipData || [])
-    .map((item, index) => ({ item, index }))
-    .filter(({ index }) => {
+    .map((item, index) => ({ item, index, status: getTaskStatusByIndex(index) }))
+    .filter(({ status }) => {
       if (!activeStatusFilter) return true;
-      return getTaskStatusByIndex(index) === activeStatusFilter;
+      return status === activeStatusFilter;
     });
 
   const handleStatusTagClick = (status) => {
     setActiveStatusFilter((prev) => (prev === status ? null : status));
-  };
-
-  const statusLabelStyle = (status) => {
-    if (status === 'Returned') return { color: '#dc2626' };
-    if (status === 'Approved') return { color: '#16a34a' };
-    if (status === 'Pending') return { color: '#ca8a04' };
-    if (status === 'Yet to Complete') return { color: '#ea580c' };
-    return { color: '#6b7280' };
+    setListExpanded(false);
   };
 
   const emptyStatusLabel = () => {
-    if (activeStatusFilter === 'Returned') return 'returned';
-    if (activeStatusFilter === 'Approved') return 'approved';
-    if (activeStatusFilter === 'Pending') return 'pending';
-    if (activeStatusFilter === 'Yet to Complete') return 'yet to complete';
+    if (activeStatusFilter === DISPLAY_STATUS.RETURNED) return 'returned';
+    if (activeStatusFilter === DISPLAY_STATUS.APPROVED) return 'approved';
+    if (activeStatusFilter === DISPLAY_STATUS.PENDING) return 'pending';
+    if (activeStatusFilter === DISPLAY_STATUS.YET) return 'yet to submit';
     return '';
   };
 
+  const formatLongDate = (date) => {
+    if (!date) return '';
+    const dd = String(date.getDate()).padStart(2, '0');
+    return `${dd} ${monthNames[date.getMonth()]} ${date.getFullYear()}`;
+  };
+
+  const formatShortDate = (date) => {
+    if (!date) return '';
+    const dd = String(date.getDate()).padStart(2, '0');
+    const mon = monthNames[date.getMonth()].substring(0, 3);
+    return `${dd} ${mon} ${date.getFullYear()}`;
+  };
+
+  const openStatutoryForForm = (item) => {
+    const selectedMonthName =
+      selectedDate && selectedDate instanceof Date
+        ? monthNames[selectedDate.getMonth()]
+        : monthNames[currentDate.getMonth()];
+    navigate('/rule-book/statutory', {
+      state: {
+        fromCalendar: true,
+        formName: item?.rule || '',
+        description: item?.schedule || '',
+        monthFilter: selectedMonthName || '',
+        dueDate: selectedDate ? selectedDate.toISOString() : null,
+      },
+    });
+  };
+
+  const resolveStatutoryRowId = (row) => {
+    const raw = row?.id ?? row?.ROWID ?? row?.StatutoryId ?? '';
+    const id = String(raw || '').trim();
+    if (!id || id === '0' || id.toLowerCase() === 'null' || id.toLowerCase() === 'undefined') {
+      return '';
+    }
+    return id;
+  };
+
+  const todayIsoLocal = () => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+
+  const markCalendarRowSentLocally = (targetId, submitDateIso) => {
+    if (!targetId) return;
+    setStatutoryData((prev) =>
+      Array.isArray(prev)
+        ? prev.map((row) => {
+            if (String(row?.id ?? row?.ROWID ?? row?.StatutoryId ?? '').trim() !== String(targetId)) {
+              return row;
+            }
+            return {
+              ...row,
+              sendForApproval: 'Sent',
+              SendForApproval: 'Sent',
+              status: 'Pending',
+              Status: 'Pending',
+              approval: '',
+              Approval: '',
+              remarks: '',
+              Remarks: '',
+              submittedDate: submitDateIso,
+              SubmittedDate: submitDateIso,
+            };
+          })
+        : prev
+    );
+  };
+
+  const handleCalendarSubmit = async (item) => {
+    const row = item?._statutoryRow || null;
+    if (!row) {
+      openStatutoryForForm(item);
+      return;
+    }
+    if (statutorySendForApprovalIsSent(row)) {
+      openStatutoryForForm(item);
+      return;
+    }
+    const targetId = resolveStatutoryRowId(row);
+    if (!targetId) {
+      openStatutoryForForm(item);
+      return;
+    }
+
+    const submitDateIso = todayIsoLocal();
+    setSubmittingStatutoryRowId(targetId);
+    markCalendarRowSentLocally(targetId, submitDateIso);
+
+    try {
+      const resp = await fetch(`/server/statutoryreg_function/statutory/${targetId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...row,
+          sendForApproval: 'Sent',
+          SendForApproval: 'Sent',
+          status: 'Pending',
+          Status: 'Pending',
+          approval: null,
+          Approval: null,
+          remarks: null,
+          Remarks: null,
+          submittedDate: submitDateIso,
+          SubmittedDate: submitDateIso,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data?.status !== 'success') {
+        throw new Error(data?.message || 'Failed to send for approval');
+      }
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('statutoryDataUpdated', { detail: { id: targetId, source: 'calendarSubmit' } })
+        );
+      }
+      openStatutoryForForm(item);
+    } catch (err) {
+      console.error('Calendar submit failed:', err);
+      setError(err?.message || 'Failed to send for approval');
+      setTimeout(() => setError(null), 4000);
+      openStatutoryForForm(item);
+    } finally {
+      setSubmittingStatutoryRowId('');
+    }
+  };
+
+  const getPriorityForRow = (status, index) => {
+    if (status === DISPLAY_STATUS.RETURNED || status === DISPLAY_STATUS.YET) {
+      return index % 3 === 0 ? 'High' : 'Medium';
+    }
+    if (status === DISPLAY_STATUS.PENDING) return 'Medium';
+    return 'Low';
+  };
+
+  const scopeParts = [];
+  if (inchargeDisplayScope.industryLabels?.length) {
+    scopeParts.push(inchargeDisplayScope.industryLabels.join(', '));
+  } else if (hasSiteBasedScope) {
+    scopeParts.push(allowedActCategoryList.join(', '));
+  } else {
+    scopeParts.push('Factories Act');
+  }
+  if (inchargeDisplayScope.stateLabels?.length) {
+    scopeParts.push(inchargeDisplayScope.stateLabels.join(', '));
+  } else {
+    scopeParts.push('TamilNadu');
+  }
+  const scopeSubtitle = scopeParts.join(' • ');
+
+  const todayAnchor = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const todayDueCount = getDayStatusSummary(todayAnchor).yet;
+  const approvedPct =
+    yetToCompleteCount + pendingCount + approvedCount + returnedCount > 0
+      ? Math.round(
+          (approvedCount / (yetToCompleteCount + pendingCount + approvedCount + returnedCount)) * 100
+        )
+      : 0;
+
+  const pageSize = 5;
+  const displayedRows = listExpanded ? visibleTooltipData : visibleTooltipData.slice(0, pageSize);
+  const totalVisible = visibleTooltipData.length;
+  const showingFrom = totalVisible === 0 ? 0 : 1;
+  const showingTo = Math.min(displayedRows.length, totalVisible);
+
   return (
-    <div className="calendar-picker-container">
-      <div className="calendar-combined-card">
-        <div className="calendar-combined-body">
-      {/* Left Side - Rule Form Boxes */}
-      <div className="notifications-panel">
-        <div className="notifications-header">
-          <div className="notifications-header-left">
-            <div className="notifications-header-icon">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8L14 2Z" stroke="#1976d2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                <path d="M14 2V8H20" stroke="#1976d2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                <path d="M16 13H8" stroke="#1976d2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                <path d="M16 17H8" stroke="#1976d2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                <path d="M10 9H9H8" stroke="#1976d2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+    <div className="calendar-picker-container hcm-cal-flow">
+      <div className="hcm-cal-card">
+        <div className="hcm-cal-toolbar">
+          <div className="hcm-cal-month-nav">
+            <button type="button" className="hcm-cal-nav-btn" onClick={() => navigateMonth(-1)} aria-label="Previous Month">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <path d="M15 18L9 12L15 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
-            </div>
-            <h2 className="notifications-title">Schedule Of Submission/ Maintenance</h2>
-            {hasSiteBasedScope && (
-              <span className="notifications-subtitle" style={{ fontSize: '12px', color: '#6b7280', marginLeft: '8px', fontWeight: 'normal' }}>
-                (site login
-                {inchargeDisplayScope.industryLabels?.length
-                  ? ` · Industry: ${inchargeDisplayScope.industryLabels.join(', ')}`
-                  : ` · ${allowedActCategoryList.join(', ')}`}
-                {inchargeDisplayScope.stateLabels?.length
-                  ? ` · State: ${inchargeDisplayScope.stateLabels.join(', ')}`
-                  : ''}
-                )
-              </span>
-            )}
+            </button>
+            <button
+              type="button"
+              className={`hcm-cal-month-label ${showYearPicker ? 'open' : ''}`}
+              onClick={() => setShowYearPicker(!showYearPicker)}
+            >
+              {monthNames[currentDate.getMonth()]} {currentDate.getFullYear()}
+            </button>
+            <button type="button" className="hcm-cal-nav-btn" onClick={() => navigateMonth(1)} aria-label="Next Month">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <path d="M9 18L15 12L9 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
           </div>
-          <div className="notification-status-tags">
-            <button
-              type="button"
-              className={statusTagClassName('Yet to Complete', 'yet-to-complete')}
-              onClick={() => handleStatusTagClick('Yet to Complete')}
-              aria-pressed={activeStatusFilter === 'Yet to Complete'}
-              style={{ cursor: 'pointer' }}
-              title="Show yet to complete forms (Statutory Transaction)"
-            >
-              Yet to Complete ({yetToCompleteCount})
-            </button>
-            <button
-              type="button"
-              className={statusTagClassName('Pending', 'status-pending')}
-              onClick={() => handleStatusTagClick('Pending')}
-              aria-pressed={activeStatusFilter === 'Pending'}
-              style={{ cursor: 'pointer' }}
-              title="Show pending forms (Statutory Transaction)"
-            >
-              Pending ({pendingCount})
-            </button>
-            <button
-              type="button"
-              className={statusTagClassName('Approved', 'completed')}
-              onClick={() => handleStatusTagClick('Approved')}
-              aria-pressed={activeStatusFilter === 'Approved'}
-              style={{ cursor: 'pointer' }}
-              title="Show approved forms (Statutory Transaction)"
-            >
-              Approved ({approvedCount})
-            </button>
-            <button
-              type="button"
-              className={statusTagClassName('Returned', 'returned')}
-              onClick={() => handleStatusTagClick('Returned')}
-              aria-pressed={activeStatusFilter === 'Returned'}
-              style={{ cursor: 'pointer' }}
-              title="Show returned forms (Statutory Transaction)"
-            >
-              Returned ({returnedCount})
-            </button>
+
+        </div>
+
+        <div className="hcm-cal-grid-wrap">
+          <div className="hcm-cal-day-headers">
+            {dayNames.map((day) => (
+              <div key={day} className="hcm-cal-day-header">
+                {day}
+              </div>
+            ))}
+          </div>
+          <div className="hcm-cal-grid">
+            {daysWithStatus.map((day, index) => {
+              if (day.isEmpty || !day.date) {
+                return <div key={index} className="hcm-cal-day empty" />;
+              }
+              const summary = day.statusSummary || {};
+              const dueCount = day.dueCount || 0;
+              return (
+                <button
+                  key={index}
+                  type="button"
+                  className={`hcm-cal-day${day.isToday ? ' today' : ''}${day.isSelected ? ' selected' : ''}${dueCount > 0 ? ' has-due' : ''}`}
+                  onClick={(e) => {
+                    handleDateSelect(day.date, e);
+                  }}
+                  title={dueCount > 0 ? `${dueCount} yet-to-submit form(s)` : undefined}
+                >
+                  <span className="hcm-cal-day-top">
+                    <span className="hcm-cal-day-number">{day.date.getDate()}</span>
+                    {dueCount > 0 ? <span className="hcm-cal-day-badge">{dueCount}</span> : null}
+                  </span>
+                  <span className="hcm-cal-day-dots" aria-hidden>
+                    {summary.pending > 0 ? <span className="dot pending" /> : null}
+                    {summary.approved > 0 ? <span className="dot approved" /> : null}
+                    {summary.returned > 0 ? <span className="dot returned" /> : null}
+                    {summary.yet > 0 && !summary.pending && !summary.approved && !summary.returned ? (
+                      <span className="dot yet" />
+                    ) : null}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
-        <div className="notifications-scroll-container rule-forms-container">
-          {visibleTooltipData && visibleTooltipData.length > 0 ? (
-            <div className="rule-forms-list">
-              {visibleTooltipData.map(({ item, index: origIndex }, index) => {
-                const colors = [
-                  { bg: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' },
-                  { bg: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' },
-                  { bg: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)' },
-                  { bg: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)' },
-                  { bg: 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)' },
-                  { bg: 'linear-gradient(135deg, #30cfd0 0%, #330867 100%)' },
-                  { bg: 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)' },
-                  { bg: 'linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%)' }
-                ];
-                const colorScheme = colors[index % colors.length];
-                const taskStatus = getTaskStatusByIndex(origIndex);
+
+        <div className="hcm-cal-summary-row">
+          <div className={`hcm-cal-summary-card yet ${activeStatusFilter === DISPLAY_STATUS.YET ? 'active' : ''}`}>
+            <div className="hcm-cal-summary-icon" aria-hidden>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="#fff" strokeWidth="2" />
+                <path d="M14 2v6h6" stroke="#fff" strokeWidth="2" />
+                <path d="M9 15h6M9 11h2" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </div>
+            <div>
+              <div className="hcm-cal-summary-label">Yet to Submit</div>
+              <div className="hcm-cal-summary-value">{yetToCompleteCount}</div>
+              <div className="hcm-cal-summary-sub">↑ {todayDueCount} Due Today</div>
+            </div>
+          </div>
+          <div className={`hcm-cal-summary-card pending ${activeStatusFilter === DISPLAY_STATUS.PENDING ? 'active' : ''}`}>
+            <div className="hcm-cal-summary-icon" aria-hidden>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="9" stroke="#fff" strokeWidth="2" />
+                <path d="M12 7v5l3 2" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </div>
+            <div>
+              <div className="hcm-cal-summary-label">Pending</div>
+              <div className="hcm-cal-summary-value">{pendingCount}</div>
+              <div className="hcm-cal-summary-sub">Awaiting Approval</div>
+            </div>
+          </div>
+          <div className={`hcm-cal-summary-card approved ${activeStatusFilter === DISPLAY_STATUS.APPROVED ? 'active' : ''}`}>
+            <div className="hcm-cal-summary-icon" aria-hidden>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="9" stroke="#fff" strokeWidth="2" />
+                <path d="M8.5 12.5l2.5 2.5 4.5-5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </div>
+            <div>
+              <div className="hcm-cal-summary-label">Approved</div>
+              <div className="hcm-cal-summary-value">{approvedCount}</div>
+              <div className="hcm-cal-summary-sub">{approvedPct}% Completed</div>
+            </div>
+          </div>
+          <div className={`hcm-cal-summary-card returned ${activeStatusFilter === DISPLAY_STATUS.RETURNED ? 'active' : ''}`}>
+            <div className="hcm-cal-summary-icon" aria-hidden>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="9" stroke="#fff" strokeWidth="2" />
+                <circle cx="12" cy="12" r="3" stroke="#fff" strokeWidth="2" />
+                <path d="M16.5 7.5l2-2" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </div>
+            <div>
+              <div className="hcm-cal-summary-label">Returned</div>
+              <div className="hcm-cal-summary-value">{returnedCount}</div>
+              <div className="hcm-cal-summary-sub">Need Correction</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="hcm-cal-forms-section">
+          <div className="hcm-cal-forms-header">
+            <div className="hcm-cal-forms-header-main">
+              <div className="hcm-cal-forms-header-row">
+                <h2 className="hcm-cal-forms-title">
+                  Forms Due on {formatLongDate(selectedDate)}
+                  <span className="hcm-cal-forms-count">{currentTooltipData?.length || 0}</span>
+                </h2>
+                <div className="hcm-cal-forms-tabs">
+                  <button
+                    type="button"
+                    className={`hcm-cal-tab ${!activeStatusFilter ? 'active' : ''}`}
+                    onClick={() => {
+                      setActiveStatusFilter(null);
+                      setListExpanded(false);
+                    }}
+                  >
+                    All
+                  </button>
+                  <button
+                    type="button"
+                    className={`hcm-cal-tab ${activeStatusFilter === DISPLAY_STATUS.YET ? 'active' : ''}`}
+                    onClick={() => handleStatusTagClick(DISPLAY_STATUS.YET)}
+                  >
+                    Yet to Submit
+                  </button>
+                  <button
+                    type="button"
+                    className={`hcm-cal-tab ${activeStatusFilter === DISPLAY_STATUS.PENDING ? 'active' : ''}`}
+                    onClick={() => handleStatusTagClick(DISPLAY_STATUS.PENDING)}
+                  >
+                    Pending
+                  </button>
+                  <button
+                    type="button"
+                    className={`hcm-cal-tab ${activeStatusFilter === DISPLAY_STATUS.APPROVED ? 'active' : ''}`}
+                    onClick={() => handleStatusTagClick(DISPLAY_STATUS.APPROVED)}
+                  >
+                    Approved
+                  </button>
+                  <button
+                    type="button"
+                    className={`hcm-cal-tab ${activeStatusFilter === DISPLAY_STATUS.RETURNED ? 'active' : ''}`}
+                    onClick={() => handleStatusTagClick(DISPLAY_STATUS.RETURNED)}
+                  >
+                    Returned
+                  </button>
+                </div>
+              </div>
+              <p className="hcm-cal-forms-scope">{scopeSubtitle}</p>
+            </div>
+          </div>
+
+          {displayedRows.length > 0 ? (
+            <div className="hcm-cal-forms-list">
+              {displayedRows.map(({ item, index: origIndex, status }, index) => {
+                const iconColor = FORM_ICON_COLORS[index % FORM_ICON_COLORS.length];
+                const displayStatus = STATUS_LABEL[status] || status || 'Yet to Submit';
+                const statusClass =
+                  status === DISPLAY_STATUS.APPROVED
+                    ? 'approved'
+                    : status === DISPLAY_STATUS.PENDING
+                      ? 'pending'
+                      : status === DISPLAY_STATUS.RETURNED
+                        ? 'returned'
+                        : 'yet';
+                const priority = getPriorityForRow(status, origIndex);
+                const dueDateForRow = getCalendarItemDueDate(item, selectedDate, targetMonthNorm);
+                const statutoryRowId = resolveStatutoryRowId(item?._statutoryRow);
+                const isSubmittingThisRow =
+                  !!submittingStatutoryRowId && statutoryRowId && submittingStatutoryRowId === statutoryRowId;
+                const canSubmit =
+                  status === DISPLAY_STATUS.YET ||
+                  status === DISPLAY_STATUS.PENDING ||
+                  status === DISPLAY_STATUS.RETURNED ||
+                  !status;
                 return (
-                  <div key={`${origIndex}-${normLabel(item.rule)}`} className="rule-form-card">
-                    <div
-                      className="rule-form-card-header"
-                      style={{ background: colorScheme.bg }}
-                    >
-                      <div className="doc-icon">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                          <path d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8L14 2Z" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                          <path d="M14 2V8H20" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                          <path d="M16 13H8" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                          <path d="M16 17H8" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                          <path d="M10 9H9H8" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                        </svg>
-                      </div>
-                      <h3 className="rule-form-card-title">{item.rule}</h3>
+                  <div key={`${origIndex}-${normLabel(item.rule)}`} className="hcm-cal-form-row">
+                    <div className="hcm-cal-form-icon" style={{ background: iconColor }}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="#fff" strokeWidth="2" />
+                        <path d="M14 2v6h6" stroke="#fff" strokeWidth="2" />
+                      </svg>
                     </div>
-                    <div className="rule-form-card-body">
-                      {item.schedule}
-                      {taskStatus && (
-                        <div
-                          style={{
-                            marginTop: '6px',
-                            fontSize: '11px',
-                            fontWeight: 600,
-                            ...statusLabelStyle(taskStatus),
-                          }}
+                    <div className="hcm-cal-form-info">
+                      <div className="hcm-cal-form-name">{item.rule}</div>
+                      <div className="hcm-cal-form-desc">{item.schedule}</div>
+                    </div>
+                    <div className={`hcm-cal-form-status ${statusClass}`}>{displayStatus}</div>
+                    <div className="hcm-cal-form-due">Due Date {formatShortDate(dueDateForRow)}</div>
+                    <div className={`hcm-cal-form-priority ${priority.toLowerCase()}`}>{priority}</div>
+                    <div className="hcm-cal-form-actions">
+                      <button type="button" className="hcm-cal-btn-view" onClick={() => openStatutoryForForm(item)}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                          <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" stroke="currentColor" strokeWidth="2" />
+                          <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
+                        </svg>
+                        View
+                      </button>
+                      {canSubmit ? (
+                        <button
+                          type="button"
+                          className="hcm-cal-btn-submit"
+                          style={{ background: iconColor }}
+                          onClick={() => handleCalendarSubmit(item)}
+                          disabled={isSubmittingThisRow}
                         >
-                          {taskStatus}
-                        </div>
+                          {isSubmittingThisRow ? 'Submitting...' : 'Submit'}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="hcm-cal-btn-submit muted"
+                          onClick={() => openStatutoryForForm(item)}
+                        >
+                          Open
+                        </button>
                       )}
                     </div>
                   </div>
@@ -1322,137 +1793,47 @@ const CalendarPicker = ({ userEmail, userRole }) => {
               })}
             </div>
           ) : (
-            <div className="no-notifications">
-              <p>
-                No{emptyStatusLabel() ? ` ${emptyStatusLabel()}` : ''} rule forms available
-              </p>
-              <p className="no-notifications-subtitle">
+            <div className="hcm-cal-forms-empty">
+              <p>No{emptyStatusLabel() ? ` ${emptyStatusLabel()}` : ''} forms for this date</p>
+              <p className="hcm-cal-forms-empty-sub">
                 {activeStatusFilter
-                  ? 'Try another status tab or date to view forms'
-                  : 'Click on a calendar date or notification to view forms'}
+                    ? 'Try another status tab or date'
+                    : 'Click a calendar date to view due forms'}
               </p>
             </div>
           )}
+
+          {totalVisible > 0 ? (
+            <div className="hcm-cal-forms-footer">
+              <span>
+                Showing {showingFrom} to {showingTo} of {totalVisible} results
+              </span>
+              {totalVisible > pageSize ? (
+                <button type="button" className="hcm-cal-view-all" onClick={() => setListExpanded((v) => !v)}>
+                  {listExpanded ? 'Show Less' : `View All ${totalVisible} Forms`}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <path
+                      d={listExpanded ? 'M18 15L12 9L6 15' : 'M9 18L15 12L9 6'}
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </div>
 
-      {/* Right Side - Calendar View */}
-      <div className="calendar-picker-card">
-        {/* Calendar Heading with Icon */}
-        <div className="calendar-main-heading">
-          <div className="calendar-heading-icon">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" stroke="#1976d2" strokeWidth="2"/>
-              <line x1="16" y1="2" x2="16" y2="6" stroke="#1976d2" strokeWidth="2" strokeLinecap="round"/>
-              <line x1="8" y1="2" x2="8" y2="6" stroke="#1976d2" strokeWidth="2" strokeLinecap="round"/>
-              <line x1="3" y1="10" x2="21" y2="10" stroke="#1976d2" strokeWidth="2"/>
-              <circle cx="8" cy="14" r="1" fill="#1976d2"/>
-              <circle cx="12" cy="14" r="1" fill="#1976d2"/>
-              <circle cx="16" cy="14" r="1" fill="#1976d2"/>
-              <circle cx="8" cy="18" r="1" fill="#1976d2"/>
-              <circle cx="12" cy="18" r="1" fill="#1976d2"/>
-            </svg>
-          </div>
-          <h1 className="calendar-heading-text">Calendar</h1>
-        </div>
-
-        {/* Month navigation: prev | month + year | next (reference layout) */}
-        <div className="calendar-picker-header">
-          <button
-            type="button"
-            className="nav-button prev-button"
-            onClick={() => navigateMonth(-1)}
-            aria-label="Previous Month"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <path d="M15 18L9 12L15 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </button>
-
-          <div className="calendar-picker-header-center">
-            <h2 className="month-title">
-              <span className="month-title-name">{monthNames[currentDate.getMonth()]}</span>
-              <button
-                type="button"
-                className={`year-selector ${showYearPicker ? 'open' : ''}`}
-                onClick={() => setShowYearPicker(!showYearPicker)}
-                aria-expanded={showYearPicker}
-                aria-haspopup="dialog"
-              >
-                {currentDate.getFullYear()}
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
-                  <path d="M6 9L12 15L18 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              </button>
-            </h2>
-          </div>
-
-          <button
-            type="button"
-            className="nav-button next-button"
-            onClick={() => navigateMonth(1)}
-            aria-label="Next Month"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <path d="M9 18L15 12L9 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </button>
-        </div>
-
-
-
-        {/* Day of week headers */}
-        <div className="day-headers">
-          {dayNames.map(day => (
-            <div key={day} className="day-header">{day}</div>
-          ))}
-        </div>
-
-        {/* Calendar grid */}
-        <div className="calendar-grid">
-          {daysWithReturnedCounts.map((day, index) => {
-            if (day.isEmpty || !day.date) {
-              return <div key={index} className="calendar-day empty"></div>;
-            }
-            
-            return (
-              <button
-                key={index}
-                type="button"
-                className={`calendar-day ${day.isToday ? 'today' : ''} ${day.isSelected ? 'selected' : ''} ${day.hasChecklistDue ? 'has-due' : day.hasData ? 'has-data' : ''}${day.returnedCount > 0 ? ' has-returned' : ''}`}
-                onClick={(e) => handleDateSelect(day.date, e)}
-                title={
-                  day.hasChecklistDue
-                    ? `${buildCalendarItemsFromChecklistForDate(day.date).length} form(s) due`
-                    : day.returnedCount > 0
-                      ? `${day.returnedCount} returned`
-                      : undefined
-                }
-              >
-                <span className="calendar-day-number">{day.date.getDate()}</span>
-                {day.returnedCount > 0 ? (
-                  <span className="calendar-day-returned-count" aria-label={`${day.returnedCount} returned`}>
-                    {day.returnedCount}
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
-        </div>
-
-
-
-      </div>
-        </div>
-      </div>
-
-      {/* Year picker as separate card */}
       {showYearPicker && (
         <div className="year-picker">
           <div className="year-picker-content">
-            {getYearRange().map(year => (
+            {getYearRange().map((year) => (
               <button
                 key={year}
+                type="button"
                 className={`year-option ${currentDate.getFullYear() === year ? 'selected' : ''}`}
                 onClick={() => handleYearSelect(year)}
               >

@@ -108,7 +108,13 @@ export function isFormITamilNaduFinesOrWorkmenDefaultContext({
   if (!blob) return false;
   const looksLikeFormI = /\bform\s*i\b/.test(blob) || /\bform\s*1\b/.test(blob);
   const looksLikeTamilNadu = /tamil\s*nadu|tamilnadu/.test(blob);
-  if (!looksLikeFormI || !looksLikeTamilNadu) return false;
+  const looksLikeWorkmenRegister =
+    /register\s+of\s+workmen/.test(blob) ||
+    /conferment\s+of\s+permanent\s+status/.test(blob) ||
+    /name\s+and\s+address\s+of\s+the\s+workman/.test(blob) ||
+    (Array.isArray(headers) &&
+      headers.some((h) => /name\s+and\s+address\s+of\s+the\s+workman/i.test(String(h || ''))) &&
+      headers.some((h) => /480\s+days|emp\s*id/i.test(String(h || ''))));
 
   // Suspension / subsistence Form_I_-_TamilNadu is a different register.
   if (
@@ -119,12 +125,14 @@ export function isFormITamilNaduFinesOrWorkmenDefaultContext({
     return false;
   }
 
+  // Workmen register: Form 1 / Form I + workmen headers is enough (filename may be form-draft.xlsx).
+  if (looksLikeFormI && looksLikeWorkmenRegister) return true;
+  if (!looksLikeFormI || !looksLikeTamilNadu) return false;
+
   return (
     /register\s+of\s+fines/.test(blob) ||
-    /register\s+of\s+workmen/.test(blob) ||
     /pw\s*form\s*i/.test(blob) ||
     /act\s+or\s+omission/.test(blob) ||
-    /name\s+and\s+address\s+of\s+the\s+workman/.test(blob) ||
     (Array.isArray(headers) &&
       headers.some((h) => {
         const bare = formITnHeaderBare(h);
@@ -250,6 +258,112 @@ function formITnRowHasNamedEmployee(row, headers) {
   );
 }
 
+/** True when a workmen row has employee identity beyond Sl.No-only template placeholders. */
+export function formITamilNaduWorkmenRowHasSubstantiveEntry(row, headers) {
+  if (!row || typeof row !== 'object') return false;
+  const lookupName = String(row.__employeeLookupName ?? '').trim();
+  if (lookupName && !isBlankLikeFormITamilNaduValue(lookupName) && !/^\d+$/.test(lookupName)) {
+    return true;
+  }
+  const lookupId = String(row.__employeeLookupId ?? '').trim();
+  if (lookupId && !isBlankLikeFormITamilNaduValue(lookupId)) return true;
+  const list = Array.isArray(headers) && headers.length > 0 ? headers : Object.keys(row);
+  for (const header of list) {
+    if (String(header || '').startsWith('__')) continue;
+    const kind = classifyFormITnDefaultColumn(header);
+    if (kind !== 'name' && kind !== 'empId') continue;
+    const v = String(row[header] ?? '').trim();
+    if (v && !isBlankLikeFormITamilNaduValue(v) && !/^\d+$/.test(v)) return true;
+  }
+  return formITnRowHasNamedEmployee(row, headers);
+}
+
+export function formITamilNaduWorkmenDownloadHasSubstantiveRows(rows, headers) {
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  return rows.some((row) => formITamilNaduWorkmenRowHasSubstantiveEntry(row, headers));
+}
+
+function pickFormITamilNaduExportCellValue(value) {
+  if (value == null || String(value).trim() === '' || isBlankLikeFormITamilNaduValue(value)) return '';
+  return value;
+}
+
+/**
+ * Register of Workmen Excel export — mirror Register of Fines fallbacks so Sl.No-only
+ * template / stale modal rows still write Form 1 Tamilnadu default employees.
+ */
+export function resolveFormITamilNaduWorkmenExportCellValue(
+  rowObj,
+  header,
+  headerIndex,
+  emp,
+  rowIndex,
+  priorHeaders = []
+) {
+  const bare = formITnHeaderBare(header);
+  const byPrior =
+    headerIndex != null && Array.isArray(priorHeaders) && priorHeaders[headerIndex]
+      ? pickFormITamilNaduExportCellValue(rowObj?.[priorHeaders[headerIndex]])
+      : '';
+  const kind = classifyFormITnDefaultColumn(header);
+
+  if (kind === 'sno' || /^(s\.?\s*no\.?|sl\.?\s*no\.?|serial)/.test(bare)) {
+    return (
+      pickFormITamilNaduExportCellValue(rowObj?.[header]) ||
+      byPrior ||
+      emp?.sno ||
+      String(rowIndex + 1)
+    );
+  }
+  if (kind === 'empId') {
+    return (
+      pickFormITamilNaduExportCellValue(rowObj?.[header]) ||
+      pickFormITamilNaduExportCellValue(rowObj?.__employeeLookupId) ||
+      byPrior ||
+      emp?.empId ||
+      ''
+    );
+  }
+  if (kind === 'name') {
+    return (
+      pickFormITamilNaduExportCellValue(rowObj?.[header]) ||
+      pickFormITamilNaduExportCellValue(rowObj?.__employeeLookupName) ||
+      byPrior ||
+      emp?.name ||
+      ''
+    );
+  }
+  if (kind === 'designation') {
+    return pickFormITamilNaduExportCellValue(rowObj?.[header]) || byPrior || emp?.designation || '';
+  }
+  if (kind === 'department') {
+    return (
+      pickFormITamilNaduExportCellValue(rowObj?.[header]) ||
+      byPrior ||
+      emp?.department ||
+      emp?.designation ||
+      ''
+    );
+  }
+  if (kind === 'dateOfFirstEntry') {
+    return pickFormITamilNaduExportCellValue(rowObj?.[header]) || byPrior || emp?.dateOfFirstEntry || '';
+  }
+  if (kind === 'dateCompleted480Days') {
+    return pickFormITamilNaduExportCellValue(rowObj?.[header]) || byPrior || emp?.dateCompleted480Days || '';
+  }
+  if (kind === 'dateMadePermanent') {
+    return pickFormITamilNaduExportCellValue(rowObj?.[header]) || byPrior || emp?.dateMadePermanent || '';
+  }
+  if (kind === 'father') {
+    return pickFormITamilNaduExportCellValue(rowObj?.[header]) || byPrior || '';
+  }
+  if (isFormITamilNaduFinesNilDefaultHeader(header)) {
+    const direct = pickFormITamilNaduExportCellValue(rowObj?.[header]);
+    return direct || byPrior || FORM_I_TAMIL_NADU_NIL_DEFAULT;
+  }
+  return pickFormITamilNaduExportCellValue(rowObj?.[header]) || byPrior || '';
+}
+
 /**
  * Ensure Form I TN download/autofill has the Form 1 Excel default employees
  * when Name columns are empty (template Sl.No-only rows).
@@ -273,7 +387,7 @@ export function isFormITamilNaduSkipAutofillHeader(header) {
   return false;
 }
 
-/** "Amount of subsistence allowance paid and the date of payment" — never fetch; fill NIL. */
+/** "Amount of subsistence allowance paid and the date of payment" — never fetch; leave blank. */
 export function isFormITamilNaduAmountAllowancePaidHeader(header) {
   const text = normalizeFormITamilNaduHeaderText(header);
   if (!text) return false;
@@ -286,11 +400,28 @@ export function isFormITamilNaduAmountAllowancePaidHeader(header) {
   );
 }
 
-export function isFormITamilNaduNilDefaultHeader(header) {
+/** Rate at which subsistence allowance is calculated — leave blank on download. */
+export function isFormITamilNaduRateAllowanceHeader(header) {
+  const text = normalizeFormITamilNaduHeaderText(header);
+  if (!text) return false;
+  return (
+    text.includes('rate') &&
+    text.includes('allowance') &&
+    text.includes('calculated') &&
+    text.includes('period for which') &&
+    text.includes('calculation made')
+  );
+}
+
+/**
+ * Register of Subsistence Allowance columns that stay blank on download (not "NIL").
+ * Offence/dates, rate, amount paid, punishment, signature.
+ */
+export function isFormITamilNaduSuspensionBlankDefaultHeader(header) {
   const text = normalizeFormITamilNaduHeaderText(header);
   if (!text) return false;
   if (isFormITamilNaduAmountAllowancePaidHeader(header)) return true;
-  if (isFormITamilNaduSkipAutofillHeader(header)) return false;
+  if (isFormITamilNaduRateAllowanceHeader(header)) return true;
 
   const hasSuspensionDate =
     text.includes('date of suspension') || (text.includes('date') && text.includes('suspension'));
@@ -305,17 +436,23 @@ export function isFormITamilNaduNilDefaultHeader(header) {
     (text.includes('nature of offence') && text.includes('date of offence')) ||
     hasSuspensionDate ||
     hasRevocationDate ||
-    (text.includes('rate') &&
-      text.includes('allowance') &&
-      text.includes('calculated') &&
-      text.includes('period for which') &&
-      text.includes('calculation made')) ||
     hasPunishmentText ||
-    text === 'remarks' ||
     (text.includes('signature of employee') &&
       text.includes('receiving money') &&
       text.includes('postal acknowledgement of money order'))
   );
+}
+
+/** Remarks — still default to NIL when blank. */
+export function isFormITamilNaduNilDefaultHeader(header) {
+  const text = normalizeFormITamilNaduHeaderText(header);
+  if (!text) return false;
+  if (isFormITamilNaduAmountAllowancePaidHeader(header)) return false;
+  if (isFormITamilNaduRateAllowanceHeader(header)) return false;
+  if (isFormITamilNaduSuspensionBlankDefaultHeader(header)) return false;
+  if (isFormITamilNaduSkipAutofillHeader(header)) return false;
+
+  return text === 'remarks';
 }
 
 export function isFormITamilNaduSuspensionWorkbookContext({
@@ -360,7 +497,7 @@ export function isFormITamilNaduSuspensionWorkbookContext({
   return looksLikeFormI && looksLikeTamilNadu && looksLikeSuspensionRegister;
 }
 
-/** Clear Monthly emoluments; fill blank offence/suspension/remarks/signature cells with NIL. */
+/** Clear Monthly emoluments; blank offence/suspension/rate/amount/signature; NIL for remarks. */
 export function applyFormITamilNaduNilDefaultsToRows(rows, headers, { overwriteNil = false } = {}) {
   if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(headers) || headers.length === 0) {
     return rows;
@@ -371,10 +508,17 @@ export function applyFormITamilNaduNilDefaultsToRows(rows, headers, { overwriteN
     let changed = false;
 
     headers.forEach((header) => {
-      // Amount paid + date: always NIL (never keep fetched month-end dates).
-      if (isFormITamilNaduAmountAllowancePaidHeader(header)) {
-        if (next[header] !== FORM_I_TAMIL_NADU_NIL_DEFAULT) {
-          next[header] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+      // Blank suspension cols: leave empty (never keep fetched dates / NIL).
+      if (isFormITamilNaduSuspensionBlankDefaultHeader(header)) {
+        const current = String(next[header] ?? '').trim();
+        const shouldClear =
+          overwriteNil ||
+          isBlankLikeFormITamilNaduValue(next[header]) ||
+          /^nil+$/i.test(current) ||
+          isFormITamilNaduAmountAllowancePaidHeader(header) ||
+          isFormITamilNaduRateAllowanceHeader(header);
+        if (shouldClear && next[header] !== '') {
+          next[header] = '';
           changed = true;
         }
         return;
@@ -456,7 +600,12 @@ export function formITamilNaduSuspensionRowHasSubstantiveEntry(row, headers) {
   return (headers || []).some((header) => {
     // Amount paid column is never treated as a real suspension entry (no fetch).
     if (isFormITamilNaduAmountAllowancePaidHeader(header)) return false;
-    if (!isFormITamilNaduNilDefaultHeader(header)) return false;
+    if (
+      !isFormITamilNaduNilDefaultHeader(header) &&
+      !isFormITamilNaduSuspensionBlankDefaultHeader(header)
+    ) {
+      return false;
+    }
     const v = String(row[header] ?? '').trim();
     if (!v || isBlankLikeFormITamilNaduValue(v)) return false;
     if (/^nil$/i.test(v) || v === FORM_I_TAMIL_NADU_NIL_DEFAULT) return false;
@@ -501,7 +650,8 @@ export function buildFormITamilNaduSuspensionNilTableRows(
     row[h] = '';
   });
   (headers || []).forEach((h) => {
-    if (isFormITamilNaduNilDefaultHeader(h) || isFormITamilNaduAmountAllowancePaidHeader(h)) {
+    // Remarks only — offence, dates, rate, amount paid, punishment, signature stay blank.
+    if (isFormITamilNaduNilDefaultHeader(h)) {
       row[h] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
     }
   });
@@ -537,7 +687,9 @@ export function applyFormITamilNaduSuspensionNilTableRows(
       if (!formITamilNaduSuspensionRowIsNilMonthEntry(r, hdrs)) return r;
       const updated = { ...r };
       hdrs.forEach((h) => {
-        if (isFormITamilNaduNilDefaultHeader(h) || isFormITamilNaduAmountAllowancePaidHeader(h)) {
+        if (isFormITamilNaduSuspensionBlankDefaultHeader(h)) {
+          updated[h] = '';
+        } else if (isFormITamilNaduNilDefaultHeader(h)) {
           updated[h] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
         }
       });
@@ -747,6 +899,81 @@ export function cloneFormITamilNaduWorkmenWorksheetClean(sourceWs) {
       cell.font = { ...(cell.font || {}), bold: true };
     }
   }
+
+  return { workbook: outWb, worksheet: outWs };
+}
+
+/** Canonical PW Form I — Register of Fines columns (Payment / Minimum Wages). */
+export const FORM_I_TN_FINES_CANONICAL_HEADERS = [
+  'Sl.No',
+  'Name',
+  "Father's/ Husband's Name or Workshop Departmental or Gang Number",
+  'Department of Gang',
+  'Act or omission for which fine imposed',
+  'Whether workman showed cause against fine or not and if so, date on which cause was shown',
+  'Total wages for the wage-period in which fine imposed',
+  'Amount of and Date on which fine imposed',
+  'Date on which fine realised',
+  'Remarks'
+];
+
+/**
+ * Build a clean PW Form I Register of Fines workbook when Form Master linked the
+ * Conferment Register of Workmen file (Form_I_-_TamilNadu.xlsx) by mistake.
+ */
+export function buildFormITamilNaduRegisterOfFinesWorkbookClean({
+  establishmentName = '',
+  establishmentAddress = ''
+} = {}) {
+  // eslint-disable-next-line global-require
+  const ExcelJS = require('exceljs');
+  const outWb = new ExcelJS.Workbook();
+  const outWs = outWb.addWorksheet('PW Form I');
+  const headers = FORM_I_TN_FINES_CANONICAL_HEADERS;
+  const colWidths = [6, 18, 28, 16, 22, 28, 18, 18, 16, 14];
+
+  outWs.mergeCells('A1:J1');
+  const title = outWs.getCell(1, 1);
+  title.value =
+    'FORM I\nREGISTER OF FINES\n[See Rule 3]\nPayment of Wages Act / Minimum Wages Act';
+  title.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  title.font = { bold: true, size: 12, name: 'Palatino Linotype' };
+  outWs.getRow(1).height = 72;
+
+  outWs.mergeCells('A2:J2');
+  const est = outWs.getCell(2, 1);
+  const namePart = String(establishmentName || '').trim();
+  const addrPart = String(establishmentAddress || '').trim();
+  est.value = `Name of the Establishment: ${[namePart, addrPart].filter(Boolean).join(', ')}`;
+  est.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+  outWs.getRow(2).height = 28;
+
+  const headerRow = 3;
+  headers.forEach((h, i) => {
+    const cell = outWs.getCell(headerRow, i + 1);
+    cell.value = h;
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    cell.font = { bold: true, size: 9, name: 'Calibri' };
+    cell.border = {
+      top: { style: 'thin' },
+      left: { style: 'thin' },
+      bottom: { style: 'thin' },
+      right: { style: 'thin' }
+    };
+  });
+  outWs.getRow(headerRow).height = 48;
+
+  // Column index row (1)…(10)
+  headers.forEach((_, i) => {
+    const cell = outWs.getCell(headerRow + 1, i + 1);
+    cell.value = `(${i + 1})`;
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    cell.font = { size: 8 };
+  });
+
+  colWidths.forEach((w, i) => {
+    outWs.getColumn(i + 1).width = w;
+  });
 
   return { workbook: outWb, worksheet: outWs };
 }

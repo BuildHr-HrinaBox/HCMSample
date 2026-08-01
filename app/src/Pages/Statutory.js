@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
@@ -313,14 +313,18 @@ import {
   applyFormITamilNaduNilDefaultsToRows,
   applyFormITamilNaduSuspensionNilTableRows,
   buildFormITamilNaduDefaultRows,
+  buildFormITamilNaduRegisterOfFinesWorkbookClean,
   cloneFormITamilNaduWorkmenWorksheetClean,
   ensureFormITamilNaduDefaultEmployeeRows,
   ensureFormITamilNaduWorkmenTitleLayout,
+  formITamilNaduWorkmenDownloadHasSubstantiveRows,
   isFormITamilNaduFinesNilDefaultHeader,
   isFormITamilNaduFinesOrWorkmenDefaultContext,
+  resolveFormITamilNaduWorkmenExportCellValue,
   isFormITamilNaduNilDefaultHeader,
   isFormITamilNaduAmountAllowancePaidHeader,
   isFormITamilNaduSkipAutofillHeader,
+  isFormITamilNaduSuspensionBlankDefaultHeader,
   isFormITamilNaduSuspensionFooterLikeValue,
   formITamilNaduSuspensionRowIsFooterLike,
   isFormITamilNaduSuspensionWorkbookContext,
@@ -5597,6 +5601,24 @@ function isFormIRegisterOfFinesContext(item, fileName, formHeader, tableHeaders,
   if (isFormXXIAPRegisterOfFinesContext(formHeader, item, fileName, sheetText, tableHeaders)) {
     return false;
   }
+  // Form_I_-_TamilNadu.xlsx SA suspension / subsistence register is not Register of Fines
+  // (both cite Payment/Minimum Wages Act and share the same filename).
+  if (
+    isFormITamilNaduSuspensionWorkbookContext({
+      fileName,
+      formFileName: fileName,
+      formHeader,
+      headers: tableHeaders,
+      sheetText
+    })
+  ) {
+    return false;
+  }
+  // Conferment Register of Workmen sheet must not be labeled Register of Fines just because
+  // the statutory catalog description says "Register of Fines".
+  if (sheetIndicatesFormIRegisterOfWorkmen(formHeader, tableHeaders, sheetText)) {
+    return false;
+  }
   const formTBlob = [
     item?.formName,
     item?.FormName,
@@ -5669,6 +5691,9 @@ function isFormIRegisterOfFinesContext(item, fileName, formHeader, tableHeaders,
 
 /** Tamil Nadu Form I (statutory name "Form 1") — Register of Workmen, not Form U Employee Register. */
 function isFormIRegisterOfWorkmenContext(item, fileName, formHeader, tableHeaders, sheetText) {
+  // Sheet content wins — catalog may wrongly say Register of Fines for a workmen template.
+  if (sheetIndicatesFormIRegisterOfWorkmen(formHeader, tableHeaders, sheetText)) return true;
+  if (sheetIndicatesFormIRegisterOfFines(formHeader, tableHeaders, sheetText)) return false;
   if (isFormIRegisterOfFinesContext(item, fileName, formHeader, tableHeaders, sheetText)) return false;
   // Form_I_-_TamilNadu.xlsx is the suspension / subsistence register — not Register of Workmen.
   if (
@@ -5797,6 +5822,96 @@ function isForm1EmployeeRegisterContext(item, fileName, formHeader, tableHeaders
   return false;
 }
 
+/** Conferment / Register of Workmen signals from parsed sheet only (ignore catalog row). */
+function sheetIndicatesFormIRegisterOfWorkmen(formHeader, tableHeaders, sheetText) {
+  const blob = [formHeader?.title, formHeader?.subtitle, formHeader?.reference, sheetText]
+    .map((s) => String(s || ''))
+    .join(' ')
+    .toLowerCase();
+  const hdr = Array.isArray(tableHeaders)
+    ? tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n')
+    : '';
+  const combined = `${blob}\n${hdr}`;
+  if (/register\s+of\s+fines/.test(combined) && /fine\s+imposed|act\s+or\s+omission/.test(combined)) {
+    return false;
+  }
+  if (/date\s+of\s+suspension|subsistence\s+allowance|kept\s+under\s+suspension/.test(combined)) {
+    return false;
+  }
+  if (/conferment\s+of\s+permanent\s+status|register\s+of\s+conferment/.test(combined)) return true;
+  if (/register\s+of\s+workmen/.test(combined) && !/employed\s+by\s+contractor/.test(combined)) {
+    return true;
+  }
+  if (/name\s+and\s+address\s+of\s+the\s+workman/.test(hdr) && /480\s+days/.test(hdr)) return true;
+  if (/emp\s*id/.test(hdr) && /480\s+days/.test(hdr) && /designation\s+of\s+the\s+workmen/.test(hdr)) {
+    return true;
+  }
+  return false;
+}
+
+/** PW Register of Fines signals from parsed sheet only (ignore catalog row). */
+function sheetIndicatesFormIRegisterOfFines(formHeader, tableHeaders, sheetText) {
+  if (sheetIndicatesFormIRegisterOfWorkmen(formHeader, tableHeaders, sheetText)) return false;
+  const blob = [formHeader?.title, formHeader?.subtitle, formHeader?.reference, sheetText]
+    .map((s) => String(s || ''))
+    .join(' ')
+    .toLowerCase();
+  const hdr = Array.isArray(tableHeaders)
+    ? tableHeaders.map((h) => String(h || '').toLowerCase()).join('\n')
+    : '';
+  const combined = `${blob}\n${hdr}`;
+  if (/register\s+of\s+fines\s+and\s+unpaid\s+accumulations/.test(combined)) return false;
+  if (/register\s+of\s+fines/.test(combined) || /register\s+of\s+fine\b/.test(combined)) return true;
+  if (/act\s+or\s+omission/.test(hdr) && /fine\s+imposed/.test(hdr)) return true;
+  if (/fine\s+realised|fine\s+realized|date\s+on\s+which\s+fine/.test(hdr)) return true;
+  return false;
+}
+
+/** What the statutory/catalog row asks for — do not use linked template sheet text. */
+function inferFormIVariantFromCatalogRow(item) {
+  if (!item) return null;
+  const blob = [
+    item.formName,
+    item.FormName,
+    item.act,
+    item.Act,
+    item.description,
+    item.Description
+  ]
+    .map((s) => String(s || ''))
+    .join(' ')
+    .toLowerCase();
+  if (!blob.trim()) return null;
+  if (/register\s+of\s+fines\s+and\s+unpaid\s+accumulations/.test(blob)) return null;
+  if (/register\s+of\s+fines/.test(blob) || /register\s+of\s+fine\b/.test(blob)) {
+    return 'register_of_fines';
+  }
+  if (/pw\s+form\s*i\b/.test(blob)) return 'register_of_fines';
+  if (
+    (/\bform\s*[-–]?\s*i\b/.test(blob) ||
+      (/\bform[\s._-]*1(?:[\s._-]|$)/i.test(blob) && !/\bform[\s._-]*1[0-9]/i.test(blob))) &&
+    (/minimum\s+wages?/.test(blob) || /payment\s+of\s+wages/.test(blob)) &&
+    !/conferment|register\s+of\s+workmen|permanent\s+status/.test(blob)
+  ) {
+    return 'register_of_fines';
+  }
+  if (/register\s+of\s+workmen|conferment\s+of\s+permanent|permanent\s+status\s+to\s+workmen/.test(blob)) {
+    return 'register_of_workmen';
+  }
+  return null;
+}
+
+/** What the opened Excel sheet actually is — ignore catalog description. */
+function inferFormIVariantFromSheetContent(formHeader, tableHeaders, sheetText) {
+  if (sheetIndicatesFormIRegisterOfFines(formHeader, tableHeaders, sheetText)) {
+    return 'register_of_fines';
+  }
+  if (sheetIndicatesFormIRegisterOfWorkmen(formHeader, tableHeaders, sheetText)) {
+    return 'register_of_workmen';
+  }
+  return null;
+}
+
 function inferFormIVariantFromRow(item, extra = {}) {
   const formHeader = {
     title: extra.formHeaderTitle,
@@ -5811,13 +5926,17 @@ function inferFormIVariantFromRow(item, extra = {}) {
     '';
   const headers = extra.sampleHeaders || extra.tableHeaders || null;
   const sheetText = extra.sheetText || '';
+  // Sheet content always wins over a mismatched catalog label (e.g. row says Fines,
+  // linked Form_I_-_TamilNadu.xlsx is Conferment Register of Workmen).
+  const sheetVariant = inferFormIVariantFromSheetContent(formHeader, headers, sheetText);
+  if (sheetVariant) return sheetVariant;
   if (isFormIRegisterOfFinesContext(item, fileName, formHeader, headers, sheetText)) {
     return 'register_of_fines';
   }
   if (isFormIRegisterOfWorkmenContext(item, fileName, formHeader, headers, sheetText)) {
     return 'register_of_workmen';
   }
-  return null;
+  return inferFormIVariantFromCatalogRow(item);
 }
 
 function inferFormIVariantFromSavedHeaders(headers) {
@@ -5828,6 +5947,17 @@ function inferFormIVariantFromSavedHeaders(headers) {
 }
 
 function inferFormIVariantFromSheetHints(hints = {}) {
+  // Prefer pure sheet classification so catalog "Register of Fines" cannot mask a workmen template.
+  const sheetOnly = inferFormIVariantFromSheetContent(
+    {
+      title: hints.formHeaderTitle,
+      subtitle: hints.formHeaderSubtitle,
+      reference: hints.formHeaderReference
+    },
+    hints.tableHeaders || hints.sampleHeaders || null,
+    hints.sheetText || ''
+  );
+  if (sheetOnly) return sheetOnly;
   return inferFormIVariantFromRow(hints.item || null, {
     fileName: hints.fileName,
     formFileName: hints.formFileName,
@@ -8591,8 +8721,33 @@ function buildStatutoryMonthPrefetchOptions(selectedMonthStr, item = null, wageP
   };
 }
 
+const STATUTORY_BACKGROUND_PREFETCH_COOLDOWN_MS = 6_000;
+const statutoryBackgroundPrefetchSeenAt = new Map();
+
+function cleanupStatutoryPrefetchSeen() {
+  if (statutoryBackgroundPrefetchSeenAt.size <= 240) return;
+  const cutoff = Date.now() - STATUTORY_BACKGROUND_PREFETCH_COOLDOWN_MS * 4;
+  statutoryBackgroundPrefetchSeenAt.forEach((ts, key) => {
+    if (!Number.isFinite(ts) || ts < cutoff) {
+      statutoryBackgroundPrefetchSeenAt.delete(key);
+    }
+  });
+}
+
 function runStatutoryBackgroundPrefetch(selectedMonthStr, item = null, wagePeriodLine = '') {
   const opts = buildStatutoryMonthPrefetchOptions(selectedMonthStr, item, wagePeriodLine);
+  const prefetchKey = [
+    opts.sdate || '',
+    opts.edate || '',
+    opts.fromDate || '',
+    opts.toDate || '',
+    Array.isArray(opts.payrollMonthCandidates) ? opts.payrollMonthCandidates.join(',') : ''
+  ].join('|');
+  const now = Date.now();
+  const lastSeen = statutoryBackgroundPrefetchSeenAt.get(prefetchKey) || 0;
+  if (now - lastSeen < STATUTORY_BACKGROUND_PREFETCH_COOLDOWN_MS) return;
+  statutoryBackgroundPrefetchSeenAt.set(prefetchKey, now);
+  cleanupStatutoryPrefetchSeen();
   prefetchStatutoryAutofillData(opts);
   prefetchSiteDetails();
   if (opts.payrollMonthCandidates.length > 0) {
@@ -9568,7 +9723,7 @@ function isForm15Part2NilDeductionColumnHeader(h) {
   );
 }
 
-const FORM_15_PART2_NIL_DEFAULT = 'Nil';
+const FORM_15_PART2_NIL_DEFAULT = 'NIL';
 
 /** Force Advance / Damages / Any-other deduction leaf columns to Nil on Form 15 Part 2 rows. */
 function applyForm15Part2NilDeductionColumnsToRows(rows, headers) {
@@ -9609,7 +9764,15 @@ function isForm15Part2SkipPeopleAutofillHeader(h) {
 
 function isForm15Part2DaysWorkedHeader(h) {
   const s = normalizeLooseHeaderText(h);
-  return s.includes('days') && s.includes('work');
+  if (!s || !s.includes('day')) return false;
+  // Avoid matching unrelated rate/rated columns that may contain "day".
+  if (/daily\s+rated|piece\s+rated|monthly\s+rated|daily\s+rate/.test(s)) return false;
+  return (
+    s.includes('work') ||
+    /paid\s*days?/.test(s) ||
+    /number\s+of\s+days?/.test(s) ||
+    /\bno\.?\s*of\s*days?\b/.test(s)
+  );
 }
 
 function isForm15Part2DearnessAllowanceHeader(h) {
@@ -10272,8 +10435,19 @@ function inferFormIVariantFromTemplateFileName(fileName) {
   if (/pw[\s._-]*form[\s._-]*i|register[\s._-]*of[\s._-]*fine|minimum[\s._-]*wage/.test(fn)) {
     return 'register_of_fines';
   }
+  // Explicit workmen / conferment filenames only.
+  // Do NOT treat bare Form_I_-_TamilNadu.xlsx as workmen — that file is PW Register of
+  // Fines or SA suspension register; mis-tagging it swaps the wrong template on download.
+  if (/register[\s._-]*of[\s._-]*workmen|conferment|permanent[\s._-]*status/.test(fn)) {
+    return 'register_of_workmen';
+  }
+  // Digit "Form 1 … Tamil Nadu" workmen register (not letter Form_I_-_TamilNadu).
+  const isFormILetterTamil =
+    /form[_\s.-]*i[_\s.-]*tamil/i.test(fn) || /form_i_-_tamil/i.test(fn);
   if (
-    /tamil[\s._-]*nadu|register[\s._-]*of[\s._-]*workmen|conferment|permanent[\s._-]*status/.test(fn)
+    !isFormILetterTamil &&
+    /(?:form[\s._-]*1[\s._-]*tamil|tamil[\s._-]*nadu.*form[\s._-]*1(?:[\s._-]|$))/i.test(fn) &&
+    !/form[\s._-]*1[0-9]/i.test(fn)
   ) {
     return 'register_of_workmen';
   }
@@ -10316,12 +10490,17 @@ function scoreFormIVariantTemplateMatch(gridRow, templateRow, requiredVariant) {
     if (gd === td) score += 15;
     else if (gd.includes(td) || td.includes(gd)) score += 8;
   }
-  if (requiredVariant === 'register_of_fines' && /pw[\s._-]*form[\s._-]*i/i.test(String(templateFileName))) {
+  if (
+    requiredVariant === 'register_of_fines' &&
+    /pw[\s._-]*form[\s._-]*i|form[_\s.-]*i[_\s.-]*tamil|form_i_-_tamil/i.test(String(templateFileName))
+  ) {
     score += 25;
   }
   if (
     requiredVariant === 'register_of_workmen' &&
-    /tamil[\s._-]*nadu|register[\s._-]*of[\s._-]*workmen/i.test(String(templateFileName))
+    (/register[\s._-]*of[\s._-]*workmen|conferment|permanent[\s._-]*status/i.test(String(templateFileName)) ||
+      (/form[\s._-]*1[\s._-]*tamil|tamil[\s._-]*nadu.*form[\s._-]*1/i.test(String(templateFileName)) &&
+        !/form[_\s.-]*i[_\s.-]*tamil|form_i_-_tamil/i.test(String(templateFileName))))
   ) {
     score += 20;
   }
@@ -10498,13 +10677,18 @@ function inferFormUVariantFromSavedHeaders(headers) {
   return null;
 }
 
-function pickFormMasterTemplateByFormIVariant(item, templates, variant) {
+function pickFormMasterTemplateByFormIVariant(item, templates, variant, opts = {}) {
   if (!variant || !Array.isArray(templates) || templates.length === 0) return null;
+  const excludeIds = new Set(
+    (Array.isArray(opts.excludeFormFileIds) ? opts.excludeFormFileIds : [])
+      .map((id) => String(id || '').trim())
+      .filter(Boolean)
+  );
   let best = null;
   let bestScore = -Infinity;
   templates.forEach((t) => {
     const fileId = t.id != null ? String(t.id) : t.fileId != null ? String(t.fileId) : '';
-    if (!fileId) return;
+    if (!fileId || excludeIds.has(fileId)) return;
     const templateFileName = t.templateFileName || t.name || t.fileName || '';
     const templateRow = {
       formName: t.formName,
@@ -10514,9 +10698,12 @@ function pickFormMasterTemplateByFormIVariant(item, templates, variant) {
       state: t.state,
       formFileName: templateFileName
     };
+    // Prefer catalog/filename variant for Form Master rows — do not let a wrong
+    // shared Form_I_-_TamilNadu filename collapse fines + workmen into one bucket.
     const tv =
-      inferFormIVariantFromRow(templateRow) ||
-      inferFormIVariantFromTemplateFileName(templateFileName);
+      inferFormIVariantFromCatalogRow(templateRow) ||
+      inferFormIVariantFromTemplateFileName(templateFileName) ||
+      inferFormIVariantFromRow(templateRow);
     if (tv !== variant) return;
     const s = scoreFormIVariantTemplateMatch(item, templateRow, variant);
     if (s > bestScore) {
@@ -10612,6 +10799,8 @@ function resolveDraftDownloadTemplateMeta(lineItem, resolvedFormFileItem, lookup
   const expectedVariant =
     opts.expectedVariant ||
     inferFormUVariantFromRow(lineItem) ||
+    // Prefer catalog Form I variant before sheet-contaminated inferFormIVariantFromRow.
+    inferFormIVariantFromCatalogRow(lineItem) ||
     inferFormIVariantFromRow(lineItem, {
       sampleHeaders: opts.sampleHeaders,
       tableHeaders: opts.sampleHeaders,
@@ -19322,6 +19511,32 @@ function resolveStatutoryWorkbookSheetName(workbook, hints = {}) {
       names.find((n) => /register\s+of\s+fines/i.test(String(n || '')));
     if (xSheet && (matchesFormXHint(blob) || /register\s+of\s+fines/i.test(blob))) return xSheet;
   }
+  // Form_I_-_TamilNadu.xlsx often has both "PW Form I" (Register of Fines) and "FORM 1"
+  // (Conferment workmen). Prefer the fines sheet when the row/UI asks for fines.
+  const wantsFormIFinesSheet =
+    /register\s+of\s+fines/.test(blob) ||
+    /pw\s+form\s*i\b/.test(blob) ||
+    (inferFormIVariantFromCatalogRow(hints.item) === 'register_of_fines');
+  const wantsFormIWorkmenSheet =
+    /register\s+of\s+workmen|conferment\s+of\s+permanent/.test(blob) ||
+    inferFormIVariantFromCatalogRow(hints.item) === 'register_of_workmen';
+  if (wantsFormIFinesSheet && !wantsFormIWorkmenSheet) {
+    const finesSheet =
+      names.find((n) => /pw\s*form\s*i|register\s+of\s+fines/i.test(String(n || ''))) ||
+      names.find(
+        (n) =>
+          /\bform\s*i\b/i.test(String(n || '')) &&
+          !/^form\s*1$/i.test(String(n || '').trim()) &&
+          !/workmen|conferment|sa\s*form/i.test(String(n || ''))
+      );
+    if (finesSheet) return finesSheet;
+  }
+  if (wantsFormIWorkmenSheet && !wantsFormIFinesSheet) {
+    const workmenSheet =
+      names.find((n) => /^form\s*1$/i.test(String(n || '').trim())) ||
+      names.find((n) => /register\s+of\s+workmen|conferment/i.test(String(n || '')));
+    if (workmenSheet) return workmenSheet;
+  }
   if (!targetToken) return names[0];
   let best = names[0];
   let bestScore = -1;
@@ -25901,6 +26116,7 @@ const getSiteWiseCategory = (siteName) => {
 };
 
 const Statutory = ({ userEmail, userRole }) => {
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const siteFromUrl = searchParams.get('site') || '';
   const effectiveUserEmail = (userEmail || (typeof localStorage !== 'undefined' ? localStorage.getItem('userEmail') : null) || '').trim().toLowerCase();
@@ -26111,6 +26327,7 @@ const Statutory = ({ userEmail, userRole }) => {
   const formXVSaveSucceededRef = useRef(false);
   const formXIRJZipExportRef = useRef(null);
   const formXIRJSaveSucceededRef = useRef(false);
+  const rowAutofillPrefetchSeenAtRef = useRef(new Map());
  
   const getCurrentMonth = () => MONTH_NAMES[new Date().getMonth()];
   const getInitialMonth = () => {
@@ -26127,6 +26344,8 @@ const Statutory = ({ userEmail, userRole }) => {
   const [selectedStateFilter, setSelectedStateFilter] = useState('all');
   const [selectedIndustryFilter, setSelectedIndustryFilter] = useState('all');
   const [currentPage, setCurrentPage] = useState(1);
+  const pendingCalendarFormFilterRef = useRef('');
+  const appliedCalendarStateKeyRef = useRef('');
   const PAGE_SIZE = 10;
   useEffect(() => {
     formTableDataRef.current = Array.isArray(formTableData) ? formTableData : [];
@@ -26148,6 +26367,32 @@ const Statutory = ({ userEmail, userRole }) => {
       if (typeof localStorage !== 'undefined' && month) localStorage.setItem(STATUTORY_MONTH_FILTER_KEY, month);
     } catch (_) {}
   };
+
+  useEffect(() => {
+    const navState = location?.state;
+    if (!navState || navState.fromCalendar !== true) return;
+    const formFromCalendar = String(navState.formName || '').trim();
+    const navMonthRaw = String(navState.monthFilter || '').trim();
+    const dueDateMonth = getMonthFromDueDate(navState.dueDate || '');
+    const monthFromCalendar =
+      resolveToFullMonthName(navMonthRaw) ||
+      resolveToFullMonthName(String(dueDateMonth || '').trim()) ||
+      '';
+    const stateKey = `${formFromCalendar}|${monthFromCalendar}|${String(navState.dueDate || '').trim()}`;
+    if (stateKey && appliedCalendarStateKeyRef.current === stateKey) return;
+    appliedCalendarStateKeyRef.current = stateKey;
+    if (monthFromCalendar) {
+      setSelectedMonth(monthFromCalendar);
+      persistMonthFilter(monthFromCalendar);
+    }
+    if (formFromCalendar) {
+      pendingCalendarFormFilterRef.current = formFromCalendar;
+      setSelectedFormFilter(formFromCalendar);
+    }
+    setSelectedStatusFilter('all');
+    setTableSearch('');
+    setCurrentPage(1);
+  }, [location?.state]);
 
   // Monthly / day-of-month due dates: show as "7-Jun" or "15-Jun" using UI month filter
   const formatMonthlyBasisDate = (dueDate, monthFallback = '') => {
@@ -37266,23 +37511,61 @@ const Statutory = ({ userEmail, userRole }) => {
     headerFormData,
     preferRegisterOfFinesSheet = false
   }) => {
+    const formIBuilderHeaderHints = Array.isArray(headersToUse) ? headersToUse : [];
+    const formIBuilderFileHint = String(formFileName || '').toLowerCase();
+    const formIBuilderFinesByHeaders =
+      inferFormIVariantFromSavedHeaders(formIBuilderHeaderHints) === 'register_of_fines';
+    const formIBuilderLetterTamilFileHint = /form[_\s.-]*i[_\s.-]*tamil|form_i_-_tamil/i.test(
+      formIBuilderFileHint
+    );
+    const formIBuilderSuspensionHint = isFormITamilNaduSuspensionWorkbookContext({
+      fileName: formFileName || '',
+      formFileName: formFileName || '',
+      formHeader: parsedFormHeader,
+      headers: formIBuilderHeaderHints,
+      sheetText: ''
+    });
+    // Final safety net: Form_I_-_TamilNadu should export PW Register of Fines unless
+    // the provided context clearly matches suspension/subsistence layout.
+    const forceRegisterOfFinesSheet =
+      !!preferRegisterOfFinesSheet ||
+      !!formIBuilderFinesByHeaders ||
+      (formIBuilderLetterTamilFileHint && !formIBuilderSuspensionHint);
     let workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(templateArrayBuffer);
+    const formISheetTopBlob = (ws) => {
+      let text = ` ${String(ws?.name || '')} `;
+      for (let r = 1; r <= 8; r += 1) {
+        for (let c = 1; c <= 10; c += 1) {
+          const t = formVIExcelCellValueToString(ws.getCell(r, c)?.value).trim();
+          if (t && !/\[object object\]/i.test(t)) text += ` ${t}`;
+        }
+      }
+      return text.toLowerCase();
+    };
     const scoreFormISheet = (ws) => {
       const n = String(ws?.name || '').trim().toLowerCase();
+      const top = formISheetTopBlob(ws);
       let score = 0;
-      if (/pw\s*form\s*i|register\s+of\s+fines/.test(n)) score += preferRegisterOfFinesSheet ? 500 : 80;
-      if (/register\s+of\s+workmen|conferment|^form\s*1$/.test(n)) score += preferRegisterOfFinesSheet ? 20 : 400;
+      const contentIsFines =
+        /register\s+of\s+fines/.test(top) ||
+        (/act\s+or\s+omission/.test(top) && /fine\s+imposed/.test(top));
+      const contentIsWorkmen =
+        sheetLooksLikeFormITamilNaduWorkmenRegister(ws) ||
+        (/register\s+of\s+workmen/.test(top) && /conferment|480\s+days/.test(top));
+      if (/pw\s*form\s*i|register\s+of\s+fines/.test(n) || contentIsFines) {
+        score += forceRegisterOfFinesSheet ? 800 : 120;
+      }
+      if (/register\s+of\s+workmen|conferment|^form\s*1$/.test(n) || contentIsWorkmen) {
+        // When downloading fines, heavily penalize the Conferment "FORM 1" sheet.
+        score += forceRegisterOfFinesSheet ? -600 : 400;
+      }
       // Suspension / subsistence allowance register (Form_I_-_TamilNadu.xlsx → "SA Form 1").
-      if (/\bsa\s*form\s*1\b|subsistence|suspension/.test(n)) {
-        score += preferRegisterOfFinesSheet ? 10 : 480;
+      if (/\bsa\s*form\s*1\b|subsistence|suspension/.test(n) || /subsistence\s+allowance/.test(top)) {
+        score += forceRegisterOfFinesSheet ? -500 : 480;
       }
-      if (n === 'form i' || n === 'form 1' || /\bform\s*[-_]?\s*i\b/.test(n) || /\bform\s*[-_]?\s*1\b/.test(n)) {
-        score += 100;
-      }
-      if (sheetLooksLikeFormITamilNaduWorkmenRegister(ws)) {
-        score += preferRegisterOfFinesSheet ? 30 : 450;
-      }
+      if (n === 'form i' || /\bform\s*[-_]?\s*i\b/.test(n)) score += 40;
+      if (n === 'form 1' || /^form\s*1$/.test(n)) score += forceRegisterOfFinesSheet ? -40 : 100;
       return score;
     };
     let worksheet = workbook.worksheets[0];
@@ -37295,6 +37578,20 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     });
     if (!worksheet) throw new Error('Template worksheet not found.');
+    // Hard prefer an explicit fines sheet when asked — never fall through to FORM 1 workmen.
+    if (forceRegisterOfFinesSheet) {
+      const finesWs =
+        (workbook.worksheets || []).find((ws) => {
+          const n = String(ws?.name || '').toLowerCase();
+          const top = formISheetTopBlob(ws);
+          return (
+            /pw\s*form\s*i|register\s+of\s+fines/.test(n) ||
+            /register\s+of\s+fines/.test(top) ||
+            (/act\s+or\s+omission/.test(top) && /fine\s+imposed/.test(top))
+          );
+        }) || null;
+      if (finesWs) worksheet = finesWs;
+    }
 
     // Detect Register of Fines on the chosen sheet (do not rely only on caller flag).
     // Never use ExcelJS `.text` here — merge slaves with a null master throw
@@ -37307,11 +37604,48 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
     const sheetNameLower = String(worksheet?.name || '').toLowerCase();
+    const sheetLooksLikeWorkmenRegister = sheetLooksLikeFormITamilNaduWorkmenRegister(worksheet);
+    const sheetLooksLikeSuspensionRegister =
+      /\bsa\s*form\s*1\b/.test(sheetNameLower) ||
+      /date\s+of\s+suspension|subsistence\s+allowance|kept\s+under\s+suspension|employees\s+placed\s+under\s+suspension|nature\s+of\s+offence/.test(
+        sheetTopText
+      );
+    // Catalog/UI asked for Register of Fines but Form Master linked Conferment workmen
+    // (or SA suspension) under Form_I_-_TamilNadu.xlsx — synthesize the fines layout.
+    if (
+      forceRegisterOfFinesSheet &&
+      (sheetLooksLikeWorkmenRegister || sheetLooksLikeSuspensionRegister)
+    ) {
+      const headerValues =
+        headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+      const estName =
+        headerValues.nameOfTheEstablishment ||
+        headerValues.NameOfTheEstablishment ||
+        headerValues.establishmentName ||
+        '';
+      const estAddr =
+        headerValues.addressOfTheEstablishment ||
+        headerValues.AddressOfTheEstablishment ||
+        headerValues.establishmentAddress ||
+        '';
+      const rebuilt = buildFormITamilNaduRegisterOfFinesWorkbookClean({
+        establishmentName: estName,
+        establishmentAddress: estAddr
+      });
+      workbook = rebuilt.workbook;
+      worksheet = rebuilt.worksheet;
+      sheetTopText = ' FORM I REGISTER OF FINES Payment of Wages Act Minimum Wages Act ';
+    }
+
     const sheetLooksLikeRegisterOfFines =
-      preferRegisterOfFinesSheet ||
-      /pw\s*form\s*i/.test(sheetNameLower) ||
-      /register\s+of\s+fines/i.test(sheetTopText) ||
-      (/act\s+or\s+omission/i.test(sheetTopText) && /fine\s+imposed/i.test(sheetTopText));
+      forceRegisterOfFinesSheet ||
+      (!sheetLooksLikeFormITamilNaduWorkmenRegister(worksheet) &&
+        !/\bsa\s*form\s*1\b|date\s+of\s+suspension|subsistence\s+allowance/.test(
+          `${String(worksheet?.name || '').toLowerCase()} ${sheetTopText}`
+        ) &&
+        (/pw\s*form\s*i/.test(String(worksheet?.name || '').toLowerCase()) ||
+          /register\s+of\s+fines/i.test(sheetTopText) ||
+          (/act\s+or\s+omission/i.test(sheetTopText) && /fine\s+imposed/i.test(sheetTopText))));
 
     // Register of Workmen / Conferment: rebuild a clean A–J workbook so Excel does
     // not repair-drop the A1:J1 title merge (template carries hundreds of phantom cols).
@@ -37572,6 +37906,17 @@ const Statutory = ({ userEmail, userRole }) => {
       } catch (_) {
         // ignore rename errors
       }
+      // Drop Conferment "FORM 1" / other sheets so Excel cannot open the workmen tab.
+      (workbook.worksheets || []).slice().forEach((ws) => {
+        if (ws && ws !== worksheet) {
+          try {
+            workbook.removeWorksheet(ws.id);
+          } catch (_) {
+            /* ignore */
+          }
+        }
+      });
+
 
       const out = await workbook.xlsx.writeBuffer();
       const fileName =
@@ -37582,6 +37927,121 @@ const Statutory = ({ userEmail, userRole }) => {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
       });
       return { blob, fileName };
+    }
+
+    // Register of Workmen (Form 1 TN): dedicated write path — always fill Emp ID / Name /
+    // Designation / dates (never leave Sl.No-only blank template after clear).
+    if (sheetLooksLikeFormITamilNaduWorkmenRegister(worksheet)) {
+      const headerValues =
+        headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+      writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
+        headerFormData: headerValues,
+        parsedFormHeader,
+        headerRowEnd: Math.max(1, headerRow - 1),
+        maxScanRows: Math.min(Math.max(1, headerRow - 1), 25),
+        maxScanCols: Math.min(20, startCol + 9),
+        colRightBound: startCol + 9,
+        writeMode: 'combined'
+      });
+
+      const sheetLeafHeaders = [];
+      for (let c = startCol; c < startCol + 20; c += 1) {
+        const leaf = String(excelCellValueToString(worksheet.getCell(headerRow, c)?.value) || '')
+          .replace(/\r?\n/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!leaf && sheetLeafHeaders.length > 0) break;
+        if (leaf) sheetLeafHeaders.push(leaf);
+      }
+      const writeHeaders =
+        sheetLeafHeaders.length >= 3
+          ? normalizeFormIWorkmenTableHeaders(sheetLeafHeaders)
+          : Array.isArray(headersToUse) && headersToUse.length >= 3
+            ? normalizeFormIWorkmenTableHeaders(headersToUse)
+            : [...FORM_I_TABLE_HEADERS];
+
+      let seedRows = Array.isArray(mappedData)
+        ? mappedData.map((r) => (r && typeof r === 'object' && !Array.isArray(r) ? { ...r } : r))
+        : [];
+      if (seedRows.length > 0 && seedRows[0] && typeof seedRows[0] === 'object' && !Array.isArray(seedRows[0])) {
+        const rowKeys = Object.keys(seedRows[0]).filter((k) => !String(k).startsWith('__'));
+        if (rowKeys.length > 0) {
+          const priorHdrs =
+            Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : rowKeys;
+          seedRows = remapFormARowsByColumnIndex(seedRows, priorHdrs, writeHeaders);
+        }
+      }
+      seedRows = padFormIWorkmenRowsForHeaders(seedRows, writeHeaders);
+      seedRows = ensureFormITamilNaduDefaultEmployeeRows(seedRows, writeHeaders, {
+        force: !formITamilNaduWorkmenDownloadHasSubstantiveRows(seedRows, writeHeaders)
+      });
+      if (!Array.isArray(seedRows) || seedRows.length === 0) {
+        seedRows = buildFormITamilNaduDefaultRows(writeHeaders);
+      }
+
+      const maxColsToWrite = Math.max(writeHeaders.length, FORM_I_TABLE_HEADERS.length);
+      const clearToRow = Math.min(maxScanRows, dataStartRow + Math.max(seedRows.length, 5) + 25);
+      for (let r = dataStartRow; r <= clearToRow; r += 1) {
+        for (let j = 0; j < maxColsToWrite; j += 1) {
+          const cell = worksheet.getCell(r, startCol + j);
+          if (cell && cell.isMerged && cell.master && cell.master !== cell) continue;
+          cell.value = null;
+        }
+      }
+
+      for (let i = 0; i < seedRows.length; i += 1) {
+        const emp = FORM_I_TN_DEFAULT_EMPLOYEES[i] || {};
+        const rowObj = seedRows[i] || {};
+        for (let j = 0; j < writeHeaders.length; j += 1) {
+          const header = writeHeaders[j];
+          const value = resolveFormITamilNaduWorkmenExportCellValue(
+            rowObj,
+            header,
+            j,
+            emp,
+            i,
+            headersToUse
+          );
+          const cell = worksheet.getCell(dataStartRow + i, startCol + j);
+          const writeVal =
+            value === '' || value == null
+              ? null
+              : j === 0 && /^-?\d+(\.\d+)?$/.test(String(value).trim())
+                ? Number(value)
+                : String(value);
+          if (cell && cell.isMerged && cell.master && cell.master !== cell) {
+            try {
+              cell.master.value = writeVal;
+            } catch (_) {
+              /* ignore */
+            }
+            continue;
+          }
+          cell.value = writeVal;
+        }
+      }
+
+      ensureExcelJSDataRowsWithBorders(worksheet, {
+        dataStartRow,
+        dataRowCount: seedRows.length,
+        colFrom: startCol,
+        colTo: startCol + maxColsToWrite - 1,
+        templateRow: dataStartRow,
+        templateBodyRows: 1
+      });
+      ensureFormITamilNaduWorkmenTitleLayout(worksheet);
+
+      const outWorkmen = await workbook.xlsx.writeBuffer();
+      const fileNameWorkmen =
+        formFileName ||
+        parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]+/g, '_') ||
+        `Form_${Date.now()}.xlsx`;
+      return {
+        blob: new Blob([outWorkmen], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        }),
+        fileName: fileNameWorkmen
+      };
     }
 
     let sourceHeaders =
@@ -37601,18 +38061,26 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     let mappedRowsForWrite = Array.isArray(mappedData) ? mappedData : [];
-    if (
-      isFormITamilNaduFinesOrWorkmenDefaultContext({
-        fileName: formFileName,
-        formFileName,
-        formHeader: parsedFormHeader,
-        headers: sourceHeaders.length ? sourceHeaders : headersToUse,
-        sheetText: ''
-      })
-    ) {
+    const workmenRegisterSheet = sheetLooksLikeFormITamilNaduWorkmenRegister(worksheet);
+    const formIWorkmenDefaultContext = isFormITamilNaduFinesOrWorkmenDefaultContext({
+      fileName: formFileName,
+      formFileName,
+      formHeader: parsedFormHeader,
+      headers: sourceHeaders.length ? sourceHeaders : headersToUse,
+      sheetText: sheetTopText
+    });
+    if (formIWorkmenDefaultContext) {
       mappedRowsForWrite = ensureFormITamilNaduDefaultEmployeeRows(
         mappedRowsForWrite,
-        sourceHeaders.length ? sourceHeaders : headersToUse || []
+        sourceHeaders.length ? sourceHeaders : headersToUse || [],
+        {
+          force:
+            workmenRegisterSheet &&
+            !formITamilNaduWorkmenDownloadHasSubstantiveRows(
+              mappedRowsForWrite,
+              sourceHeaders.length ? sourceHeaders : headersToUse || []
+            )
+        }
       );
     }
     const firstMappedRow =
@@ -37649,15 +38117,22 @@ const Statutory = ({ userEmail, userRole }) => {
 
     const getRowValueForHeader = (rowObj, header, headerIndex) => {
       if (!rowObj || typeof rowObj !== 'object' || Array.isArray(rowObj)) return '';
-      // Amount of subsistence allowance paid — never export fetched dates (e.g. 31-05-2026).
+      // Amount paid / offence / suspension dates / punishment / signature — blank (not NIL).
       if (formISuspensionExportContext && isFormITamilNaduAmountAllowancePaidHeader(header)) {
-        return FORM_I_TAMIL_NADU_NIL_DEFAULT;
+        return '';
       }
       if (formISuspensionExportContext && isFormITamilNaduSuspensionFooterLikeValue(rowObj?.[header])) {
         return '';
       }
       if (header && Object.prototype.hasOwnProperty.call(rowObj, header)) {
         const direct = pickVal(rowObj[header]);
+        if (
+          formISuspensionExportContext &&
+          isFormITamilNaduSuspensionBlankDefaultHeader(header) &&
+          /^nil+$/i.test(String(direct).trim())
+        ) {
+          return '';
+        }
         if (direct !== '') return direct;
       }
       const target = headerNormKey(header);
@@ -37754,15 +38229,43 @@ const Statutory = ({ userEmail, userRole }) => {
         return true;
       })
       .map((row, idx) => {
+        const blankNilToEmpty = (header, value) => {
+          if (
+            formISuspensionExportContext &&
+            isFormITamilNaduSuspensionBlankDefaultHeader(header) &&
+            /^nil+$/i.test(String(value ?? '').trim())
+          ) {
+            return '';
+          }
+          return value;
+        };
         if (Array.isArray(row)) {
-          const out = [...row];
+          const out = sourceHeaders.map((h, j) => blankNilToEmpty(h, row[j]));
           if (out[0] == null || String(out[0]).trim() === '') out[0] = idx + 1;
-          if (amountColIndex >= 0) out[amountColIndex] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+          if (amountColIndex >= 0) out[amountColIndex] = '';
           return out;
         }
-        const arr = sourceHeaders.map((h, j) => getRowValueForHeader(row, h, j));
+        const arr = sourceHeaders.map((h, j) => {
+          let value = blankNilToEmpty(h, getRowValueForHeader(row, h, j));
+          if (
+            workmenRegisterSheet &&
+            formIWorkmenDefaultContext &&
+            (value == null || String(value).trim() === '')
+          ) {
+            const emp = FORM_I_TN_DEFAULT_EMPLOYEES[idx] || {};
+            value = resolveFormITamilNaduWorkmenExportCellValue(
+              row,
+              h,
+              j,
+              emp,
+              idx,
+              headersToUse
+            );
+          }
+          return blankNilToEmpty(h, value);
+        });
         if (arr[0] == null || String(arr[0]).trim() === '') arr[0] = idx + 1;
-        if (amountColIndex >= 0) arr[amountColIndex] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+        if (amountColIndex >= 0) arr[amountColIndex] = '';
         return arr;
       })
       .filter((arr) => Array.isArray(arr) && arr.some((v) => v != null && String(v).trim() !== ''));
@@ -37861,7 +38364,7 @@ const Statutory = ({ userEmail, userRole }) => {
         if (cell && cell.isMerged && cell.master && cell.master !== cell) continue;
         const raw = String(excelCellValueToString(cell?.value) || '').trim();
         if (r < dataStartRow + sourceRows.length) {
-          cell.value = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+          cell.value = '';
           continue;
         }
         if (
@@ -40582,42 +41085,34 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
       downloadHeaderHints.tableHeaders = headersToUse;
+      // Expected = what the statutory row asks for (catalog). Fetched = what the Excel actually is.
+      // Mixing them previously hid workmen templates behind a "Register of Fines" catalog label.
       const expectedFormIVariant =
-        inferFormIVariantFromRow(lineItem, {
-          ...downloadHeaderHints,
-          sampleHeaders: sampleHeadersForTemplate
-        }) ||
+        inferFormIVariantFromCatalogRow(lineItem) ||
         inferFormIVariantFromSavedHeaders(sampleHeadersForTemplate) ||
-        inferFormIVariantFromSavedHeaders(headersToUse) ||
         null;
-      const fetchedFormIVariant = inferFormIVariantFromSheetHints({
-        ...downloadHeaderHints,
-        item: lineItem,
-        tableHeaders: headersToUse
-      });
+      const fetchedFormIVariant = inferFormIVariantFromSheetContent(
+        parsed?.formHeader,
+        headersToUse,
+        downloadHeaderHints.sheetText || ''
+      );
       const formITemplateMismatch =
         isFormIItem &&
+        expectedFormIVariant &&
         fetchedFormIVariant &&
-        (expectedFormIVariant
-          ? fetchedFormIVariant !== expectedFormIVariant
-          : fetchedFormIVariant === 'register_of_workmen' &&
-            isFormIRegisterOfFinesContext(
-              lineItem,
-              fn,
-              parsed?.formHeader,
-              headersToUse,
-              downloadHeaderHints.sheetText
-            ));
+        fetchedFormIVariant !== expectedFormIVariant;
       if (formITemplateMismatch) {
-        const repickVariant =
-          expectedFormIVariant ||
-          (fetchedFormIVariant === 'register_of_workmen' ? 'register_of_fines' : null);
+        const repickVariant = expectedFormIVariant;
+        const excludeWrongFile = [templateMeta.formFile, resolvedFormFileItem?.formFile].filter(
+          Boolean
+        );
         const repickMeta =
           (repickVariant
             ? pickFormMasterTemplateByFormIVariant(
                 lineItem,
                 formmasterTemplates,
-                repickVariant
+                repickVariant,
+                { excludeFormFileIds: excludeWrongFile }
               )
             : null) ||
           resolveDraftDownloadTemplateMeta(
@@ -40626,13 +41121,14 @@ const Statutory = ({ userEmail, userRole }) => {
             { formmasterFormFileByMatchKey, formmasterTemplates },
             {
               expectedVariant: repickVariant,
-              sampleHeaders: sampleHeadersForTemplate || headersToUse,
-              formHeaderTitle: parsed.formHeader?.title,
-              formHeaderSubtitle: parsed.formHeader?.subtitle,
-              sheetText: downloadHeaderHints.sheetText
+              sampleHeaders: sampleHeadersForTemplate || headersToUse
             }
           );
-        if (repickMeta?.formFile && String(repickMeta.formFile) !== String(templateMeta.formFile)) {
+        if (
+          repickMeta?.formFile &&
+          String(repickMeta.formFile) !== String(templateMeta.formFile) &&
+          !excludeWrongFile.map(String).includes(String(repickMeta.formFile))
+        ) {
           const repickFn = String(
             repickMeta.formFileName || templateMeta.formFileName || 'template.xlsx'
           ).replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -41564,6 +42060,35 @@ const Statutory = ({ userEmail, userRole }) => {
           (Array.isArray(headersToUse) &&
             headersToUse.some((h) => /full\s+name\s+of\s+the\s+worker/i.test(String(h || ''))) &&
             headersToUse.some((h) => /working\s+hours/i.test(String(h || '')))));
+      const formILiveHeaderCandidates = (() => {
+        const fromModal = Array.isArray(formFileModalData?.parsedTableHeaders)
+          ? formFileModalData.parsedTableHeaders
+          : [];
+        const fromParsed = Array.isArray(headersToUse) ? headersToUse : [];
+        const firstMapped =
+          Array.isArray(mappedData) && mappedData.length > 0 && mappedData[0] && typeof mappedData[0] === 'object'
+            ? Object.keys(mappedData[0]).filter((k) => !String(k).startsWith('__'))
+            : [];
+        const firstLive =
+          Array.isArray(formTableDataRef?.current) &&
+          formTableDataRef.current.length > 0 &&
+          formTableDataRef.current[0] &&
+          typeof formTableDataRef.current[0] === 'object'
+            ? Object.keys(formTableDataRef.current[0]).filter((k) => !String(k).startsWith('__'))
+            : [];
+        return [...fromModal, ...fromParsed, ...firstMapped, ...firstLive]
+          .map((h) => String(h || '').trim())
+          .filter(Boolean);
+      })();
+      const formIFinesByVisibleHeaders =
+        inferFormIVariantFromSavedHeaders(formILiveHeaderCandidates) === 'register_of_fines' ||
+        isFormIRegisterOfFinesContext(
+          item,
+          templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
+          formFileModalData?.parsedFormHeader || parsed?.formHeader,
+          formILiveHeaderCandidates,
+          formFileModalData?.sheetText || parsed?.sheetText
+        );
       const isFormIDownload =
         !isFormIIDownload &&
         !isFormQMaharashtraDownload &&
@@ -41589,6 +42114,7 @@ const Statutory = ({ userEmail, userRole }) => {
           /form[_\s-]*i(?:[_\s-]|$)/i.test(String(item?.formName || item?.FormName || '')) ||
           /\bform\s*[-"']?\s*i\b/i.test(String(item?.formName || item?.FormName || '')) ||
           /\bform\s*[-"']?\s*i\b/i.test(String(parsed?.formHeader?.title || '')) ||
+          formIFinesByVisibleHeaders ||
           (/\bform\s*[-"']?\s*1\b/i.test(String(parsed?.formHeader?.title || '')) &&
             /register\s+of\s+workmen|conferment/i.test(
               `${parsed?.formHeader?.title || ''} ${parsed?.formHeader?.subtitle || ''} ${parsed?.sheetText || ''}`
@@ -41811,13 +42337,54 @@ const Statutory = ({ userEmail, userRole }) => {
             headersToUse,
             sheetTextForDownload
           ));
-      const isFormIFinesDownload = isFormIRegisterOfFinesContext(
-        item,
-        templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
-        parsed?.formHeader,
-        headersToUse,
-        parsed?.sheetText
+      // Catalog / open modal / workbook sheet name must win over a wrongly selected
+      // Conferment "FORM 1" sheet during download parse.
+      const modalFormIFinesHint =
+        !!formFileModalData &&
+        (/register\s+of\s+fines/i.test(
+          `${formFileModalData?.parsedFormHeader?.title || ''} ${formFileModalData?.parsedFormHeader?.subtitle || ''} ${formFileModalData?.sheetText || ''}`
+        ) ||
+          /pw\s*form\s*i/i.test(String(formFileModalData?.sheetName || '')) ||
+          (Array.isArray(formFileModalData?.parsedTableHeaders) &&
+            formFileModalData.parsedTableHeaders.some((h) =>
+              /act\s+or\s+omission|fine\s+imposed|fine\s+realis/i.test(String(h || ''))
+            )));
+      const formILetterTamilFileHint = /form[_\s.-]*i[_\s.-]*tamil|form_i_-_tamil/i.test(
+        String(templateMeta.formFileName || resolvedFormFileItem.formFileName || fn || '')
       );
+      const formILetterTamilSuspensionContext = isFormITamilNaduSuspensionWorkbookContext({
+        fileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || fn || '',
+        formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || fn || '',
+        formHeader: formFileModalData?.parsedFormHeader || parsed?.formHeader,
+        headers: formFileModalData?.parsedTableHeaders || headersToUse,
+        sheetText: formFileModalData?.sheetText || parsed?.sheetText || sheetTextForDownload || ''
+      });
+      // Form_I_-_TamilNadu template should default to PW Register of Fines unless
+      // it is clearly the subsistence/suspension register.
+      const formILetterTamilAssumeFines =
+        formILetterTamilFileHint && !formILetterTamilSuspensionContext;
+      const catalogWantsFormIFines =
+        inferFormIVariantFromCatalogRow(item) === 'register_of_fines' ||
+        inferFormIVariantFromCatalogRow(lineItem) === 'register_of_fines';
+      const isFormIFinesDownload =
+        formILetterTamilAssumeFines ||
+        formIFinesByVisibleHeaders ||
+        catalogWantsFormIFines ||
+        modalFormIFinesHint ||
+        isFormIRegisterOfFinesContext(
+          item,
+          templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
+          parsed?.formHeader,
+          headersToUse,
+          parsed?.sheetText
+        ) ||
+        isFormIRegisterOfFinesContext(
+          item,
+          templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
+          formFileModalData?.parsedFormHeader || parsed?.formHeader,
+          formFileModalData?.parsedTableHeaders || headersToUse,
+          formFileModalData?.sheetText || parsed?.sheetText
+        );
       const countFilledRowCells = (row, headers) => {
         if (!row || typeof row !== 'object' || !Array.isArray(headers)) return 0;
         let n = 0;
@@ -42608,6 +43175,9 @@ const Statutory = ({ userEmail, userRole }) => {
           ) {
             headersToUse = normalizeFormIWorkmenTableHeaders(headersToUse);
             mappedData = padFormIWorkmenRowsForHeaders(mappedData, headersToUse);
+            mappedData = ensureFormITamilNaduDefaultEmployeeRows(mappedData, headersToUse, {
+              force: !formITamilNaduWorkmenDownloadHasSubstantiveRows(mappedData, headersToUse)
+            });
           }
         }
         savedDraftRowMatrix = null;
@@ -49286,8 +49856,20 @@ const Statutory = ({ userEmail, userRole }) => {
                               if (Array.isArray(modalHdrsI) && modalHdrsI.length > 0) {
                                 formIHeadersForWrite = [...modalHdrsI];
                               }
+                              const formIFinesByCurrentHeaders =
+                                inferFormIVariantFromSavedHeaders(formIHeadersForWrite) ===
+                                  'register_of_fines' ||
+                                isFormIRegisterOfFinesContext(
+                                  item,
+                                  templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
+                                  formFileModalData?.parsedFormHeader || parsed?.formHeader,
+                                  formIHeadersForWrite,
+                                  formFileModalData?.sheetText || parsed?.sheetText
+                                );
+                              const useFormIFinesDownload =
+                                !!isFormIFinesDownload || !!formIFinesByCurrentHeaders;
                               const formIWorkmen =
-                                !isFormIFinesDownload &&
+                                !useFormIFinesDownload &&
                                 isFormIRegisterOfWorkmenContext(
                                   item,
                                   templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
@@ -49301,8 +49883,24 @@ const Statutory = ({ userEmail, userRole }) => {
                                   formIRowsForWrite,
                                   formIHeadersForWrite
                                 );
+                                formIRowsForWrite = ensureFormITamilNaduDefaultEmployeeRows(
+                                  formIRowsForWrite,
+                                  formIHeadersForWrite,
+                                  {
+                                    force: !formITamilNaduWorkmenDownloadHasSubstantiveRows(
+                                      formIRowsForWrite,
+                                      formIHeadersForWrite
+                                    )
+                                  }
+                                );
+                                if (
+                                  !Array.isArray(formIRowsForWrite) ||
+                                  formIRowsForWrite.length === 0
+                                ) {
+                                  formIRowsForWrite = buildFormITamilNaduDefaultRows(formIHeadersForWrite);
+                                }
                               }
-                              if (isFormIFinesDownload) {
+                              if (useFormIFinesDownload) {
                                 const formILive = applyFormIFinesLiveModalForDownload(
                                   formIHeadersForWrite,
                                   formFileModalData,
@@ -49362,7 +49960,15 @@ const Statutory = ({ userEmail, userRole }) => {
                               ) {
                                 formIRowsForWrite = ensureFormITamilNaduDefaultEmployeeRows(
                                   formIRowsForWrite,
-                                  formIHeadersForWrite
+                                  formIHeadersForWrite,
+                                  {
+                                    force:
+                                      formIWorkmen &&
+                                      !formITamilNaduWorkmenDownloadHasSubstantiveRows(
+                                        formIRowsForWrite,
+                                        formIHeadersForWrite
+                                      )
+                                  }
                                 );
                               }
                               if (!Array.isArray(formIRowsForWrite) || formIRowsForWrite.length === 0) {
@@ -49372,6 +49978,16 @@ const Statutory = ({ userEmail, userRole }) => {
                               }
                               mappedData = formIRowsForWrite;
                               headersToUse = formIHeadersForWrite;
+                              const formIHeaderSuggestsFines =
+                                inferFormIVariantFromSavedHeaders(formIHeadersForWrite) ===
+                                  'register_of_fines' ||
+                                isFormIRegisterOfFinesContext(
+                                  item,
+                                  templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
+                                  formFileModalData?.parsedFormHeader || parsed?.formHeader,
+                                  formIHeadersForWrite,
+                                  formFileModalData?.sheetText || parsed?.sheetText
+                                );
                               return buildFormIWorkbookWithTemplateStyles({
                                 templateArrayBuffer: arrayBuffer,
                                 mappedData: formIRowsForWrite,
@@ -49379,7 +49995,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                 headersToUse: formIHeadersForWrite,
                                 // For Register of Fines / Form_I Tamil Nadu, ignore parser footer indices.
                                 parsedHeaderRowIndex:
-                                  isFormIFinesDownload ||
+                                  useFormIFinesDownload ||
                                   /form[_\s-]*i.*tamil|tamil.*form[_\s-]*i/i.test(
                                     String(
                                       templateMeta.formFileName ||
@@ -49393,7 +50009,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                       ? downloadHeaderRowIndex
                                       : parsed.headerRowIndex,
                                 parsedDataStartIndex:
-                                  isFormIFinesDownload ||
+                                  useFormIFinesDownload ||
                                   /form[_\s-]*i.*tamil|tamil.*form[_\s-]*i/i.test(
                                     String(
                                       templateMeta.formFileName ||
@@ -49412,19 +50028,23 @@ const Statutory = ({ userEmail, userRole }) => {
                                   resolvedFormFileItem.formFileName ||
                                   'form-draft.xlsx',
                                 headerFormData: downloadHeaderFormData,
+                                // Prefer PW Form I (fines) over Conferment FORM 1 workmen.
                                 preferRegisterOfFinesSheet:
-                                  !!isFormIFinesDownload ||
-                                  /form[_\s-]*i.*tamil|tamil.*form[_\s-]*i/i.test(
-                                    String(
-                                      templateMeta.formFileName ||
-                                        resolvedFormFileItem.formFileName ||
-                                        fn ||
-                                        ''
-                                    )
-                                  ) ||
-                                  /register\s+of\s+fines/i.test(
-                                    `${parsed?.formHeader?.subtitle || ''} ${parsed?.sheetText || ''}`
-                                  )
+                                  !!useFormIFinesDownload ||
+                                  !!formIHeaderSuggestsFines ||
+                                  !!modalFormIFinesHint ||
+                                  (!formIWorkmen &&
+                                    (/register\s+of\s+fines/i.test(
+                                      `${parsed?.formHeader?.title || ''} ${parsed?.formHeader?.subtitle || ''} ${parsed?.sheetText || ''} ${formFileModalData?.parsedFormHeader?.title || ''} ${formFileModalData?.parsedFormHeader?.subtitle || ''} ${formFileModalData?.sheetText || ''}`
+                                    ) ||
+                                      /pw\s*form\s*i/i.test(
+                                        String(
+                                          formFileModalData?.sheetName ||
+                                            resolvedDownloadSheetName ||
+                                            parsed?.sheetName ||
+                                            ''
+                                        )
+                                      )))
                               });
                             })()
                           : isFormKDownload
@@ -52503,12 +53123,25 @@ const Statutory = ({ userEmail, userRole }) => {
           saveTemplateArrayBuffer || XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
         const formIHeaders =
           Array.isArray(headersToUse) && headersToUse.length > 0 ? headersToUse : [...FORM_I_TABLE_HEADERS];
-        const formIFinesSave = isFormIRegisterOfFinesContext(
-          currentItem,
-          draftFileNameForSave,
-          parsedFormHeaderForSave || formHeader,
-          formIHeaders
+        const formILetterTamilSaveFileHint = /form[_\s.-]*i[_\s.-]*tamil|form_i_-_tamil/i.test(
+          String(draftFileNameForSave || '')
         );
+        const formILetterTamilSaveSuspensionContext = isFormITamilNaduSuspensionWorkbookContext({
+          fileName: draftFileNameForSave || '',
+          formFileName: draftFileNameForSave || '',
+          formHeader: parsedFormHeaderForSave || formHeader,
+          headers: formIHeaders,
+          sheetText: formFileModalData?.sheetText || ''
+        });
+        const formIFinesSave =
+          (formILetterTamilSaveFileHint && !formILetterTamilSaveSuspensionContext) ||
+          inferFormIVariantFromCatalogRow(currentItem) === 'register_of_fines' ||
+          isFormIRegisterOfFinesContext(
+            currentItem,
+            draftFileNameForSave,
+            parsedFormHeaderForSave || formHeader,
+            formIHeaders
+          );
         const formILiveSave = formIFinesSave
           ? applyFormIFinesLiveModalForDownload(formIHeaders, formFileModalData, formTableDataRef)
           : null;
@@ -52533,6 +53166,15 @@ const Statutory = ({ userEmail, userRole }) => {
         ) {
           formIRows = ensureFormITamilNaduDefaultEmployeeRows(formIRows, formIHeadersResolved);
         }
+        const formIHeadersSuggestFinesSave =
+          inferFormIVariantFromSavedHeaders(formIHeadersResolved) === 'register_of_fines' ||
+          isFormIRegisterOfFinesContext(
+            currentItem,
+            draftFileNameForSave,
+            parsedFormHeaderForSave || formHeader,
+            formIHeadersResolved,
+            formFileModalData?.sheetText || ''
+          );
         ({ blob, fileName } = await buildFormIWorkbookWithTemplateStyles({
           templateArrayBuffer,
           mappedData: formIRows,
@@ -52542,7 +53184,7 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedDataStartIndex: formIFinesSave ? null : dataStartIndex,
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           formFileName: draftFileNameForSave,
-          preferRegisterOfFinesSheet: !!formIFinesSave
+          preferRegisterOfFinesSheet: !!formIFinesSave || !!formIHeadersSuggestFinesSave
         }));
       } else if (formIISave && templateWb) {
         const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
@@ -55472,6 +56114,13 @@ const Statutory = ({ userEmail, userRole }) => {
         enrichPaintScheduled = true;
         setTimeout(() => {
           enrichPaintScheduled = false;
+          if (isFormModalScrollBusy()) {
+            // User is actively scrolling; postpone heavy merge to avoid jank/freeze.
+            if (pendingEnrichMergeRows) {
+              mergeMappedIntoFormTable(pendingEnrichMergeRows, false);
+            }
+            return;
+          }
           const latest = pendingEnrichMergeRows;
           pendingEnrichMergeRows = null;
           if (!latest || isStaleAutofillRun()) return;
@@ -55481,7 +56130,7 @@ const Statutory = ({ userEmail, userRole }) => {
           } finally {
             flushingEnrichPaint = false;
           }
-        }, 420);
+        }, 700);
         return;
       }
 
@@ -61383,12 +62032,31 @@ const Statutory = ({ userEmail, userRole }) => {
             pickPayrollApiScalarAmount(p, ['Overtime', 'overtime', 'overtime_wages'])
           ),
           daysWorked: firstPresent(
+            flat.paid_days,
+            flat.Paid_days,
+            flat['paid_days'],
+            flat['Paid_days'],
+            flat.paidDays,
+            flat['paidDays'],
+            flat['Paid Days'],
             payrollRow?.paid_days,
+            payrollRow?.Paid_days,
+            payrollRow?.['paid_days'],
+            payrollRow?.['Paid_days'],
+            payrollRow?.paidDays,
+            payrollRow?.['paidDays'],
+            payrollRow?.['Paid Days'],
             p.paid_days,
             p['paid_days'],
+            p.Paid_days,
+            p['Paid_days'],
+            p.paidDays,
+            p['paidDays'],
+            p['Paid Days'],
             p.days_worked,
             p['days_worked'],
-            p.no_of_days_worked
+            p.no_of_days_worked,
+            p['no_of_days_worked']
           ),
           totalDeductions: totalDeductions !== '' ? totalDeductions : '',
           netWages: netPay !== '' ? netPay : '',
@@ -61459,7 +62127,12 @@ const Statutory = ({ userEmail, userRole }) => {
         row,
         payrollMap,
         form15Headers,
-        { overwrite = false, forcePayrollWages = false, allHeaders = null } = {}
+        {
+          overwrite = false,
+          forcePayrollWages = false,
+          allHeaders = null,
+          sourcePayrollRow = null,
+        } = {}
       ) => {
         if (!row || !payrollMap || !form15Headers) return;
         const cellIsEmpty = (header) => {
@@ -61473,7 +62146,7 @@ const Statutory = ({ userEmail, userRole }) => {
         };
         const setNumericCell = (header, value) => {
           if (!header || value == null || value === '') return;
-          const num = Number(value);
+          const num = parsePayrollAmount(value);
           if (!Number.isFinite(num)) return;
           if (!overwrite && !cellIsEmpty(header)) return;
           row[header] = sanitizeValue(num);
@@ -61481,8 +62154,48 @@ const Statutory = ({ userEmail, userRole }) => {
         const parsePayrollAmount = (value) => {
           if (value == null || value === '') return NaN;
           if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
-          const n = Number(String(value).replace(/,/g, '').trim());
-          return Number.isFinite(n) ? n : NaN;
+          const cleaned = String(value).replace(/,/g, '').trim();
+          const n = Number(cleaned);
+          if (Number.isFinite(n)) return n;
+          // Accept mixed text values like "26 days" / "Paid days: 26.5".
+          const match = cleaned.match(/-?\d+(?:\.\d+)?/);
+          if (match) {
+            const parsed = Number(match[0]);
+            if (Number.isFinite(parsed)) return parsed;
+          }
+          return NaN;
+        };
+        const resolveForm15Part2DaysWorked = (payrollMapLike = {}, sourcePayrollRow = null) => {
+          const fromUnifiedResolver = resolveFormXVIIPaidDaysAmount(
+            sourcePayrollRow || payrollMapLike,
+            payrollMapLike
+          );
+          if (Number.isFinite(fromUnifiedResolver) && fromUnifiedResolver >= 0) {
+            return fromUnifiedResolver;
+          }
+          const fromMap = parsePayrollAmount(
+            firstPresent(
+              payrollMapLike.daysWorked,
+              payrollMapLike.paidDays,
+              payrollMapLike['paidDays'],
+              payrollMapLike['Paid Days'],
+              payrollMapLike['paid_days'],
+              payrollMapLike['Paid_days']
+            )
+          );
+          if (Number.isFinite(fromMap) && fromMap >= 0) return fromMap;
+          const fromKeys = pickRowValueByKeyPatterns(sourcePayrollRow || {}, [
+            /paid[_\s-]*days/,
+            /paiddays/,
+            /paidday/,
+            /days[_\s-]*worked/,
+            /daysworked/,
+            /no[_\s-]*of[_\s-]*days[_\s-]*worked/,
+            /work(ed)?\s*days/
+          ]);
+          const fromRow = parsePayrollAmount(fromKeys);
+          if (Number.isFinite(fromRow) && fromRow >= 0) return fromRow;
+          return '';
         };
         const setPayrollWageCell = (header, value) => {
           if (!header || value == null || value === '') return;
@@ -61499,7 +62212,16 @@ const Statutory = ({ userEmail, userRole }) => {
         setNumericCell(form15Headers.dearnessAllowance, payrollMap.dearnessAllowance);
         setNumericCell(form15Headers.grossWages, payrollMap.grossWages);
         setNumericCell(form15Headers.overtimeWages, payrollMap.overtimeWages);
-        setNumericCell(form15Headers.daysWorked, payrollMap.daysWorked);
+        const resolvedDaysWorked = resolveForm15Part2DaysWorked(payrollMap, sourcePayrollRow);
+        const daysWorkedHeaders = [
+          form15Headers.daysWorked,
+          ...(Array.isArray(allHeaders) ? allHeaders.filter((h) => isForm15Part2DaysWorkedHeader(h)) : []),
+          ...Object.keys(row || {}).filter((h) => isForm15Part2DaysWorkedHeader(h)),
+        ].filter(Boolean);
+        const uniqueDaysWorkedHeaders = Array.from(new Set(daysWorkedHeaders));
+        uniqueDaysWorkedHeaders.forEach((header) => {
+          setNumericCell(header, resolvedDaysWorked);
+        });
         setNumericCell(form15Headers.totalDeductions, payrollMap.totalDeductions);
         setNumericCell(form15Headers.netWages, payrollMap.netWages);
         // Provident Fund No. ← Sample Payroll PF (also set on every matching header key).
@@ -61519,7 +62241,13 @@ const Statutory = ({ userEmail, userRole }) => {
         );
       };
 
-      const findForm15Part2SamplePayrollDetailRow = (detailRows, em, row, form15Headers) => {
+      const findForm15Part2SamplePayrollDetailRow = (
+        detailRows,
+        em,
+        row,
+        form15Headers,
+        { rowIndex = -1 } = {}
+      ) => {
         if (!Array.isArray(detailRows) || detailRows.length === 0) return null;
         const idCandidates = [
           em?.Zoho_ID,
@@ -61598,6 +62326,15 @@ const Statutory = ({ userEmail, userRole }) => {
             }
           }
         }
+        // Fallback: when employee identifiers/names are missing in template rows,
+        // align with Sample Payroll row order so Paid_days/basic/HRA can still populate.
+        if (
+          Number.isInteger(rowIndex) &&
+          rowIndex >= 0 &&
+          rowIndex < detailRows.length
+        ) {
+          return detailRows[rowIndex];
+        }
         return null;
       };
 
@@ -61620,7 +62357,8 @@ const Statutory = ({ userEmail, userRole }) => {
             detailRows,
             em,
             row,
-            form15Headers
+            form15Headers,
+            { rowIndex }
           );
           if (!detailRow) return;
           const pfAmount = readForm15Part2SamplePayrollPfAmount(detailRow);
@@ -65768,7 +66506,8 @@ const Statutory = ({ userEmail, userRole }) => {
             form15DetailRows,
             em,
             row,
-            form15Headers
+            form15Headers,
+            { rowIndex }
           );
           if (!matchedPayrollRow || matchedPayrollRow.fetch_error) {
             // Still fill wages + Provident Fund No. from Sample Payroll when wage payroll row is missing.
@@ -65777,7 +66516,12 @@ const Statutory = ({ userEmail, userRole }) => {
                 row,
                 buildForm15Part2PayrollMap(sampleDetailRow),
                 form15Headers,
-                { overwrite, forcePayrollWages: true, allHeaders: currentHeaders }
+                {
+                  overwrite,
+                  forcePayrollWages: true,
+                  allHeaders: currentHeaders,
+                  sourcePayrollRow: sampleDetailRow,
+                }
               );
               currentHeaders.forEach((header) => {
                 if (isForm15Part2DoNotFetchHeader(header)) row[header] = '';
@@ -65810,7 +66554,12 @@ const Statutory = ({ userEmail, userRole }) => {
             row,
             payrollMap,
             form15Headers,
-            { overwrite, forcePayrollWages: true, allHeaders: currentHeaders }
+            {
+              overwrite,
+              forcePayrollWages: true,
+              allHeaders: currentHeaders,
+              sourcePayrollRow: matchedPayrollRow,
+            }
           );
           // Keep manual-only columns blank (cash in lieu of kinds).
           currentHeaders.forEach((header) => {
@@ -68248,9 +68997,12 @@ const Statutory = ({ userEmail, userRole }) => {
           }
 
           // Form I TN Register of Subsistence Allowance:
-          // Monthly emoluments — do not fetch; amount paid/date + offence/suspension → NIL
-          if (formITamilNaduSuspensionAutofillContext && isFormITamilNaduAmountAllowancePaidHeader(header)) {
-            row[header] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+          // Monthly emoluments — do not fetch; offence/dates/amount/signature → blank; rate/remarks → NIL
+          if (
+            formITamilNaduSuspensionAutofillContext &&
+            isFormITamilNaduSuspensionBlankDefaultHeader(header)
+          ) {
+            row[header] = '';
             return;
           }
           if (formITamilNaduSuspensionAutofillContext && isFormITamilNaduSkipAutofillHeader(header)) {
@@ -70290,8 +71042,11 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           // Default: try to find matching field by checking all emp properties
           else {
-            if (formITamilNaduSuspensionAutofillContext && isFormITamilNaduAmountAllowancePaidHeader(header)) {
-              row[header] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
+            if (
+              formITamilNaduSuspensionAutofillContext &&
+              isFormITamilNaduSuspensionBlankDefaultHeader(header)
+            ) {
+              row[header] = '';
               return;
             }
             if (formITamilNaduSuspensionAutofillContext && isFormITamilNaduSkipAutofillHeader(header)) {
@@ -70791,7 +71546,12 @@ const Statutory = ({ userEmail, userRole }) => {
                 row,
                 buildForm15Part2PayrollMap(matchedPayrollRow),
                 form15Headers,
-                { overwrite: true, forcePayrollWages: true, allHeaders: currentHeaders }
+                {
+                  overwrite: true,
+                  forcePayrollWages: true,
+                  allHeaders: currentHeaders,
+                  sourcePayrollRow: matchedPayrollRow,
+                }
               );
             }
           }
@@ -71479,7 +72239,14 @@ const Statutory = ({ userEmail, userRole }) => {
           setTableAutofillEnriching(true);
           const employeeSnapshotForEnrich = Array.isArray(employees) ? employees.slice() : [];
           // Never await enrich — awaiting blocks modal scroll until payroll/attendance finish.
-          const startBackgroundEnrich = () => {
+          const startBackgroundEnrich = async () => {
+            if (isStaleAutofillRun()) {
+              setTableAutofillEnriching(false);
+              return;
+            }
+            // Wait for scroll/input idle before running heavy enrich network + merge path.
+            await waitWhileUiBusy(isFormModalScrollBusy, 120);
+            await yieldToMain();
             if (isStaleAutofillRun()) {
               setTableAutofillEnriching(false);
               return;
@@ -71507,7 +72274,9 @@ const Statutory = ({ userEmail, userRole }) => {
           if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
             window.requestIdleCallback(() => startBackgroundEnrich(), { timeout: 900 });
           } else {
-            setTimeout(startBackgroundEnrich, 120);
+            setTimeout(() => {
+              void startBackgroundEnrich();
+            }, 900);
           }
           return;
         } else {
@@ -84422,6 +85191,29 @@ const Statutory = ({ userEmail, userRole }) => {
     const cacheKey = getFormTemplateCacheKey(resolved);
     if (urls.length && cacheKey) prefetchFormTemplate(urls, cacheKey);
   }, [formmasterFormFileByMatchKey, formmasterTemplates]);
+  const requestAutofillPrefetch = useCallback((item, options = {}) => {
+    if (!item) return;
+    const force = !!options.force;
+    const rowKey = [
+      String(item?.id ?? ''),
+      checklistBulkRowIdentityKey(item),
+      baseFormNameKey(item?.formName || item?.FormName || ''),
+      String(item?.state || item?.State || '').trim().toLowerCase(),
+      String(selectedMonth || '').trim().toLowerCase()
+    ].join('|');
+    const now = Date.now();
+    const seenMap = rowAutofillPrefetchSeenAtRef.current;
+    const lastSeen = seenMap.get(rowKey) || 0;
+    if (!force && now - lastSeen < 4_000) return;
+    seenMap.set(rowKey, now);
+    if (seenMap.size > 320) {
+      const cutoff = now - 20_000;
+      seenMap.forEach((ts, key) => {
+        if (!Number.isFinite(ts) || ts < cutoff) seenMap.delete(key);
+      });
+    }
+    prefetchAutofillForRow(item);
+  }, [prefetchAutofillForRow, selectedMonth]);
 
   const handleViewFormFile = async (item, forceAutofill = false, options = {}) => {
     try {
@@ -86374,13 +87166,16 @@ const Statutory = ({ userEmail, userRole }) => {
             );
           }
         }
-        const formIFinesModalOpen = isFormIRegisterOfFinesContext(
-          item,
-          displayFileName,
-          formHeaderForModal,
-          tableHeadersForModal,
-          sheetTextForVariant
-        );
+        const formICatalogVariantForModal = inferFormIVariantFromCatalogRow(item);
+        const formIFinesModalOpen =
+          formICatalogVariantForModal === 'register_of_fines' ||
+          isFormIRegisterOfFinesContext(
+            item,
+            displayFileName,
+            formHeaderForModal,
+            tableHeadersForModal,
+            sheetTextForVariant
+          );
         const formXAPFinesModalOpen = isFormXAPRegisterOfFinesContext(
           formHeaderForModal,
           item,
@@ -86600,6 +87395,7 @@ const Statutory = ({ userEmail, userRole }) => {
           sheetTextForVariant
         );
         const formIWorkmenModalOpen =
+          !formIFinesModalOpen &&
           !formXIVMPEmploymentCardModalOpen &&
           !formITamilNaduSuspensionModalOpen &&
           !isFormXVContext(formHeaderForModal, item, displayFileName) &&
@@ -86625,7 +87421,15 @@ const Statutory = ({ userEmail, userRole }) => {
             reference: normalizedTModal.formReference
           };
         }
-        if ((formIFinesModalOpen || formIWorkmenModalOpen) && formHeaderForModal && !formXAPFinesModalOpen && !formXXIAPFinesModalOpen && !formXIIIWorkmenModalOpen && !formXXAPDeductionsModalOpen) {
+        if (
+          (formIFinesModalOpen || formIWorkmenModalOpen) &&
+          !formITamilNaduSuspensionModalOpen &&
+          formHeaderForModal &&
+          !formXAPFinesModalOpen &&
+          !formXXIAPFinesModalOpen &&
+          !formXIIIWorkmenModalOpen &&
+          !formXXAPDeductionsModalOpen
+        ) {
           const titleText = String(formHeaderForModal.title || '');
           const subtitleText = String(formHeaderForModal.subtitle || '');
           const titleOk = /\bform\s*[-–]?\s*i\b/i.test(titleText);
@@ -89117,6 +89921,23 @@ const Statutory = ({ userEmail, userRole }) => {
     );
   }, [filteredStatutoryData]);
 
+  useEffect(() => {
+    const pendingForm = String(pendingCalendarFormFilterRef.current || '').trim();
+    if (!pendingForm) return;
+    const matchedForm = tableFormOptions.find(
+      (name) => String(name || '').trim().toLowerCase() === pendingForm.toLowerCase()
+    );
+    if (matchedForm) {
+      setSelectedFormFilter(matchedForm);
+      pendingCalendarFormFilterRef.current = '';
+      return;
+    }
+    if (Array.isArray(filteredStatutoryData) && filteredStatutoryData.length > 0) {
+      setSelectedFormFilter('all');
+      pendingCalendarFormFilterRef.current = '';
+    }
+  }, [tableFormOptions, filteredStatutoryData]);
+
   const tableStateOptions = useMemo(() => {
     const states = new Set();
     (filteredStatutoryData || []).forEach((item) => {
@@ -90352,6 +91173,19 @@ const Statutory = ({ userEmail, userRole }) => {
       )
     ) {
       return remapFormDRajasthanRowsToHeaders(rows, rawHeaders, hdrs);
+    }
+    if (
+      isForm15Part2Context(
+        displayFormHeader,
+        item,
+        fn,
+        hdrs.length > 0 ? hdrs : rawHeaders
+      ) ||
+      looksLikeForm15Part2TableHeaders(hdrs.length > 0 ? hdrs : rawHeaders)
+    ) {
+      const effectiveHeaders = hdrs.length > 0 ? hdrs : rawHeaders;
+      const nilApplied = applyForm15Part2NilDeductionColumnsToRows(filteredRows, effectiveHeaders);
+      return applyForm15Part2SequentialSerialNumbersToRows(nilApplied, effectiveHeaders);
     }
     if (!isFormQContext(displayFormHeader, item, fn, hdrs)) return rows;
     return remapFormQRowsToHeaders(rows, rawHeaders, hdrs);
@@ -93138,16 +93972,16 @@ const Statutory = ({ userEmail, userRole }) => {
                                     <button
                                       className="statutory-autofill-btn-ui"
                                       onMouseEnter={() => {
-                                        if (!andhraAutofillGrayedOut) prefetchAutofillForRow(item);
+                                        if (!andhraAutofillGrayedOut) requestAutofillPrefetch(item);
                                       }}
                                       onFocus={() => {
-                                        if (!andhraAutofillGrayedOut) prefetchAutofillForRow(item);
+                                        if (!andhraAutofillGrayedOut) requestAutofillPrefetch(item);
                                       }}
                                       onMouseDown={() => {
-                                        if (!andhraAutofillGrayedOut) prefetchAutofillForRow(item);
+                                        if (!andhraAutofillGrayedOut) requestAutofillPrefetch(item);
                                       }}
                                       onTouchStart={() => {
-                                        if (!andhraAutofillGrayedOut) prefetchAutofillForRow(item);
+                                        if (!andhraAutofillGrayedOut) requestAutofillPrefetch(item);
                                       }}
                                       onClick={(e) => {
                                         e.stopPropagation();
@@ -93159,6 +93993,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                         ) {
                                           return;
                                         }
+                                        requestAutofillPrefetch(item, { force: true });
                                         handleAutofill(item, {
                                           // Autofill always loads current Zoho People rows; saved drafts open via View Draft File.
                                           preferSavedDraftData: false,
@@ -93370,7 +94205,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                               resolvedFormFileItem
                                             );
                                           } else {
-                                            prefetchAutofillForRow(resolvedFormFileItem || item);
+                                            requestAutofillPrefetch(resolvedFormFileItem || item, { force: true });
                                             handleViewDraftFileGenerate(draftSourceItem || item, resolvedFormFileItem, {
                                               sampleStatutoryId: draftApiRowId,
                                               draftApiRowId

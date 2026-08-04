@@ -639,7 +639,8 @@ export function parseApprovedLeaveDaysCount(daysField) {
     const raw = entry.LeaveCount ?? entry.leaveCount ?? entry.count;
     if (raw == null || raw === '') return;
     const n = Number(raw);
-    if (Number.isFinite(n)) {
+    // Skip weekly-off / session placeholders with LeaveCount 0.0
+    if (Number.isFinite(n) && n > 0) {
       total += n;
       hasCount = true;
     }
@@ -651,8 +652,52 @@ function isZohoLeaveDateString(value) {
   return /^\d{1,2}-[A-Za-z]{3}-\d{4}$/i.test(String(value || '').trim());
 }
 
+function zohoLeaveDateKeyToTime(key) {
+  const m = String(key || '')
+    .trim()
+    .match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/i);
+  if (!m) return 0;
+  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const mon = months.indexOf(m[2].toLowerCase());
+  if (mon < 0) return 0;
+  return new Date(parseInt(m[3], 10), mon, parseInt(m[1], 10)).getTime();
+}
+
+function zohoLeaveDateKeyIsWeekend(key) {
+  const t = zohoLeaveDateKeyToTime(key);
+  if (!t) return false;
+  const day = new Date(t).getDay();
+  return day === 0 || day === 6;
+}
+
+/**
+ * Dates in Days JSON with LeaveCount > 0 (ignore LeaveCount 0.0 weekly offs).
+ * Optional `excludeWeekends` drops Sat/Sun even when LeaveCount is 1
+ * (Contingency booked often counts working days only).
+ */
+export function extractApprovedLeavePositiveDayKeys(daysField, { excludeWeekends = false } = {}) {
+  const obj = parseJsonMaybe(daysField);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [];
+  return Object.keys(obj)
+    .map((k) => String(k || '').trim())
+    .filter((k) => {
+      if (!isZohoLeaveDateString(k)) return false;
+      const entry = obj[k];
+      if (!entry || typeof entry !== 'object') return false;
+      const n = Number(entry.LeaveCount ?? entry.leaveCount ?? entry.count);
+      if (!Number.isFinite(n) || n <= 0) return false;
+      if (excludeWeekends && zohoLeaveDateKeyIsWeekend(k)) return false;
+      return true;
+    })
+    .sort((a, b) => zohoLeaveDateKeyToTime(a) - zohoLeaveDateKeyToTime(b));
+}
+
 /** Earliest / latest date keys from approved-leave `Days` JSON (e.g. "18-May-2026"). */
 function extractLeaveDatesFromDaysField(daysField) {
+  const positive = extractApprovedLeavePositiveDayKeys(daysField);
+  if (positive.length > 0) {
+    return { from: positive[0], to: positive[positive.length - 1] };
+  }
   const obj = parseJsonMaybe(daysField);
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
     return { from: '', to: '' };
@@ -661,18 +706,49 @@ function extractLeaveDatesFromDaysField(daysField) {
     .map((k) => String(k || '').trim())
     .filter((k) => isZohoLeaveDateString(k));
   if (dateKeys.length === 0) return { from: '', to: '' };
-
-  const toTime = (key) => {
-    const m = key.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/i);
-    if (!m) return 0;
-    const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-    const mon = months.indexOf(m[2].toLowerCase());
-    if (mon < 0) return 0;
-    return new Date(parseInt(m[3], 10), mon, parseInt(m[1], 10)).getTime();
-  };
-
-  dateKeys.sort((a, b) => toTime(a) - toTime(b));
+  dateKeys.sort((a, b) => zohoLeaveDateKeyToTime(a) - zohoLeaveDateKeyToTime(b));
   return { from: dateKeys[0], to: dateKeys[dateKeys.length - 1] };
+}
+
+/**
+ * Form N / Contingency: prefer From/To and day count from Days with LeaveCount > 0.
+ * When that exceeds LeaveData booked, drop weekend days (Zoho often marks Sat as LeaveCount 1).
+ */
+export function resolveApprovedLeavePeriodForFormNGJ(record, bookedLimit = '') {
+  const base = normalizeApprovedLeaveRecord(record || {});
+  const daysField = record?.Days ?? record?.days;
+  let positiveKeys = extractApprovedLeavePositiveDayKeys(daysField);
+  let daysCount = parseApprovedLeaveDaysCount(daysField) || base.daysCount;
+
+  const bookedNum = Number(String(bookedLimit || '').replace(/,/g, '').trim());
+  const countNum = Number(String(daysCount || '').replace(/,/g, '').trim());
+  if (
+    Number.isFinite(bookedNum) &&
+    bookedNum > 0 &&
+    Number.isFinite(countNum) &&
+    countNum > bookedNum
+  ) {
+    const weekdayKeys = extractApprovedLeavePositiveDayKeys(daysField, { excludeWeekends: true });
+    if (weekdayKeys.length > 0) {
+      positiveKeys = weekdayKeys;
+      const weekdaySum = weekdayKeys.reduce((sum, key) => {
+        const obj = parseJsonMaybe(daysField);
+        const entry = obj?.[key];
+        const n = Number(entry?.LeaveCount ?? entry?.leaveCount ?? entry?.count);
+        return sum + (Number.isFinite(n) && n > 0 ? n : 0);
+      }, 0);
+      if (weekdaySum > 0) daysCount = String(weekdaySum);
+    }
+  }
+
+  const from = positiveKeys[0] || base.from;
+  const to = positiveKeys[positiveKeys.length - 1] || base.to || from;
+  return {
+    from,
+    to,
+    daysCount: daysCount || base.daysCount,
+    wagesPaidDate: from && to ? (from === to ? from : `${from} to ${to}`) : base.wagesPaidDate,
+  };
 }
 
 export function normalizeApprovedLeaveRecord(record) {
@@ -1084,7 +1160,36 @@ export function collectApprovedLeaveIdentityKeys(record) {
     const v = record[k];
     if (v) names.add(normalizePersonNameKey(v));
   });
-  ['Employee.ID', 'EmployeeID', 'employeeId', 'Employee Id', 'erecno', 'Erecno'].forEach((k) => {
+  // Also compose FirstName + LastName when Zoho nests them on Employee / record.
+  const first =
+    (employee && typeof employee === 'object'
+      ? employee.FirstName || employee.firstName || employee['First Name']
+      : null) ||
+    record.FirstName ||
+    record.firstName ||
+    record['First Name'];
+  const last =
+    (employee && typeof employee === 'object'
+      ? employee.LastName || employee.lastName || employee['Last Name']
+      : null) ||
+    record.LastName ||
+    record.lastName ||
+    record['Last Name'];
+  const fn = String(first || '').trim();
+  const ln = String(last || '').trim();
+  if (fn && ln) names.add(normalizePersonNameKey(`${fn} ${ln}`));
+  [
+    'Employee.ID',
+    'EmployeeID',
+    'employeeId',
+    'Employee Id',
+    'erecno',
+    'Erecno',
+    'ZohoID',
+    'Zoho_ID',
+    'zoho_id',
+    'Zoho.ID',
+  ].forEach((k) => {
     const v = record[k];
     if (v != null && String(v).trim()) ids.add(String(v).trim().toLowerCase());
   });

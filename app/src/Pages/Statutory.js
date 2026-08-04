@@ -928,6 +928,7 @@ import {
   filterFormNGJGujaratExportRows,
   formatFormNGJGujaratEmployerFromSite,
   formatFormNGJGujaratEstablishmentFromSite,
+  getFormNGJRowValueForHeader,
   headersLookLikeBrokenFormNGJ,
   isFormNGJCasualLeaveAutofillHeader,
   isFormNGJDateOfEntryHeader,
@@ -16408,6 +16409,64 @@ function andhraAutofillGrayedOutMessage(short = false) {
     : 'Autofill is not available for Andhra Pradesh Form XXVI, Form XXVII, Form VII, Form 5, Form 11, Form 2-A, or Form 18. Enter data manually.';
 }
 
+/**
+ * Gujarat only — Autofill stays grayed out (manual entry) for:
+ * Form Q Annual Return under The Gujarat Shops And Establishments Act
+ * (Regulation Of Employment And Conditions Of Service).
+ * Does not affect Maharashtra Form Q muster or Karnataka Form Q.
+ */
+function isGujaratFormQAutofillGrayedOutForm(rowItem, fileName = '', formHeader = null) {
+  if (isFormQKarnatakaContext(formHeader, rowItem, fileName)) return false;
+
+  const blob = [
+    rowItem?.formName,
+    rowItem?.FormName,
+    rowItem?.description,
+    rowItem?.Description,
+    rowItem?.act,
+    rowItem?.Act,
+    rowItem?.state,
+    rowItem?.State,
+    rowItem?.formFileName,
+    rowItem?.FormFileName,
+    formHeader?.title,
+    formHeader?.subtitle,
+    formHeader?.reference,
+    fileName,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+
+  const stateText = String(rowItem?.state || rowItem?.State || '').toLowerCase();
+  const isGujarat =
+    /gujarat/.test(blob) ||
+    /\b_gj\b/.test(blob) ||
+    /form[_\s-]*q[_\s-]*gj/.test(blob) ||
+    stateText.includes('gujarat');
+  if (!isGujarat) return false;
+
+  // Maharashtra Form Q is the muster-roll attendance grid — keep Autofill.
+  if (/maharashtra/.test(blob) && !/gujarat/.test(stateText) && !/\b_gj\b/.test(blob)) {
+    return false;
+  }
+
+  const isFormQ =
+    /\bform[\s._-]*q\b/.test(blob) ||
+    /\bform_q\b/.test(blob) ||
+    /form[_\s-]*q[_\s-]*(?:gj|gujarat)/.test(blob);
+  if (!isFormQ) return false;
+
+  // Prefer Annual Return / Shops Act when present; Form Q + Gujarat alone is enough.
+  return true;
+}
+
+function gujaratFormQAutofillGrayedOutMessage(short = false) {
+  return short
+    ? 'Autofill is not available for Gujarat Form Q (Annual Return) — enter data manually'
+    : 'Autofill is not available for Gujarat Form Q Annual Return under The Gujarat Shops And Establishments Act. Enter data manually.';
+}
+
 const isFormXVIIContext = (formHeader, rowItem, fileName) => {
   const parts = [
     rowItem?.formName,
@@ -29140,13 +29199,41 @@ const Statutory = ({ userEmail, userRole }) => {
       setError(andhraAutofillGrayedOutMessage());
       return;
     }
+    if (
+      !options.preferSavedDraftData &&
+      isGujaratFormQAutofillGrayedOutForm(
+        { ...item, ...autofillRowItem },
+        autofillRowItem.formFileName || ''
+      )
+    ) {
+      setError(gujaratFormQAutofillGrayedOutMessage());
+      return;
+    }
     runStatutoryBackgroundPrefetch(selectedMonth, autofillRowItem);
     fetchPeopleDataForAutofillDisplay().catch(() => null);
     setIsAutofillMode(true);
     setAutofillItem(autofillRowItem);
     setFormFileLoading(true);
+    setTableAutofillLoading(true);
+    setTableAutofillProgress('Opening form…');
     setError('');
-    // Do not open a loading placeholder modal — open the form once the template is parsed.
+    // Open loading modal immediately so Gujarat CLRA / Autofill never looks frozen while template + data load.
+    const loadingFileName =
+      autofillRowItem?.formFileName ||
+      autofillRowItem?.FormFileName ||
+      autofillRowItem?.formName ||
+      autofillRowItem?.FormName ||
+      'Form File';
+    setFormFileModalData({
+      fileName: loadingFileName,
+      formFileName: loadingFileName,
+      fileType: 'excel-form',
+      item: autofillRowItem,
+      parsedTableHeaders: [],
+    });
+    setIsFormFileModalOpen(true);
+    isFormFileModalOpenRef.current = true;
+    await yieldToMain();
     await handleViewFormFile(autofillRowItem, true, options);
   };
 
@@ -48168,6 +48255,18 @@ const Statutory = ({ userEmail, userRole }) => {
           headersToUse = [...modalHdrs];
           usedLiveModalGrid = true;
           savedDraftRowMatrix = null;
+        }
+        // Lookup autofill stores lowercase names; title-case for Excel like Form P.
+        if (Array.isArray(mappedData) && mappedData.length > 0) {
+          mappedData.forEach((row) => {
+            if (!row || typeof row !== 'object') return;
+            Object.keys(row).forEach((key) => {
+              if (!isFormOGJWorkerNameHeader(key) && !isStatutoryWorkerNameHeader(key)) return;
+              const cur = String(row[key] ?? '').trim();
+              if (!cur || /^enter\b/i.test(cur)) return;
+              row[key] = toStatutoryPersonNameDisplay(cur);
+            });
+          });
         }
         const layoutSource =
           formFileModalData ||
@@ -67330,9 +67429,8 @@ const Statutory = ({ userEmail, userRole }) => {
                       : 'Fetching payroll for Form 10…'
           );
         }
-        if (fastPaginatedAutofill && !enrichOnlyPhase) {
-          void runPayrollPreload();
-        } else if (enrichOnlyPhase && (formXIVMPAutofillContext || formXIXKarnatakaAutofillContext || formXIXMPAutofillContext)) {
+        // Never await payroll on the first paint / background enrich — awaiting freezes Gujarat CLRA modals.
+        if (fastPaginatedAutofill || enrichOnlyPhase) {
           void runPayrollPreload();
         } else {
           await runPayrollPreload();
@@ -68763,7 +68861,11 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
           if (formOGJGujaratAutofillContext && isFormOGJWorkerNameHeader(header)) {
-            row[header] = sanitizeValue(getEmployeeLookupName(emp) || getFallbackName(emp));
+            // Lookup name is lowercased for matching; store Title Case for modal + Excel.
+            row[header] = sanitizeValue(
+              getEmployeeDisplayName(emp) ||
+                toStatutoryPersonNameDisplay(getFallbackName(emp) || '')
+            );
             return;
           }
           if (formOGJGujaratAutofillContext && isFormOGJSkipPeopleAutofillHeader(header)) {
@@ -79867,18 +79969,17 @@ const Statutory = ({ userEmail, userRole }) => {
           );
         }
         try {
-          let leaveResult = getCachedStoredLeaveData();
-          if (!leaveResult?.leaveRecords?.length && !leaveResult?.records) {
-            leaveResult = await fetchStoredLeaveDataForAutofill({
-              fromDate,
-              toDate,
-              force: !returnMappedData,
-              timeoutMs: 120000,
-            }).catch((err) => {
-              console.warn('Form N Gujarat LeaveData fetch failed:', err?.message || err);
-              return null;
-            });
-          }
+          // Always load LeaveData for the selected UI month (same as Form X).
+          // Stale/wrong-month cache was pairing Contingency balances to the wrong workers.
+          const leaveResult = await fetchStoredLeaveDataForAutofill({
+            fromDate,
+            toDate,
+            force: true,
+            timeoutMs: 120000,
+          }).catch((err) => {
+            console.warn('Form N Gujarat LeaveData fetch failed:', err?.message || err);
+            return null;
+          });
           const extractedLeave = extractLeaveRecordsFromApiResult(leaveResult || {});
           leaveRecords = extractedLeave.records || [];
           leaveTypeLabels = extractedLeave.leaveTypeLabels || {};
@@ -85231,6 +85332,26 @@ const Statutory = ({ userEmail, userRole }) => {
       }
       setTableHeaders([]);
       setSubColumns(null);
+
+      // Show loading shell immediately (Autofill may have opened it already).
+      if (!isFormFileModalOpenRef.current) {
+        const loadingFileName =
+          item?.formFileName || item?.FormFileName || item?.formName || item?.FormName || 'Form File';
+        setFormFileModalData({
+          fileName: loadingFileName,
+          formFileName: loadingFileName,
+          fileType: 'excel-form',
+          item,
+          parsedTableHeaders: [],
+        });
+        setIsFormFileModalOpen(true);
+        isFormFileModalOpenRef.current = true;
+        if (forceAutofill) {
+          setTableAutofillLoading(true);
+          setTableAutofillProgress('Opening form…');
+        }
+        await yieldToMain();
+      }
 
       if (forceAutofill) {
         fetchPeopleDataForAutofillDisplay().catch(() => null);
@@ -91163,6 +91284,21 @@ const Statutory = ({ userEmail, userRole }) => {
       return remapFormPGJRowsToHeaders(rows, rawHeaders, hdrs);
     }
     if (
+      isFormNGJGujaratTableLayoutFormHeader(displayFormHeader) ||
+      isFormNGJGujaratHeaderFieldLayoutFormHeader(displayFormHeader) ||
+      isFormNGJGujaratContext(
+        displayFormHeader,
+        item,
+        fn,
+        formFileModalData?.sheetText || '',
+        hdrs
+      ) ||
+      headersLookLikeBrokenFormNGJ(hdrs)
+    ) {
+      const canonHdrs = resolveFormNGJGujaratTableHeaders(hdrs.length > 0 ? hdrs : rawHeaders);
+      return remapFormNGJGujaratRowsToHeaders(rows, rawHeaders, canonHdrs);
+    }
+    if (
       isFormDRajasthanAttendanceTableLayoutFormHeader(displayFormHeader) ||
       isFormDRajasthanContext(
         displayFormHeader,
@@ -91832,6 +91968,30 @@ const Statutory = ({ userEmail, userRole }) => {
         sheetText,
         displayTableHeaders
       )
+    );
+  }, [
+    displayFormHeader,
+    displayTableHeaders,
+    formFileModalData?.item,
+    formFileModalData?.fileName,
+    formFileModalData?.sheetText,
+  ]);
+
+  const formNGJAutofillGrid = useMemo(() => {
+    const item = formFileModalData?.item;
+    const fn = formFileModalData?.fileName || '';
+    const sheetText = formFileModalData?.sheetText || '';
+    return (
+      isFormNGJGujaratTableLayoutFormHeader(displayFormHeader) ||
+      isFormNGJGujaratHeaderFieldLayoutFormHeader(displayFormHeader) ||
+      isFormNGJGujaratContext(
+        displayFormHeader,
+        item,
+        fn,
+        sheetText,
+        displayTableHeaders
+      ) ||
+      headersLookLikeBrokenFormNGJ(displayTableHeaders)
     );
   }, [
     displayFormHeader,
@@ -93968,25 +94128,48 @@ const Statutory = ({ userEmail, userRole }) => {
                                       item?.FormFileName ||
                                       ''
                                   );
+                                  const gujaratFormQAutofillGrayedOut =
+                                    isGujaratFormQAutofillGrayedOutForm(
+                                      {
+                                        ...item,
+                                        formFileName:
+                                          viewFileItem?.formFileName ||
+                                          resolvedFormFileItem?.formFileName ||
+                                          item?.formFileName ||
+                                          item?.FormFileName,
+                                        FormFileName:
+                                          viewFileItem?.formFileName ||
+                                          resolvedFormFileItem?.formFileName ||
+                                          item?.FormFileName ||
+                                          item?.formFileName
+                                      },
+                                      viewFileItem?.formFileName ||
+                                        resolvedFormFileItem?.formFileName ||
+                                        item?.formFileName ||
+                                        item?.FormFileName ||
+                                        ''
+                                    );
+                                  const autofillGrayedOut =
+                                    andhraAutofillGrayedOut || gujaratFormQAutofillGrayedOut;
                                   return (
                                     <button
                                       className="statutory-autofill-btn-ui"
                                       onMouseEnter={() => {
-                                        if (!andhraAutofillGrayedOut) requestAutofillPrefetch(item);
+                                        if (!autofillGrayedOut) requestAutofillPrefetch(item);
                                       }}
                                       onFocus={() => {
-                                        if (!andhraAutofillGrayedOut) requestAutofillPrefetch(item);
+                                        if (!autofillGrayedOut) requestAutofillPrefetch(item);
                                       }}
                                       onMouseDown={() => {
-                                        if (!andhraAutofillGrayedOut) requestAutofillPrefetch(item);
+                                        if (!autofillGrayedOut) requestAutofillPrefetch(item);
                                       }}
                                       onTouchStart={() => {
-                                        if (!andhraAutofillGrayedOut) requestAutofillPrefetch(item);
+                                        if (!autofillGrayedOut) requestAutofillPrefetch(item);
                                       }}
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         if (
-                                          andhraAutofillGrayedOut ||
+                                          autofillGrayedOut ||
                                           !hasFormFileForRow ||
                                           rowLocked ||
                                           formFileLoading
@@ -94004,13 +94187,15 @@ const Statutory = ({ userEmail, userRole }) => {
                                       title={
                                         andhraAutofillGrayedOut
                                           ? andhraAutofillGrayedOutMessage(true)
-                                          : rowLocked
-                                            ? 'Approved row is locked for editing'
-                                            : hasFormFileForRow
-                                              ? 'Autofill from Zoho People, Attendance, Leave and Payroll'
-                                              : 'No form file – upload or link a form to enable Autofill'
+                                          : gujaratFormQAutofillGrayedOut
+                                            ? gujaratFormQAutofillGrayedOutMessage(true)
+                                            : rowLocked
+                                              ? 'Approved row is locked for editing'
+                                              : hasFormFileForRow
+                                                ? 'Autofill from Zoho People, Attendance, Leave and Payroll'
+                                                : 'No form file – upload or link a form to enable Autofill'
                                       }
-                                      disabled={!hasFormFileForRow || rowLocked || andhraAutofillGrayedOut}
+                                      disabled={!hasFormFileForRow || rowLocked || autofillGrayedOut}
                                     >
                                       Autofill
                                     </button>
@@ -95116,7 +95301,9 @@ const Statutory = ({ userEmail, userRole }) => {
                       animation: 'spin 1s linear infinite',
                       margin: '0 auto 16px'
                     }}></div>
-                    <p style={{ color: '#6b7280', margin: 0 }}>Loading form file...</p>
+                    <p style={{ color: '#6b7280', margin: 0 }}>
+                      {tableAutofillProgress || 'Loading form file...'}
+                    </p>
                   </div>
                 </div>
               ) : formFileModalData?.fileType === 'excel-form' ? (
@@ -96176,10 +96363,26 @@ const Statutory = ({ userEmail, userRole }) => {
                     {/* Autofill button - Hide if draft file exists */}
                     {!isFormFileReadOnly &&
                       (displayTableHeaders.length > 0 || isFormAHeaderFieldLayoutFormHeader(displayFormHeader) || isForm18APHeaderFieldLayoutFormHeader(displayFormHeader) || isFormXXVIAPHeaderFieldLayoutFormHeader(displayFormHeader) || isFormMGJGujaratHeaderFieldLayoutFormHeader(displayFormHeader) || isFormVIIAPHeaderFieldLayoutFormHeader(displayFormHeader) || isFormXIXAPHeaderFieldLayoutFormHeader(displayFormHeader) || isFormXIVMPHeaderFieldLayoutFormHeader(displayFormHeader)) &&
-                      !formFileModalData?.item?.draftFile && (
+                      !formFileModalData?.item?.draftFile && (() => {
+                      const gujaratFormQModalAutofillGrayedOut = isGujaratFormQAutofillGrayedOutForm(
+                        formFileModalData?.item,
+                        String(
+                          formFileModalData?.fileName ||
+                            formFileModalData?.formFileName ||
+                            formFileModalData?.item?.formFileName ||
+                            ''
+                        ),
+                        formFileModalData?.parsedFormHeader || displayFormHeader
+                      );
+                      const modalAutofillDisabled =
+                        formFileLoading ||
+                        tableAutofillLoading ||
+                        gujaratFormQModalAutofillGrayedOut;
+                      return (
                       <button
+                        disabled={modalAutofillDisabled}
                         onClick={() => {
-                          if (formFileLoading || tableAutofillLoading) return;
+                          if (modalAutofillDisabled) return;
                           const kaModalOpen =
                             isFormXIXKarnatakaTableLayoutFormHeader(formFileModalData?.parsedFormHeader) ||
                             isFormXIXKarnatakaWageSlipContext(
@@ -96306,29 +96509,40 @@ const Statutory = ({ userEmail, userRole }) => {
                         }}
                         style={{
                           padding: '10px 20px',
-                          backgroundColor: STAT_FORM_FILE_ACCENT_BG,
+                          backgroundColor: gujaratFormQModalAutofillGrayedOut
+                            ? '#9ca3af'
+                            : STAT_FORM_FILE_ACCENT_BG,
                           color: 'white',
                           border: 'none',
                           borderRadius: '6px',
                           fontSize: '14px',
                           fontWeight: '500',
-                          cursor: 'pointer',
+                          cursor: modalAutofillDisabled ? 'not-allowed' : 'pointer',
                           display: 'flex',
                           alignItems: 'center',
                           gap: '8px',
-                          transition: 'all 0.2s ease'
+                          transition: 'all 0.2s ease',
+                          opacity: gujaratFormQModalAutofillGrayedOut ? 0.85 : 1
                         }}
                         onMouseOver={(e) => {
+                          if (modalAutofillDisabled) return;
                           e.currentTarget.style.backgroundColor = STAT_FORM_FILE_ACCENT_BG_HOVER;
                         }}
                         onMouseOut={(e) => {
-                          e.currentTarget.style.backgroundColor = STAT_FORM_FILE_ACCENT_BG;
+                          e.currentTarget.style.backgroundColor = gujaratFormQModalAutofillGrayedOut
+                            ? '#9ca3af'
+                            : STAT_FORM_FILE_ACCENT_BG;
                         }}
-                        title="Fetch employee data from Zoho People and populate the form"
+                        title={
+                          gujaratFormQModalAutofillGrayedOut
+                            ? gujaratFormQAutofillGrayedOutMessage(true)
+                            : 'Fetch employee data from Zoho People and populate the form'
+                        }
                       >
                         Autofill
                       </button>
-                    )}
+                      );
+                    })()}
                     {/* Import button (after Autofill) */}
                     {!isFormFileReadOnly &&
                       (displayTableHeaders.length > 0 ||
@@ -97030,6 +97244,8 @@ const Statutory = ({ userEmail, userRole }) => {
                                       ? getFormTSEKarnatakaRowValueForHeader(row, header)
                                     : formOGJAutofillGrid
                                       ? getFormOGJRowValueForHeader(row, header)
+                                    : formNGJAutofillGrid
+                                      ? getFormNGJRowValueForHeader(row, header)
                                     : formLGJAutofillGrid
                                       ? getFormLGJRowValueForHeader(row, header)
                                     : formDRJAutofillGrid
@@ -97147,6 +97363,19 @@ const Statutory = ({ userEmail, userRole }) => {
                                           ? getForm6APHumidityCellPlaceholder(header)
                                           : formTSEThead
                                             ? `Enter ${formatFormTSEWageColumnHeaderLabel(header)}`
+                                            : formNGJAutofillGrid
+                                              ? (() => {
+                                                  const leaf = String(header || '').includes('_')
+                                                    ? String(header).split('_').pop()
+                                                    : header;
+                                                  const periodLeaf = String(leaf || '').match(
+                                                    /^Period_(From|To)$/i
+                                                  );
+                                                  const label = periodLeaf
+                                                    ? periodLeaf[1]
+                                                    : formatStatutoryTableHeaderLabel(leaf);
+                                                  return `Enter ${label}`;
+                                                })()
                                             : `Enter ${formatStatutoryTableHeaderLabel(header)}`
                                     }
                                   />

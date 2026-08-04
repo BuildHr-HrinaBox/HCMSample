@@ -402,6 +402,7 @@ function MainApp({ userRole, userEmail, userName }) {
 
   const isHomePage = location.pathname === '/';
   const isHcmDashboardPage = location.pathname === '/hcm-dashboard';
+  const isNewDashboardPage = location.pathname === '/new-dashboard';
   const isCompanyDetailsHcmShell = location.pathname === '/rule-book/company-details';
   const isSiteManagementHcmShell = location.pathname === '/rule-book/site-management';
   const isActsBulkHcmShell = location.pathname === '/rule-book/actsbulk';
@@ -424,6 +425,7 @@ function MainApp({ userRole, userEmail, userName }) {
   const isClraHcmShell = location.pathname === '/rule-book/clra';
   const isHcmFullShell =
     isHcmDashboardPage ||
+    isNewDashboardPage ||
     isCompanyDetailsHcmShell ||
     isSiteManagementHcmShell ||
     isActsBulkHcmShell ||
@@ -510,7 +512,19 @@ function MainApp({ userRole, userEmail, userName }) {
                 path="/"
                 element={<Navigate to="/hcm-dashboard" replace />}
               />
-              <Route path="/new-dashboard" element={<Dashboard userRole={userRole} userEmail={userEmail} />} />
+              <Route
+                path="/new-dashboard"
+                element={
+                  <HcmDashboardPageShell
+                    userName={userName || 'User'}
+                    userRole={userRole || 'App User'}
+                    userInitials={dashboardInitials}
+                    userEmail={userEmail}
+                  >
+                    <Dashboard userRole={userRole} userEmail={userEmail} standalone />
+                  </HcmDashboardPageShell>
+                }
+              />
               <Route
                 path="/hcm-dashboard"
                 element={

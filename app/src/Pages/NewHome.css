@@ -2,14 +2,14 @@
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
-/* Outer flex wrapper: sidebar + main area - light beige background */
+/* Outer flex wrapper: sidebar + main area */
 .new-home-main-area {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   position: relative;
   overflow-x: hidden;
-  background: #F5F5DC;
+  background: #ffffff;
 }
 
 .new-home-container {

@@ -12,7 +12,7 @@ const PEOPLE_CACHE_KEY = 'statutoryPeopleData_v3';
 const PEOPLE_CACHE_TTL_MS = 5 * 60 * 1000;
 const PEOPLE_PAGE_SIZE = 300;
 const PEOPLE_PAGE_DELAY_MS = 0;
-const PEOPLE_FAST_FIRST_PAGE_SIZE = 300;
+const PEOPLE_FAST_FIRST_PAGE_SIZE = 80;
 const ATTENDANCE_CACHE_TTL_MS = 5 * 60 * 1000;
 const LEAVE_CACHE_TTL_MS = 5 * 60 * 1000;
 const PAYROLL_BULK_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -162,6 +162,11 @@ function readPeopleCacheRaw() {
   try {
     const cached = localStorage.getItem(PEOPLE_CACHE_KEY);
     if (!cached) return null;
+    // Huge sync JSON.parse blocks Autofill / Gujarat CLRA form open — skip oversized caches.
+    if (cached.length > 2_500_000) {
+      localStorage.removeItem(PEOPLE_CACHE_KEY);
+      return null;
+    }
     const parsed = JSON.parse(cached);
     if (parsed?.ts && parsed?.data && Date.now() - parsed.ts < PEOPLE_CACHE_TTL_MS) {
       peopleMemory = parsed.data;
@@ -177,11 +182,19 @@ function readPeopleCacheRaw() {
 export function writePeopleCache(data) {
   peopleMemory = data;
   peopleMemoryTs = Date.now();
-  try {
-    localStorage.setItem(PEOPLE_CACHE_KEY, JSON.stringify({ ts: peopleMemoryTs, data }));
-  } catch (_) {
-    /* ignore */
-  }
+  const ts = peopleMemoryTs;
+  const schedulePersist =
+    typeof requestIdleCallback === 'function'
+      ? (fn) => requestIdleCallback(fn, { timeout: 2500 })
+      : (fn) => setTimeout(fn, 0);
+  // Persist off the critical path — stringify of large People payloads freezes Autofill UI.
+  schedulePersist(() => {
+    try {
+      localStorage.setItem(PEOPLE_CACHE_KEY, JSON.stringify({ ts, data }));
+    } catch (_) {
+      /* ignore */
+    }
+  });
 }
 
 export function clearPeopleCache() {
@@ -419,19 +432,13 @@ export function startPeopleDataBackgroundRefresh(options = {}) {
 /**
  * Statutory Autofill: return cached or first Zoho page immediately (<1s target),
  * then refresh the full list in the background for pagination.
+ * Never await the full fetch_all inflight — that hangs Gujarat CLRA / all Autofill until every employee arrives.
  */
 export async function fetchPeopleDataForAutofillDisplay(options = {}) {
   const cached = readPeopleCacheRaw();
   if (cached?.success) {
     const count = flattenZohoPeopleEmployees(cached).length;
     if (count > 0) return cached;
-  }
-  if (peopleInflight) {
-    try {
-      return await peopleInflight;
-    } catch (_) {
-      /* fall through to first-page fetch */
-    }
   }
 
   const pageSize = Math.min(
@@ -452,6 +459,15 @@ export async function fetchPeopleDataForAutofillDisplay(options = {}) {
   if (response.ok && pageResult.success) {
     const batch = flattenZohoPeopleEmployees({ data: pageResult.data });
     if (batch.length > 0) {
+      // Keep memory warm for the next paint; full list continues in background.
+      if (!peopleMemory) {
+        peopleMemory = {
+          success: true,
+          data: { response: { result: batch, status: 0 } },
+          meta: { total: batch.length, mode: 'fast_first_page' },
+        };
+        peopleMemoryTs = Date.now();
+      }
       startPeopleDataBackgroundRefresh(options);
       return {
         success: true,
@@ -461,6 +477,14 @@ export async function fetchPeopleDataForAutofillDisplay(options = {}) {
     }
   }
 
+  // Last resort: only wait on full fetch if first page failed and one is already running.
+  if (peopleInflight) {
+    try {
+      return await peopleInflight;
+    } catch (_) {
+      /* fall through */
+    }
+  }
   return fetchPeopleData(options);
 }
 
@@ -529,7 +553,13 @@ export function yieldToMain() {
       sched.yield().then(resolve, () => setTimeout(resolve, 0));
       return;
     }
-    // Prefer a macrotask so scroll/wheel handlers can run between autofill chunks.
+    // Double-rAF + macrotask: lets the browser paint and handle wheel/touch before we resume.
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
+      });
+      return;
+    }
     setTimeout(resolve, 0);
   });
 }
@@ -598,7 +628,7 @@ export function prefetchPeopleDataFast() {
   if (cached?.success && flattenZohoPeopleEmployees(cached).length > 0) {
     return Promise.resolve(cached);
   }
-  if (peopleInflight) return peopleInflight;
+  // Do not return peopleInflight (full fetch_all) — that defeats the fast path.
   return fetchPeopleDataForAutofillDisplay().catch(() => null);
 }
 
@@ -790,7 +820,11 @@ function writeStoredLeaveCache(monthWise, data) {
 
 /** Synchronous LeaveData table read when prefetch already ran. */
 export function getCachedStoredLeaveData(monthWise = '') {
-  return readStoredLeaveCacheRaw(monthWise) || readStoredLeaveCacheRaw('');
+  const specific = readStoredLeaveCacheRaw(monthWise);
+  if (specific) return specific;
+  // Do not fall back to another month's cache when a specific month was requested.
+  if (String(monthWise || '').trim()) return null;
+  return readStoredLeaveCacheRaw('');
 }
 
 /**
@@ -1026,8 +1060,8 @@ export function prefetchPayrollBulkRows() {
 export function prefetchStatutoryAutofillData(options = {}) {
   prefetchSiteDetails();
   prefetchCompanyDetails();
-  prefetchPeopleDataFast();
-  void startPeopleDataBackgroundRefresh();
+  // First page first — then full list. Starting both together made Autofill await fetch_all.
+  void prefetchPeopleDataFast().then(() => startPeopleDataBackgroundRefresh());
   const attOpts =
     options.sdate && options.edate ? { sdate: options.sdate, edate: options.edate } : {};
   prefetchAttendanceData(attOpts);

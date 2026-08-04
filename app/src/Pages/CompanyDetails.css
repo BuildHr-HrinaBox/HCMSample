@@ -93,6 +93,8 @@ main.nd-content.nd-content--embedded-page > .company-details-page:not(.company-d
   overflow: auto;
 }
 
+.nd-content--embedded-page .company-details-page:not(.company-details-page-form-open) .company-details-shell-box > .company-details-pagination-footer,
+main.nd-content.nd-content--embedded-page > .company-details-page:not(.company-details-page-form-open) .company-details-shell-box > .company-details-pagination-footer,
 .nd-content--embedded-page .company-details-page:not(.company-details-page-form-open) .company-details-shell-box > .company-details-pagination,
 main.nd-content.nd-content--embedded-page > .company-details-page:not(.company-details-page-form-open) .company-details-shell-box > .company-details-pagination {
   flex-shrink: 0;
@@ -685,6 +687,27 @@ main.nd-content.nd-content--embedded-page > .company-details-page:not(.company-d
   background-color: #1976d2;
 }
 
+.company-details-pagination-footer {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: auto;
+  padding: 8px 8px 4px;
+  box-sizing: border-box;
+}
+
+.company-details-pagination-info {
+  position: absolute;
+  left: 8px;
+  font-size: 13px;
+  color: #6b7280;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .company-details-pagination {
   display: flex;
   flex-wrap: wrap;
@@ -696,9 +719,31 @@ main.nd-content.nd-content--embedded-page > .company-details-page:not(.company-d
   box-sizing: border-box;
 }
 
+.company-details-pagination-footer .company-details-pagination {
+  margin-top: 0;
+  padding: 0;
+  flex: 0 1 auto;
+}
+
 @media (max-width: 768px) {
   .company-details-shell-box {
     min-height: calc(100vh - 140px);
+  }
+
+  .company-details-pagination-footer {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .company-details-pagination-info {
+    position: static;
+    width: 100%;
+    text-align: center;
+  }
+
+  .company-details-pagination-footer .company-details-pagination {
+    width: 100%;
+    justify-content: center;
   }
 }
 

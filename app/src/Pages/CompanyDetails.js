@@ -1368,6 +1368,11 @@ const CompanyDetails = ({ userRole, userEmail }) => {
     return displayCompanies.slice(start, start + COMPANY_TABLE_PAGE_SIZE);
   }, [displayCompanies, effectiveTablePage]);
 
+  const totalVisible = displayCompanies.length;
+  const pageStart = (effectiveTablePage - 1) * COMPANY_TABLE_PAGE_SIZE;
+  const showingFrom = totalVisible === 0 ? 0 : pageStart + 1;
+  const showingTo = Math.min(pageStart + pagedCompanies.length, totalVisible);
+
   const paginationItems = useMemo(
     () => buildPaginationItems(effectiveTablePage, totalTablePages),
     [effectiveTablePage, totalTablePages]
@@ -2479,78 +2484,83 @@ const CompanyDetails = ({ userRole, userEmail }) => {
                   </table>
                 </div>
                 {displayCompanies.length > 0 ? (
-                  <nav className="company-details-pagination" aria-label="Table pagination">
-                    <button
-                      type="button"
-                      className="company-details-pagination-nav"
-                      disabled={effectiveTablePage <= 1}
-                      onClick={() => setTablePage(1)}
-                      title="First page"
-                      aria-label="First page"
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                        <polyline points="11 17 6 12 11 7" />
-                        <polyline points="18 17 13 12 18 7" />
-                      </svg>
-                    </button>
-                    <button
-                      type="button"
-                      className="company-details-pagination-nav"
-                      disabled={effectiveTablePage <= 1}
-                      onClick={() => setTablePage((p) => Math.max(1, p - 1))}
-                      title="Previous page"
-                      aria-label="Previous page"
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                        <polyline points="15 18 9 12 15 6" />
-                      </svg>
-                    </button>
-                    <div className="company-details-pagination-pages">
-                      {paginationItems.map((item, i) =>
-                        item === 'ellipsis' ? (
-                          <span key={`e-${i}`} className="company-details-pagination-ellipsis" aria-hidden>
-                            ...
-                          </span>
-                        ) : (
-                          <button
-                            key={item}
-                            type="button"
-                            className={`company-details-pagination-page${item === effectiveTablePage ? ' company-details-pagination-page--active' : ''}`}
-                            onClick={() => setTablePage(item)}
-                            aria-label={`Page ${item}`}
-                            aria-current={item === effectiveTablePage ? 'page' : undefined}
-                          >
-                            {item}
-                          </button>
-                        )
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      className="company-details-pagination-nav"
-                      disabled={effectiveTablePage >= totalTablePages}
-                      onClick={() => setTablePage((p) => Math.min(totalTablePages, p + 1))}
-                      title="Next page"
-                      aria-label="Next page"
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                        <polyline points="9 18 15 12 9 6" />
-                      </svg>
-                    </button>
-                    <button
-                      type="button"
-                      className="company-details-pagination-nav"
-                      disabled={effectiveTablePage >= totalTablePages}
-                      onClick={() => setTablePage(totalTablePages)}
-                      title="Last page"
-                      aria-label="Last page"
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                        <polyline points="13 17 18 12 13 7" />
-                        <polyline points="6 17 11 12 6 7" />
-                      </svg>
-                    </button>
-                  </nav>
+                  <div className="company-details-pagination-footer">
+                    <span className="company-details-pagination-info">
+                      Showing {showingFrom} to {showingTo} of {totalVisible} results
+                    </span>
+                    <nav className="company-details-pagination" aria-label="Table pagination">
+                      <button
+                        type="button"
+                        className="company-details-pagination-nav"
+                        disabled={effectiveTablePage <= 1}
+                        onClick={() => setTablePage(1)}
+                        title="First page"
+                        aria-label="First page"
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <polyline points="11 17 6 12 11 7" />
+                          <polyline points="18 17 13 12 18 7" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        className="company-details-pagination-nav"
+                        disabled={effectiveTablePage <= 1}
+                        onClick={() => setTablePage((p) => Math.max(1, p - 1))}
+                        title="Previous page"
+                        aria-label="Previous page"
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <polyline points="15 18 9 12 15 6" />
+                        </svg>
+                      </button>
+                      <div className="company-details-pagination-pages">
+                        {paginationItems.map((item, i) =>
+                          item === 'ellipsis' ? (
+                            <span key={`e-${i}`} className="company-details-pagination-ellipsis" aria-hidden>
+                              ...
+                            </span>
+                          ) : (
+                            <button
+                              key={item}
+                              type="button"
+                              className={`company-details-pagination-page${item === effectiveTablePage ? ' company-details-pagination-page--active' : ''}`}
+                              onClick={() => setTablePage(item)}
+                              aria-label={`Page ${item}`}
+                              aria-current={item === effectiveTablePage ? 'page' : undefined}
+                            >
+                              {item}
+                            </button>
+                          )
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        className="company-details-pagination-nav"
+                        disabled={effectiveTablePage >= totalTablePages}
+                        onClick={() => setTablePage((p) => Math.min(totalTablePages, p + 1))}
+                        title="Next page"
+                        aria-label="Next page"
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        className="company-details-pagination-nav"
+                        disabled={effectiveTablePage >= totalTablePages}
+                        onClick={() => setTablePage(totalTablePages)}
+                        title="Last page"
+                        aria-label="Last page"
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <polyline points="13 17 18 12 13 7" />
+                          <polyline points="6 17 11 12 6 7" />
+                        </svg>
+                      </button>
+                    </nav>
+                  </div>
                 ) : null}
               </>
             )}

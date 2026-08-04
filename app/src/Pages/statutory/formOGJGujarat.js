@@ -8,6 +8,7 @@ import {
   getApprovedLeaveRecordUniqueKey,
   normalizeApprovedLeaveRecord,
   normalizePersonNameKey,
+  resolveApprovedLeavePeriodForFormNGJ,
 } from './formFKarnataka';
 
 export const FORM_OGJ_PERIOD_PARENT = 'Period for which leave is accumulated';
@@ -455,79 +456,126 @@ export function filterApprovedLeaveRecordsForFormOGJMonth(records, monthFrom, mo
   );
 }
 
+function unwrapEmployeeRecord(emp) {
+  return emp?.Employee || emp?.employee || emp;
+}
+
+/**
+ * Read FirstName / LastName for Form O matching.
+ * Never match approved leave on first name or last name alone.
+ */
+export function readFormOGJEmployeeNameParts(emp) {
+  const src = unwrapEmployeeRecord(emp);
+  if (!src || typeof src !== 'object') return { first: '', last: '', full: '' };
+  const first = String(
+    src.FirstName || src['FirstName'] || src.firstName || src['First Name'] || ''
+  ).trim();
+  const last = String(
+    src.LastName || src['LastName'] || src.lastName || src['Last Name'] || ''
+  ).trim();
+  const full = first && last ? `${first} ${last}` : first || last || '';
+  return { first, last, full };
+}
+
 /**
  * Strict full-name match for Form O — never match on last name or first name alone.
  * "chetan kumar" must not match "kumar singh" or "ajikumar singh".
+ * Prefer FirstName+LastName when both are available (same as Form N).
  */
-export function formOGJPersonNamesMatchStrict(workerName, recordName) {
+export function formOGJPersonNamesMatchStrict(workerName, recordName, firstName = '', lastName = '') {
+  const recordNorm = normalizePersonNameKey(recordName);
+  if (!recordNorm) return false;
+
+  const fn = normalizePersonNameKey(firstName);
+  const ln = normalizePersonNameKey(lastName);
+  if (fn && ln) {
+    const recordParts = recordNorm.split(' ').filter(Boolean);
+    if (recordParts.length < 2) return false;
+    return recordParts[0] === fn && recordParts[recordParts.length - 1] === ln;
+  }
+
   const a = normalizePersonNameKey(workerName);
-  const b = normalizePersonNameKey(recordName);
-  if (!a || !b) return false;
-  if (a === b) return true;
+  if (!a) return false;
+  if (a === recordNorm) return true;
 
   const aParts = a.split(' ').filter(Boolean);
-  const bParts = b.split(' ').filter(Boolean);
+  const bParts = recordNorm.split(' ').filter(Boolean);
   if (aParts.length < 2 || bParts.length < 2) return false;
-
-  if (aParts[0] !== bParts[0]) return false;
-
-  const aLast = aParts[aParts.length - 1];
-  const bLast = bParts[bParts.length - 1];
-  if (aLast === bLast) return true;
-
-  // Allow single-letter last initial on the form vs full surname in Zoho (e.g. "muthukrishnan p" ↔ "muthukrishnan paldurai").
-  if (aLast.length === 1 && bLast.startsWith(aLast)) return true;
-  if (bLast.length === 1 && aLast.startsWith(bLast)) return true;
-
-  return false;
+  return aParts[0] === bParts[0] && aParts[aParts.length - 1] === bParts[bParts.length - 1];
 }
 
-function readEmployeeZohoIds(emp) {
-  if (!emp || typeof emp !== 'object') return [];
+/** Only EmployeeID / Zoho People ids — never Role.ID or other shared codes. */
+function collectFormOGJApprovedLeaveMatchIds(emp, options = {}) {
   const ids = new Set();
   const add = (value) => {
-    const id = String(value || '').trim().toLowerCase();
-    if (id && id.length >= 4 && !/^\d{1,3}$/.test(id)) ids.add(id);
+    const id = String(value || '')
+      .trim()
+      .toLowerCase();
+    if (!id || id.length < 4 || /^\d{1,3}$/.test(id)) return;
+    ids.add(id);
   };
-  add(emp.Zoho_ID);
-  add(emp['Zoho_ID']);
-  add(emp.ZohoID);
-  add(emp['ZohoID']);
-  add(emp.erecno);
-  add(emp.Erecno);
-  add(emp['Erecno']);
-  add(emp.Employee_ID);
-  add(emp['Employee ID']);
-  add(emp['Employee.ID']);
-  add(emp.employeeId);
+
+  const src = unwrapEmployeeRecord(emp);
+  if (src && typeof src === 'object') {
+    [
+      'EmployeeID',
+      'Employee ID',
+      'Employee_ID',
+      'EmployeeId',
+      'employeeId',
+      'Employee.ID',
+      'Zoho_ID',
+      'ZohoID',
+      'zoho_id',
+      'erecno',
+      'Erecno',
+    ].forEach((k) => add(src[k]));
+  }
+
+  // Narrow optional collector: keep VE/Zoho-like ids only (drop Role.ID etc.).
+  if (typeof options.collectEmployeeIdCandidates === 'function' && emp) {
+    options.collectEmployeeIdCandidates(emp, {}).forEach((raw) => {
+      const id = String(raw || '')
+        .trim()
+        .toLowerCase();
+      if (!id || id.length < 4) return;
+      if (/^ve\d+/i.test(id) || /^[a-z]{1,3}\d{3,}$/i.test(id) || /^\d{6,}$/.test(id)) {
+        ids.add(id);
+      }
+    });
+  }
   return [...ids];
 }
 
-/** Shared worker match for Form O / Form N approved-leave autofill. */
+/**
+ * Match approved leave to a Form O worker using EmployeeID/Zoho id
+ * and FirstName+LastName — never first-name-only or last-initial-only.
+ *
+ * Zoho approved-leave rows can share the same erecno across different people.
+ * An ID hit alone is not enough when FirstName+LastName are available and the
+ * leave row has a name.
+ */
 export function formOGJRecordMatchesWorker(record, workerName, emp, options = {}) {
   if (!record) return false;
 
   const { ids: recordIds, names: recordNames } = collectApprovedLeaveIdentityKeys(record);
+  const workerIds = new Set(collectFormOGJApprovedLeaveMatchIds(emp, options));
+  const { first, last, full } = readFormOGJEmployeeNameParts(emp);
+  const nameForMatch = full || String(workerName || '').trim();
 
-  const workerIds = new Set(readEmployeeZohoIds(emp));
-  if (typeof options.collectEmployeeIdCandidates === 'function' && emp) {
-    options.collectEmployeeIdCandidates(emp, {}).forEach((id) => {
-      const normalized = String(id || '').trim().toLowerCase();
-      if (normalized && normalized.length >= 4) workerIds.add(normalized);
-    });
-  }
-  if (workerIds.size > 0 && recordIds.some((id) => workerIds.has(id))) {
+  const nameMatched = recordNames.some((rn) =>
+    formOGJPersonNamesMatchStrict(nameForMatch, rn, first, last)
+  );
+  const idMatched = workerIds.size > 0 && recordIds.some((id) => workerIds.has(id));
+
+  if (idMatched) {
+    // Duplicate Zoho IDs: reject when emp FirstName+LastName disagree with leave name.
+    if (first && last && recordNames.length > 0 && !nameMatched) return false;
     return true;
   }
 
-  const workerNorm = normalizePersonNameKey(workerName);
-  if (!workerNorm) return false;
-
-  for (const recordName of recordNames) {
-    if (formOGJPersonNamesMatchStrict(workerName, recordName)) return true;
-  }
-
-  return false;
+  if (!nameForMatch && !(first && last)) return false;
+  return nameMatched;
 }
 
 export function findApprovedLeaveForFormORow(
@@ -541,14 +589,18 @@ export function findApprovedLeaveForFormORow(
 
   const canonicalHeaders = resolveFormOGJGujaratTableHeaders(tableHeaders);
   const workerHeader = canonicalHeaders.find(isFormOGJWorkerNameHeader) || '';
-  const workerName = workerHeader ? String(row?.[workerHeader] ?? '').trim() : '';
-  if (!workerName) return null;
+  const { full: empFullName } = readFormOGJEmployeeNameParts(emp);
+  const workerName = workerHeader
+    ? String(row?.[workerHeader] ?? row?.__employeeLookupName ?? empFullName ?? '').trim()
+    : String(row?.__employeeLookupName ?? empFullName ?? '').trim();
+  if (!workerName && !empFullName) return null;
 
   const usedRecordKeys =
     options.usedRecordKeys instanceof Set ? options.usedRecordKeys : new Set();
   const monthFrom = options.monthFrom || '';
   const monthTo = options.monthTo || '';
 
+  const matches = [];
   for (let i = 0; i < approvedRecords.length; i += 1) {
     const rec = approvedRecords[i];
     if (!rec) continue;
@@ -557,11 +609,21 @@ export function findApprovedLeaveForFormORow(
     if (monthFrom && monthTo && !approvedLeaveRecordOverlapsFormOGJMonth(rec, monthFrom, monthTo)) {
       continue;
     }
-    if (formOGJRecordMatchesWorker(rec, workerName, emp, options)) {
-      return rec;
+    if (formOGJRecordMatchesWorker(rec, workerName || empFullName, emp, options)) {
+      matches.push(rec);
     }
   }
-  return null;
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return matches[0];
+
+  // Prefer leave whose Employee Name matches FirstName+LastName when several ID hits exist.
+  const { first, last, full } = readFormOGJEmployeeNameParts(emp);
+  const nameForMatch = full || workerName;
+  const nameExact = matches.find((rec) => {
+    const { names } = collectApprovedLeaveIdentityKeys(rec);
+    return names.some((rn) => formOGJPersonNamesMatchStrict(nameForMatch, rn, first, last));
+  });
+  return nameExact || matches[0];
 }
 
 export function getFormOGJRowValueForHeader(row, header) {
@@ -618,7 +680,8 @@ export function applyFormOGJGujaratApprovedLeaveToRow(
   ) {
     return 0;
   }
-  const metrics = normalizeApprovedLeaveRecord(approvedRecord);
+  // Prefer Days with LeaveCount > 0 for From/Till/count (same as Form N).
+  const metrics = resolveApprovedLeavePeriodForFormNGJ(approvedRecord);
   const leaveType = readApprovedLeaveLeaveType(approvedRecord);
   const leaveCount = metrics.daysCount;
   const periodFrom = metrics.from;
@@ -694,6 +757,9 @@ export function applyFormOGJGujaratApprovedLeaveAutofill(
 
     const empItem = employeesForMapping[index];
     const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+    const { full: empFullName } = readFormOGJEmployeeNameParts(emp);
+    if (empFullName) row.__employeeLookupName = empFullName;
+
     const approvedRecord = findApprovedLeaveForFormORow(row, canonicalHeaders, recordsToUse, emp, {
       usedRecordKeys,
       monthFrom,
@@ -701,7 +767,7 @@ export function applyFormOGJGujaratApprovedLeaveAutofill(
       collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
     });
     if (!approvedRecord) {
-      // Clear stale leave cells when no strict match (e.g. prior wrong "kumar" match).
+      // Clear stale leave cells when no strict match (e.g. prior wrong shared Zoho ID).
       canonicalHeaders.forEach((header) => {
         if (isFormOGJSkipPeopleAutofillHeader(header)) row[header] = '';
       });
@@ -731,6 +797,21 @@ export function enrichFormOGJGujaratDisplayHeader(formHeader, fileName, rowItem,
     subtitle: formHeader?.subtitle || '(See rule 18)',
     formOGJGujaratTableLayout: true,
   };
+}
+
+/** Title-case worker names for Form O Excel (lookup helpers store lowercase). */
+export function toFormOGJPersonNameDisplay(value) {
+  const s = String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!s) return '';
+  return s
+    .split(' ')
+    .map((word) => {
+      if (!word) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(' ');
 }
 
 function formOGJHeaderAliasBucket(n) {
@@ -1130,6 +1211,9 @@ export async function buildFormOGJGujaratWorkbookWithTemplateStyles({
       } else if (bucket === 'sno') {
         const n = Number(String(val).replace(/[,]/g, '').trim());
         cell.value = Number.isFinite(n) ? n : String(val);
+      } else if (bucket === 'workerName') {
+        // Autofill lookup names are lowercased; write Title Case in Excel.
+        cell.value = toFormOGJPersonNameDisplay(val);
       } else {
         cell.value = String(val);
       }

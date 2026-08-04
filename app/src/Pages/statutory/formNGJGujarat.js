@@ -9,12 +9,13 @@ import {
   findLeaveRecordForFormRow,
 } from '../../utils/leaveMetrics';
 import {
+  collectApprovedLeaveIdentityKeys,
   getApprovedLeaveRecordUniqueKey,
-  normalizeApprovedLeaveRecord,
+  normalizePersonNameKey,
+  resolveApprovedLeavePeriodForFormNGJ,
 } from './formFKarnataka';
 import {
   filterApprovedLeaveRecordsForFormOGJMonth,
-  formOGJRecordMatchesWorker,
   readApprovedLeaveLeaveType,
 } from './formOGJGujarat';
 import {
@@ -639,15 +640,8 @@ export function remapFormNGJGujaratRowsToHeaders(rows, sourceHeaders, targetHead
   const tgt = resolveFormNGJGujaratTableHeaders(targetHeaders);
   if (!Array.isArray(rows)) return [];
 
-  const bucketFor = (header) => {
-    const n = normHeaderLabel(header);
-    if (/name\s+of\s+the\s+worker/.test(n)) return 'workerName';
-    if (/description\s+of\s+the\s+department/.test(n)) return 'department';
-    if (/name\s+of\s+the\s+employer/.test(n)) return 'employer';
-    if (/date\s+of\s+entry\s+into\s+service/.test(n)) return 'dateOfEntry';
-    if (/receipt\s+of\s+level\s+book/.test(n)) return 'receipt';
-    return n;
-  };
+  // Use export buckets so Festival Total/Availed/Balance never collide with Casual.
+  const bucketFor = (header) => formNGJExportHeaderBucket(header);
 
   return rows.map((row) => {
     if (!row || typeof row !== 'object') return {};
@@ -656,15 +650,23 @@ export function remapFormNGJGujaratRowsToHeaders(rows, sourceHeaders, targetHead
       let val = '';
       if (Object.prototype.hasOwnProperty.call(row, targetHeader)) {
         val = row[targetHeader];
-      } else if (src[colIdx] && Object.prototype.hasOwnProperty.call(row, src[colIdx])) {
-        val = row[src[colIdx]];
       } else {
         const bucket = bucketFor(targetHeader);
         for (const [k, v] of Object.entries(row)) {
-          if (bucketFor(k) === bucket) {
+          if (String(k).startsWith('__')) continue;
+          if (bucketFor(k) === bucket && v != null && String(v).trim() !== '') {
             val = v;
             break;
           }
+        }
+        // Index fallback only when source/target buckets match (never Festival→Casual).
+        if (
+          (val == null || String(val).trim() === '') &&
+          src[colIdx] &&
+          Object.prototype.hasOwnProperty.call(row, src[colIdx]) &&
+          bucketFor(src[colIdx]) === bucket
+        ) {
+          val = row[src[colIdx]];
         }
       }
       out[targetHeader] = val == null ? '' : val;
@@ -909,6 +911,69 @@ function readEmployeeDateOfJoining(emp) {
   ).trim();
 }
 
+/** Prefer EmployeeID (VE0471) so LeaveData "Name (VE0471)" matches; Zoho_ID as fallback. */
+function readEmployeeLookupId(emp) {
+  const src = unwrapEmployeeRecord(emp);
+  if (!src || typeof src !== 'object') return '';
+  const keys = [
+    'EmployeeID',
+    'Employee ID',
+    'Employee_ID',
+    'EmployeeId',
+    'employeeId',
+    'employee_id',
+    'Employee.ID',
+    'Employee_Code',
+    'EmployeeCode',
+    'Zoho_ID',
+    'ZohoID',
+    'zoho_id',
+    'erecno',
+    'Erecno',
+  ];
+  for (let i = 0; i < keys.length; i += 1) {
+    const raw = src[keys[i]];
+    if (raw == null || raw === '') continue;
+    if (typeof raw === 'object') {
+      const nested = String(raw.displayValue ?? raw.name ?? raw.Name ?? raw.ID ?? '').trim();
+      if (nested) return nested;
+      continue;
+    }
+    const text = String(raw).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function collectEmployeeLookupIdCandidates(emp, options = {}) {
+  const ids = new Set();
+  const add = (v) => {
+    const s = String(v || '')
+      .trim()
+      .toLowerCase();
+    if (s && s.length >= 2) ids.add(s);
+  };
+  add(readEmployeeLookupId(emp));
+  const src = unwrapEmployeeRecord(emp);
+  if (src && typeof src === 'object') {
+    [
+      'EmployeeID',
+      'Employee ID',
+      'Employee_ID',
+      'EmployeeId',
+      'employeeId',
+      'Zoho_ID',
+      'ZohoID',
+      'zoho_id',
+      'erecno',
+    ].forEach((k) => add(src[k]));
+  }
+  if (typeof options.collectEmployeeIdCandidates === 'function' && emp) {
+    options.collectEmployeeIdCandidates(emp, {}).forEach(add);
+  }
+  return [...ids];
+}
+
 export function isFormNGJWorkerNameHeader(header) {
   return /name\s+of\s+the\s+worker/i.test(normHeaderLabel(header));
 }
@@ -1004,7 +1069,9 @@ export function applyFormNGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
   };
 
   const fullName = readEmployeeFullName(emp);
+  const employeeId = readEmployeeLookupId(emp);
   if (fullName) out.__employeeLookupName = fullName;
+  if (employeeId) out.__employeeLookupId = employeeId;
 
   hdrs.forEach((header) => {
     if (isFormNGJSkipPeopleAutofillHeader(header)) {
@@ -1110,8 +1177,152 @@ function setFormNGJCasualCell(row, header, value, overwrite) {
 }
 
 /**
+ * Read FirstName / LastName for Form N matching.
+ * Never match Contingency leave on first name or last name alone.
+ */
+export function readFormNGJEmployeeNameParts(emp) {
+  const src = unwrapEmployeeRecord(emp);
+  if (!src || typeof src !== 'object') return { first: '', last: '', full: '' };
+  const first = String(
+    src.FirstName || src['FirstName'] || src.firstName || src['First Name'] || ''
+  ).trim();
+  const last = String(
+    src.LastName || src['LastName'] || src.lastName || src['Last Name'] || ''
+  ).trim();
+  const full = first && last ? `${first} ${last}` : first || last || '';
+  return { first, last, full };
+}
+
+/**
+ * Form N name match: require FirstName AND LastName (exact tokens).
+ * Does NOT allow last-initial shortcuts ("Ajaykumar M" ↛ "Ajaykumar Mansingbhai"),
+ * which previously assigned another worker's 5-day leave to Ajaykumar Mansingbhai.
+ */
+export function formNGJPersonNamesMatchExact(workerName, recordName, firstName = '', lastName = '') {
+  const recordNorm = normalizePersonNameKey(recordName);
+  if (!recordNorm) return false;
+
+  const fn = normalizePersonNameKey(firstName);
+  const ln = normalizePersonNameKey(lastName);
+  if (fn && ln) {
+    const recordParts = recordNorm.split(' ').filter(Boolean);
+    if (recordParts.length < 2) return false;
+    return recordParts[0] === fn && recordParts[recordParts.length - 1] === ln;
+  }
+
+  const workerNorm = normalizePersonNameKey(workerName);
+  if (!workerNorm) return false;
+  if (workerNorm === recordNorm) return true;
+
+  const aParts = workerNorm.split(' ').filter(Boolean);
+  const bParts = recordNorm.split(' ').filter(Boolean);
+  if (aParts.length < 2 || bParts.length < 2) return false;
+  return aParts[0] === bParts[0] && aParts[aParts.length - 1] === bParts[bParts.length - 1];
+}
+
+/** Only EmployeeID / Zoho People ids — never Role.ID or other shared codes. */
+function collectFormNGJApprovedLeaveMatchIds(emp, options = {}) {
+  const ids = new Set();
+  const add = (value) => {
+    const id = String(value || '')
+      .trim()
+      .toLowerCase();
+    if (!id || id.length < 4 || /^\d{1,3}$/.test(id)) return;
+    ids.add(id);
+  };
+
+  const src = unwrapEmployeeRecord(emp);
+  if (src && typeof src === 'object') {
+    add(readEmployeeLookupId(src));
+    [
+      'EmployeeID',
+      'Employee ID',
+      'Employee_ID',
+      'EmployeeId',
+      'employeeId',
+      'Zoho_ID',
+      'ZohoID',
+      'zoho_id',
+      'erecno',
+      'Erecno',
+    ].forEach((k) => add(src[k]));
+  }
+
+  // Narrow optional collector: keep VE/Zoho-like ids only (drop Role.ID etc.).
+  if (typeof options.collectEmployeeIdCandidates === 'function' && emp) {
+    options.collectEmployeeIdCandidates(emp, {}).forEach((raw) => {
+      const id = String(raw || '')
+        .trim()
+        .toLowerCase();
+      if (!id || id.length < 4) return;
+      if (/^ve\d+/i.test(id) || /^[a-z]{1,3}\d{3,}$/i.test(id) || /^\d{6,}$/.test(id)) {
+        ids.add(id);
+      }
+    });
+  }
+  return [...ids];
+}
+
+/**
+ * Match approved Contingency leave to a Form N worker using EmployeeID/Zoho id
+ * and FirstName+LastName — never first-name-only or last-initial-only.
+ *
+ * Zoho approved-leave rows can share the same erecno across different people
+ * (seen in Approved Leaves). An ID hit alone is not enough when FirstName+LastName
+ * are available and the leave row has a name.
+ */
+export function formNGJRecordMatchesWorker(record, workerName, emp, options = {}) {
+  if (!record) return false;
+
+  const { ids: recordIds, names: recordNames } = collectApprovedLeaveIdentityKeys(record);
+  const workerIds = new Set(collectFormNGJApprovedLeaveMatchIds(emp, options));
+  const { first, last, full } = readFormNGJEmployeeNameParts(emp);
+  const nameForMatch = full || String(workerName || '').trim();
+
+  const nameMatched = recordNames.some((rn) =>
+    formNGJPersonNamesMatchExact(nameForMatch, rn, first, last)
+  );
+  const idMatched = workerIds.size > 0 && recordIds.some((id) => workerIds.has(id));
+
+  if (idMatched) {
+    // Duplicate Zoho IDs: reject when emp FirstName+LastName disagree with leave name.
+    if (first && last && recordNames.length > 0 && !nameMatched) return false;
+    return true;
+  }
+
+  if (!nameForMatch && !(first && last)) return false;
+  return nameMatched;
+}
+
+/**
+ * Among Contingency leaves for this worker, prefer LeaveCount that matches
+ * LeaveData Contingency booked (avoids another person's leave via shared Zoho ID).
+ */
+export function pickBestFormNGJContingencyLeave(matches, bookedLimit = '') {
+  if (!Array.isArray(matches) || matches.length === 0) return null;
+  if (matches.length === 1) return matches[0];
+
+  const bookedNum = Number(String(bookedLimit || '').replace(/,/g, '').trim());
+  const scored = matches.map((rec) => {
+    const period = resolveApprovedLeavePeriodForFormNGJ(rec, bookedLimit);
+    const count = Number(String(period.daysCount || '').replace(/,/g, '').trim());
+    return { rec, count: Number.isFinite(count) ? count : NaN, period };
+  });
+
+  if (Number.isFinite(bookedNum) && bookedNum > 0) {
+    const exact = scored.find((s) => s.count === bookedNum);
+    if (exact) return exact.rec;
+    const under = scored
+      .filter((s) => Number.isFinite(s.count) && s.count > 0 && s.count <= bookedNum)
+      .sort((a, b) => b.count - a.count);
+    if (under.length > 0) return under[0].rec;
+  }
+  return matches[0];
+}
+
+/**
  * Find Contingency Leave approved record for a Form N worker row.
- * Reuses Form O worker identity matching (strict name / Zoho id).
+ * Matches on EmployeeID / Zoho id and FirstName+LastName (not first/last alone).
  */
 export function findApprovedContingencyLeaveForFormNRow(
   row,
@@ -1124,10 +1335,11 @@ export function findApprovedContingencyLeaveForFormNRow(
 
   const hdrs = resolveFormNGJGujaratTableHeaders(tableHeaders);
   const workerHeader = hdrs.find(isFormNGJWorkerNameHeader) || '';
+  const { full: empFullName } = readFormNGJEmployeeNameParts(emp);
   const workerName = workerHeader
-    ? String(row?.[workerHeader] ?? row?.__employeeLookupName ?? '').trim()
-    : String(row?.__employeeLookupName ?? '').trim();
-  if (!workerName) return null;
+    ? String(row?.[workerHeader] ?? row?.__employeeLookupName ?? empFullName ?? '').trim()
+    : String(row?.__employeeLookupName ?? empFullName ?? '').trim();
+  if (!workerName && !empFullName) return null;
 
   const usedRecordKeys =
     options.usedRecordKeys instanceof Set ? options.usedRecordKeys : new Set();
@@ -1139,29 +1351,37 @@ export function findApprovedContingencyLeaveForFormNRow(
     monthTo
   );
 
+  const matches = [];
   for (let i = 0; i < contingencyRecords.length; i += 1) {
     const rec = contingencyRecords[i];
     if (!rec) continue;
     const key = getApprovedLeaveRecordUniqueKey(rec);
     if (key && usedRecordKeys.has(key)) continue;
-    if (formOGJRecordMatchesWorker(rec, workerName, emp, options)) {
-      return rec;
+    if (formNGJRecordMatchesWorker(rec, workerName || empFullName, emp, options)) {
+      matches.push(rec);
     }
   }
-  return null;
+  return pickBestFormNGJContingencyLeave(matches, options.bookedLimit || '');
 }
 
 /**
  * Build Casual Leave metrics:
- * From / To / Availed → approved Contingency Leave for that period (LeaveCount).
+ * From / To → Days with LeaveCount > 0 (drop weekly-off 0.0; drop weekends when
+ *   LeaveCount exceeds Contingency booked).
+ * Availed → that leave's LeaveCount, never above LeaveData Contingency booked.
  * Balance → Contingency LeaveData (end balance).
  * Total → beginning = balance + availed when both exist.
- *
- * Do not use LeaveData YTD `booked` for Availed (it disagrees with Period From/To).
- * Do not fill defaults when there is no approved Contingency leave.
  */
 export function buildFormNGJCasualLeaveValues(approvedRecord, leaveRecord, leaveTypeLabels = {}) {
-  const metrics = normalizeApprovedLeaveRecord(approvedRecord || {});
+  const apiMetrics = leaveRecord
+    ? getFormXMedicalLeaveApiMetrics(leaveRecord, leaveTypeLabels)
+    : { balance: '', booked: '', hasData: false };
+  const booked =
+    apiMetrics.hasData && apiMetrics.booked !== '' && apiMetrics.booked != null
+      ? formatFormNGJLeaveNumber(apiMetrics.booked)
+      : '';
+
+  const metrics = resolveApprovedLeavePeriodForFormNGJ(approvedRecord || {}, booked);
   const hasApprovedPeriod = !!(metrics.from || metrics.to);
   if (!hasApprovedPeriod) {
     return {
@@ -1175,11 +1395,15 @@ export function buildFormNGJCasualLeaveValues(approvedRecord, leaveRecord, leave
     };
   }
 
-  const apiMetrics = leaveRecord
-    ? getFormXMedicalLeaveApiMetrics(leaveRecord, leaveTypeLabels)
-    : { balance: '', booked: '', hasData: false };
-  // Availed must match Period From/To → that leave's LeaveCount only.
-  const availed = formatFormNGJLeaveNumber(metrics.daysCount);
+  let availed = formatFormNGJLeaveNumber(metrics.daysCount);
+  // If LeaveCount still exceeds Contingency booked, trust LeaveData booked.
+  if (availed !== '' && booked !== '') {
+    const leaveCountNum = Number(availed);
+    const bookedNum = Number(booked);
+    if (Number.isFinite(leaveCountNum) && Number.isFinite(bookedNum) && leaveCountNum > bookedNum) {
+      availed = booked;
+    }
+  }
   const balance =
     apiMetrics.hasData && apiMetrics.balance !== '' && apiMetrics.balance != null
       ? formatFormNGJLeaveNumber(apiMetrics.balance)
@@ -1269,6 +1493,34 @@ export function applyFormNGJGujaratCasualLeaveAutofill(
 
     const empItem = employeesForMapping[index];
     const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+    const empName = readEmployeeFullName(emp);
+    const empId = readEmployeeLookupId(emp);
+    if (empName) row.__employeeLookupName = empName;
+    if (empId) row.__employeeLookupId = empId;
+
+    let leaveRecord = null;
+    const idCandidates = collectEmployeeLookupIdCandidates(emp, options);
+    for (let i = 0; i < idCandidates.length; i += 1) {
+      const id = idCandidates[i];
+      if (leaveLookup.byId.has(id)) {
+        leaveRecord = leaveLookup.byId.get(id);
+        break;
+      }
+    }
+    if (!leaveRecord) {
+      leaveRecord =
+        findLeaveRecordForFormRow(leaveLookup, row, '', workerHeader) ||
+        (typeof options.findLeaveRecord === 'function'
+          ? options.findLeaveRecord(row, emp, index)
+          : null);
+    }
+
+    const bookedLimit = leaveRecord
+      ? String(
+          getFormXMedicalLeaveApiMetrics(leaveRecord, leaveTypeLabels).booked ?? ''
+        ).trim()
+      : '';
+
     const approvedRecord = findApprovedContingencyLeaveForFormNRow(
       row,
       canonicalHeaders,
@@ -1278,6 +1530,7 @@ export function applyFormNGJGujaratCasualLeaveAutofill(
         usedRecordKeys,
         monthFrom,
         monthTo,
+        bookedLimit,
         collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
       }
     );
@@ -1294,12 +1547,6 @@ export function applyFormNGJGujaratCasualLeaveAutofill(
       });
       return;
     }
-
-    const leaveRecord =
-      findLeaveRecordForFormRow(leaveLookup, row, '', workerHeader) ||
-      (typeof options.findLeaveRecord === 'function'
-        ? options.findLeaveRecord(row, emp, index)
-        : null);
 
     const applied = applyFormNGJGujaratCasualLeaveToRow(
       row,

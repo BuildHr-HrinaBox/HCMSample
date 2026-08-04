@@ -16,6 +16,26 @@ const DISPLAY_STATUS = {
   RETURNED: 'Returned',
 };
 
+function buildPaginationItems(currentPage, totalPages) {
+  if (totalPages <= 0) return [];
+  if (totalPages <= 9) {
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
+  }
+  const set = new Set([1, totalPages, currentPage]);
+  for (let i = currentPage - 2; i <= currentPage + 2; i += 1) {
+    if (i >= 1 && i <= totalPages) set.add(i);
+  }
+  const sorted = [...set].sort((a, b) => a - b);
+  const out = [];
+  for (let i = 0; i < sorted.length; i += 1) {
+    if (i > 0 && sorted[i] - sorted[i - 1] > 1) {
+      out.push('ellipsis');
+    }
+    out.push(sorted[i]);
+  }
+  return out;
+}
+
 const STATUS_LABEL = {
   [DISPLAY_STATUS.YET]: 'Yet to Submit',
   [DISPLAY_STATUS.PENDING]: 'Pending',
@@ -34,7 +54,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
   const [tooltipData, setTooltipData] = useState(null);
   const [selectedNotificationId, setSelectedNotificationId] = useState(null);
   const [activeStatusFilter, setActiveStatusFilter] = useState(null); // null = All
-  const [listExpanded, setListExpanded] = useState(false);
+  const [formsPage, setFormsPage] = useState(1);
   const [error, setError] = useState(null);
   const [submittingStatutoryRowId, setSubmittingStatutoryRowId] = useState('');
   
@@ -902,7 +922,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     setSelectedDate(date);
     setSelectedNotificationId(null);
     setActiveStatusFilter(null); // show all checklistbulk forms for the selected due date
-    setListExpanded(false);
+    setFormsPage(1);
     const items = getCalendarItemsForDate(date);
     setTooltipData(items);
     setShowTooltip(true);
@@ -1364,7 +1384,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
 
   const handleStatusTagClick = (status) => {
     setActiveStatusFilter((prev) => (prev === status ? null : status));
-    setListExpanded(false);
+    setFormsPage(1);
   };
 
   const emptyStatusLabel = () => {
@@ -1505,14 +1525,6 @@ const CalendarPicker = ({ userEmail, userRole }) => {
     }
   };
 
-  const getPriorityForRow = (status, index) => {
-    if (status === DISPLAY_STATUS.RETURNED || status === DISPLAY_STATUS.YET) {
-      return index % 3 === 0 ? 'High' : 'Medium';
-    }
-    if (status === DISPLAY_STATUS.PENDING) return 'Medium';
-    return 'Low';
-  };
-
   const scopeParts = [];
   if (inchargeDisplayScope.industryLabels?.length) {
     scopeParts.push(inchargeDisplayScope.industryLabels.join(', '));
@@ -1538,10 +1550,13 @@ const CalendarPicker = ({ userEmail, userRole }) => {
       : 0;
 
   const pageSize = 5;
-  const displayedRows = listExpanded ? visibleTooltipData : visibleTooltipData.slice(0, pageSize);
   const totalVisible = visibleTooltipData.length;
-  const showingFrom = totalVisible === 0 ? 0 : 1;
-  const showingTo = Math.min(displayedRows.length, totalVisible);
+  const totalPages = Math.max(1, Math.ceil(totalVisible / pageSize));
+  const safeFormsPage = Math.min(formsPage, totalPages);
+  const pageStart = (safeFormsPage - 1) * pageSize;
+  const displayedRows = visibleTooltipData.slice(pageStart, pageStart + pageSize);
+  const showingFrom = totalVisible === 0 ? 0 : pageStart + 1;
+  const showingTo = Math.min(pageStart + displayedRows.length, totalVisible);
 
   return (
     <div className="calendar-picker-container hcm-cal-flow">
@@ -1613,7 +1628,11 @@ const CalendarPicker = ({ userEmail, userRole }) => {
         </div>
 
         <div className="hcm-cal-summary-row">
-          <div className={`hcm-cal-summary-card yet ${activeStatusFilter === DISPLAY_STATUS.YET ? 'active' : ''}`}>
+          <button
+            type="button"
+            className={`hcm-cal-summary-card yet ${activeStatusFilter === DISPLAY_STATUS.YET ? 'active' : ''}`}
+            onClick={() => handleStatusTagClick(DISPLAY_STATUS.YET)}
+          >
             <div className="hcm-cal-summary-icon" aria-hidden>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="#fff" strokeWidth="2" />
@@ -1626,8 +1645,12 @@ const CalendarPicker = ({ userEmail, userRole }) => {
               <div className="hcm-cal-summary-value">{yetToCompleteCount}</div>
               <div className="hcm-cal-summary-sub">↑ {todayDueCount} Due Today</div>
             </div>
-          </div>
-          <div className={`hcm-cal-summary-card pending ${activeStatusFilter === DISPLAY_STATUS.PENDING ? 'active' : ''}`}>
+          </button>
+          <button
+            type="button"
+            className={`hcm-cal-summary-card pending ${activeStatusFilter === DISPLAY_STATUS.PENDING ? 'active' : ''}`}
+            onClick={() => handleStatusTagClick(DISPLAY_STATUS.PENDING)}
+          >
             <div className="hcm-cal-summary-icon" aria-hidden>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
                 <circle cx="12" cy="12" r="9" stroke="#fff" strokeWidth="2" />
@@ -1639,8 +1662,12 @@ const CalendarPicker = ({ userEmail, userRole }) => {
               <div className="hcm-cal-summary-value">{pendingCount}</div>
               <div className="hcm-cal-summary-sub">Awaiting Approval</div>
             </div>
-          </div>
-          <div className={`hcm-cal-summary-card approved ${activeStatusFilter === DISPLAY_STATUS.APPROVED ? 'active' : ''}`}>
+          </button>
+          <button
+            type="button"
+            className={`hcm-cal-summary-card approved ${activeStatusFilter === DISPLAY_STATUS.APPROVED ? 'active' : ''}`}
+            onClick={() => handleStatusTagClick(DISPLAY_STATUS.APPROVED)}
+          >
             <div className="hcm-cal-summary-icon" aria-hidden>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
                 <circle cx="12" cy="12" r="9" stroke="#fff" strokeWidth="2" />
@@ -1652,8 +1679,12 @@ const CalendarPicker = ({ userEmail, userRole }) => {
               <div className="hcm-cal-summary-value">{approvedCount}</div>
               <div className="hcm-cal-summary-sub">{approvedPct}% Completed</div>
             </div>
-          </div>
-          <div className={`hcm-cal-summary-card returned ${activeStatusFilter === DISPLAY_STATUS.RETURNED ? 'active' : ''}`}>
+          </button>
+          <button
+            type="button"
+            className={`hcm-cal-summary-card returned ${activeStatusFilter === DISPLAY_STATUS.RETURNED ? 'active' : ''}`}
+            onClick={() => handleStatusTagClick(DISPLAY_STATUS.RETURNED)}
+          >
             <div className="hcm-cal-summary-icon" aria-hidden>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
                 <circle cx="12" cy="12" r="9" stroke="#fff" strokeWidth="2" />
@@ -1666,7 +1697,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
               <div className="hcm-cal-summary-value">{returnedCount}</div>
               <div className="hcm-cal-summary-sub">Need Correction</div>
             </div>
-          </div>
+          </button>
         </div>
 
         <div className="hcm-cal-forms-section">
@@ -1683,7 +1714,7 @@ const CalendarPicker = ({ userEmail, userRole }) => {
                     className={`hcm-cal-tab ${!activeStatusFilter ? 'active' : ''}`}
                     onClick={() => {
                       setActiveStatusFilter(null);
-                      setListExpanded(false);
+                      setFormsPage(1);
                     }}
                   >
                     All
@@ -1735,7 +1766,6 @@ const CalendarPicker = ({ userEmail, userRole }) => {
                       : status === DISPLAY_STATUS.RETURNED
                         ? 'returned'
                         : 'yet';
-                const priority = getPriorityForRow(status, origIndex);
                 const dueDateForRow = getCalendarItemDueDate(item, selectedDate, targetMonthNorm);
                 const statutoryRowId = resolveStatutoryRowId(item?._statutoryRow);
                 const isSubmittingThisRow =
@@ -1759,7 +1789,6 @@ const CalendarPicker = ({ userEmail, userRole }) => {
                     </div>
                     <div className={`hcm-cal-form-status ${statusClass}`}>{displayStatus}</div>
                     <div className="hcm-cal-form-due">Due Date {formatShortDate(dueDateForRow)}</div>
-                    <div className={`hcm-cal-form-priority ${priority.toLowerCase()}`}>{priority}</div>
                     <div className="hcm-cal-form-actions">
                       <button type="button" className="hcm-cal-btn-view" onClick={() => openStatutoryForForm(item)}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -1804,24 +1833,82 @@ const CalendarPicker = ({ userEmail, userRole }) => {
           )}
 
           {totalVisible > 0 ? (
-            <div className="hcm-cal-forms-footer">
+            <div className="hcm-cal-forms-footer hcm-cal-forms-footer--company-model">
               <span>
                 Showing {showingFrom} to {showingTo} of {totalVisible} results
               </span>
-              {totalVisible > pageSize ? (
-                <button type="button" className="hcm-cal-view-all" onClick={() => setListExpanded((v) => !v)}>
-                  {listExpanded ? 'Show Less' : `View All ${totalVisible} Forms`}
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
-                    <path
-                      d={listExpanded ? 'M18 15L12 9L6 15' : 'M9 18L15 12L9 6'}
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
+              <nav className="company-details-pagination" aria-label="Forms pagination">
+                <button
+                  type="button"
+                  className="company-details-pagination-nav"
+                  disabled={safeFormsPage <= 1}
+                  onClick={() => setFormsPage(1)}
+                  title="First page"
+                  aria-label="First page"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <polyline points="11 17 6 12 11 7" />
+                    <polyline points="18 17 13 12 18 7" />
                   </svg>
                 </button>
-              ) : null}
+                <button
+                  type="button"
+                  className="company-details-pagination-nav"
+                  disabled={safeFormsPage <= 1}
+                  onClick={() => setFormsPage((p) => Math.max(1, Math.min(p, totalPages) - 1))}
+                  title="Previous page"
+                  aria-label="Previous page"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <polyline points="15 18 9 12 15 6" />
+                  </svg>
+                </button>
+                <div className="company-details-pagination-pages">
+                  {buildPaginationItems(safeFormsPage, totalPages).map((item, i) =>
+                    item === 'ellipsis' ? (
+                      <span key={`e-${i}`} className="company-details-pagination-ellipsis" aria-hidden>
+                        ...
+                      </span>
+                    ) : (
+                      <button
+                        key={item}
+                        type="button"
+                        className={`company-details-pagination-page${item === safeFormsPage ? ' company-details-pagination-page--active' : ''}`}
+                        onClick={() => setFormsPage(item)}
+                        aria-label={`Page ${item}`}
+                        aria-current={item === safeFormsPage ? 'page' : undefined}
+                      >
+                        {item}
+                      </button>
+                    )
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="company-details-pagination-nav"
+                  disabled={safeFormsPage >= totalPages}
+                  onClick={() => setFormsPage((p) => Math.min(totalPages, Math.min(p, totalPages) + 1))}
+                  title="Next page"
+                  aria-label="Next page"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className="company-details-pagination-nav"
+                  disabled={safeFormsPage >= totalPages}
+                  onClick={() => setFormsPage(totalPages)}
+                  title="Last page"
+                  aria-label="Last page"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <polyline points="13 17 18 12 13 7" />
+                    <polyline points="6 17 11 12 6 7" />
+                  </svg>
+                </button>
+              </nav>
             </div>
           ) : null}
         </div>

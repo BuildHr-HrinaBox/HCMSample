@@ -4,7 +4,7 @@
   --nd-green: #2ecc71;
   --nd-green-soft: #e8f8ef;
   --nd-green-muted: #d4f0e3;
-  --nd-bg: #f8f9fa;
+  --nd-bg: #ffffff;
   --nd-card: #ffffff;
   --nd-text: #1a1d21;
   --nd-text-muted: #6b7280;
@@ -24,7 +24,8 @@
   min-height: 100dvh;
   height: 100vh;
   overflow: hidden;
-  background: var(--nd-bg);
+  background: #ffffff !important;
+  background-color: #ffffff !important;
   color: var(--nd-text);
   font-size: clamp(14px, 0.82vw, 16px);
   line-height: 1.5;
@@ -438,6 +439,8 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: #ffffff !important;
+  background-color: #ffffff !important;
 }
 
 /* Company Details / other full-height embedded routes: clip tall content so inner regions scroll */
@@ -453,7 +456,8 @@
   gap: 20px;
   flex-wrap: wrap;
   padding: clamp(10px, 1vw, 16px) clamp(12px, 1.2vw, 20px);
-  background: var(--nd-bg);
+  background: #ffffff !important;
+  background-color: #ffffff !important;
   position: sticky;
   top: 0;
   z-index: 100;
@@ -554,6 +558,8 @@
   overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  background: #ffffff !important;
+  background-color: #ffffff !important;
 }
 
 /* Inner pages (e.g. Company Details) wrapped in HcmDashboardPageShell */
@@ -714,19 +720,45 @@
 
 .nd-metric {
   background: var(--nd-card);
-  border-radius: var(--nd-radius);
-  padding: 16px 10px;
-  box-shadow: var(--nd-shadow);
+  border-radius: 10px;
+  padding: 16px 14px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
   display: flex;
-  gap: 8px;
+  gap: 12px;
   align-items: flex-start;
   min-width: 0;
   overflow: hidden;
+  border: 1px solid transparent;
+}
+
+.nd-metric--green {
+  background: #ecfdf3;
+  border-color: #b7ebc9;
+}
+
+.nd-metric--orange {
+  background: #fff7ed;
+  border-color: #fcd9a8;
+}
+
+.nd-metric--blue {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.nd-metric--teal {
+  background: #f0fdfa;
+  border-color: #99f6e4;
+}
+
+.nd-metric--purple {
+  background: #faf5ff;
+  border-color: #e9d5ff;
 }
 
 .nd-metric-icon-wrap {
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 12px;
   display: flex;
   align-items: center;
@@ -735,18 +767,23 @@
 }
 
 .nd-metric--green .nd-metric-icon-wrap {
-  background: #e8f8ef;
-  color: var(--nd-green);
+  background: #d1fae5;
+  color: #059669;
 }
 
 .nd-metric--blue .nd-metric-icon-wrap {
-  background: #e8f2ff;
-  color: #3b82f6;
+  background: #dbeafe;
+  color: #2563eb;
 }
 
 .nd-metric--orange .nd-metric-icon-wrap {
-  background: #fff4e6;
-  color: #f59e0b;
+  background: #ffedd5;
+  color: #ea580c;
+}
+
+.nd-metric--teal .nd-metric-icon-wrap {
+  background: #ccfbf1;
+  color: #0d9488;
 }
 
 .nd-metric--purple .nd-metric-icon-wrap {
@@ -762,21 +799,36 @@
   flex: 1;
 }
 
-.nd-metric-label {
-  font-size: 11px;
-  color: var(--nd-text-muted);
-  font-weight: 500;
-  white-space: nowrap;
-  line-height: 1.25;
-  overflow: hidden;
-  text-overflow: clip;
+.nd-metric-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: #111827;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
 }
 
-.nd-metric-value {
-  font-size: 26px;
-  font-weight: 700;
-  color: var(--nd-text);
-  line-height: 1.2;
+.nd-metric-label {
+  font-size: 13px;
+  color: #111827;
+  font-weight: 600;
+  white-space: nowrap;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nd-metric-hint {
+  font-size: 12px;
+  color: #9ca3af;
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nd-metric-hint--success {
+  color: #16a34a;
 }
 
 .nd-metric-trend {

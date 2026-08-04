@@ -1,8 +1,10 @@
 import {
   FORM_NGJ_CASUAL_HEADERS,
   FORM_NGJ_CASUAL_PARENT,
+  FORM_NGJ_FESTIVAL_PARENT,
   applyFormNGJGujaratCasualLeaveAutofill,
   applyFormNGJGujaratCasualLeaveToRow,
+  applyFormNGJGujaratEmployeeToRow,
   buildFormNGJCasualLeaveValues,
   buildFormNGJGujaratWorkbookWithTemplateStyles,
   filterApprovedLeaveRecordsForFormNGJCasual,
@@ -14,6 +16,7 @@ import {
   isFormNGJCasualPeriodFromHeader,
   isFormNGJCasualPeriodToHeader,
   isFormNGJCasualTotalLeaveHeader,
+  remapFormNGJGujaratRowsToHeaders,
   resolveFormNGJGujaratHeaderFieldLayout,
   resolveFormNGJGujaratTableHeaders,
   rowHasMeaningfulFormNGJGujaratExportData,
@@ -254,6 +257,284 @@ describe('Form N GJ Casual Leave (Contingency)', () => {
     expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Total Leave`]).toBe('');
     expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Availed Leave`]).toBe('');
     expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Balance Leave`]).toBe('');
+  });
+
+  it('matches Contingency LeaveData by EmployeeID (VE code), not a similarly named worker', () => {
+    const mappedData = [
+      {
+        'Name of the worker': 'Ajaykumar Mansingbhai',
+        [`${FORM_NGJ_CASUAL_PARENT}_Period_From`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Period_To`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Total Leave`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Availed Leave`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Balance Leave`]: '',
+      },
+    ];
+    const employees = [
+      {
+        FirstName: 'Ajaykumar',
+        LastName: 'Mansingbhai',
+        EmployeeID: 'VE0471',
+        Zoho_ID: '9990001',
+      },
+    ];
+    const approved = [
+      {
+        'Leave Type': 'Contingency Leave',
+        From: '30-Apr-2026',
+        To: '02-May-2026',
+        Days: {
+          '30-Apr-2026': { LeaveCount: 1 },
+          '01-May-2026': { LeaveCount: 1 },
+          '02-May-2026': { LeaveCount: 1 },
+        },
+        ApprovalStatus: 'APPROVED',
+        'Employee Name': 'Ajaykumar Mansingbhai',
+        ZohoID: '9990001',
+      },
+    ];
+    const leaveRecords = [
+      {
+        employee: { name: 'Vijaya Sankar Chandrasekar', id: 'VE0465' },
+        'Contingency Leave': { balance: 21, booked: 3 },
+      },
+      {
+        employee: { name: 'Ajaykumar Mansingbhai', id: 'VE0471' },
+        'Contingency Leave': { balance: 25, booked: 3 },
+      },
+    ];
+    applyFormNGJGujaratCasualLeaveAutofill(
+      mappedData,
+      employees,
+      headers,
+      approved,
+      leaveRecords,
+      { monthFrom: '01-Apr-2026', monthTo: '30-Apr-2026' }
+    );
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Availed Leave`]).toBe('3');
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Balance Leave`]).toBe('25');
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Total Leave`]).toBe('28');
+  });
+
+  it("does not take another Ajaykumar's 5-day leave when FirstName+LastName is Mansingbhai (VE0471)", () => {
+    const mappedData = [
+      {
+        'Name of the worker': 'Ajaykumar Mansingbhai',
+        [`${FORM_NGJ_CASUAL_PARENT}_Period_From`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Period_To`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Total Leave`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Availed Leave`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Balance Leave`]: '',
+      },
+    ];
+    const employees = [
+      {
+        FirstName: 'Ajaykumar',
+        LastName: 'Mansingbhai',
+        EmployeeID: 'VE0471',
+        Zoho_ID: '9990001',
+      },
+    ];
+    const approved = [
+      {
+        'Leave Type': 'Contingency Leave',
+        From: '23-May-2026',
+        To: '28-May-2026',
+        Days: {
+          '23-May-2026': { LeaveCount: 1 },
+          '24-May-2026': { LeaveCount: 1 },
+          '25-May-2026': { LeaveCount: 1 },
+          '26-May-2026': { LeaveCount: 1 },
+          '27-May-2026': { LeaveCount: 1 },
+        },
+        ApprovalStatus: 'APPROVED',
+        'Employee Name': 'Ajaykumar Mehta',
+        ZohoID: '8880001',
+      },
+      {
+        'Leave Type': 'Contingency Leave',
+        From: '23-May-2026',
+        To: '28-May-2026',
+        Days: {
+          '23-May-2026': { LeaveCount: 1 },
+          '24-May-2026': { LeaveCount: 1 },
+          '25-May-2026': { LeaveCount: 1 },
+          '26-May-2026': { LeaveCount: 1 },
+          '27-May-2026': { LeaveCount: 1 },
+        },
+        ApprovalStatus: 'APPROVED',
+        'Employee Name': 'Ajaykumar M',
+        ZohoID: '7770001',
+      },
+      {
+        'Leave Type': 'Contingency Leave',
+        From: '26-May-2026',
+        To: '28-May-2026',
+        Days: {
+          '26-May-2026': { LeaveCount: 1 },
+          '27-May-2026': { LeaveCount: 1 },
+          '28-May-2026': { LeaveCount: 1 },
+        },
+        ApprovalStatus: 'APPROVED',
+        'Employee Name': 'Ajaykumar Mansingbhai',
+        FirstName: 'Ajaykumar',
+        LastName: 'Mansingbhai',
+        ZohoID: '9990001',
+      },
+    ];
+    const leaveRecords = [
+      {
+        employee: { name: 'Ajaykumar Mansingbhai', id: 'VE0471' },
+        'Contingency Leave': { balance: 25, booked: 3 },
+      },
+    ];
+    applyFormNGJGujaratCasualLeaveAutofill(
+      mappedData,
+      employees,
+      headers,
+      approved,
+      leaveRecords,
+      { monthFrom: '01-May-2026', monthTo: '31-May-2026' }
+    );
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Period_From`]).toBe('26-May-2026');
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Period_To`]).toBe('28-May-2026');
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Availed Leave`]).toBe('3');
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Balance Leave`]).toBe('25');
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Total Leave`]).toBe('28');
+  });
+
+  it('caps Availed at Contingency booked when LeaveCount exceeds booked (wrong leave guard)', () => {
+    const approved = {
+      'Leave Type': 'Contingency Leave',
+      From: '23-May-2026',
+      To: '28-May-2026',
+      Days: {
+        // Sat 23 + Sun 24 + Mon–Wed — Zoho marks weekends LeaveCount 1; Contingency booked is 3.
+        '23-May-2026': { LeaveCount: 1 },
+        '24-May-2026': { LeaveCount: 0 },
+        '25-May-2026': { LeaveCount: 1 },
+        '26-May-2026': { LeaveCount: 1 },
+        '27-May-2026': { LeaveCount: 1 },
+        '28-May-2026': { LeaveCount: 0 },
+      },
+    };
+    const leaveRecord = {
+      'Contingency Leave': { balance: 25, booked: 3 },
+    };
+    const values = buildFormNGJCasualLeaveValues(approved, leaveRecord);
+    expect(values.from).toBe('25-May-2026');
+    expect(values.to).toBe('27-May-2026');
+    expect(values.availedLeave).toBe('3');
+    expect(values.balanceLeave).toBe('25');
+    expect(values.totalLeave).toBe('28');
+  });
+
+  it('rejects Contingency leave that only matches a duplicated Zoho ID with a different name', () => {
+    const mappedData = [
+      {
+        'Name of the worker': 'Ajaykumar Mansingbhai',
+        [`${FORM_NGJ_CASUAL_PARENT}_Period_From`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Period_To`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Total Leave`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Availed Leave`]: '',
+        [`${FORM_NGJ_CASUAL_PARENT}_Balance Leave`]: '',
+      },
+    ];
+    const employees = [
+      {
+        FirstName: 'Ajaykumar',
+        LastName: 'Mansingbhai',
+        EmployeeID: 'VE0471',
+        Zoho_ID: '313989000000559170',
+      },
+    ];
+    // Same Zoho erecno as another worker (real Approved Leaves bug) + 5-day leave.
+    const approved = [
+      {
+        'Leave Type': 'Contingency Leave',
+        From: '23-May-2026',
+        To: '28-May-2026',
+        Days: {
+          '23-May-2026': { LeaveCount: 1 },
+          '24-May-2026': { LeaveCount: 1 },
+          '25-May-2026': { LeaveCount: 1 },
+          '26-May-2026': { LeaveCount: 1 },
+          '27-May-2026': { LeaveCount: 1 },
+        },
+        ApprovalStatus: 'APPROVED',
+        'Employee Name': 'Santhoshkumar Raman',
+        ZohoID: '313989000000559170',
+      },
+      {
+        'Leave Type': 'Contingency Leave',
+        From: '26-May-2026',
+        To: '28-May-2026',
+        Days: {
+          '26-May-2026': { LeaveCount: 1 },
+          '27-May-2026': { LeaveCount: 1 },
+          '28-May-2026': { LeaveCount: 1 },
+        },
+        ApprovalStatus: 'APPROVED',
+        'Employee Name': 'Ajaykumar Mansingbhai',
+        ZohoID: '9990001',
+      },
+    ];
+    const leaveRecords = [
+      {
+        employee: { name: 'Ajaykumar Mansingbhai', id: 'VE0471' },
+        'Contingency Leave': { balance: 25, booked: 3 },
+      },
+    ];
+    applyFormNGJGujaratCasualLeaveAutofill(
+      mappedData,
+      employees,
+      headers,
+      approved,
+      leaveRecords,
+      { monthFrom: '01-May-2026', monthTo: '31-May-2026' }
+    );
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Period_From`]).toBe('26-May-2026');
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Period_To`]).toBe('28-May-2026');
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Availed Leave`]).toBe('3');
+    expect(mappedData[0][`${FORM_NGJ_CASUAL_PARENT}_Balance Leave`]).toBe('25');
+  });
+
+  it('does not remap Festival leave values into Casual Leave columns', () => {
+    const sourceHeaders = [
+      'Name of the worker',
+      `${FORM_NGJ_FESTIVAL_PARENT}_Total Leave`,
+      `${FORM_NGJ_FESTIVAL_PARENT}_Availed Leave`,
+      `${FORM_NGJ_FESTIVAL_PARENT}_Balance Leave`,
+      `${FORM_NGJ_CASUAL_PARENT}_Total Leave`,
+      `${FORM_NGJ_CASUAL_PARENT}_Availed Leave`,
+      `${FORM_NGJ_CASUAL_PARENT}_Balance Leave`,
+    ];
+    const rows = [
+      {
+        'Name of the worker': 'Ravi Patel',
+        [`${FORM_NGJ_FESTIVAL_PARENT}_Total Leave`]: '99',
+        [`${FORM_NGJ_FESTIVAL_PARENT}_Availed Leave`]: '9',
+        [`${FORM_NGJ_FESTIVAL_PARENT}_Balance Leave`]: '90',
+        [`${FORM_NGJ_CASUAL_PARENT}_Total Leave`]: '28',
+        [`${FORM_NGJ_CASUAL_PARENT}_Availed Leave`]: '3',
+        [`${FORM_NGJ_CASUAL_PARENT}_Balance Leave`]: '25',
+      },
+    ];
+    const remapped = remapFormNGJGujaratRowsToHeaders(rows, sourceHeaders, headers);
+    expect(remapped[0][`${FORM_NGJ_CASUAL_PARENT}_Total Leave`]).toBe('28');
+    expect(remapped[0][`${FORM_NGJ_CASUAL_PARENT}_Availed Leave`]).toBe('3');
+    expect(remapped[0][`${FORM_NGJ_CASUAL_PARENT}_Balance Leave`]).toBe('25');
+    expect(remapped[0][`${FORM_NGJ_FESTIVAL_PARENT}_Total Leave`]).toBe('99');
+  });
+
+  it('stores EmployeeID on Form N rows for LeaveData matching', () => {
+    const row = applyFormNGJGujaratEmployeeToRow(
+      {},
+      { FirstName: 'Ajaykumar', LastName: 'Mansingbhai', EmployeeID: 'VE0471' },
+      headers
+    );
+    expect(row.__employeeLookupName).toBe('Ajaykumar Mansingbhai');
+    expect(row.__employeeLookupId).toBe('VE0471');
   });
 
   it('preserves table anchors for draft export (does not force headerRowIndex=-1)', () => {

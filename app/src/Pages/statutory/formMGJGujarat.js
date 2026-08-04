@@ -635,8 +635,8 @@ const matchesFormMGJSpecLabel = (spec, cellStr) => {
   if (!s) return false;
   if (spec.match.test(s) || spec.match.test(cellStr)) return true;
   const ordinal = FORM_MGJ_EXPORT_ORDINALS[spec.key];
-  if (ordinal && new RegExp(`^\\(?${ordinal}\\)?[\\.\\)]\\s*`, 'i').test(s)) {
-    return spec.match.test(s.replace(/^\(?[a-f]\)?[\.\)]\s*/i, '')) || spec.match.test(s);
+  if (ordinal && new RegExp(`^\\(?${ordinal}\\)?(?:[\\.)]|\\s|$)`, 'i').test(s)) {
+    return spec.match.test(s.replace(/^\(?[a-f]\)?[\.\)]?\s*/i, '')) || spec.match.test(s);
   }
   return false;
 };
@@ -647,7 +647,7 @@ const findFormMGJLabelPosition = (worksheet, spec, _parsedFields, cellText) => {
     for (let r = 1; r <= 30; r += 1) {
       const raw = String(cellText(worksheet.getCell(r, 2)?.value) || '').trim();
       if (!raw) continue;
-      if (new RegExp(`^\\(?${ordinal}\\)?[\\.\\)]\\s*`, 'i').test(raw)) {
+      if (new RegExp(`^\\(?${ordinal}\\)?(?:[\\.)]|\\s|$)`, 'i').test(raw)) {
         return { row: r, col: 2 };
       }
     }
@@ -923,10 +923,12 @@ function collectEmployeeMobileSources(emp) {
   return sources;
 }
 
-function readMobileFromEmployeeSource(src, depth = 0) {
-  if (!src || typeof src !== 'object' || depth > 4) return '';
+function readMobileFromEmployeeSource(src) {
+  if (!src || typeof src !== 'object') return '';
+  // Zoho People Mobile only — do not fall back to Phone / emergency / nested contacts.
   const keys = ['Mobile', 'mobile', 'Mobile_Number', 'Mobile_Number1', 'Mobile Number', 'MobileNumber'];
   for (let i = 0; i < keys.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(src, keys[i])) continue;
     const val = sanitizeFormMGJGujaratMobileValue(pickScalarEmployeeValue(src[keys[i]]));
     if (val) return val;
   }
@@ -934,22 +936,10 @@ function readMobileFromEmployeeSource(src, depth = 0) {
     const kn = String(k || '')
       .toLowerCase()
       .replace(/[^a-z0-9]/g, '');
-    if (
-      kn === 'mobile' ||
-      kn === 'mobilenumber' ||
-      kn === 'phonenumber' ||
-      kn === 'phone' ||
-      kn === 'workphone' ||
-      kn === 'personalmobile'
-    ) {
+    if (kn === 'mobile' || kn === 'mobilenumber' || kn === 'mobilenumber1') {
       const val = sanitizeFormMGJGujaratMobileValue(pickScalarEmployeeValue(v));
       if (val) return val;
     }
-  }
-  for (const [, v] of Object.entries(src)) {
-    if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
-    const nested = readMobileFromEmployeeSource(v, depth + 1);
-    if (nested) return nested;
   }
   return '';
 }
@@ -989,8 +979,10 @@ export function readFormMGJGujaratEmployeeDateOfBirth(emp) {
   return readScalarFromEmployeeSources(
     emp,
     [
-      'DateofBirth',
+      'Date_of_birth',
       'Date_of_Birth',
+      'DateofBirth',
+      'Dateofbirth',
       'Date of Birth',
       'DateOfBirth',
       'DOB',
@@ -1010,6 +1002,7 @@ export function readFormMGJGujaratEmployeeDateOfJoining(emp) {
       'Date of Joining',
       'DateofJoining',
       'DateOfJoining',
+      'Date_of_joining',
       'DOJ',
       'JoiningDate',
     ],
@@ -1027,7 +1020,13 @@ export function enrichFormMGJGujaratContactRows(mappedData, employees, headers, 
   const employeeList = Array.isArray(employees) ? employees : [];
   mappedData.forEach((row, localIdx) => {
     if (!row || typeof row !== 'object') return;
-    const empItem = employeeList[rowIndexOffset + localIdx] || employeeList[localIdx];
+    const absoluteIdx = rowIndexOffset + localIdx;
+    const empItem = employeeList[absoluteIdx] || employeeList[localIdx];
+    row.__employeeIndex = absoluteIdx;
+    if (empItem && !row.__employeeLookupName) {
+      const name = readEmployeeFullName(empItem);
+      if (name) row.__employeeLookupName = name;
+    }
     row[contactHeader] = empItem ? readFormMGJGujaratEmployeeMobile(empItem) : '';
   });
   return mappedData;
@@ -1087,9 +1086,11 @@ export function applyFormMGJGujaratAutofillFromEmployee(headerData, empItem, sit
   };
 
   fill('form_m_gj_worker_name_address', workerLine);
-  fill('form_m_gj_date_of_birth', dobRaw ? formatStatutoryDateDisplay(dobRaw) : '');
-  fill('form_m_gj_date_of_joining', dojRaw ? formatStatutoryDateDisplay(dojRaw) : '');
-  fill('form_m_gj_contact_no', readFormMGJGujaratEmployeeMobile(empItem));
+  // Always sync dates from People — blank when missing (never keep shared header data).
+  out.form_m_gj_date_of_birth = dobRaw ? formatStatutoryDateDisplay(dobRaw) : '';
+  out.form_m_gj_date_of_joining = dojRaw ? formatStatutoryDateDisplay(dojRaw) : '';
+  // Always sync Contact No. from People Mobile — blank when missing (never keep shared header data).
+  out.form_m_gj_contact_no = readFormMGJGujaratEmployeeMobile(empItem);
   return out;
 }
 
@@ -1117,6 +1118,7 @@ export function applyFormMGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
   const dob = dobRaw ? formatStatutoryDateDisplay(dobRaw) : '';
   const doj = dojRaw ? formatStatutoryDateDisplay(dojRaw) : '';
   if (fullName) out.__employeeLookupName = fullName;
+  out.__employeeIndex = rowIndex;
 
   hdrs.forEach((header) => {
     if (isFormMGJSkipPeopleAutofillHeader(header)) {
@@ -1163,6 +1165,10 @@ export function buildFormMGJGujaratHeaderFormDataForRow(baseHeaderData, row, hea
     formatStatutoryDateDisplay = (v) => String(v || '').trim(),
   } = options;
   let out = baseHeaderData && typeof baseHeaderData === 'object' ? { ...baseHeaderData } : {};
+  // Drop shared worker fields before per-employee sync so download matches the autofill row.
+  out.form_m_gj_date_of_birth = '';
+  out.form_m_gj_date_of_joining = '';
+  out.form_m_gj_contact_no = '';
   if (empItem) {
     out = applyFormMGJGujaratAutofillFromEmployee(out, empItem, siteContext, {
       formatStatutoryDateDisplay,
@@ -1172,13 +1178,50 @@ export function buildFormMGJGujaratHeaderFormDataForRow(baseHeaderData, row, hea
     const bucket = formMGJHeaderAliasBucket(normHeaderLabel(header));
     const key = WORKER_FIELD_KEY_BY_BUCKET[bucket];
     if (!key) return;
-    let val = getFormMGJGujaratRowValueForHeader(row, header);
-    if (val !== '' && (bucket === 'dateOfBirth' || bucket === 'dateOfJoining')) {
-      val = formatStatutoryDateDisplay(val);
+    if (bucket === 'contactNo') {
+      // Per-employee Contact No. must mirror People Mobile only; never keep shared headerFormData.
+      out[key] = empItem
+        ? readFormMGJGujaratEmployeeMobile(empItem)
+        : sanitizeFormMGJGujaratMobileValue(getFormMGJGujaratRowValueForHeader(row, header));
+      return;
     }
+    if (bucket === 'dateOfBirth' || bucket === 'dateOfJoining') {
+      // Prefer the autofill grid value (what the user sees), then People.
+      const fromRow = String(getFormMGJGujaratRowValueForHeader(row, header) || '').trim();
+      const fromEmp = empItem
+        ? String(
+            (bucket === 'dateOfBirth'
+              ? readFormMGJGujaratEmployeeDateOfBirth(empItem)
+              : readFormMGJGujaratEmployeeDateOfJoining(empItem)) || ''
+          ).trim()
+        : '';
+      const raw = fromRow || fromEmp;
+      out[key] = raw ? formatStatutoryDateDisplay(raw) : '';
+      return;
+    }
+    let val = getFormMGJGujaratRowValueForHeader(row, header);
     if (val !== '') out[key] = val;
   });
   return out;
+}
+
+function resolveFormMGJGujaratEmployeeForExportRow(row, employees, index) {
+  const list = Array.isArray(employees) ? employees : [];
+  if (!list.length) return null;
+  const storedIdx = Number(row?.__employeeIndex);
+  if (Number.isFinite(storedIdx) && storedIdx >= 0 && list[storedIdx]) {
+    return list[storedIdx];
+  }
+  const lookupName = String(row?.__employeeLookupName || '').trim().toLowerCase();
+  if (lookupName) {
+    const matched = list.find((emp) => readEmployeeFullName(emp).trim().toLowerCase() === lookupName);
+    if (matched) return matched;
+  }
+  // __employeeIndex may be absolute while employeesOverride is a page slice — fall back to row order.
+  if (Number.isFinite(storedIdx) && storedIdx >= list.length && list[index]) {
+    return list[index];
+  }
+  return list[index] || null;
 }
 
 function resolveFormMGJGujaratExportFields(parsedFormHeader) {
@@ -1321,7 +1364,7 @@ export async function buildFormMGJGujaratPerEmployeeDownload({
 
   const buildMergedHeaderData = (row, index) =>
     buildFormMGJGujaratHeaderFormDataForRow(headerFormData, row, hdrs, {
-      empItem: Array.isArray(employeesOverride) ? employeesOverride[index] : null,
+      empItem: resolveFormMGJGujaratEmployeeForExportRow(row, employeesOverride, index),
       siteContext: siteCtx,
       formatStatutoryDateDisplay: formatDate,
     });

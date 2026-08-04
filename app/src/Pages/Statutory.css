@@ -1360,6 +1360,7 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
   }
   
 .statutory-table-footer {
+    position: relative;
     padding: 8px 8px 4px;
     background: #fff;
     border-top: 1px solid #f0f1f3;
@@ -1369,9 +1370,19 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 12px;
+    gap: 8px;
     flex-wrap: wrap;
+    box-sizing: border-box;
   }
+
+.statutory-pagination-info {
+  position: absolute;
+  left: 8px;
+  font-size: 13px;
+  color: #6b7280;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 
 .statutory-pagination {
   display: inline-flex;
@@ -1379,6 +1390,25 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
   align-items: center;
   justify-content: center;
   gap: 6px;
+  flex: 0 1 auto;
+}
+
+@media (max-width: 768px) {
+  .statutory-table-footer {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .statutory-pagination-info {
+    position: static;
+    width: 100%;
+    text-align: center;
+  }
+
+  .statutory-pagination {
+    width: 100%;
+    justify-content: center;
+  }
 }
 
 .statutory-pagination-nav {
@@ -2234,7 +2264,7 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
   
   .form-file-modal-content table.form-file-modal-table tbody tr {
     content-visibility: auto;
-    contain-intrinsic-size: auto 44px;
+    contain-intrinsic-size: auto 42px;
   }
 
   .form-file-modal-content table.form-file-modal-table td {

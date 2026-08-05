@@ -377,11 +377,12 @@
 }
 
 .chd-location-body {
-  display: grid;
-  grid-template-columns: 1fr 1.2fr;
-  gap: 20px;
-  align-items: center;
+  display: flex;
+  flex-direction: row;
+  gap: 16px;
+  align-items: stretch;
   min-height: 280px;
+  margin-top: 12px;
 }
 
 .chd-map-wrap {
@@ -391,6 +392,8 @@
   display: flex;
   align-items: stretch;
   justify-content: stretch;
+  flex: 1 1 55%;
+  min-width: 0;
   min-height: 280px;
   height: 280px;
   overflow: hidden;
@@ -405,9 +408,55 @@
   border-radius: var(--chd-radius);
 }
 
+.chd-india-map.leaflet-container,
 .chd-india-map .leaflet-container {
   background: #f3f4f6;
   font: inherit;
+}
+
+.chd-india-map .leaflet-tile-pane {
+  background: #f3f4f6;
+}
+
+.chd-india-map .leaflet-overlay-pane {
+  z-index: 400;
+}
+
+.chd-india-map .leaflet-marker-pane {
+  z-index: 650;
+}
+
+.chd-india-map .leaflet-tooltip-pane,
+.chd-india-map .leaflet-popup-pane {
+  z-index: 700;
+}
+
+/* Coloured state pointers on Compliance by Location map */
+.chd-map-pointer {
+  background: transparent !important;
+  border: none !important;
+}
+
+.chd-map-pointer-pin {
+  width: 18px;
+  height: 18px;
+  border: 2px solid currentColor;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.35);
+  position: relative;
+  box-sizing: border-box;
+}
+
+.chd-map-pointer-dot {
+  width: 6px;
+  height: 6px;
+  background: #fff;
+  border-radius: 50%;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) rotate(45deg);
 }
 
 .chd-loc-list {
@@ -415,8 +464,16 @@
   flex-direction: column;
   gap: 12px;
   padding: 4px 0;
-  max-height: 300px;
+  flex: 1 1 45%;
+  min-width: 0;
+  max-height: 280px;
   overflow-y: auto;
+  align-self: stretch;
+}
+
+.chd-location-body > .chd-empty {
+  flex: 1 1 45%;
+  align-self: center;
 }
 
 .chd-loc-row {
@@ -510,15 +567,27 @@
 }
 
 @media (max-width: 720px) {
-  .chd-health-body,
-  .chd-location-body {
+  .chd-health-body {
     grid-template-columns: 1fr;
+  }
+
+  .chd-location-body {
+    flex-direction: column;
+    min-height: 0;
   }
 
   .chd-map-wrap,
   .chd-india-map {
+    flex: none;
+    width: 100%;
     min-height: 220px;
     height: 220px;
+  }
+
+  .chd-loc-list {
+    flex: none;
+    width: 100%;
+    max-height: 220px;
   }
 
   .chd-loc-row {

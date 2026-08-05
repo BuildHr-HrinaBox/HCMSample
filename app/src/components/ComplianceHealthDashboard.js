@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
-import { MapContainer, TileLayer, GeoJSON, useMap } from 'react-leaflet';
+import { MapContainer, GeoJSON, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
@@ -47,8 +47,8 @@ const STATUS_LABELS = {
 const LOCATION_STATUS_ORDER = ['yetToSubmit', 'pending', 'approved', 'returned'];
 /** Industry legend / bar group order (matches mockup). */
 const INDUSTRY_STATUS_ORDER = ['approved', 'pending', 'yetToSubmit', 'returned'];
-/** Trend legend order: Approved → Pending → Returned → Yet to Submit. */
-const TREND_STATUS_ORDER = ['approved', 'pending', 'returned', 'yetToSubmit'];
+/** Trend legend order (image-1 model): Approved → Pending → Yet to Submit → Returned. */
+const TREND_STATUS_ORDER = ['approved', 'pending', 'yetToSubmit', 'returned'];
 
 const MONTH_NAME_INDEX = {
   jan: 0,
@@ -125,6 +125,38 @@ const STATE_CENTROIDS = {
   delhi: [28.6139, 77.209],
   nctofdelhi: [28.6139, 77.209],
 };
+
+/** Fixed marker colors for known states on the India map. */
+const STATE_MAP_COLORS = {
+  tamilnadu: '#22c55e', // green
+  karnataka: '#eab308', // yellow
+  gujarat: '#8b5cf6', // purple
+  rajasthan: '#ef4444', // red
+  andhrapradesh: '#38bdf8', // skyblue
+  madhyapradesh: '#ec4899', // pink
+  maharashtra: '#f97316', // orange
+};
+
+/** Fallback palette for states without a fixed color. */
+const STATE_MAP_PALETTE = [
+  '#3b82f6', // blue
+  '#06b6d4', // cyan
+  '#84cc16', // lime
+  '#14b8a6', // teal
+  '#6366f1', // indigo
+  '#e11d48', // rose
+  '#f59e0b', // amber
+];
+
+function mapColorForState(stateName) {
+  const key = normalizeStateCompareKey(stateName) || String(stateName || '');
+  if (STATE_MAP_COLORS[key]) return STATE_MAP_COLORS[key];
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  return STATE_MAP_PALETTE[hash % STATE_MAP_PALETTE.length];
+}
 
 /** Same rules as Statutory Status column / Calendar KPIs. */
 function getComplianceBucket(item) {
@@ -402,32 +434,38 @@ function monthIndexToWindowKey(monthIdx, windowKeys) {
   return null;
 }
 
-/**
- * Resolve which trend month a live statutory row belongs to.
- * Prefer MonthFilter (same as Statutory UI), then real due/activity dates.
- */
-function resolveTrendMonthKey(item, windowKeys, now = new Date()) {
-  const windowSet = new Set(windowKeys);
-  const currentKey = monthKey(new Date(now.getFullYear(), now.getMonth(), 1));
+/** Monthly Basis / day-of-month dues recur every month — not a single bucket. */
+function isMonthlyRecurringDue(item) {
+  const dueRaw = item?.dueDate ?? item?.DueDate;
+  if (dueRaw == null || String(dueRaw).trim() === '') return true;
+  if (/^monthly\s*basis$/i.test(String(dueRaw).trim())) return true;
+  if (isDayOnlyDueDate(dueRaw)) return true;
+  return false;
+}
 
-  const monthFilter = item?.monthFilter ?? item?.MonthFilter ?? item?.monthfilter;
-  if (monthFilter != null && String(monthFilter).trim() !== '') {
-    const fromFilter = monthIndexToWindowKey(parseMonthIndex(monthFilter), windowKeys);
-    if (fromFilter) return fromFilter;
-  }
+/**
+ * Resolve a one-shot calendar month for a row (YYYY-MM), or null when the row
+ * should count as open inventory across the whole 6-month window.
+ * Do NOT use MonthFilter here — that is a Statutory UI month and dumps all
+ * monthly rows into one column (July/August spike).
+ */
+function resolveTrendMonthKey(item, windowKeys) {
+  const windowSet = new Set(windowKeys);
+
+  if (isMonthlyRecurringDue(item)) return null;
 
   const dueRaw = item?.dueDate ?? item?.DueDate;
-  if (dueRaw != null && String(dueRaw).trim() !== '' && !/^monthly\s*basis$/i.test(String(dueRaw).trim())) {
-    if (!isDayOnlyDueDate(dueRaw)) {
-      const dueTs = parseDateValue(dueRaw);
-      if (dueTs != null) {
-        const d = new Date(dueTs);
-        const key = monthKey(new Date(d.getFullYear(), d.getMonth(), 1));
-        if (windowSet.has(key)) return key;
-      }
+  if (dueRaw != null && String(dueRaw).trim() !== '') {
+    const dueTs = parseDateValue(dueRaw);
+    if (dueTs != null) {
+      const d = new Date(dueTs);
+      const key = monthKey(new Date(d.getFullYear(), d.getMonth(), 1));
+      if (windowSet.has(key)) return key;
+      // Due before the window → open from the first month; after → skip one-shot.
+      if (key < windowKeys[0]) return null;
+      return undefined;
     }
-    const dueMonthIdx = parseMonthIndex(dueRaw);
-    const fromDueName = monthIndexToWindowKey(dueMonthIdx, windowKeys);
+    const fromDueName = monthIndexToWindowKey(parseMonthIndex(dueRaw), windowKeys);
     if (fromDueName) return fromDueName;
   }
 
@@ -436,25 +474,44 @@ function resolveTrendMonthKey(item, windowKeys, now = new Date()) {
     const d = new Date(activity);
     const key = monthKey(new Date(d.getFullYear(), d.getMonth(), 1));
     if (windowSet.has(key)) return key;
+    if (key < windowKeys[0]) return null;
+    return undefined;
   }
 
-  // Undated / out-of-window live rows → current month (same universe as Compliance Health).
-  return windowSet.has(currentKey) ? currentKey : windowKeys[windowKeys.length - 1] || currentKey;
+  // Undated live rows → open inventory across the window (image-1 model).
+  return null;
 }
 
+/**
+ * Image-1 line model: open compliance inventory over the last 6 months.
+ * Monthly / undated rows count in every month; one-shot dated rows carry
+ * forward from their month through the end of the window.
+ */
 function buildTrendSeries(items, now = new Date()) {
   const months = [];
   for (let i = 5; i >= 0; i -= 1) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     months.push({ key: monthKey(d), label: monthLabel(d), date: d, ...EMPTY_COUNTS });
   }
-  const byKey = Object.fromEntries(months.map((m) => [m.key, m]));
   const windowKeys = months.map((m) => m.key);
 
   items.forEach((item) => {
     const bucket = getComplianceBucket(item);
-    const key = resolveTrendMonthKey(item, windowKeys, now);
-    if (byKey[key]) byKey[key][bucket] += 1;
+    const key = resolveTrendMonthKey(item, windowKeys);
+    if (key === undefined) return;
+
+    if (key == null) {
+      months.forEach((m) => {
+        m[bucket] += 1;
+      });
+      return;
+    }
+
+    let on = false;
+    months.forEach((m) => {
+      if (m.key === key) on = true;
+      if (on) m[bucket] += 1;
+    });
   });
 
   return months.map((m) => {
@@ -503,8 +560,9 @@ function statutoryRowMatchesSiteScope(row, scope) {
   }
 
   if (hasStates) {
+    // Same as Statutory: blank / All India / other states are excluded for site login.
     const stateField = row?.states ?? row?.state ?? row?.State ?? '';
-    if (String(stateField || '').trim() && !statesFieldMatchesInchargeSiteStates(stateField, scope.stateLabels)) {
+    if (!statesFieldMatchesInchargeSiteStates(stateField, scope.stateLabels)) {
       return false;
     }
   }
@@ -702,14 +760,19 @@ function buildLocationSeries(items, siteRecords) {
         ...row,
         total,
         score,
-        color: STATUS_COLORS[dominantStatus(row)],
+        statusColor: STATUS_COLORS[dominantStatus(row)],
         lat: coords?.[0] ?? null,
         lng: coords?.[1] ?? null,
       };
     })
     .filter((row) => row.total > 0)
     .sort((a, b) => b.total - a.total || a.state.localeCompare(b.state))
-    .slice(0, 8);
+    .slice(0, 8)
+    .map((row) => ({
+      ...row,
+      // Fixed map pin color per state (bars still use approved green).
+      color: mapColorForState(row.state),
+    }));
 }
 
 function industryGroupLabel(item) {
@@ -723,9 +786,23 @@ function industryGroupLabel(item) {
   return null;
 }
 
-function buildIndustrySeries(items) {
+/**
+ * Build industry bar series. When `allowedCategories` is set (site login),
+ * only those act buckets are shown — e.g. Factories Act login → Factory only.
+ */
+function buildIndustrySeries(items, allowedCategories = null) {
+  const groups =
+    Array.isArray(allowedCategories) && allowedCategories.length > 0
+      ? INDUSTRY_GROUPS.filter((g) => allowedCategories.includes(g.category))
+      : INDUSTRY_GROUPS;
+
+  // No matching industry for this login — show nothing rather than all three buckets.
+  if (groups.length === 0) {
+    return [];
+  }
+
   const byKey = Object.fromEntries(
-    INDUSTRY_GROUPS.map((g) => [g.label, { industry: g.label, ...EMPTY_COUNTS, total: 0 }])
+    groups.map((g) => [g.label, { industry: g.label, ...EMPTY_COUNTS, total: 0 }])
   );
 
   items.forEach((item) => {
@@ -736,7 +813,7 @@ function buildIndustrySeries(items) {
     byKey[label].total += 1;
   });
 
-  return INDUSTRY_GROUPS.map((g) => byKey[g.label]);
+  return groups.map((g) => byKey[g.label]);
 }
 
 async function fetchSiteDetails() {
@@ -767,19 +844,6 @@ function StatusLegend({ compact = false, order, square = false, labels = STATUS_
   );
 }
 
-const INDIA_STATES_GEOJSON_URL = '/data/india-states.geojson';
-const MAP_IDLE_FILL = '#e5e7eb';
-const MAP_IDLE_STROKE = '#cbd5e1';
-
-/** Normalize GeoJSON / app state labels so Pondicherry↔Puducherry etc. match. */
-function geoStateKey(name) {
-  const key = normalizeStateCompareKey(name);
-  if (key === 'pondicherry') return 'puducherry';
-  if (key === 'orissa') return 'odisha';
-  if (key === 'nctofdelhi' || key === 'nctdelhi') return 'delhi';
-  return key;
-}
-
 function MapInvalidateSize() {
   const map = useMap();
   useEffect(() => {
@@ -789,87 +853,77 @@ function MapInvalidateSize() {
   return null;
 }
 
+function FitIndiaBounds({ geojson }) {
+  const map = useMap();
+  useEffect(() => {
+    if (!geojson) return undefined;
+    try {
+      const layer = L.geoJSON(geojson);
+      const bounds = layer.getBounds();
+      if (bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [8, 8], maxZoom: 5 });
+      }
+    } catch {
+      /* ignore invalid geojson */
+    }
+    return undefined;
+  }, [map, geojson]);
+  return null;
+}
+
+const INDIA_GEOJSON_URL = `${process.env.PUBLIC_URL || ''}/data/india-states.geojson`;
+
+const INDIA_MAP_STYLE = {
+  fillColor: '#d1d5db',
+  fillOpacity: 1,
+  color: '#9ca3af',
+  weight: 0.8,
+  opacity: 1,
+};
+
+/** Coloured teardrop pin for each state on the India map. */
+function createStatePointerIcon(color) {
+  const fill = color || STATUS_COLORS.yetToSubmit;
+  return L.divIcon({
+    className: 'chd-map-pointer',
+    html: `
+      <div class="chd-map-pointer-pin" style="background-color:${fill};border-color:${fill};">
+        <span class="chd-map-pointer-dot"></span>
+      </div>
+    `,
+    iconSize: [22, 22],
+    iconAnchor: [11, 22],
+    popupAnchor: [0, -20],
+  });
+}
+
 function IndiaLocationMap({ locations }) {
-  const [geoData, setGeoData] = useState(null);
+  const [indiaGeo, setIndiaGeo] = useState(null);
+  const markers = useMemo(
+    () =>
+      (locations || [])
+        .filter((loc) => Number.isFinite(loc.lat) && Number.isFinite(loc.lng))
+        .map((loc) => ({
+          ...loc,
+          icon: createStatePointerIcon(loc.color || mapColorForState(loc.state)),
+        })),
+    [locations]
+  );
 
   useEffect(() => {
     let cancelled = false;
-    fetch(INDIA_STATES_GEOJSON_URL, { cache: 'force-cache' })
+    fetch(INDIA_GEOJSON_URL)
       .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!cancelled) setGeoData(data);
+      .then((json) => {
+        if (!cancelled && json) setIndiaGeo(json);
       })
       .catch(() => {
-        if (!cancelled) setGeoData(null);
+        if (!cancelled) setIndiaGeo(null);
       });
     return () => {
       cancelled = true;
     };
   }, []);
-
-  const byStateKey = useMemo(() => {
-    const map = new Map();
-    (locations || []).forEach((loc) => {
-      const key = geoStateKey(loc.state);
-      if (key) map.set(key, loc);
-    });
-    return map;
-  }, [locations]);
-
-  const geoStyle = useMemo(
-    () => (feature) => {
-      const loc = byStateKey.get(geoStateKey(feature?.properties?.name));
-      if (loc) {
-        return {
-          fillColor: loc.color || STATUS_COLORS.yetToSubmit,
-          fillOpacity: 0.88,
-          color: '#ffffff',
-          weight: 1.25,
-          opacity: 1,
-        };
-      }
-      return {
-        fillColor: MAP_IDLE_FILL,
-        fillOpacity: 0.75,
-        color: MAP_IDLE_STROKE,
-        weight: 0.8,
-        opacity: 1,
-      };
-    },
-    [byStateKey]
-  );
-
-  const onEachFeature = useMemo(
-    () => (feature, layer) => {
-      const name = feature?.properties?.name || 'State';
-      const loc = byStateKey.get(geoStateKey(name));
-      if (loc) {
-        layer.bindPopup(
-          `<strong>${loc.state}</strong><br/>${loc.score}% overall · ${loc.total} compliances`
-        );
-        layer.on({
-          mouseover: (e) => {
-            e.target.setStyle({ weight: 2, fillOpacity: 0.98 });
-            e.target.bringToFront();
-          },
-          mouseout: (e) => {
-            e.target.setStyle(geoStyle(feature));
-          },
-        });
-      } else {
-        layer.bindPopup(`<strong>${name}</strong><br/>No compliance data`);
-      }
-    },
-    [byStateKey, geoStyle]
-  );
-
-  const geoKey = useMemo(
-    () =>
-      (locations || [])
-        .map((l) => `${geoStateKey(l.state)}:${l.color}:${l.score}`)
-        .join('|'),
-    [locations]
-  );
 
   return (
     <MapContainer
@@ -882,18 +936,22 @@ function IndiaLocationMap({ locations }) {
       zoomControl={false}
       attributionControl={false}
       className="chd-india-map"
-      style={{ height: '100%', width: '100%' }}
+      style={{ height: '100%', width: '100%', background: '#f3f4f6' }}
       maxBounds={L.latLngBounds([6, 68], [37, 98])}
       maxBoundsViscosity={1}
     >
       <MapInvalidateSize />
-      <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png"
-        subdomains="abcd"
-      />
-      {geoData ? (
-        <GeoJSON key={geoKey} data={geoData} style={geoStyle} onEachFeature={onEachFeature} />
-      ) : null}
+      <FitIndiaBounds geojson={indiaGeo} />
+      {indiaGeo ? <GeoJSON data={indiaGeo} style={() => INDIA_MAP_STYLE} /> : null}
+      {markers.map((loc) => (
+        <Marker key={loc.state} position={[loc.lat, loc.lng]} icon={loc.icon} zIndexOffset={600}>
+          <Popup>
+            <strong>{loc.state}</strong>
+            <br />
+            {loc.score}% · {loc.approved} of {loc.total} compliances
+          </Popup>
+        </Marker>
+      ))}
     </MapContainer>
   );
 }
@@ -905,29 +963,32 @@ function LocationBars({ rows }) {
 
   return (
     <div className="chd-loc-list">
-      {rows.map((row) => (
-        <div key={row.state} className="chd-loc-row">
-          <span className="chd-loc-name" title={row.state}>
-            {row.state}
-          </span>
-          <span className="chd-loc-score">{row.score}% overall</span>
-          <div className="chd-loc-bar-track" aria-hidden>
-            {LOCATION_STATUS_ORDER.map((key) => {
-              const value = row[key] || 0;
-              if (!value || !row.total) return null;
-              const width = (value / row.total) * 100;
-              return (
+      {rows.map((row) => {
+        const approvedPct = row.total ? (row.approved / row.total) * 100 : 0;
+        const stateColor = row.color || mapColorForState(row.state);
+        return (
+          <div key={row.state} className="chd-loc-row">
+            <span className="chd-loc-name" title={row.state}>
+              {row.state}
+            </span>
+            <span className="chd-loc-score" style={{ color: stateColor }}>
+              {row.score}%
+            </span>
+            <div className="chd-loc-bar-track" aria-hidden>
+              {approvedPct > 0 ? (
                 <span
-                  key={key}
                   className="chd-loc-bar-seg"
-                  style={{ width: `${width}%`, background: STATUS_COLORS[key] }}
-                  title={`${STATUS_LABELS[key]}: ${value}`}
+                  style={{
+                    width: `${approvedPct}%`,
+                    background: stateColor,
+                  }}
+                  title={`Approved: ${row.approved}`}
                 />
-              );
-            })}
+              ) : null}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -1110,7 +1171,7 @@ function describeArc(cx, cy, r, startAngle, endAngle) {
   return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArc} ${sweepFlag} ${end.x} ${end.y}`;
 }
 
-/** Straight-line mockup model: linear segments between month points (no curves). */
+/** Image-1 line model: open inventory series, hollow markers, 0–200 scale. */
 function TrendChart({ series }) {
   const width = 560;
   const height = 240;
@@ -1124,8 +1185,8 @@ function TrendChart({ series }) {
     0,
     ...series.flatMap((row) => keys.map((key) => Number(row[key]) || 0))
   );
-  // Match mockup: 0–100 with steps of 25; scale up in steps of 50 when volume is higher.
-  const maxY = Math.max(100, Math.ceil(rawMax / 50) * 50 || 100);
+  // Image-1 model: 0–200 with steps of 50 when volume is above 100; else 0–100 / 25.
+  const maxY = rawMax <= 100 ? 100 : Math.max(200, Math.ceil(rawMax / 50) * 50);
   const ticks = [];
   const step = maxY <= 100 ? 25 : 50;
   for (let v = 0; v <= maxY; v += step) ticks.push(v);
@@ -1134,7 +1195,6 @@ function TrendChart({ series }) {
   const yAt = (v) => pad.top + chartH - (Math.min(Math.max(v, 0), maxY) / maxY) * chartH;
   const hasData = series.some((s) => (s.total || 0) > 0);
 
-  // Explicit M/L polyline → sharp straight segments (no curve / spline / rounded joins).
   const paths = keys.map((key) => {
     const pts = series.map((row, i) => ({
       x: xAt(i),
@@ -1163,17 +1223,6 @@ function TrendChart({ series }) {
           </text>
         </g>
       ))}
-      {series.map((_, i) => (
-        <line
-          key={`v-${i}`}
-          x1={xAt(i)}
-          y1={pad.top}
-          x2={xAt(i)}
-          y2={pad.top + chartH}
-          stroke="#f3f4f6"
-          strokeWidth="1"
-        />
-      ))}
       {paths.map((p) => (
         <path
           key={p.key}
@@ -1181,8 +1230,8 @@ function TrendChart({ series }) {
           fill="none"
           stroke={STATUS_COLORS[p.key]}
           strokeWidth="2"
-          strokeLinejoin="miter"
-          strokeLinecap="butt"
+          strokeLinejoin="round"
+          strokeLinecap="round"
           strokeOpacity={hasData ? 1 : 0.35}
         />
       ))}
@@ -1194,7 +1243,7 @@ function TrendChart({ series }) {
               key={`${key}-${i}`}
               cx={xAt(i)}
               cy={yAt(value)}
-              r="3.5"
+              r="4"
               fill={STATUS_COLORS[key]}
               stroke="#fff"
               strokeWidth="1.5"
@@ -1225,6 +1274,8 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
   const [selectedSite, setSelectedSite] = useState('all');
   const [siteOptions, setSiteOptions] = useState([]);
   const [isSiteScopedUser, setIsSiteScopedUser] = useState(false);
+  /** Site login act categories (factories | clra | shops_and_establishment); null = show all. */
+  const [allowedActCategories, setAllowedActCategories] = useState(null);
   const [rawItems, setRawItems] = useState([]);
   const [siteRecords, setSiteRecords] = useState([]);
   const [refreshAt, setRefreshAt] = useState(0);
@@ -1247,10 +1298,13 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
         const hasSiteScope = hasUsableSiteScope(siteScope);
         const visibleSites = filterSitesForLoginUser(siteDetails, loginEmail, userRole);
         const inchargeScope = buildInchargeSiteScopeFromList(siteDetails, loginEmail);
-        const scopedUser = Boolean(hasSiteScope || inchargeScope?.mine?.length);
-        const adminViewer = isOrgWideSiteViewer(userRole);
+        // Same lens as top KPI cards: if this login is a Site Incharge, always
+        // scope compliance counts to that assignment (even when role is HR Admin).
+        const preferInchargeLens = Boolean(
+          hasSiteScope || (inchargeScope?.mine && inchargeScope.mine.length > 0)
+        );
 
-        const options = (scopedUser && !adminViewer ? visibleSites : siteDetails)
+        const options = (preferInchargeLens ? visibleSites : siteDetails)
           .map((s) => {
             const name = siteNameFromSiteRecord(s);
             return name ? { value: name, label: name } : null;
@@ -1273,18 +1327,60 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
 
         // Same idea as Statutory page: unique form lines with live approval workflow fields.
         const merged = mergeStatutoryWithBulk(statutory, bulk);
-        // Site login: only their Site Management assignment (industry/state/site).
-        // Admin: full org dataset (optional All Sites dropdown filters further).
+        // Site Incharge login: only Tamil Nadu Factories (etc.) — match Statutory list size.
+        // Org-wide admin with no incharge assignment: full dataset.
         const scoped =
-          hasSiteScope && !adminViewer
+          preferInchargeLens && hasSiteScope
             ? merged.filter((item) => statutoryRowMatchesSiteScope(item, siteScope))
-            : merged;
+            : preferInchargeLens && inchargeScope
+              ? merged.filter((item) =>
+                  statutoryRowMatchesSiteScope(item, {
+                    actCategories: [
+                      ...new Set(
+                        (inchargeScope.industryLabels || [])
+                          .map((ind) => industryLabelToActCategory(ind))
+                          .filter(Boolean)
+                      ),
+                    ],
+                    industryLabels: inchargeScope.industryLabels || [],
+                    stateLabels: inchargeScope.stateLabels || [],
+                    siteNames: (inchargeScope.mine || [])
+                      .map((s) => siteNameFromSiteRecord(s))
+                      .filter(Boolean),
+                  })
+                )
+              : merged;
 
         if (!cancelled) {
-          setIsSiteScopedUser(scopedUser && !adminViewer);
+          setIsSiteScopedUser(preferInchargeLens);
+          let actCats = null;
+          if (preferInchargeLens) {
+            if (Array.isArray(siteScope?.actCategories) && siteScope.actCategories.length > 0) {
+              actCats = siteScope.actCategories;
+            } else if (Array.isArray(siteScope?.industryLabels) && siteScope.industryLabels.length > 0) {
+              const derived = [
+                ...new Set(
+                  siteScope.industryLabels
+                    .map((ind) => industryLabelToActCategory(ind))
+                    .filter(Boolean)
+                ),
+              ];
+              actCats = derived.length > 0 ? derived : null;
+            } else if (inchargeScope?.industryLabels?.length) {
+              const derived = [
+                ...new Set(
+                  inchargeScope.industryLabels
+                    .map((ind) => industryLabelToActCategory(ind))
+                    .filter(Boolean)
+                ),
+              ];
+              actCats = derived.length > 0 ? derived : null;
+            }
+          }
+          setAllowedActCategories(actCats);
           setSiteOptions(options);
-          setSiteRecords(scopedUser && !adminViewer ? visibleSites : siteDetails);
-          if (scopedUser && !adminViewer && options.length === 1) {
+          setSiteRecords(preferInchargeLens ? visibleSites : siteDetails);
+          if (preferInchargeLens && options.length === 1) {
             setSelectedSite(options[0].value);
           }
           setRawItems(scoped);
@@ -1294,6 +1390,7 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
         if (!cancelled) {
           setRawItems([]);
           setSiteRecords([]);
+          setAllowedActCategories(null);
           setLoading(false);
         }
       }
@@ -1357,9 +1454,26 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
     () => buildLocationSeries(items, siteRecords),
     [items, siteRecords]
   );
-  const industries = useMemo(() => buildIndustrySeries(items), [items]);
+  const industries = useMemo(() => {
+    let cats = isSiteScopedUser ? allowedActCategories : null;
 
-  const showSiteFilter = isAdmin || siteOptions.length > 1;
+    // When a single site is selected, show only that site's industry bar(s).
+    if (selectedSite && selectedSite !== 'all') {
+      const site = (siteRecords || []).find(
+        (s) =>
+          String(siteNameFromSiteRecord(s) || '').trim().toLowerCase() ===
+          String(selectedSite).trim().toLowerCase()
+      );
+      const cat = site ? industryLabelToActCategory(siteIndustry(site)) : null;
+      if (cat) cats = [cat];
+    }
+
+    return buildIndustrySeries(items, cats);
+  }, [items, isSiteScopedUser, allowedActCategories, selectedSite, siteRecords]);
+
+  const showSiteFilter = isSiteScopedUser
+    ? siteOptions.length > 1
+    : isAdmin || siteOptions.length > 1;
   const siteSelectDisabled = isSiteScopedUser && siteOptions.length <= 1;
 
   return (
@@ -1380,7 +1494,9 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
                     disabled={siteSelectDisabled}
                     onChange={(e) => setSelectedSite(e.target.value)}
                   >
-                    {(isAdmin || siteOptions.length > 1) && (
+                    {(isSiteScopedUser
+                      ? siteOptions.length > 1
+                      : isAdmin || siteOptions.length > 1) && (
                       <option value="all">
                         {isSiteScopedUser ? 'My Sites' : 'All Sites'}
                       </option>
@@ -1460,6 +1576,17 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
         <section className="chd-card chd-card--location">
           <div className="chd-card-head">
             <h3>Compliance by Location</h3>
+          </div>
+          <div className="chd-legend chd-legend--compact">
+            {locations.map((loc) => (
+              <span key={loc.state} className="chd-legend-item">
+                <span
+                  className="chd-dot"
+                  style={{ background: loc.color || mapColorForState(loc.state) }}
+                />
+                {loc.state}
+              </span>
+            ))}
           </div>
           <div className="chd-location-body">
             <div className="chd-map-wrap">

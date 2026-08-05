@@ -41,14 +41,6 @@ const DEFAULT_METRICS = [
     tone: 'orange',
   },
   {
-    key: 'approvals',
-    label: 'Pending for Approval',
-    value: 0,
-    hint: '0% of total',
-    icon: ClipboardList,
-    tone: 'blue',
-  },
-  {
     key: 'due',
     label: 'Approved',
     value: 0,
@@ -63,6 +55,14 @@ const DEFAULT_METRICS = [
     hint: '0% of total',
     icon: BookMarked,
     tone: 'purple',
+  },
+  {
+    key: 'approvals',
+    label: 'Pending for Approval',
+    value: 0,
+    hint: '0% of total',
+    icon: ClipboardList,
+    tone: 'blue',
   },
 ];
 
@@ -143,7 +143,8 @@ function statutoryRowMatchesSiteScope(row, scope) {
   const sts = scope?.stateLabels;
   if (Array.isArray(sts) && sts.length > 0) {
     const stateField = row?.states ?? row?.state ?? row?.State ?? '';
-    if (String(stateField || '').trim() && !statesFieldMatchesInchargeSiteStates(stateField, sts)) {
+    // Same as Statutory: blank / other states excluded for site incharge.
+    if (!statesFieldMatchesInchargeSiteStates(stateField, sts)) {
       return false;
     }
   }

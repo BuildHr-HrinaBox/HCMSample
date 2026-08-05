@@ -67,7 +67,7 @@ async function fetchPayrollTablePayloadOnce(payrollMonth, { timeoutMs = 45000, f
   }
 
   const task = (async () => {
-    const sampleLoad = await fetchSamplePayrollRowsForMonth(month, { timeoutMs });
+    const sampleLoad = await fetchSamplePayrollRowsForMonth(month, { timeoutMs, force });
     if (sampleLoad.records.length > 0) {
       const payDate = String(
         sampleLoad.meta?.payDate || sampleLoad.meta?.pay_date || ''
@@ -197,12 +197,14 @@ async function fetchZohoPayrollListRowsForMonth(
   const rows = normalizePayrollTableRecords(merged);
   if (rows.length > 0) {
     const payDate = String(meta?.payDate || meta?.pay_date || '').trim();
+    // Zoho list rows often lack PF / VPF / Income Tax — do not tag as sample_payroll
+    // or Form B (and other forms) will skip the real SamplePayroll table snapshot.
     cacheForm15PayrollTableRows(
       month,
       rows,
       meta || (payDate ? { payDate, pay_date: payDate } : null),
       payDate,
-      'sample_payroll'
+      'zoho_list'
     );
   }
   return { rows, meta: meta ? { ...meta, total: total ?? meta.total } : null };

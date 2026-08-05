@@ -419,14 +419,47 @@ export function fetchPeopleData(options = {}) {
   return peopleInflight;
 }
 
+/** True when cache is only the fast first page and must still be upgraded to the full list. */
+export function isPartialPeopleCache(cached = readPeopleCacheRaw()) {
+  if (!cached?.success) return false;
+  return cached?.meta?.mode === 'fast_first_page';
+}
+
 /** Continue loading full employee list after a fast first-page autofill response. */
 export function startPeopleDataBackgroundRefresh(options = {}) {
   const cached = readPeopleCacheRaw();
-  if (cached?.success && flattenZohoPeopleEmployees(cached).length >= PEOPLE_FAST_FIRST_PAGE_SIZE) {
+  // A fast_first_page cache is intentionally size==80 — do NOT treat that as complete,
+  // or Autofill never upgrades and site filters (e.g. GJ-Amreli) miss employees past page 1.
+  if (
+    cached?.success &&
+    !isPartialPeopleCache(cached) &&
+    flattenZohoPeopleEmployees(cached).length > 0
+  ) {
     return Promise.resolve(cached);
   }
   if (peopleInflight) return peopleInflight;
-  return fetchPeopleData({ ...options, force: false }).catch(() => null);
+  // Force when upgrading a partial cache; otherwise fetchPeopleData would return the 80-row page again.
+  return fetchPeopleData({ ...options, force: isPartialPeopleCache(cached) }).catch(() => null);
+}
+
+/** Await a complete People list (upgrades fast_first_page cache when needed). */
+export async function ensureCompletePeopleData(options = {}) {
+  const cached = readPeopleCacheRaw();
+  if (cached?.success && !isPartialPeopleCache(cached)) {
+    const count = flattenZohoPeopleEmployees(cached).length;
+    if (count > 0) return cached;
+  }
+  if (peopleInflight) {
+    try {
+      const inflight = await peopleInflight;
+      if (inflight?.success && !isPartialPeopleCache(inflight)) {
+        return inflight;
+      }
+    } catch (_) {
+      /* fall through */
+    }
+  }
+  return fetchPeopleData({ ...options, force: true });
 }
 
 /**
@@ -438,7 +471,13 @@ export async function fetchPeopleDataForAutofillDisplay(options = {}) {
   const cached = readPeopleCacheRaw();
   if (cached?.success) {
     const count = flattenZohoPeopleEmployees(cached).length;
-    if (count > 0) return cached;
+    if (count > 0) {
+      // Keep returning quickly, but never strand Autofill on a first-page-only cache.
+      if (isPartialPeopleCache(cached)) {
+        startPeopleDataBackgroundRefresh(options);
+      }
+      return cached;
+    }
   }
 
   const pageSize = Math.min(

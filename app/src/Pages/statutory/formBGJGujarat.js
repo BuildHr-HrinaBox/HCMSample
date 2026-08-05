@@ -28,7 +28,8 @@ export function formBGJPayrollRowHasSampleDeductionFields(payrollRow) {
 
 /**
  * Form B must prefer Sample Payroll table rows (PF / VPF / Income Tax columns).
- * Zoho pay-run rows often have HRA/Gross but empty deduction scalars.
+ * Zoho pay-run / list rows often have HRA/Gross but empty deduction scalars —
+ * never early-return those when a Sample Payroll snapshot with deductions exists.
  */
 export function resolveFormBGJGujaratPayrollRowsForAutofill(
   statutoryPayrollRows,
@@ -57,34 +58,54 @@ export function resolveFormBGJGujaratPayrollRowsForAutofill(
     });
   };
 
-  const preferDeductionRows = (rows) => {
-    const list = (Array.isArray(rows) ? rows : [])
+  const normalizeRows = (rows) =>
+    (Array.isArray(rows) ? rows : [])
       .filter((row) => row && typeof row === 'object' && row.fetch_error !== true)
       .map((row) => flattenPayrollEarningColumns(row));
+
+  const preferDeductionRows = (rows) => {
+    const list = normalizeRows(rows);
     if (list.length === 0) return [];
     const withDeductions = list.filter((row) => formBGJPayrollRowHasSampleDeductionFields(row));
     return stampPayDate(withDeductions.length > 0 ? withDeductions : list);
   };
 
-  const fromCached = preferDeductionRows(cachedSampleRows);
-  if (fromCached.length > 0) return fromCached;
+  const takeIfHasDeductions = (rows) => {
+    const preferred = preferDeductionRows(rows);
+    if (
+      preferred.length > 0 &&
+      preferred.some((row) => formBGJPayrollRowHasSampleDeductionFields(row))
+    ) {
+      return preferred;
+    }
+    return null;
+  };
 
-  const fromBulk = preferDeductionRows(bulkSampleRows);
-  if (fromBulk.length > 0) return fromBulk;
+  const fromCached = takeIfHasDeductions(cachedSampleRows);
+  if (fromCached) return fromCached;
 
-  const fromStatutoryPreferred = preferDeductionRows(statutoryPayrollRows);
-  if (
-    fromStatutoryPreferred.length > 0 &&
-    fromStatutoryPreferred.some((row) => formBGJPayrollRowHasSampleDeductionFields(row))
-  ) {
-    return fromStatutoryPreferred;
-  }
+  const fromBulk = takeIfHasDeductions(bulkSampleRows);
+  if (fromBulk) return fromBulk;
+
+  const fromStatutoryPreferred = takeIfHasDeductions(statutoryPayrollRows);
+  if (fromStatutoryPreferred) return fromStatutoryPreferred;
 
   const xix = resolveFormXIXMPPayrollRowsForAutofill(statutoryPayrollRows, monthCandidates);
-  const fromXix = preferDeductionRows(xix);
-  if (fromXix.length > 0) return fromXix;
+  const fromXix = takeIfHasDeductions(xix);
+  if (fromXix) return fromXix;
 
-  return fromStatutoryPreferred;
+  // Last resort (gross/HRA only) — callers should reload Sample Payroll for PF/VPF/IT.
+  const fallbackCandidates = [
+    cachedSampleRows,
+    bulkSampleRows,
+    xix,
+    statutoryPayrollRows,
+  ];
+  for (let i = 0; i < fallbackCandidates.length; i += 1) {
+    const fallback = preferDeductionRows(fallbackCandidates[i]);
+    if (fallback.length > 0) return fallback;
+  }
+  return [];
 }
 
 export function formBGJGujaratHeaderNorm(txt) {
@@ -251,30 +272,51 @@ export function isFormBGJPaymentDateHeader(h) {
   );
 }
 
-export function isFormBGJGrossTotalHeader(header, headers) {
+export function isFormBGJGrossTotalHeader(header, headers, headerIndex = null) {
   if (!isFormBGJTotalHeader(header)) return false;
   const list = Array.isArray(headers) ? headers : [];
-  const idx = list.indexOf(header);
+  const idx =
+    Number.isInteger(headerIndex) && headerIndex >= 0 ? headerIndex : list.indexOf(header);
+  if (idx < 0) return false;
+  const totalIndices = list
+    .map((h, i) => (isFormBGJTotalHeader(h) ? i : -1))
+    .filter((i) => i >= 0);
+  // Two "Total" columns: first is earnings total (gross pay).
+  if (totalIndices.length >= 2) return idx === totalIndices[0];
+  // In single-total layouts, "HRA" followed by "Total" means earnings total.
+  if (idx > 0 && isFormBGJHraHeader(list[idx - 1])) return true;
   const dedStart = list.findIndex(
     (h) =>
       isFormBGJPfHeader(h) ||
       isFormBGJVoluntaryPfHeader(h) ||
       isFormBGJIncomeTaxHeader(h) ||
+      isFormBGJRecoveriesHeader(h) ||
       isFormBGJDeductionBandHeader(h)
   );
   if (dedStart >= 0 && idx >= dedStart) return false;
   return true;
 }
 
-export function isFormBGJDeductionsTotalHeader(header, headers) {
+export function isFormBGJDeductionsTotalHeader(header, headers, headerIndex = null) {
   if (!isFormBGJTotalHeader(header)) return false;
   const list = Array.isArray(headers) ? headers : [];
-  const idx = list.indexOf(header);
+  const idx =
+    Number.isInteger(headerIndex) && headerIndex >= 0 ? headerIndex : list.indexOf(header);
+  if (idx < 0) return false;
+  const totalIndices = list
+    .map((h, i) => (isFormBGJTotalHeader(h) ? i : -1))
+    .filter((i) => i >= 0);
+  // Two "Total" columns: second (last) is deductions/recoveries total.
+  if (totalIndices.length >= 2) return idx === totalIndices[totalIndices.length - 1];
+  if (idx > 0 && isFormBGJHraHeader(list[idx - 1])) return false;
+  const norm = normHeader(header);
+  if (!norm.includes('deduction') && !norm.includes('recover')) return false;
   const dedStart = list.findIndex(
     (h) =>
       isFormBGJPfHeader(h) ||
       isFormBGJVoluntaryPfHeader(h) ||
       isFormBGJIncomeTaxHeader(h) ||
+      isFormBGJRecoveriesHeader(h) ||
       isFormBGJDeductionBandHeader(h)
   );
   return dedStart >= 0 && idx >= dedStart;
@@ -291,9 +333,11 @@ function isFormBGJDeductionBandHeader(h) {
   const s = normHeader(h);
   return (
     s.includes('deduction') ||
+    s.includes('recover') ||
     isFormBGJPfHeader(h) ||
     isFormBGJVoluntaryPfHeader(h) ||
-    isFormBGJIncomeTaxHeader(h)
+    isFormBGJIncomeTaxHeader(h) ||
+    isFormBGJInsuranceHeader(h)
   );
 }
 
@@ -305,6 +349,30 @@ export function isFormBGJRateOfWageHeader(h) {
 export function isFormBGJOthersHeader(h) {
   const s = normHeader(h);
   return s === 'others' || /^others\b/.test(s);
+}
+
+/** Insurance sits after Others in the recoveries band — leave blank (manual). */
+export function isFormBGJInsuranceHeader(h) {
+  const s = normHeader(h);
+  if (!s || s.includes('income')) return false;
+  return s === 'insurance' || /^insurance\b/.test(s);
+}
+
+/** Recoveries / recovery total column (not individual PF/VPF/IT lines). */
+export function isFormBGJRecoveriesHeader(h) {
+  const s = normHeader(h);
+  if (!s) return false;
+  if (isFormBGJPfHeader(h) || isFormBGJVoluntaryPfHeader(h) || isFormBGJIncomeTaxHeader(h)) {
+    return false;
+  }
+  if (isFormBGJInsuranceHeader(h) || isFormBGJOthersHeader(h)) return false;
+  return (
+    s === 'recoveries' ||
+    s === 'recovery' ||
+    /^recoveries\b/.test(s) ||
+    /^recovery\b/.test(s) ||
+    (s.includes('recover') && (s.includes('total') || s.includes('amount')))
+  );
 }
 
 function formatBGJPayrollPayDate(payDateRaw) {
@@ -341,6 +409,8 @@ export function isFormBGJDaHeader(h) {
 export function isFormBGJSkipPeopleAutofillHeader(h) {
   return (
     isFormBGJOthersHeader(h) ||
+    isFormBGJInsuranceHeader(h) ||
+    isFormBGJRecoveriesHeader(h) ||
     isFormBGJRateOfWageHeader(h) ||
     isFormBGJDaysWorkedHeader(h) ||
     isFormBGJOvertimeHoursHeader(h) ||
@@ -397,6 +467,16 @@ export function formBGJHeaderAliasBucket(norm) {
   if (n.includes('date') && n.includes('payment')) return 'paymentDate';
   if (n.includes('rate') && n.includes('wage')) return 'rateOfWage';
   if (n === 'others' || /^others\b/.test(n)) return 'others';
+  if (n === 'insurance' || /^insurance\b/.test(n)) return 'insurance';
+  if (
+    n === 'recoveries' ||
+    n === 'recovery' ||
+    /^recoveries\b/.test(n) ||
+    /^recovery\b/.test(n) ||
+    (n.includes('recover') && (n.includes('total') || n.includes('amount')))
+  ) {
+    return 'recoveries';
+  }
   if (n === 'total' || /^total\b/.test(n)) return 'total';
   return n;
 }
@@ -457,9 +537,20 @@ export function isFormBGJGujaratContext(
 
 export function resolveFormBGJGujaratTableHeaders(tableHeaders) {
   const parsed = Array.isArray(tableHeaders)
-    ? tableHeaders.map((h) => String(h || '').trim()).filter(Boolean)
+    ? tableHeaders
+        .map((h) => String(h ?? ''))
+        .filter((h) => String(h).trim() !== '')
     : [];
-  return parsed.length > 0 ? parsed : [];
+  if (parsed.length === 0) return [];
+
+  // Keep duplicate captions addressable as separate object keys.
+  // Example: "Total" + "Total" should become "Total" + "Total ".
+  const seen = new Map();
+  return parsed.map((header) => {
+    const count = seen.get(header) || 0;
+    seen.set(header, count + 1);
+    return count > 0 ? `${header}${' '.repeat(count)}` : header;
+  });
 }
 
 function parsePayrollNumber(value) {
@@ -627,35 +718,45 @@ export function resolveFormBGJGujaratPayrollFields(payrollRow, helpers = {}) {
     )
   );
 
-  const totalDeductions = readPayrollScalar(
-    source,
-    [
-      'total_deductions',
-      'Total Deductions',
-      'totalDeductions',
-      'TotalDeduction',
-      'totalDeduction',
-      'total_employee_deductions',
-    ],
-    [/^total_deductions?$/]
-  );
-  const totalBenefits = readPayrollScalar(
-    source,
-    ['total_benefits', 'Total Benefits', 'totalBenefits'],
-    [/^total_benefits$/]
-  );
-  const totalTaxes = readPayrollScalar(
-    source,
-    ['total_taxes', 'Total Taxes', 'totalTaxes'],
-    [/^total_taxes$/]
-  );
-  const deductionsTotal = sumPayrollNumbers([totalDeductions, totalBenefits, totalTaxes]);
-
   const netPay = readPayrollScalar(
     source,
     ['net_pay', 'Net Pay', 'netPay', 'netpay', 'Netpay', 'monthly_salary'],
     [/^net_pay$/, /^netpay$/]
   );
+
+  // Recoveries (after earnings Total / PF band) ← gross_pay − net_pay.
+  const grossN = parsePayrollNumber(grossPay);
+  const netN = parsePayrollNumber(netPay);
+  let deductionsTotal = '';
+  if (Number.isFinite(grossN) && Number.isFinite(netN)) {
+    deductionsTotal = Math.round((grossN - netN) * 100) / 100;
+    if (deductionsTotal < 0) deductionsTotal = '';
+  }
+  if (deductionsTotal === '') {
+    const totalDeductions = readPayrollScalar(
+      source,
+      [
+        'total_deductions',
+        'Total Deductions',
+        'totalDeductions',
+        'TotalDeduction',
+        'totalDeduction',
+        'total_employee_deductions',
+      ],
+      [/^total_deductions?$/]
+    );
+    const totalBenefits = readPayrollScalar(
+      source,
+      ['total_benefits', 'Total Benefits', 'totalBenefits'],
+      [/^total_benefits$/]
+    );
+    const totalTaxes = readPayrollScalar(
+      source,
+      ['total_taxes', 'Total Taxes', 'totalTaxes'],
+      [/^total_taxes$/]
+    );
+    deductionsTotal = sumPayrollNumbers([totalDeductions, totalBenefits, totalTaxes]);
+  }
 
   const payDateRaw =
     readPayrollTextScalar(
@@ -783,8 +884,9 @@ export function applyFormBGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
   );
   const fullName = readEmployeeFullName(emp);
   if (fullName) out.__employeeLookupName = fullName;
+  const firstTotalHeaderIndex = hdrs.findIndex((h) => isFormBGJTotalHeader(h));
 
-  hdrs.forEach((header) => {
+  hdrs.forEach((header, headerIndex) => {
     if (isFormBGJSerialHeader(header)) {
       setCell(header, String(rowIndex + 1), { allowZero: true });
       return;
@@ -809,7 +911,8 @@ export function applyFormBGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
       setCell(header, payroll.rateOfWage);
       return;
     }
-    if (isFormBGJOthersHeader(header)) {
+    if (isFormBGJOthersHeader(header) || isFormBGJInsuranceHeader(header)) {
+      // Insurance is after Others — do not put recoveries here.
       if (overwrite || cellIsEmpty(header)) out[header] = '';
       return;
     }
@@ -817,7 +920,7 @@ export function applyFormBGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
       setCell(header, payroll.hra);
       return;
     }
-    if (isFormBGJGrossTotalHeader(header, hdrs)) {
+    if (isFormBGJGrossTotalHeader(header, hdrs, headerIndex)) {
       setCell(header, payroll.grossPay);
       return;
     }
@@ -826,14 +929,23 @@ export function applyFormBGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
       return;
     }
     if (isFormBGJPfHeader(header)) {
-      setCell(header, payroll.pf, { allowZero: true });
+      // If PF appears before the first Total, use gross pay per template mapping.
+      if (firstTotalHeaderIndex >= 0 && headerIndex < firstTotalHeaderIndex) {
+        setCell(header, payroll.grossPay, { allowZero: true });
+      } else {
+        setCell(header, payroll.pf, { allowZero: true });
+      }
       return;
     }
     if (isFormBGJIncomeTaxHeader(header)) {
       setCell(header, payroll.incomeTax, { allowZero: true });
       return;
     }
-    if (isFormBGJDeductionsTotalHeader(header, hdrs)) {
+    if (isFormBGJRecoveriesHeader(header)) {
+      if (overwrite || cellIsEmpty(header)) out[header] = '';
+      return;
+    }
+    if (isFormBGJDeductionsTotalHeader(header, hdrs, headerIndex)) {
       setCell(header, payroll.deductionsTotal, { allowZero: true });
       return;
     }

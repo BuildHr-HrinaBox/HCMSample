@@ -49,6 +49,12 @@ describe('statutory download content alignment helpers', () => {
     expect(isStatutoryFormTitleBandText('FORM - W')).toBe(true);
     expect(isStatutoryFormTitleBandText('[See sub-rule(1) of rule (16)]')).toBe(true);
     expect(isStatutoryFormTitleBandText('REGISTER OF WAGES')).toBe(true);
+    expect(isStatutoryFormTitleBandText('SERVICE CERTIFICATE')).toBe(true);
+    expect(
+      isStatutoryFormTitleBandText(
+        '[Vide rule 77 of Contract Labour (Regul. & Abolition) Central & Gujarat Rules]'
+      )
+    ).toBe(true);
     expect(
       isStatutoryFormTitleBandText('Name and Address of Contractor. : VAYONA ENERGY')
     ).toBe(false);

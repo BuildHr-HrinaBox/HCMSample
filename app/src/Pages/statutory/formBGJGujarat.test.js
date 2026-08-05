@@ -2,11 +2,14 @@ import {
   applyFormBGJGujaratEmployeeToRow,
   formBGJPayrollRowHasSampleDeductionFields,
   isFormBGJIncomeTaxHeader,
+  isFormBGJInsuranceHeader,
   isFormBGJPaymentDateHeader,
   isFormBGJPfHeader,
+  isFormBGJRecoveriesHeader,
   isFormBGJVoluntaryPfHeader,
   resolveFormBGJGujaratPayrollFields,
   resolveFormBGJGujaratPayrollRowsForAutofill,
+  resolveFormBGJGujaratTableHeaders,
 } from './formBGJGujarat';
 
 describe('Form B Gujarat Sample Payroll deductions', () => {
@@ -124,6 +127,163 @@ describe('Form B Gujarat Sample Payroll deductions', () => {
     expect(rows[0].pf).toBe(9211);
     expect(rows[0].voluntary_provident_fund).toBe(18422);
     expect(rows[0].income_tax).toBe(30640);
+  });
+
+  test('skips HRA-only cached rows when bulk Sample Payroll has PF / VPF / Income Tax', () => {
+    const zohoCached = [{ employee_name: 'A', hra: 5700, gross_pay: 22832 }];
+    const sampleBulk = [
+      {
+        employee_name: 'A',
+        hra: 5700,
+        gross_pay: 22832,
+        PF: 1800,
+        VoluntaryProvidentFund: 500,
+        IncomeTax: 1200,
+      },
+    ];
+    const rows = resolveFormBGJGujaratPayrollRowsForAutofill(zohoCached, ['2026-05'], {
+      cachedSampleRows: zohoCached,
+      bulkSampleRows: sampleBulk,
+    });
+    expect(rows).toHaveLength(1);
+    expect(formBGJPayrollRowHasSampleDeductionFields(rows[0])).toBe(true);
+    const fields = resolveFormBGJGujaratPayrollFields(rows[0]);
+    expect(fields.pf).toBe(1800);
+    expect(fields.voluntaryProvidentFund).toBe(500);
+    expect(fields.incomeTax).toBe(1200);
+  });
+
+  test('Recoveries stays blank while second Total gets gross_pay − net_pay', () => {
+    expect(isFormBGJRecoveriesHeader('Recoveries')).toBe(true);
+    expect(isFormBGJInsuranceHeader('Insurance')).toBe(true);
+    expect(isFormBGJInsuranceHeader('Income Tax')).toBe(false);
+
+    const fields = resolveFormBGJGujaratPayrollFields({
+      gross_pay: 63622,
+      net_pay: 50000,
+      pf: 1800,
+      income_tax: 1200,
+    });
+    expect(fields.deductionsTotal).toBe(13622);
+
+    const headers = [
+      'Name',
+      'Total',
+      'PF',
+      'Voluntary Provident Fund',
+      'Income Tax',
+      'Insurance',
+      'Others',
+      'Recoveries',
+      'Total ',
+    ];
+    const row = applyFormBGJGujaratEmployeeToRow(
+      {},
+      { FirstName: 'Test', LastName: 'Emp' },
+      headers,
+      {
+        payrollRow: {
+          gross_pay: 63622,
+          net_pay: 50000,
+          pf: 1800,
+          income_tax: 1200,
+        },
+      }
+    );
+    expect(row.Total).toBe('63622');
+    expect(row['Total ']).toBe('13622');
+    expect(row.PF).toBe('1800');
+    expect(row.Insurance).toBe('');
+    expect(row.Others).toBe('');
+    expect(row.Recoveries).toBe('');
+  });
+
+  test('PF before Total uses gross_pay', () => {
+    const row = applyFormBGJGujaratEmployeeToRow(
+      {},
+      { FirstName: 'Test', LastName: 'Emp' },
+      ['Name', 'PF', 'Total', 'Net Payment'],
+      {
+        payrollRow: {
+          gross_pay: 63622,
+          net_pay: 50000,
+          pf: 1800,
+        },
+      }
+    );
+    expect(row.PF).toBe('63622');
+    expect(row['Net Payment']).toBe('50000');
+  });
+
+  test('Total right after HRA uses gross_pay (not deductions)', () => {
+    const row = applyFormBGJGujaratEmployeeToRow(
+      {},
+      { FirstName: 'Test', LastName: 'Emp' },
+      ['HRA', 'Total', 'PF'],
+      {
+        payrollRow: {
+          hra: 10935,
+          gross_pay: 63622,
+          net_pay: 60625,
+          pf: 2797,
+        },
+      }
+    );
+    expect(row.HRA).toBe('10935');
+    expect(row.Total).toBe('63622');
+    expect(row.PF).toBe('2797');
+  });
+
+  test('with two Total columns: first is gross, second is gross minus net', () => {
+    const headers = ['HRA', 'Total', 'PF', 'Recoveries', 'Total ', 'Net Payment'];
+    const row = applyFormBGJGujaratEmployeeToRow(
+      {},
+      { FirstName: 'Test', LastName: 'Emp' },
+      headers,
+      {
+        payrollRow: {
+          hra: 10935,
+          gross_pay: 63622,
+          net_pay: 60625,
+          pf: 2797,
+        },
+      }
+    );
+    expect(row.HRA).toBe('10935');
+    expect(row.PF).toBe('2797');
+    expect(row.Recoveries).toBe('');
+    expect(row.Total).toBe('63622');
+    expect(row['Total ']).toBe('2997');
+    expect(row['Net Payment']).toBe('60625');
+  });
+
+  test('with duplicate "Total" captions, values stay in separate columns', () => {
+    const rawHeaders = ['HRA', 'Total', 'PF', 'Recoveries', 'Total', 'Net Payment'];
+    const headers = resolveFormBGJGujaratTableHeaders(rawHeaders);
+    const firstTotal = headers[1];
+    const secondTotal = headers[4];
+    expect(firstTotal).toBe('Total');
+    expect(secondTotal).toBe('Total ');
+
+    const row = applyFormBGJGujaratEmployeeToRow(
+      {},
+      { FirstName: 'Test', LastName: 'Emp' },
+      rawHeaders,
+      {
+        payrollRow: {
+          hra: 10935,
+          gross_pay: 63622,
+          net_pay: 60625,
+          pf: 2797,
+        },
+      }
+    );
+
+    expect(row.HRA).toBe('10935');
+    expect(row.PF).toBe('2797');
+    expect(row[firstTotal]).toBe('63622');
+    expect(row[secondTotal]).toBe('2997');
+    expect(row['Net Payment']).toBe('60625');
   });
 
   test('Date of Payment header matches Sample Payroll Pay date', () => {

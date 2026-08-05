@@ -452,17 +452,46 @@ export function isStatutoryFormTitleBandText(text) {
   if (/^wage\s+slip\b/i.test(t) && t.length <= 100) return true;
   if (/^combined\s+muster\b/i.test(t) && t.length <= 100) return true;
   if (/^register\s+of\s+overtime\b/i.test(t)) return true;
+  // CLRA Form XV / XI service certificate title (Gujarat / AP / TN / MP).
+  if (/^service\s+certificate\b/i.test(t) && t.length <= 80) return true;
   return false;
+}
+
+/**
+ * Form XV Service Certificate (esp. Gujarat two-column) — employment table values stay centered.
+ */
+function worksheetLooksLikeFormXVServiceCertificate(worksheet) {
+  if (!worksheet || typeof worksheet.getCell !== 'function') return false;
+  let hasFormXv = false;
+  let hasServiceCert = false;
+  const maxR = Math.min(8, Number(worksheet.rowCount) || 8);
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= 12; c += 1) {
+      let value;
+      try {
+        value = worksheet.getCell(r, c)?.value;
+      } catch (_) {
+        continue;
+      }
+      const text = statutoryCellValueToPlainText(value);
+      if (!text) continue;
+      if (/^form\s*xv\b/i.test(text)) hasFormXv = true;
+      if (/^service\s+certificate\b/i.test(text)) hasServiceCert = true;
+      if (hasFormXv && hasServiceCert) return true;
+    }
+  }
+  return hasFormXv && hasServiceCert;
 }
 
 /**
  * Download alignment:
  * - Form Number / Rule / Form Name → center
- * - Numeric values → right
+ * - Numeric values → right (except Form XV service-certificate table → center)
  * - No left-align override for text (keeps template centering)
  */
 export function applyStatutoryDownloadContentAlignment(worksheet) {
   if (!worksheet) return;
+  const formXvServiceCertificate = worksheetLooksLikeFormXVServiceCertificate(worksheet);
   worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
     row.eachCell({ includeEmpty: false }, (cell) => {
       const text = statutoryCellValueToPlainText(cell?.value);
@@ -477,9 +506,10 @@ export function applyStatutoryDownloadContentAlignment(worksheet) {
 
       // Always center Form Number / Rule / Form Name (do not leave/force left).
       // Keep wrapText false on title band so a narrow column cannot stack the title vertically.
+      // Long Gujarat "Vide rule 77 … Gujarat Rules" line may need wrap inside its merge.
       if (rowNumber <= 20 && isStatutoryFormTitleBandText(text)) {
         next.horizontal = 'center';
-        next.wrapText = false;
+        next.wrapText = /vide\s+rule/i.test(text) && text.length > 60 ? true : false;
         next.textRotation = 0;
         cell.alignment = next;
         return;
@@ -487,7 +517,8 @@ export function applyStatutoryDownloadContentAlignment(worksheet) {
 
       // Numbers only — never force normal text to left.
       if (isStatutoryNumericCellValue(cell?.value)) {
-        next.horizontal = 'right';
+        // Form XV employment table (Sl No / rate / period) matches the certificate template.
+        next.horizontal = formXvServiceCertificate && rowNumber >= 30 ? 'center' : 'right';
         cell.alignment = next;
       }
     });

@@ -446,8 +446,11 @@ export async function fetchSamplePayrollTableSnapshot(payrollMonth) {
   return { records: [], meta: null, payrollMonth: String(payrollMonth || '').trim() };
 }
 
-export async function fetchSamplePayrollRowsForMonth(payrollMonth, { timeoutMs = 45000 } = {}) {
-  const listLoad = await fetchSamplePayrollRecords(payrollMonth, { timeoutMs });
+export async function fetchSamplePayrollRowsForMonth(
+  payrollMonth,
+  { timeoutMs = 45000, force = false } = {}
+) {
+  const listLoad = await fetchSamplePayrollRecords(payrollMonth, { timeoutMs, force });
   const payDate = String(listLoad.meta?.payDate || listLoad.meta?.pay_date || '').trim();
   const meta =
     listLoad.meta ||

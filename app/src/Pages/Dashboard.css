@@ -1,346 +1,377 @@
-/* Compliance Analytics Dashboard — model UI */
+/* HCM Dashboard - Model UI (reference design) */
 
-.nd-root,
-.nd-main,
-.nd-content,
-.nd-header,
-.cd-page,
-.cd-page--standalone,
-.cd-grid {
-  background: #ffffff !important;
-  background-color: #ffffff !important;
-}
-
-.cd-page {
-  min-height: 100%;
+.new-dashboard-page {
+  min-height: 100vh;
+  background: rgb(250, 234, 209);
+  font-family: 'Inter', 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif;
+  padding: 1.5rem;
   width: 100%;
   box-sizing: border-box;
-  padding: 0;
-  margin: 0 0 1.25rem;
-  font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* Metric cards row */
+.metric-cards-container {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.metric-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 1.25rem 1.5rem;
+  border-radius: 16px;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
+  min-height: 100px;
+}
+
+.metric-card-icon {
+  margin-bottom: 0.5rem;
+  opacity: 0.95;
+}
+
+.metric-card-value {
+  font-size: 2rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.metric-card-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.metric-card-green {
+  background: #22c55e;
+}
+
+.metric-card-blue {
+  background: #2563eb;
+}
+
+.metric-card-pink {
+  background: #ec4899;
+}
+
+.metric-card-orange {
+  background: #f97316;
+}
+
+/* Main grid: top row + bottom row */
+.new-dashboard-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.dashboard-top-row {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 1.5rem;
+}
+
+.dashboard-bottom-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+
+/* Shared card styles */
+.overall-compliance-card,
+.map-card,
+.compliance-acts-card,
+.bar-chart-card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 1.5rem;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  font-size: 1.05rem;
+  font-weight: 700;
   color: #1f2937;
 }
 
-.cd-page--standalone {
-  padding: 1.25rem 1.5rem 2rem;
-  margin: 0;
-  min-height: 100%;
-}
-
-.cd-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1.25rem;
-  max-width: 1400px;
-  margin: 0 auto;
-}
-
-.cd-card {
-  background: transparent !important;
-  background-color: transparent !important;
-  border: none !important;
-  border-radius: 0 !important;
-  box-shadow: none !important;
-  padding: 1.15rem 1.25rem 1rem;
-  display: flex;
-  flex-direction: column;
-  min-height: 340px;
-}
-
-.cd-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
-}
-
-.cd-card-title {
-  margin: 0;
-  font-size: 1.05rem;
-  font-weight: 700;
-  color: #111827;
-}
-
-.cd-select {
-  appearance: none;
-  border: 1px solid #dbe3ef;
-  background: none url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M3 4.5L6 8l3-3.5'/%3E%3C/svg%3E") no-repeat right 0.6rem center;
-  padding: 0.35rem 1.75rem 0.35rem 0.7rem;
-  border-radius: 8px;
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: #374151;
-  cursor: pointer;
-}
-
-.cd-link {
-  color: #2563eb;
-  font-size: 0.88rem;
-  font-weight: 600;
-  text-decoration: none;
-}
-
-.cd-link:hover {
-  text-decoration: underline;
-}
-
-.cd-inline-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.85rem 1.1rem;
-  margin-bottom: 0.5rem;
-}
-
-.cd-inline-legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.8rem;
-  color: #4b5563;
-  font-weight: 500;
-}
-
-.cd-dot {
-  width: 9px;
-  height: 9px;
+.card-dot {
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
-.cd-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  flex-shrink: 0;
+.card-dot.accent {
+  background: #53c26b;
 }
 
-/* Health */
-.cd-health-body {
-  display: grid;
-  grid-template-columns: 1.1fr 1fr;
-  gap: 0.5rem 1rem;
-  align-items: center;
-  flex: 1;
+.card-dot.primary {
+  background: #2563eb;
 }
 
-.cd-health-gauge-wrap {
+/* Overall Compliance ring (donut) */
+.overall-compliance-ring {
   display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.overall-compliance-segment {
+  width: 180px;
+  height: 180px;
+  border-radius: 50%;
+  position: relative;
+  display: flex;
+  align-items: center;
   justify-content: center;
 }
 
-.cd-gauge {
-  width: 100%;
-  max-width: 220px;
-  height: auto;
-}
-
-.cd-gauge-value {
-  font-size: 28px;
-  font-weight: 800;
-  fill: #111827;
-}
-
-.cd-gauge-label {
-  font-size: 8.5px;
-  font-weight: 500;
-  fill: #6b7280;
-}
-
-.cd-health-legend {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.overall-compliance-inner {
+  position: absolute;
+  width: 120px;
+  height: 120px;
+  background: #fff;
+  border-radius: 50%;
   display: flex;
   flex-direction: column;
-  gap: 0.7rem;
-}
-
-.cd-health-legend li {
-  display: grid;
-  grid-template-columns: 12px 1fr auto;
   align-items: center;
-  gap: 0.55rem;
-  font-size: 0.9rem;
+  justify-content: center;
+  box-shadow: inset 0 0 0 2px #e5e7eb;
 }
 
-.cd-legend-label {
-  color: #374151;
-  font-weight: 500;
+.overall-compliance-inner span {
+  font-size: 1.75rem;
+  font-weight: 800;
+  color: #22c55e;
+  line-height: 1.2;
 }
 
-.cd-legend-value {
-  font-weight: 700;
-  color: #111827;
-  white-space: nowrap;
-}
-
-.cd-legend-value em {
-  font-style: normal;
+.overall-compliance-inner small {
+  font-size: 0.85rem;
   font-weight: 500;
   color: #6b7280;
 }
 
-.cd-health-footer {
-  margin-top: 1rem;
-  background: none;
-  border-radius: 0;
-  padding: 0.85rem 0;
+/* Map card */
+.map-card .card-header {
+  flex-wrap: wrap;
+}
+
+.map-toggle-btn {
+  margin-left: auto;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: #f1f5f9;
+  color: #475569;
+  border-radius: 8px;
+  cursor: pointer;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  color: #166534;
-  font-weight: 600;
-  font-size: 0.92rem;
+  justify-content: center;
 }
 
-.cd-health-footer-score {
-  text-align: right;
+.map-toggle-btn:hover {
+  background: #e2e8f0;
+  color: #1e293b;
 }
 
-.cd-health-footer-score strong {
-  display: block;
-  font-size: 1.55rem;
-  line-height: 1.1;
-  color: #16a34a;
-}
-
-.cd-health-footer-score small {
-  display: block;
-  margin-top: 0.15rem;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: #16a34a;
-}
-
-/* Charts */
-.cd-chart-wrap {
-  flex: 1;
-  min-height: 220px;
-  display: flex;
-  align-items: stretch;
-}
-
-.cd-trend-svg,
-.cd-act-svg {
+.map-frame {
+  position: relative;
   width: 100%;
-  height: 100%;
-  min-height: 220px;
-}
-
-.cd-axis-text {
-  font-size: 10px;
-  fill: #9ca3af;
-}
-
-.cd-act-label {
-  font-size: 9px;
-}
-
-.cd-bar-label {
-  font-size: 9px;
-  font-weight: 700;
-  fill: #4b5563;
-}
-
-/* Location */
-.cd-location-body {
-  display: grid;
-  grid-template-columns: 1.05fr 1fr;
-  gap: 1rem;
-  flex: 1;
-  min-height: 240px;
-}
-
-.cd-location-map {
+  height: 320px;
+  min-height: 280px;
+  background: #f1f5f9;
   border-radius: 12px;
   overflow: hidden;
-  background: none;
-  border: none;
-  min-height: 220px;
+  margin-bottom: 1rem;
 }
 
+/* Leaflet India map - fill container */
 .india-map-container {
   height: 100% !important;
   width: 100% !important;
   border-radius: 12px;
-  background: none;
 }
 
+.india-map-container .leaflet-tile-pane {
+  z-index: 1;
+}
+
+.india-map-container .leaflet-marker-pane {
+  z-index: 2;
+}
+
+/* Custom teardrop markers - hide default Leaflet icon border */
 .custom-marker {
   background: transparent !important;
   border: none !important;
 }
 
-.cd-location-list {
-  list-style: none;
-  margin: 0;
-  padding: 0.15rem 0 0;
+/* Location chips list */
+.map-locations-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.map-location-chip {
   display: flex;
   flex-direction: column;
-  gap: 0.85rem;
+  align-items: flex-start;
+  gap: 0.25rem;
+  padding: 0.75rem 1rem;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  min-width: 160px;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-.cd-location-row {
-  display: grid;
-  grid-template-columns: 12px 1fr auto;
+.map-location-chip:hover {
+  border-color: #94a3b8;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.map-location-chip.active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.map-chip-header {
+  display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin-bottom: 0.35rem;
 }
 
-.cd-location-name {
-  font-size: 0.88rem;
+.map-chip-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.map-chip-name {
+  font-size: 0.9rem;
   font-weight: 600;
   color: #1f2937;
 }
 
-.cd-location-pct {
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: #374151;
+.map-chip-meta {
+  font-size: 0.8rem;
+  color: #6b7280;
+  padding-left: 18px;
 }
 
-.cd-progress {
-  height: 8px;
-  background: #eef2f7;
-  border-radius: 999px;
+.map-chip-score {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #2563eb;
+  padding-left: 18px;
+}
+
+/* Compliance acts list */
+.compliance-acts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.compliance-act-container {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
   overflow: hidden;
 }
 
-.cd-progress-fill {
-  height: 100%;
-  border-radius: 999px;
+.compliance-act-row {
+  display: flex;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: #fff;
+  font-size: 0.9rem;
 }
 
-.cd-card-footer-center {
-  margin-top: 0.85rem;
-  text-align: center;
+.compliance-act-row-clickable:hover {
+  background: #f9fafb;
 }
 
-@media (max-width: 1100px) {
-  .cd-grid {
+.compliance-act-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+  color: #1f2937;
+}
+
+.checklist-count-badge {
+  font-weight: 400;
+  color: #6b7280;
+  margin-left: 4px;
+}
+
+.compliance-act-score {
+  font-weight: 700;
+  color: #6b7280;
+  margin-right: 0.5rem;
+}
+
+.compliance-act-score.score-high {
+  color: #16a34a;
+}
+
+.compliance-act-score.score-mid {
+  color: #ca8a04;
+}
+
+.expand-icon {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+/* Bar chart card */
+.bar-chart-container {
+  width: 100%;
+  overflow: auto;
+}
+
+.bar-chart-wrapper {
+  min-width: 100%;
+}
+
+.bar-chart-svg {
+  display: block;
+}
+
+@media (max-width: 1024px) {
+  .dashboard-top-row {
     grid-template-columns: 1fr;
   }
-}
 
-@media (max-width: 720px) {
-  .cd-page {
-    padding: 1rem;
-  }
-
-  .cd-health-body,
-  .cd-location-body {
+  .dashboard-bottom-row {
     grid-template-columns: 1fr;
   }
 
-  .cd-health-footer {
-    flex-direction: column;
-    align-items: flex-start;
+  .metric-cards-container {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .metric-cards-container {
+    grid-template-columns: 1fr;
   }
 
-  .cd-health-footer-score {
-    text-align: left;
+  .map-location-chip {
+    min-width: 100%;
   }
 }

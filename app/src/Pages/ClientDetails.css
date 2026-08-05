@@ -1,5 +1,5 @@
 /* ClientDetails – Statutory-style layout, cd- prefix */
-.cd-page {
+.client-details-page {
   padding: 24px;
   background-color: #FFEFD5;
   min-height: 100vh;
@@ -268,7 +268,8 @@
   gap: 0;
 }
 
-.cd-card {
+/* Scoped under modal wrap so Dashboard `.cd-card` graphs are not capped at 640px */
+.cd-forms-wrap .cd-card {
   background: #ffffff;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
@@ -279,7 +280,7 @@
   animation: cd-slideUp 0.3s ease-out;
 }
 
-.cd-card-header {
+.cd-forms-wrap .cd-card-header {
   padding: 24px 32px;
   border-bottom: 1px solid #e5e7eb;
   display: flex;
@@ -287,7 +288,7 @@
   align-items: center;
 }
 
-.cd-card-header h2 {
+.cd-forms-wrap .cd-card-header h2 {
   margin: 0;
   font-size: 24px;
   color: #2C3E50;

@@ -201,7 +201,7 @@ const ClientDetails = ({ userRole, userEmail }) => {
   };
 
   return (
-    <div className="cd-page">
+    <div className="client-details-page">
       <div className="cd-card-container">
         <div className="cd-header-row">
           <div className="cd-header-left">

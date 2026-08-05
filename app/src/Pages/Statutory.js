@@ -39,6 +39,8 @@ import {
   fetchLeaveData,
   fetchPeopleData,
   fetchPeopleDataForAutofillDisplay,
+  ensureCompletePeopleData,
+  isPartialPeopleCache,
   fetchJsonWithTimeout,
   flattenZohoPeopleEmployees,
   getCachedAttendanceData,
@@ -827,6 +829,7 @@ import {
   buildFormBGJGujaratWorkbookWithTemplateStyles,
   enrichFormBGJGujaratPayrollRows,
   filterFormBGJGujaratExportRows,
+  formBGJPayrollRowHasSampleDeductionFields,
   isFormBGJGujaratContext,
   isFormBGJSkipPeopleAutofillHeader,
   remapFormBGJGujaratRowsToHeaders,
@@ -15921,15 +15924,56 @@ const isFormXVGJContext = (formHeader, rowItem, fileName, sheetText = '') => {
     rowItem?.SiteState,
     rowItem?.formName,
     rowItem?.FormName,
+    rowItem?.formFileName,
+    rowItem?.FormFileName,
+    rowItem?.fileName,
+    rowItem?.FileName,
     fileName,
     formHeader?.title,
     formHeader?.subtitle,
+    formHeader?.reference,
     sheetText,
   ]
     .filter((x) => x != null && String(x).trim() !== '')
     .join(' ')
     .toLowerCase();
-  return /gujarat|form[\s._-]*xv[\s._-]*gj/i.test(parts);
+  return /gujarat|form[\s._-]*xv[\s._-]*gj|\bxv[\s._-]*gj\b|form_xv_gj/i.test(parts);
+};
+
+/**
+ * Gujarat Form XV — two-column bordered site boxes (contractor|establishment,
+ * nature|principal) above stacked workman labels. Never treat as TN/MP stacked.
+ */
+const detectFormXVGJTwoColumnBoxLayout = (worksheet, headerRow) => {
+  if (!worksheet || headerRow < 10) return false;
+  const contractor = findFormXVMasterLabelCell(
+    worksheet,
+    headerRow,
+    /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i,
+    14
+  );
+  const establishment = findFormXVMasterLabelCell(
+    worksheet,
+    headerRow,
+    /establishment[\s\S]{0,80}?contract/i,
+    14
+  );
+  if (!contractor || !establishment) return false;
+  if (establishment.col <= contractor.col) return false;
+  if (Math.abs(establishment.row - contractor.row) > 2) return false;
+  let hasGujaratVide = false;
+  for (let r = 1; r <= Math.min(6, headerRow - 1); r += 1) {
+    for (let c = 1; c <= 14; c += 1) {
+      const text = String(formXVExcelCellValueToString(worksheet.getCell(r, c)?.value) || '').trim();
+      if (!text) continue;
+      if (/gujarat\s+rules|central\s*&\s*gujarat|vide\s+rule\s*77/i.test(text)) {
+        hasGujaratVide = true;
+        break;
+      }
+    }
+    if (hasGujaratVide) break;
+  }
+  return hasGujaratVide || (contractor.col <= 5 && establishment.col >= 6);
 };
 
 /** Form 27 / XXVII — underscore filenames (Form_XXVII_-_TamilNadu.xlsx) break \\b word boundaries. */
@@ -19818,7 +19862,8 @@ const FORM_XV_SITE_HEADER_LABEL_SPECS = [
     key: 'form_xv_nature_location_work'
   },
   {
-    match: /name\s+and\s+address\s+of\s+establishment[\s\S]*contract\s+is\s+carried\s+on/i,
+    // Templates sometimes misspell "carried" as "caried".
+    match: /name\s+and\s+address\s+of\s+establishment[\s\S]*contract\s+is\s+cari?ed\s+on/i,
     label: 'Name and address of establishment in/under which contract is carried on',
     key: 'form_xv_establishment_contract_carried'
   },
@@ -20924,6 +20969,135 @@ const clearFormXVStackedHeaderValueCells = (worksheet, headerRow, opts = {}) => 
   clearFormXVStackedCertificateValueBand(worksheet, headerRow, opts);
 };
 
+/** Resolve the bordered/merged value box under a Form XV_GJ site label. */
+const resolveFormXVGJSiteBoxArea = (worksheet, labelRow, labelCol, side = 'left') => {
+  const halfStart = side === 'right' ? Math.max(6, labelCol) : Math.max(1, Math.min(labelCol, 3));
+  const halfEnd = side === 'right' ? 12 : 5;
+  const boxTop = labelRow + 1;
+  if (!worksheet || labelRow < 1) {
+    return { row: boxTop, col: halfStart, rowSpan: 6, colSpan: halfEnd - halfStart + 1 };
+  }
+  const colLettersToNum = (letters) => {
+    let n = 0;
+    for (const ch of String(letters || '').toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
+    return n;
+  };
+  // Prefer an existing merge that sits directly under the label in this half.
+  try {
+    const mergeList = Array.isArray(worksheet.model?.merges) ? worksheet.model.merges : [];
+    let best = null;
+    for (const range of mergeList) {
+      const parts = String(range || '').split(':');
+      if (parts.length !== 2) continue;
+      const start = String(parts[0]).match(/^([A-Z]+)(\d+)$/i);
+      const end = String(parts[1]).match(/^([A-Z]+)(\d+)$/i);
+      if (!start || !end) continue;
+      const top = Math.min(Number(start[2]), Number(end[2]));
+      const bottom = Math.max(Number(start[2]), Number(end[2]));
+      const left = Math.min(colLettersToNum(start[1]), colLettersToNum(end[1]));
+      const right = Math.max(colLettersToNum(start[1]), colLettersToNum(end[1]));
+      if (top < boxTop || top > labelRow + 3) continue;
+      if (bottom - top < 1) continue;
+      const overlapLeft = Math.max(left, halfStart);
+      const overlapRight = Math.min(right, halfEnd);
+      if (overlapRight < overlapLeft) continue;
+      if (!best || top < best.top || (top === best.top && left < best.left)) {
+        best = { top, bottom, left: overlapLeft, right: overlapRight };
+      }
+    }
+    if (best) {
+      return {
+        row: best.top,
+        col: best.left,
+        rowSpan: best.bottom - best.top + 1,
+        colSpan: best.right - best.left + 1
+      };
+    }
+  } catch (_) {
+    /* fall through to defaults */
+  }
+  return {
+    row: boxTop,
+    col: halfStart,
+    rowSpan: 6,
+    colSpan: halfEnd - halfStart + 1
+  };
+};
+
+const clearFormXVGJSiteBoxSpill = (worksheet, headerRow) => {
+  if (!worksheet || headerRow < 8) return;
+  const workman = findFormXVMasterLabelCell(
+    worksheet,
+    headerRow,
+    /name\s+and\s+address\s+of\s+the\s+workm[ae]n/i,
+    14
+  );
+  const nature = findFormXVMasterLabelCell(worksheet, headerRow, /nature\s+and\s+location/i, 14);
+  const principal = findFormXVMasterLabelCell(
+    worksheet,
+    headerRow,
+    /name\s+and\s+address\s+of\s+(?:the\s+)?principal\s+employer|principal\s+employer/i,
+    14
+  );
+  let clearFrom = 21;
+  if (nature) {
+    const area = resolveFormXVGJSiteBoxArea(worksheet, nature.row, nature.col, 'left');
+    clearFrom = Math.max(clearFrom, area.row + area.rowSpan);
+  }
+  if (principal) {
+    const area = resolveFormXVGJSiteBoxArea(worksheet, principal.row, principal.col, 'right');
+    clearFrom = Math.max(clearFrom, area.row + area.rowSpan);
+  }
+  const clearUntil = workman ? workman.row - 1 : Math.min(headerRow - 1, 34);
+  if (clearFrom > clearUntil) return;
+  // Gap rows between principal/nature boxes and workman band often keep orphan fragments (e.g. "Theni").
+  for (let r = clearFrom; r <= clearUntil; r += 1) {
+    for (let c = 1; c <= 14; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      if (formXVCellIsMergeSlave(cell)) continue;
+      const text = String(formXVExcelCellValueToString(cell?.value) || '').trim();
+      if (!text) continue;
+      if (
+        /name\s+and\s+address|nature\s+and\s+location|principal\s+employer|age\s+or\s+date|identification|father|husband|form\s*xv|service\s+certificate|vide\s+rule|see\s+rule/i.test(
+          text
+        )
+      ) {
+        continue;
+      }
+      cell.value = '';
+    }
+  }
+};
+
+const ensureFormXVGJTitleBandAlignment = (worksheet, headerRow) => {
+  if (!worksheet || headerRow < 2) return;
+  for (let r = 1; r <= Math.min(5, headerRow - 1); r += 1) {
+    for (let c = 1; c <= 12; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      if (formXVCellIsMergeSlave(cell)) continue;
+      const text = String(formXVExcelCellValueToString(cell?.value) || '').trim();
+      if (!text) continue;
+      if (
+        /^form\s*xv\b/i.test(text) ||
+        /^service\s+certificate\b/i.test(text) ||
+        /vide\s+rule\s*77/i.test(text) ||
+        /^\(?\s*see\s+rule\b/i.test(text)
+      ) {
+        cell.alignment = {
+          ...(cell.alignment || {}),
+          horizontal: 'center',
+          vertical: 'middle',
+          wrapText: /vide\s+rule|see\s+rule/i.test(text),
+          shrinkToFit: false
+        };
+        if (/^form\s*xv\b|^service\s+certificate\b/i.test(text)) {
+          cell.font = { ...(cell.font || {}), bold: true };
+        }
+      }
+    }
+  }
+};
+
 const writeFormXVHeaderFieldsToWorksheet = (
   worksheet,
   layout,
@@ -20935,6 +21109,7 @@ const writeFormXVHeaderFieldsToWorksheet = (
     includeStaticBoxes = true,
     includeNatureBox = true,
     preferTamilNadu = false,
+    preferGujarat = false,
     forceStacked = false
   }
 ) => {
@@ -20958,9 +21133,11 @@ const writeFormXVHeaderFieldsToWorksheet = (
     return fromField && !isStatutoryHeaderPlaceholderValue(fromField) ? fromField : '';
   };
 
+  // Gujarat two-column boxes must never take the TN/MP stacked path.
   const stackedLayout =
-    detectFormXVStackedCertificateLayout(worksheet, headerRow, forceStacked || preferTamilNadu) ||
-    preferTamilNadu;
+    !preferGujarat &&
+    (detectFormXVStackedCertificateLayout(worksheet, headerRow, forceStacked || preferTamilNadu) ||
+      preferTamilNadu);
   if (stackedLayout) {
     const stackedValueCol = resolveFormXVStackedValueColumn(worksheet, headerRow, {
       preferTamilNadu
@@ -21014,6 +21191,15 @@ const writeFormXVHeaderFieldsToWorksheet = (
   const resolveFormXVSiteBoxAnchor = (spec) => {
     const label = findFormXVSiteLabel(spec.match);
     if (label) {
+      if (preferGujarat) {
+        const area = resolveFormXVGJSiteBoxArea(
+          worksheet,
+          label.labelRow,
+          label.labelCol,
+          spec.side
+        );
+        return area;
+      }
       const interiorRow = label.labelRow + 1;
       const interiorCol =
         spec.side === 'right'
@@ -21023,13 +21209,18 @@ const writeFormXVHeaderFieldsToWorksheet = (
           : label.labelCol <= 5
             ? label.labelCol
             : 2;
-      return { row: interiorRow, col: interiorCol };
+      return { row: interiorRow, col: interiorCol, rowSpan: 5, colSpan: 4 };
     }
     if (spec.key === 'form_xv_nature_location_work') {
       const principal = findFormXVSiteLabel(/principal\s+employer/i);
-      if (principal) return { row: principal.labelRow + 1, col: 2 };
+      if (principal) {
+        if (preferGujarat) {
+          return resolveFormXVGJSiteBoxArea(worksheet, principal.labelRow, 2, 'left');
+        }
+        return { row: principal.labelRow + 1, col: 2, rowSpan: 5, colSpan: 4 };
+      }
     }
-    return spec.defaultAnchor;
+    return { ...spec.defaultAnchor, rowSpan: 5, colSpan: 4 };
   };
 
   const splitFormXVBoxLines = (text) => {
@@ -21044,7 +21235,9 @@ const writeFormXVHeaderFieldsToWorksheet = (
   const clearFormXVSiteBox = (row, col, rowSpan = 5, colSpan = 4) => {
     for (let r = row; r < row + rowSpan; r += 1) {
       for (let c = col; c < col + colSpan; c += 1) {
-        worksheet.getCell(r, c).value = '';
+        const cell = worksheet.getCell(r, c);
+        if (formXVCellIsMergeSlave(cell)) continue;
+        cell.value = '';
       }
     }
   };
@@ -21054,7 +21247,9 @@ const writeFormXVHeaderFieldsToWorksheet = (
       .map((line) => dedupeFormXVRepeatedText(line))
       .filter(Boolean);
     if (parts.length === 0 || !anchor) return;
-    clearFormXVSiteBox(anchor.row, anchor.col, rowSpan, colSpan);
+    const spanRows = Number(anchor.rowSpan) > 0 ? Number(anchor.rowSpan) : rowSpan;
+    const spanCols = Number(anchor.colSpan) > 0 ? Number(anchor.colSpan) : colSpan;
+    clearFormXVSiteBox(anchor.row, anchor.col, spanRows, spanCols);
     const cell = worksheet.getCell(anchor.row, anchor.col);
     cell.value = parts.join('\n');
     cell.alignment = {
@@ -21070,28 +21265,28 @@ const writeFormXVHeaderFieldsToWorksheet = (
     {
       key: 'form_xv_contractor',
       match: /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i,
-      defaultAnchor: { row: 7, col: 2 },
+      defaultAnchor: { row: 7, col: preferGujarat ? 1 : 2 },
       side: 'left',
       static: true
     },
     {
       key: 'form_xv_establishment_contract_carried',
       match: /establishment[\s\S]*contract\s+is\s+car/i,
-      defaultAnchor: { row: 7, col: 7 },
+      defaultAnchor: { row: 7, col: preferGujarat ? 6 : 7 },
       side: 'right',
       static: true
     },
     {
       key: 'form_xv_nature_location_work',
       match: /nature\s+and\s+location/i,
-      defaultAnchor: { row: 14, col: 2 },
+      defaultAnchor: { row: 15, col: preferGujarat ? 1 : 2 },
       side: 'left',
       static: false
     },
     {
       key: 'form_xv_principal_employer',
       match: /name\s+and\s+address\s+of\s+(?:the\s+)?principal\s+employer|principal\s+employer/i,
-      defaultAnchor: { row: 14, col: 7 },
+      defaultAnchor: { row: 15, col: preferGujarat ? 6 : 7 },
       side: 'right',
       static: true
     }
@@ -21115,6 +21310,11 @@ const writeFormXVHeaderFieldsToWorksheet = (
 
     const value = resolveHeaderValue(spec.key, spec.match);
     writeFormXVSiteBoxMultiline(anchor, splitFormXVBoxLines(value));
+  }
+
+  if (preferGujarat) {
+    clearFormXVGJSiteBoxSpill(worksheet, headerRow);
+    ensureFormXVGJTitleBandAlignment(worksheet, headerRow);
   }
 };
 
@@ -21179,7 +21379,7 @@ const resetFormXVWorkmanLabelCell = (worksheet, row, col, spec) => {
   worksheet.getCell(row, col).value = `${beforeColon} :`;
 };
 
-const setFormXVWorkmanCellValue = (worksheet, row, col, value) => {
+const setFormXVWorkmanCellValue = (worksheet, row, col, value, { preferGujarat = false } = {}) => {
   const text = dedupeFormXVRepeatedText(value);
   if (!text) return;
   const cell = worksheet.getCell(row, col);
@@ -21188,7 +21388,8 @@ const setFormXVWorkmanCellValue = (worksheet, row, col, value) => {
   cell.alignment = {
     ...(cell.alignment || {}),
     horizontal: 'left',
-    vertical: multiline ? 'top' : (cell.alignment?.vertical || 'top'),
+    // GJ template: single-line workman values sit mid-height beside tall B–E label merges.
+    vertical: multiline ? 'top' : preferGujarat ? 'middle' : (cell.alignment?.vertical || 'top'),
     wrapText: multiline,
     shrinkToFit: false
   };
@@ -21213,13 +21414,35 @@ const clearFormXVWorkmanValueCells = (worksheet, layout, opts = {}) => {
   if (!worksheet || !layout) return;
   const { headerRow } = layout;
   const preferTamilNadu = !!opts.preferTamilNadu;
-  if (detectFormXVStackedCertificateLayout(worksheet, headerRow, preferTamilNadu) || preferTamilNadu) {
+  const preferGujarat = !!opts.preferGujarat;
+  if (
+    !preferGujarat &&
+    (detectFormXVStackedCertificateLayout(worksheet, headerRow, preferTamilNadu) || preferTamilNadu)
+  ) {
     clearFormXVStackedHeaderValueCells(worksheet, headerRow, { preferTamilNadu });
     return;
   }
   const valueCol = resolveFormXVWorkmanValueColumn(worksheet, headerRow);
-  for (let r = 1; r < headerRow; r += 1) {
-    worksheet.getCell(r, valueCol).value = '';
+  const workman = findFormXVMasterLabelCell(
+    worksheet,
+    headerRow,
+    /name\s+and\s+address\s+of\s+the\s+workm[ae]n/i,
+    20
+  );
+  // GJ/AP: only clear the workman value band — never wipe site-box columns above it.
+  const clearFromRow = preferGujarat && workman ? workman.row : 1;
+  for (let r = clearFromRow; r < headerRow; r += 1) {
+    const cell = worksheet.getCell(r, valueCol);
+    if (formXVCellIsMergeSlave(cell)) continue;
+    const text = String(formXVExcelCellValueToString(cell?.value) || '').trim();
+    if (
+      /name\s+and\s+address|nature\s+and\s+location|principal\s+employer|form\s*xv|service\s+certificate|vide\s+rule/i.test(
+        text
+      )
+    ) {
+      continue;
+    }
+    cell.value = '';
   }
 };
 
@@ -21228,18 +21451,23 @@ const writeFormXVWorkmanFieldsToWorksheet = (
   layout,
   row,
   hdrs,
-  { preferTamilNadu = false } = {}
+  { preferTamilNadu = false, preferGujarat = false } = {}
 ) => {
   if (!worksheet || !row || typeof row !== 'object') return;
   const { headerRow } = layout;
   const allHdrs = Array.isArray(hdrs) && hdrs.length > 0 ? hdrs : [...FORM_XV_TABLE_HEADERS];
   const filledSpecs = new Set();
   const stackedLayout =
-    detectFormXVStackedCertificateLayout(worksheet, headerRow, preferTamilNadu) || preferTamilNadu;
+    !preferGujarat &&
+    (detectFormXVStackedCertificateLayout(worksheet, headerRow, preferTamilNadu) || preferTamilNadu);
   const defaultValueCol = resolveFormXVWorkmanValueColumn(worksheet, headerRow);
   const stackedValueCol = stackedLayout
     ? resolveFormXVStackedValueColumn(worksheet, headerRow, { preferTamilNadu })
     : defaultValueCol;
+
+  if (preferGujarat) {
+    clearFormXVWorkmanValueCells(worksheet, layout, { preferGujarat: true });
+  }
 
   for (const spec of FORM_XV_WORKMAN_HEADER_LABEL_SPECS) {
     if (filledSpecs.has(spec.key)) continue;
@@ -21258,10 +21486,22 @@ const writeFormXVWorkmanFieldsToWorksheet = (
         preferTamilNadu
       });
     } else {
-      const valueCol = defaultValueCol;
+      // GJ: value column is F (beside B–E label merges); keep label text intact.
+      const valueCol = preferGujarat
+        ? Math.max(defaultValueCol, formXVMergeEndCol(worksheet, label.row, label.col) + 1, 6)
+        : defaultValueCol;
       resetFormXVWorkmanLabelCell(worksheet, label.row, label.col, spec);
+      if (preferGujarat) {
+        const labelCell = worksheet.getCell(label.row, label.col);
+        labelCell.alignment = {
+          ...(labelCell.alignment || {}),
+          horizontal: 'left',
+          vertical: 'middle',
+          wrapText: true
+        };
+      }
       clearFormXVStaleBelowRowValue(worksheet, label.row, valueCol, value);
-      setFormXVWorkmanCellValue(worksheet, label.row, valueCol, value);
+      setFormXVWorkmanCellValue(worksheet, label.row, valueCol, value, { preferGujarat });
     }
     filledSpecs.add(spec.key);
   }
@@ -21291,7 +21531,7 @@ const resolveFormXVExportRowValue = (row, header, allHdrs = null) => {
   return value;
 };
 
-const writeFormXVDataRowsToWorksheet = (worksheet, layout, sourceRows) => {
+const writeFormXVDataRowsToWorksheet = (worksheet, layout, sourceRows, { preferGujarat = false } = {}) => {
   const { dataStartRow, hdrs, columnByHeader, allHdrs } = layout;
   const rows = (Array.isArray(sourceRows) ? sourceRows : []).filter(
     (row) => row && typeof row === 'object' && Object.values(row).some((v) => String(v ?? '').trim() !== '')
@@ -21307,7 +21547,16 @@ const writeFormXVDataRowsToWorksheet = (worksheet, layout, sourceRows) => {
         value = i + 1;
       }
       if (value == null || value === '') continue;
-      worksheet.getCell(dataStartRow + i, exportCol).value = coerceFormXVCellExportValue(value, header);
+      const cell = worksheet.getCell(dataStartRow + i, exportCol);
+      cell.value = coerceFormXVCellExportValue(value, header);
+      if (preferGujarat) {
+        cell.alignment = {
+          ...(cell.alignment || {}),
+          horizontal: 'center',
+          vertical: 'middle',
+          wrapText: false
+        };
+      }
     }
   }
   return rows.length;
@@ -25743,8 +25992,12 @@ const getStatutoryRowDisplayStatus = (item) => {
     String(draftVal).trim() !== 'null' &&
     String(draftVal).trim() !== 'undefined';
   if (!hasDraftFile) return 'Yet to Complete';
-  if (norm === '' || norm === '-' || norm === '—') return 'Pending';
-  if (normalized === 'pending') return 'Pending';
+  if (norm === '' || norm === '-' || norm === '—') {
+    return statutorySendForApprovalIsSent(item) ? 'Pending' : 'Yet to Complete';
+  }
+  if (normalized === 'pending') {
+    return statutorySendForApprovalIsSent(item) ? 'Pending' : 'Yet to Complete';
+  }
   if (normalized === 'yet to complete' || normalized === 'yet to comply') {
     return statutorySendForApprovalIsSent(item) ? 'Pending' : 'Yet to Complete';
   }
@@ -29217,23 +29470,7 @@ const Statutory = ({ userEmail, userRole }) => {
     setTableAutofillLoading(true);
     setTableAutofillProgress('Opening form…');
     setError('');
-    // Open loading modal immediately so Gujarat CLRA / Autofill never looks frozen while template + data load.
-    const loadingFileName =
-      autofillRowItem?.formFileName ||
-      autofillRowItem?.FormFileName ||
-      autofillRowItem?.formName ||
-      autofillRowItem?.FormName ||
-      'Form File';
-    setFormFileModalData({
-      fileName: loadingFileName,
-      formFileName: loadingFileName,
-      fileType: 'excel-form',
-      item: autofillRowItem,
-      parsedTableHeaders: [],
-    });
-    setIsFormFileModalOpen(true);
-    isFormFileModalOpenRef.current = true;
-    await yieldToMain();
+    // Do not open a loading modal for Autofill; show the modal only once the form is parsed.
     await handleViewFormFile(autofillRowItem, true, options);
   };
 
@@ -34551,13 +34788,19 @@ const Statutory = ({ userEmail, userRole }) => {
       headersToUse
     });
 
+    const preferGujarat =
+      isFormXVGJContext(parsedFormHeader, rowItem, formFileName || '', sheetText || '') ||
+      detectFormXVGJTwoColumnBoxLayout(worksheet, layout.headerRow);
+
     const preferTamilNadu =
-      isFormXVTamilNaduContext(
+      !preferGujarat &&
+      (isFormXVTamilNaduContext(
         parsedFormHeader,
         rowItem,
         formFileName || '',
         sheetText || ''
-      ) || detectFormXVTamilNaduTemplateLayout(worksheet, layout.headerRow);
+      ) ||
+        detectFormXVTamilNaduTemplateLayout(worksheet, layout.headerRow));
 
     if (preferTamilNadu && Array.isArray(layout.columnByHeader)) {
       layout.columnByHeader = layout.columnByHeader.map((c, j) =>
@@ -34571,9 +34814,11 @@ const Statutory = ({ userEmail, userRole }) => {
       (row) => row && typeof row === 'object' && Object.values(row).some((v) => String(v ?? '').trim() !== '')
     );
 
+    // GJ two-column boxes must never take the TN/MP stacked certificate path.
     const useStacked =
-      preferTamilNadu ||
-      detectFormXVStackedCertificateLayout(worksheet, layout.headerRow, preferTamilNadu);
+      !preferGujarat &&
+      (preferTamilNadu ||
+        detectFormXVStackedCertificateLayout(worksheet, layout.headerRow, preferTamilNadu));
 
     if (useStacked) {
       clearFormXVStackedCertificateValueBand(worksheet, layout.headerRow, { preferTamilNadu });
@@ -34587,12 +34832,14 @@ const Statutory = ({ userEmail, userRole }) => {
       includeStaticBoxes: true,
       includeNatureBox: sourceRows.length === 1,
       preferTamilNadu,
+      preferGujarat,
       forceStacked: useStacked
     });
 
     if (sourceRows.length === 1) {
       writeFormXVWorkmanFieldsToWorksheet(worksheet, layout, sourceRows[0], allHdrs || hdrs, {
-        preferTamilNadu
+        preferTamilNadu,
+        preferGujarat
       });
     }
     const { usedExportCols } = layout;
@@ -34618,11 +34865,12 @@ const Statutory = ({ userEmail, userRole }) => {
         worksheet.getCell(r, usedExportCols[ci]).value = '';
       }
     }
-    writeFormXVDataRowsToWorksheet(worksheet, layout, sourceRows);
+    writeFormXVDataRowsToWorksheet(worksheet, layout, sourceRows, { preferGujarat });
 
     // TN Form XV body is A–F — do not autofit (keeps template column widths).
     // MP stacked certificate: keep template + value-band widths so titles/labels stay aligned.
-    if (!skipAutofit && !useStacked) {
+    // GJ two-column boxes: never autofit — preserves C–K / A–I certificate column widths.
+    if (!skipAutofit && !useStacked && !preferGujarat) {
       const maxCol =
         columnByHeader.length > 0
           ? Math.max(...columnByHeader, hdrs.length)
@@ -34632,6 +34880,10 @@ const Statutory = ({ userEmail, userRole }) => {
 
     if (useStacked) {
       ensureFormXVStackedTitleBand(worksheet, layout.headerRow, { preferTamilNadu });
+    }
+    if (preferGujarat) {
+      ensureFormXVGJTitleBandAlignment(worksheet, layout.headerRow);
+      clearFormXVGJSiteBoxSpill(worksheet, layout.headerRow);
     }
 
     // Final sweep: remove any values that still leaked into column G+ on TN templates.
@@ -34650,6 +34902,7 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     // Full thin box borders on header + data + empty template body (the blank box under the row).
+    // GJ: paint data rows only — keep multi-tier From/To header merges as in the template.
     if (sourceRows.length > 0 && usedExportCols.length > 0) {
       const bodyRowsToPaint = Math.max(sourceRows.length, templateBodyRows, 1);
       ensureExcelJSDataRowsWithBorders(worksheet, {
@@ -34661,7 +34914,7 @@ const Statutory = ({ userEmail, userRole }) => {
         templateBodyRows: bodyRowsToPaint
       });
       applyExcelJSFullBoxBordersToRange(worksheet, {
-        rowFrom: layout.headerRow,
+        rowFrom: preferGujarat ? dataStartRow : layout.headerRow,
         rowTo: dataStartRow + bodyRowsToPaint - 1,
         colFrom: tableColFrom,
         colTo: tableColTo
@@ -34736,12 +34989,11 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     let useFastZip = false;
-    let preferTamilNaduZip = isFormXVTamilNaduContext(
-      parsedFormHeader,
-      rowItem,
-      formFileName || '',
-      sheetText || ''
-    );
+    const preferGujaratZip =
+      isFormXVGJContext(parsedFormHeader, rowItem, formFileName || '', sheetText || '');
+    let preferTamilNaduZip =
+      !preferGujaratZip &&
+      isFormXVTamilNaduContext(parsedFormHeader, rowItem, formFileName || '', sheetText || '');
     try {
       const probeWb = new ExcelJS.Workbook();
       await probeWb.xlsx.load(templateArrayBuffer);
@@ -34752,12 +35004,16 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedDataStartIndex,
           headersToUse: hdrs
         });
-        if (!preferTamilNaduZip) {
+        const preferGujaratProbe =
+          preferGujaratZip || detectFormXVGJTwoColumnBoxLayout(probeWs, probeLayout.headerRow);
+        if (!preferTamilNaduZip && !preferGujaratProbe) {
           preferTamilNaduZip = detectFormXVTamilNaduTemplateLayout(probeWs, probeLayout.headerRow);
         }
+        // GJ two-column templates need ExcelJS merge-aware writes — never MP fast XML zip.
         useFastZip =
-          preferTamilNaduZip ||
-          detectFormXVStackedCertificateLayout(probeWs, probeLayout.headerRow, preferTamilNaduZip);
+          !preferGujaratProbe &&
+          (preferTamilNaduZip ||
+            detectFormXVStackedCertificateLayout(probeWs, probeLayout.headerRow, preferTamilNaduZip));
       }
     } catch (_) {
       useFastZip = false;
@@ -41845,12 +42101,19 @@ const Statutory = ({ userEmail, userRole }) => {
         (isFormQKarnatakaHeaderFieldLayoutFormHeader(parsed?.formHeader) || formQKarnatakaDownloadContext);
       const isFormVIIAPDownload =
         isFormVIIAPHeaderFieldLayoutFormHeader(parsed?.formHeader) || formVIIAPDownloadContext;
-      const isFormXIVMPDownload = isFormXIVMPEmploymentCardContext(
-        parsed?.formHeader,
-        item,
-        fn,
-        parsed?.sheetText || formFileModalData?.sheetText || ''
-      );
+      const isFormXIVMPDownload =
+        isFormXIVMPEmploymentCardContext(
+          parsed?.formHeader,
+          item,
+          fn,
+          parsed?.sheetText || formFileModalData?.sheetText || ''
+        ) ||
+        isFormXRajasthanEmploymentCardContext(
+          parsed?.formHeader,
+          item,
+          fn,
+          parsed?.sheetText || formFileModalData?.sheetText || ''
+        );
       const isFormXIXMPDownload = isFormXIXMPWageSlipContext(
         parsed?.formHeader,
         item,
@@ -49459,7 +49722,9 @@ const Statutory = ({ userEmail, userRole }) => {
                       headersToUse: xivDownloadHdrs,
                       parsedFormHeader: parsed.formHeader,
                       formFileName: templateMeta.formFileName || resolvedFormFileItem.formFileName || 'form-draft.xlsx',
-                      headerFormData: downloadHeaderFormData
+                      headerFormData: downloadHeaderFormData,
+                      rowItem: lineItem || item,
+                      sheetText: parsed?.sheetText || formFileModalData?.sheetText || '',
                     });
                   })()
               : isFormXIXKarnatakaDownload
@@ -51135,7 +51400,9 @@ const Statutory = ({ userEmail, userRole }) => {
           headersToUse: xivHdrs,
           parsedFormHeader: parsed.formHeader,
           formFileName: fileName || fn,
-          headerFormData
+          headerFormData,
+          rowItem: lineItem || sourceItem || resolvedFormFileItem || null,
+          sheetText: parsed?.sheetText || formFileModalData?.sheetText || '',
         });
         triggerFormXIVMPZipDownload(zipResult.blob, zipResult.fileName);
       } else {
@@ -58011,6 +58278,44 @@ const Statutory = ({ userEmail, userRole }) => {
             resolvedSiteForEmployeeFilter,
             sitesForEmployeeFilter
           );
+          // Fast first-page (~80) often omits site-specific staff (e.g. GJ-Amreli).
+          // If the filter empties the list on a partial cache, upgrade to the full People fetch once.
+          if (
+            employees.length === 0 &&
+            !skipPeopleLoad &&
+            (isPartialPeopleCache(getCachedPeopleData()) || beforeCount > 0)
+          ) {
+            const cachedPeople = getCachedPeopleData();
+            const shouldUpgrade =
+              isPartialPeopleCache(cachedPeople) ||
+              (beforeCount > 0 && beforeCount <= 80 && !cachedPeople?.meta?.mode);
+            if (shouldUpgrade) {
+              try {
+                if (!returnMappedData) {
+                  setTableAutofillProgress(
+                    `Loading full employee list for ${locationTargets.join(', ') || 'site'}…`
+                  );
+                }
+                const fullResult = await ensureCompletePeopleData({ force: true });
+                const fullEmployees = flattenZohoPeopleEmployees(fullResult);
+                if (Array.isArray(fullEmployees) && fullEmployees.length > 0) {
+                  employees = filterEmployeesBySiteLocation(
+                    fullEmployees,
+                    resolvedSiteForEmployeeFilter,
+                    sitesForEmployeeFilter
+                  );
+                  console.log(
+                    `Statutory autofill upgraded People list for location filter: ${beforeCount} → ${fullEmployees.length} total, ${employees.length} matched (${locationTargets.join(', ')})`
+                  );
+                }
+              } catch (upgradeErr) {
+                console.warn(
+                  'Could not upgrade partial People cache after empty location filter:',
+                  upgradeErr
+                );
+              }
+            }
+          }
           const excludedSample = beforeEmployees
             .filter((emp) => !employees.includes(emp))
             .slice(0, 12)
@@ -68217,10 +68522,15 @@ const Statutory = ({ userEmail, userRole }) => {
         );
         const skipBlockingBgjPayrollFetch =
           fastPaginatedAutofill || fastModalAutofill || enrichOnlyPhase;
-        if (payrollRowsForBgjGrid.length === 0 && !skipBlockingBgjPayrollFetch) {
+        const bgjGridLacksSampleDeductions =
+          payrollRowsForBgjGrid.length === 0 ||
+          !payrollRowsForBgjGrid.some((row) => formBGJPayrollRowHasSampleDeductionFields(row));
+        // Reload Sample Payroll when cache/Zoho list has Gross but empty PF / VPF / Income Tax.
+        if (bgjGridLacksSampleDeductions && !skipBlockingBgjPayrollFetch) {
           try {
             const loadedBgj = await loadFormXIXMPPayrollRowsForAutofill(bgjMonthForGrid, {
               timeoutMs: fastModalAutofill ? 15000 : 45000,
+              force: true,
             });
             const reloadedBgjCache = getCachedForm15PayrollTableRows(bgjMonthForGrid);
             const reloadedBgjPayDate = String(
@@ -76775,10 +77085,15 @@ const Statutory = ({ userEmail, userRole }) => {
             payDate: form10PayDate,
           }
         );
-        if (bgjPayrollRows.length === 0) {
+        const bgjFinalLacksSampleDeductions =
+          bgjPayrollRows.length === 0 ||
+          !bgjPayrollRows.some((row) => formBGJPayrollRowHasSampleDeductionFields(row));
+        // Always pull Sample Payroll when PF / Voluntary Provident Fund / Income Tax are missing.
+        if (bgjFinalLacksSampleDeductions) {
           try {
             const loadedBgj = await loadFormXIXMPPayrollRowsForAutofill(bgjMonthCandidates, {
               timeoutMs: enrichOnlyPhase ? 8000 : 45000,
+              force: true,
             });
             cachedBgjReload = getCachedForm15PayrollTableRows(bgjMonthCandidates);
             if (!form10PayDate) {
@@ -85333,8 +85648,8 @@ const Statutory = ({ userEmail, userRole }) => {
       setTableHeaders([]);
       setSubColumns(null);
 
-      // Show loading shell immediately (Autofill may have opened it already).
-      if (!isFormFileModalOpenRef.current) {
+      // View File opens a loading shell; Autofill opens the modal only after form parse.
+      if (!isFormFileModalOpenRef.current && !forceAutofill) {
         const loadingFileName =
           item?.formFileName || item?.FormFileName || item?.formName || item?.FormName || 'Form File';
         setFormFileModalData({
@@ -85346,10 +85661,6 @@ const Statutory = ({ userEmail, userRole }) => {
         });
         setIsFormFileModalOpen(true);
         isFormFileModalOpenRef.current = true;
-        if (forceAutofill) {
-          setTableAutofillLoading(true);
-          setTableAutofillProgress('Opening form…');
-        }
         await yieldToMain();
       }
 

@@ -693,6 +693,10 @@ const resolveFormXVRJTableExportLayout = (worksheet, hdrs) => {
 const writeFormXVRJTableRowToWorksheet = (worksheet, row, layout) => {
   if (!worksheet || !row || !layout) return;
   const { dataStartRow, columnByHeader, hdrs } = layout;
+  const targetRow = worksheet.getRow(dataStartRow);
+  if (targetRow && (!targetRow.height || Number(targetRow.height) < 18)) {
+    targetRow.height = 18;
+  }
   hdrs.forEach((header, j) => {
     const col = columnByHeader[j];
     if (!col || col < 1) return;
@@ -798,19 +802,45 @@ const formXVRJColToLetter = (col) => {
 
 const formXVRJToCellRef = (row, col) => `${formXVRJColToLetter(col)}${row}`;
 
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const ensureInlineStringCellOpenTag = (openTag) => {
+  if (!openTag) return '<c t="inlineStr">';
+  if (/\bt\s*=\s*(['"])inlineStr\1/i.test(openTag)) return openTag;
+  if (/\bt\s*=\s*(['"])[^'"]*\1/i.test(openTag)) {
+    return openTag.replace(/\bt\s*=\s*(['"])[^'"]*\1/i, 't="inlineStr"');
+  }
+  return openTag.replace(/>$/, ' t="inlineStr">');
+};
+
 const formXVRJUpsertInlineStrCell = (sheetXml, cellRef, value) => {
   const text = formXVRJEscapeXml(formXVRJSanitizeExportText(value));
-  const cellXml = text
-    ? `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`
-    : `<c r="${cellRef}"/>`;
-  const cellRe = new RegExp(`<c\\s+r="${cellRef}"[^>]*(?:/>|>[\\s\\S]*?</c>)`, 'i');
-  if (cellRe.test(sheetXml)) {
-    return sheetXml.replace(cellRe, cellXml);
+  const escapedRef = escapeRegExp(cellRef);
+  const buildInlineStringCell = (openTag) => {
+    if (!text) return `${openTag.replace(/>$/, '')}/>`;
+    return `${openTag}<is><t xml:space="preserve">${text}</t></is></c>`;
+  };
+
+  const fullCellRe = new RegExp(`(<c\\b[^>]*\\br="${escapedRef}"[^>]*>)[\\s\\S]*?<\\/c>`, 'i');
+  const fullMatch = sheetXml.match(fullCellRe);
+  if (fullMatch) {
+    const openTag = ensureInlineStringCellOpenTag(fullMatch[1]);
+    return sheetXml.replace(fullCellRe, buildInlineStringCell(openTag));
   }
+
+  const selfClosingCellRe = new RegExp(`(<c\\b[^>]*\\br="${escapedRef}"[^>]*)\\/>`, 'i');
+  const selfClosingMatch = sheetXml.match(selfClosingCellRe);
+  if (selfClosingMatch) {
+    const openTag = ensureInlineStringCellOpenTag(`${selfClosingMatch[1]}>`);
+    return sheetXml.replace(selfClosingCellRe, buildInlineStringCell(openTag));
+  }
+
+  const bareOpenTag = ensureInlineStringCellOpenTag(`<c r="${cellRef}">`);
+  const bareCellXml = text ? buildInlineStringCell(bareOpenTag) : `<c r="${cellRef}"/>`;
   const rowNum = cellRef.replace(/^[A-Z]+/i, '');
   const rowRe = new RegExp(`(<row\\s+r="${rowNum}"[^>]*>)([\\s\\S]*?)(</row>)`, 'i');
   if (!rowRe.test(sheetXml)) return sheetXml;
-  return sheetXml.replace(rowRe, `$1$2${cellXml}$3`);
+  return sheetXml.replace(rowRe, `$1$2${bareCellXml}$3`);
 };
 
 const resolveFormXVRJWorksheetEntry = (zipFiles) =>

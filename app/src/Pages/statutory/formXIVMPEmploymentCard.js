@@ -265,6 +265,10 @@ export function headersIndicateFormXIVMPTable(tableHeaders) {
 
 export function resolveFormXIVVariant(formHeader, rowItem, fileName, sheetText = '', tableHeaders = null) {
   const parts = [
+    rowItem?.state,
+    rowItem?.State,
+    rowItem?.siteState,
+    rowItem?.SiteState,
     rowItem?.formName,
     rowItem?.FormName,
     rowItem?.description,
@@ -2808,6 +2812,8 @@ export async function buildFormXIVMPPerEmployeeDownload({
   parsedFormHeader,
   formFileName,
   headerFormData,
+  rowItem = null,
+  sheetText = '',
 }) {
   const hdrs = resolveFormXIVMPTableHeaders(headersToUse, {
     formHeader: parsedFormHeader,
@@ -2817,7 +2823,7 @@ export async function buildFormXIVMPPerEmployeeDownload({
     ...(parsedFormHeader || {}),
     formXIVVariant:
       parsedFormHeader?.formXIVVariant ||
-      resolveFormXIVVariant(parsedFormHeader, null, formFileName, '', hdrs),
+      resolveFormXIVVariant(parsedFormHeader, rowItem, formFileName, sheetText, hdrs),
   };
   const exportRows = (Array.isArray(mappedData) ? mappedData : []).filter((row) =>
     rowHasMeaningfulFormXIVMPExportData(row, hdrs)

@@ -1173,6 +1173,7 @@ function describeArc(cx, cy, r, startAngle, endAngle) {
 
 /** Image-1 line model: open inventory series, hollow markers, 0–200 scale. */
 function TrendChart({ series }) {
+  const [hover, setHover] = useState(null);
   const width = 560;
   const height = 240;
   const pad = { top: 12, right: 18, bottom: 30, left: 40 };
@@ -1194,6 +1195,7 @@ function TrendChart({ series }) {
   const xAt = (i) => pad.left + (n === 1 ? chartW / 2 : (i / (n - 1)) * chartW);
   const yAt = (v) => pad.top + chartH - (Math.min(Math.max(v, 0), maxY) / maxY) * chartH;
   const hasData = series.some((s) => (s.total || 0) > 0);
+  const bandW = n === 1 ? chartW : chartW / Math.max(n - 1, 1);
 
   const paths = keys.map((key) => {
     const pts = series.map((row, i) => ({
@@ -1206,65 +1208,161 @@ function TrendChart({ series }) {
     return { key, d };
   });
 
+  const setHoverFromEvent = (index, focusKey, event) => {
+    const row = series[index];
+    if (!row) return;
+    const svg = event.currentTarget.ownerSVGElement || event.currentTarget;
+    const rect = svg.getBoundingClientRect?.() || event.currentTarget.getBoundingClientRect();
+    const scaleX = rect.width / width;
+    const scaleY = rect.height / height;
+    const focusValue = Number(row[focusKey]) || 0;
+    setHover({
+      index,
+      focusKey,
+      label: row.label,
+      counts: {
+        approved: Number(row.approved) || 0,
+        pending: Number(row.pending) || 0,
+        yetToSubmit: Number(row.yetToSubmit) || 0,
+        returned: Number(row.returned) || 0,
+      },
+      x: xAt(index) * scaleX,
+      y: yAt(focusValue) * scaleY,
+    });
+  };
+
+  const nearestKeyAtY = (row, svgY) => {
+    let nearestKey = keys[0];
+    let best = Infinity;
+    keys.forEach((key) => {
+      const dist = Math.abs(yAt(Number(row[key]) || 0) - svgY);
+      if (dist < best) {
+        best = dist;
+        nearestKey = key;
+      }
+    });
+    return nearestKey;
+  };
+
   return (
-    <svg className="chd-trend-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Compliance trend">
-      {ticks.map((v) => (
-        <g key={v}>
-          <line
-            x1={pad.left}
-            y1={yAt(v)}
-            x2={pad.left + chartW}
-            y2={yAt(v)}
-            stroke="#eef2f7"
-            strokeWidth="1"
-          />
-          <text x={pad.left - 10} y={yAt(v) + 4} textAnchor="end" fontSize="10" fill="#9ca3af">
-            {v}
-          </text>
-        </g>
-      ))}
-      {paths.map((p) => (
-        <path
-          key={p.key}
-          d={p.d}
-          fill="none"
-          stroke={STATUS_COLORS[p.key]}
-          strokeWidth="2"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          strokeOpacity={hasData ? 1 : 0.35}
-        />
-      ))}
-      {keys.map((key) =>
-        series.map((row, i) => {
-          const value = Number(row[key]) || 0;
-          return (
-            <circle
-              key={`${key}-${i}`}
-              cx={xAt(i)}
-              cy={yAt(value)}
-              r="4"
-              fill={STATUS_COLORS[key]}
-              stroke="#fff"
-              strokeWidth="1.5"
-              opacity={hasData ? 1 : 0.35}
+    <div className="chd-trend-wrap" onMouseLeave={() => setHover(null)}>
+      <svg className="chd-trend-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Compliance trend">
+        {ticks.map((v) => (
+          <g key={v}>
+            <line
+              x1={pad.left}
+              y1={yAt(v)}
+              x2={pad.left + chartW}
+              y2={yAt(v)}
+              stroke="#eef2f7"
+              strokeWidth="1"
             />
-          );
-        })
-      )}
-      {series.map((row, i) => (
-        <text
-          key={row.label}
-          x={xAt(i)}
-          y={height - 8}
-          textAnchor="middle"
-          fontSize="11"
-          fill="#6b7280"
+            <text x={pad.left - 10} y={yAt(v) + 4} textAnchor="end" fontSize="10" fill="#9ca3af">
+              {v}
+            </text>
+          </g>
+        ))}
+        {hover != null && (
+          <line
+            x1={xAt(hover.index)}
+            y1={pad.top}
+            x2={xAt(hover.index)}
+            y2={pad.top + chartH}
+            stroke="#cbd5e1"
+            strokeWidth="1"
+            strokeDasharray="4 3"
+            pointerEvents="none"
+          />
+        )}
+        {paths.map((p) => (
+          <path
+            key={p.key}
+            d={p.d}
+            fill="none"
+            stroke={STATUS_COLORS[p.key]}
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            strokeOpacity={hasData ? 1 : 0.35}
+            pointerEvents="none"
+          />
+        ))}
+        {keys.map((key) =>
+          series.map((row, i) => {
+            const value = Number(row[key]) || 0;
+            const active = hover?.focusKey === key && hover?.index === i;
+            return (
+              <circle
+                key={`${key}-${i}`}
+                cx={xAt(i)}
+                cy={yAt(value)}
+                r={active ? 5.5 : 4}
+                fill={STATUS_COLORS[key]}
+                stroke="#fff"
+                strokeWidth={active ? 2.5 : 1.5}
+                opacity={hasData ? 1 : 0.35}
+                pointerEvents="none"
+              />
+            );
+          })
+        )}
+        {series.map((row, i) => (
+          <text
+            key={row.label}
+            x={xAt(i)}
+            y={height - 8}
+            textAnchor="middle"
+            fontSize="11"
+            fill="#6b7280"
+          >
+            {row.label}
+          </text>
+        ))}
+        {/* Hit bands: hover near a month / line to show counts */}
+        {series.map((row, i) => (
+          <rect
+            key={`band-${row.label}`}
+            x={xAt(i) - bandW / 2}
+            y={pad.top}
+            width={bandW}
+            height={chartH}
+            fill="transparent"
+            style={{ cursor: 'pointer' }}
+            onMouseEnter={(e) => {
+              const svg = e.currentTarget.ownerSVGElement;
+              const rect = svg.getBoundingClientRect();
+              const svgY = ((e.clientY - rect.top) / rect.height) * height;
+              setHoverFromEvent(i, nearestKeyAtY(row, svgY), e);
+            }}
+            onMouseMove={(e) => {
+              const svg = e.currentTarget.ownerSVGElement;
+              const rect = svg.getBoundingClientRect();
+              const svgY = ((e.clientY - rect.top) / rect.height) * height;
+              setHoverFromEvent(i, nearestKeyAtY(row, svgY), e);
+            }}
+          />
+        ))}
+      </svg>
+      {hover && (
+        <div
+          className={`chd-trend-tooltip${hover.y < 72 ? ' chd-trend-tooltip--below' : ''}`}
+          style={{ left: hover.x, top: hover.y }}
+          role="tooltip"
         >
-          {row.label}
-        </text>
-      ))}
-    </svg>
+          <div className="chd-trend-tooltip-month">{hover.label}</div>
+          {TREND_STATUS_ORDER.map((key) => (
+            <div
+              key={key}
+              className={`chd-trend-tooltip-row${hover.focusKey === key ? ' is-active' : ''}`}
+            >
+              <span className="chd-dot" style={{ background: STATUS_COLORS[key] }} />
+              <span>{STATUS_LABELS[key]}</span>
+              <strong>{hover.counts[key]}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

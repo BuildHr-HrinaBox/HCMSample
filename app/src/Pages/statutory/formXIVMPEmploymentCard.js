@@ -24,6 +24,7 @@ import {
   isFormXIVEmploymentCardContext,
   matchesFormXIVHint,
   resolveFormXIVWorkbookSheetName,
+  sheetBlobIndicatesFormXLeaveRegister,
 } from './formXAPRegisterOfFines';
 
 /** MP / CLRA Form XIV — Employment Card (Rule 76): header fields + employee table. */
@@ -547,15 +548,40 @@ function pickWorkbookSheet(workbook, hints = {}) {
   const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
   if (!names.length) return null;
   const preferred = String(hints.preferredSheetName || '').trim();
-  if (preferred && workbook.Sheets?.[preferred]) return preferred;
+  if (preferred && workbook.Sheets?.[preferred]) {
+    const preferredBlob = `${preferred} ${buildSheetTextBlob(workbook, preferred)}`;
+    // Never keep a Register of Leave tab when Form X_RJ / Employment Card is requested.
+    if (!sheetBlobIndicatesFormXLeaveRegister(preferredBlob)) return preferred;
+  }
   const fromResolver = resolveFormXIVWorkbookSheetName(workbook, hints);
   if (fromResolver) return fromResolver;
-  if (names.length === 1) return names[0];
-  const blob = [hints.fileName, hints.formFileName, hints.item?.formName, hints.item?.FormName]
+  if (names.length === 1) {
+    const onlyBlob = `${names[0]} ${buildSheetTextBlob(workbook, names[0])}`;
+    if (sheetBlobIndicatesFormXLeaveRegister(onlyBlob) && !blobIndicatesEmploymentCard(onlyBlob, null)) {
+      return null;
+    }
+    return names[0];
+  }
+  const blob = [
+    hints.fileName,
+    hints.formFileName,
+    hints.item?.formName,
+    hints.item?.FormName,
+    hints.item?.description,
+    hints.item?.Description,
+    hints.item?.state,
+    hints.item?.State,
+  ]
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
-  if (!matchesFormXIVHint(blob) && !blobIndicatesEmploymentCard(blob, null)) return names[0];
+  const wantsFormXRJ =
+    /form[\s._-]*x[\s._-]*rj\b/i.test(blob) ||
+    /\bx_rj\b/i.test(blob) ||
+    (/rajasthan/i.test(blob) && /employment\s+card/i.test(blob));
+  if (!matchesFormXIVHint(blob) && !blobIndicatesEmploymentCard(blob, null) && !wantsFormXRJ) {
+    return names[0];
+  }
   let best = null;
   let bestScore = -Infinity;
   for (const name of names) {
@@ -564,6 +590,8 @@ function pickWorkbookSheet(workbook, hints = {}) {
     let score = 0;
     if (matchesFormXIVHint(sheetBlob)) score += 120;
     if (blobIndicatesEmploymentCard(sheetBlob, null)) score += 90;
+    if (wantsFormXRJ && blobIndicatesEmploymentCard(sheetBlob, null)) score += 80;
+    if (sheetBlobIndicatesFormXLeaveRegister(sheetBlob)) score -= 280;
     if (/register\s+of\s+workmen\s+employed\s+by\s+contractor/i.test(sheetBlob) && !/employment\s+card/i.test(sheetBlob)) {
       score -= 100;
     }
@@ -573,6 +601,102 @@ function pickWorkbookSheet(workbook, hints = {}) {
     }
   }
   return bestScore > 0 ? best : names[0];
+}
+
+/** Scan ExcelJS worksheet text for leave-register vs employment-card layout. */
+function buildExcelJsSheetTextBlob(worksheet, maxRows = 30, maxCols = 12) {
+  if (!worksheet) return '';
+  const parts = [];
+  for (let r = 1; r <= maxRows; r += 1) {
+    const rowParts = [];
+    for (let c = 1; c <= maxCols; c += 1) {
+      const text = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (text) rowParts.push(text);
+    }
+    if (rowParts.length) parts.push(rowParts.join(' '));
+  }
+  return parts.join(' ');
+}
+
+/**
+ * Prefer Employment Card / Form X_RJ sheet for ExcelJS export.
+ * Never default to a Register of Leave tab when a better sheet exists.
+ */
+export function resolveFormXIVMPExcelJsWorksheet(workbook, hints = {}) {
+  const sheets = Array.isArray(workbook?.worksheets) ? workbook.worksheets : [];
+  if (!sheets.length) return null;
+
+  const preferred = String(hints.preferredSheetName || '').trim();
+  if (preferred) {
+    const byName = sheets.find((ws) => String(ws?.name || '').trim() === preferred);
+    if (byName) {
+      const blob = `${byName.name} ${buildExcelJsSheetTextBlob(byName)}`;
+      if (!sheetBlobIndicatesFormXLeaveRegister(blob) || blobIndicatesEmploymentCard(blob, null)) {
+        return byName;
+      }
+    }
+  }
+
+  const rjLayout = sheets.find((ws) => detectFormXRajasthanWorksheetLayout(ws));
+  if (rjLayout) return rjLayout;
+
+  const employmentCard = sheets.find((ws) => {
+    const blob = `${ws.name} ${buildExcelJsSheetTextBlob(ws)}`;
+    return blobIndicatesEmploymentCard(blob, null) && !sheetBlobIndicatesFormXLeaveRegister(blob);
+  });
+  if (employmentCard) return employmentCard;
+
+  const nonLeave = sheets.find((ws) => {
+    const blob = `${ws.name} ${buildExcelJsSheetTextBlob(ws)}`;
+    return !sheetBlobIndicatesFormXLeaveRegister(blob);
+  });
+  return nonLeave || sheets[0];
+}
+
+/**
+ * Keep only the Employment Card worksheet so download does not open a sibling
+ * Register of Leave tab (common in multi-form Form X workbooks).
+ */
+export async function isolateFormXIVEmploymentCardTemplateBuffer(templateArrayBuffer, hints = {}) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateArrayBuffer);
+  const target = resolveFormXIVMPExcelJsWorksheet(workbook, hints);
+  if (!target) throw new Error('Template worksheet not found.');
+
+  const targetBlob = `${target.name} ${buildExcelJsSheetTextBlob(target)}`;
+  if (
+    sheetBlobIndicatesFormXLeaveRegister(targetBlob) &&
+    !blobIndicatesEmploymentCard(targetBlob, null) &&
+    !detectFormXRajasthanWorksheetLayout(target)
+  ) {
+    throw new Error(
+      'Form X_RJ template is Register of Leave, not Employment Card. Upload Form X_RJ (Employment Card) in Form Master.'
+    );
+  }
+
+  workbook.worksheets.forEach((ws) => {
+    if (ws.id !== target.id) {
+      try {
+        workbook.removeWorksheet(ws.id);
+      } catch (_) {
+        /* ignore locked/order issues */
+      }
+    }
+  });
+
+  // Ensure the kept sheet is first / active for Excel open.
+  if (workbook.worksheets[0] && workbook.worksheets[0].id !== target.id) {
+    // removeWorksheet may leave target as sole sheet already
+  }
+  if (typeof target.orderNo === 'number') {
+    try {
+      target.orderNo = 0;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  return workbook.xlsx.writeBuffer();
 }
 
 function buildWorkbookMergedCellAccessor(workbook, hints = {}) {
@@ -2618,27 +2742,54 @@ export async function buildFormXIVMPWorkbookWithTemplateStyles({
   parsedFormHeader,
   formFileName,
   headerFormData,
+  preferredSheetName = '',
+  rowItem = null,
+  sheetText = '',
 }) {
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(templateArrayBuffer);
-  const worksheet = workbook.worksheets[0];
-  if (!worksheet) throw new Error('Template worksheet not found.');
-
   const hdrs = resolveFormXIVMPTableHeaders(headersToUse, {
     formHeader: parsedFormHeader,
     fileName: formFileName,
   });
+  const resolvedVariant = resolveFormXIVVariant(
+    parsedFormHeader,
+    rowItem,
+    formFileName,
+    sheetText,
+    hdrs
+  );
+  const isRajasthanTableLayout =
+    String(parsedFormHeader?.formXIVVariant || '').toLowerCase() === 'rj' ||
+    resolvedVariant === 'rj' ||
+    isFormXRajasthanEmploymentCardContext(parsedFormHeader, rowItem, formFileName, sheetText);
   const parsedFormHeaderWithVariant = {
     ...(parsedFormHeader || {}),
-    formXIVVariant:
-      parsedFormHeader?.formXIVVariant ||
-      resolveFormXIVVariant(parsedFormHeader, null, formFileName, '', hdrs),
+    formXIVVariant: isRajasthanTableLayout ? 'rj' : parsedFormHeader?.formXIVVariant || resolvedVariant,
   };
+
+  const isolatedBuffer = await isolateFormXIVEmploymentCardTemplateBuffer(templateArrayBuffer, {
+    preferredSheetName,
+    fileName: formFileName,
+    formFileName,
+    formName: parsedFormHeaderWithVariant?.title,
+    formHeader: parsedFormHeaderWithVariant,
+    item: rowItem,
+  });
+
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(isolatedBuffer);
+  const worksheet = resolveFormXIVMPExcelJsWorksheet(workbook, {
+    preferredSheetName,
+    fileName: formFileName,
+    formFileName,
+    formHeader: parsedFormHeaderWithVariant,
+    item: rowItem,
+  });
+  if (!worksheet) throw new Error('Template worksheet not found.');
+
   const sourceRows = (Array.isArray(mappedData) ? mappedData : []).filter((row) =>
     rowHasMeaningfulFormXIVMPExportData(row, hdrs)
   );
   const employeeRow = sourceRows.length === 1 ? sourceRows[0] : sourceRows[0] || null;
-  const isRajasthanTableLayout = parsedFormHeaderWithVariant.formXIVVariant === 'rj';
 
   writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData, parsedFormHeaderWithVariant);
   if (employeeRow) {
@@ -2717,23 +2868,49 @@ async function prepareFormXIVMPFastZipTemplate({
   parsedFormHeader,
   headerFormData,
   formFileName = '',
+  preferredSheetName = '',
+  rowItem = null,
+  sheetText = '',
 }) {
   const hdrs = resolveFormXIVMPTableHeaders(headersToUse, {
     formHeader: parsedFormHeader,
     fileName: formFileName,
   });
+  const resolvedVariant = resolveFormXIVVariant(
+    parsedFormHeader,
+    rowItem,
+    formFileName,
+    sheetText,
+    hdrs
+  );
+  const isRajasthanTableLayout =
+    String(parsedFormHeader?.formXIVVariant || '').toLowerCase() === 'rj' ||
+    resolvedVariant === 'rj' ||
+    isFormXRajasthanEmploymentCardContext(parsedFormHeader, rowItem, formFileName, sheetText);
   const parsedFormHeaderWithVariant = {
     ...(parsedFormHeader || {}),
-    formXIVVariant:
-      parsedFormHeader?.formXIVVariant ||
-      resolveFormXIVVariant(parsedFormHeader, null, formFileName, '', hdrs),
+    formXIVVariant: isRajasthanTableLayout ? 'rj' : parsedFormHeader?.formXIVVariant || resolvedVariant,
   };
+
+  const isolatedBuffer = await isolateFormXIVEmploymentCardTemplateBuffer(templateArrayBuffer, {
+    preferredSheetName,
+    fileName: formFileName,
+    formFileName,
+    formHeader: parsedFormHeaderWithVariant,
+    item: rowItem,
+  });
+
   const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(templateArrayBuffer);
-  const worksheet = workbook.worksheets[0];
+  await workbook.xlsx.load(isolatedBuffer);
+  const worksheet = resolveFormXIVMPExcelJsWorksheet(workbook, {
+    preferredSheetName,
+    fileName: formFileName,
+    formFileName,
+    formHeader: parsedFormHeaderWithVariant,
+    item: rowItem,
+  });
   if (!worksheet) throw new Error('Template worksheet not found.');
   writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData, parsedFormHeaderWithVariant);
-  const isRajasthanTableLayout = parsedFormHeaderWithVariant.formXIVVariant === 'rj';
   let positions = [];
   if (isRajasthanTableLayout) {
     const tableLayout = resolveFormXRJTableExportLayout(worksheet, hdrs);
@@ -2814,16 +2991,27 @@ export async function buildFormXIVMPPerEmployeeDownload({
   headerFormData,
   rowItem = null,
   sheetText = '',
+  preferredSheetName = '',
 }) {
   const hdrs = resolveFormXIVMPTableHeaders(headersToUse, {
     formHeader: parsedFormHeader,
     fileName: formFileName,
   });
+  const resolvedVariant = resolveFormXIVVariant(
+    parsedFormHeader,
+    rowItem,
+    formFileName,
+    sheetText,
+    hdrs
+  );
+  // Prefer live RJ detection over a stale formXIVVariant (e.g. cached 'mp' on Form_X_RJ).
+  const isRajasthanTableLayout =
+    String(parsedFormHeader?.formXIVVariant || '').toLowerCase() === 'rj' ||
+    resolvedVariant === 'rj' ||
+    isFormXRajasthanEmploymentCardContext(parsedFormHeader, rowItem, formFileName, sheetText);
   const parsedFormHeaderWithVariant = {
     ...(parsedFormHeader || {}),
-    formXIVVariant:
-      parsedFormHeader?.formXIVVariant ||
-      resolveFormXIVVariant(parsedFormHeader, rowItem, formFileName, sheetText, hdrs),
+    formXIVVariant: isRajasthanTableLayout ? 'rj' : parsedFormHeader?.formXIVVariant || resolvedVariant,
   };
   const exportRows = (Array.isArray(mappedData) ? mappedData : []).filter((row) =>
     rowHasMeaningfulFormXIVMPExportData(row, hdrs)
@@ -2834,8 +3022,10 @@ export async function buildFormXIVMPPerEmployeeDownload({
     parsedFormHeader: parsedFormHeaderWithVariant,
     formFileName,
     headerFormData,
+    preferredSheetName,
+    rowItem,
+    sheetText,
   };
-  const isRajasthanTableLayout = parsedFormHeaderWithVariant.formXIVVariant === 'rj';
   const zipFilePrefix = isRajasthanTableLayout ? 'Form_X_RJ' : 'Form_XIV_MP';
 
   // Form X RJ: always ZIP (even for 0–1 employees). MP/GJ keep single .xlsx for ≤1.
@@ -2885,6 +3075,9 @@ export async function buildFormXIVMPPerEmployeeDownload({
       parsedFormHeader: parsedFormHeaderWithVariant,
       headerFormData,
       formFileName,
+      preferredSheetName,
+      rowItem,
+      sheetText,
     });
     if (!Array.isArray(positions) || positions.length === 0) {
       return buildSlowZipDownload();

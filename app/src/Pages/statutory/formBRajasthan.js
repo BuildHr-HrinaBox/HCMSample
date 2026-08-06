@@ -194,7 +194,7 @@ export function isFormBRJDeductionTotalHeader(header, headers = [], headerIndex 
   return totalIndices.length >= 2 && idx === totalIndices[totalIndices.length - 1];
 }
 
-/** Earnings total — Basic + HRA only. */
+/** Earnings total (column after HRA) — payroll gross_pay. */
 export function isFormBRJEarningsTotalHeader(header, headers = [], headerIndex = null) {
   if (isFormBRJDeductionTotalHeader(header, headers, headerIndex)) return false;
   return isFormBRJPlainTotalHeader(header);
@@ -425,7 +425,8 @@ export function resolveFormBRajasthanPayrollFields(payrollRow, helpers = {}) {
     if (deductionsTotal < 0) deductionsTotal = '';
   }
 
-  const earningsTotal = sumPayrollNumbers([basic, hra]);
+  // Total after HRA ← gross_pay (not Basic + HRA).
+  const earningsTotal = grossPay || sumPayrollNumbers([basic, hra]);
 
   // Date of Payment → month end (selected wage month), not payroll pay_date.
   const paymentDate =

@@ -4,10 +4,54 @@ import {
   isFormXAPRegisterOfFinesContext,
   blobIndicatesFormIRegisterOfFinesNotFormX,
   sheetBlobIndicatesFormXAPRegisterOfFines,
+  sheetBlobIndicatesFormXLeaveRegister,
+  matchesFormXHint,
   FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT,
   isFormXXAPDeductionNilHeader,
   applyFormXXAPDeductionsNilToMappedRows,
 } from './formXAPRegisterOfFines';
+import { isFormXRajasthanEmploymentCardContext } from './formXIVMPEmploymentCard';
+
+describe('Form X hint vs Form X_RJ Employment Card', () => {
+  it('does not treat Form X_RJ as AP/TN Form X', () => {
+    expect(matchesFormXHint('Form X_RJ')).toBe(false);
+    expect(matchesFormXHint('Form_X_RJ.xlsx')).toBe(false);
+    expect(matchesFormXHint('FORM X RJ Employment Card')).toBe(false);
+    expect(
+      matchesFormXHint('Rajasthan CLRA Form X Employment Card Rule 75')
+    ).toBe(false);
+  });
+
+  it('still matches plain Form X leave / fines labels', () => {
+    expect(matchesFormXHint('Form X')).toBe(true);
+    expect(matchesFormXHint('Form_X_-_TamilNadu.xlsx')).toBe(true);
+    expect(matchesFormXHint('FORM X Register of Leave')).toBe(true);
+  });
+
+  it('detects Rajasthan Form X Employment Card context', () => {
+    expect(
+      isFormXRajasthanEmploymentCardContext(
+        { title: 'FORM X', subtitle: 'Employment Card', reference: '(See rule 75)' },
+        { state: 'Rajasthan', formName: 'Form X_RJ' },
+        'Form_X_RJ.xlsx',
+        'Employment Card'
+      )
+    ).toBe(true);
+  });
+
+  it('detects leave register sheets and rejects them for Form X_RJ sheet pick', () => {
+    expect(
+      sheetBlobIndicatesFormXLeaveRegister(
+        'FORM X REGISTER OF LEAVE Name of the employee Earned Leave Medical Leave'
+      )
+    ).toBe(true);
+    expect(
+      sheetBlobIndicatesFormXLeaveRegister(
+        'FORM X Employment Card Name of the workman Wage period Period of employment'
+      )
+    ).toBe(false);
+  });
+});
 
 describe('Form XIII Register of Workmen detection', () => {
   it('does not classify Tamil Nadu Form 1 conferment register as Form XIII', () => {

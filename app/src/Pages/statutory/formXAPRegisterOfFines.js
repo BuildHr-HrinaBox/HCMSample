@@ -334,9 +334,23 @@ export function isFormXIIIRegisterOfWorkmenContext(
   return blobIndicatesRegisterOfWorkmen(parts, tableHeaders);
 }
 
+/**
+ * AP/TN Form X (leave / fines) only — not Rajasthan CLRA Form X_RJ Employment Card.
+ * Form_X_RJ must not match, or View File / sheet-repick swap in Register of Leave.
+ */
 export function matchesFormXHint(blob) {
   const text = String(blob || '').toLowerCase();
   if (MULTI_X_FORM_RE.test(text)) return false;
+  // Form X_RJ / Form_X_RJ — Rajasthan Employment Card [Rule 75], not AP Shops Form X.
+  if (/form[\s._-]*x[\s._-]*rj\b/i.test(text) || /\bx_rj\b/i.test(text)) return false;
+  if (
+    /rajasthan/i.test(text) &&
+    /employment\s+card/i.test(text) &&
+    /form[\s._-]*x\b/i.test(text) &&
+    !/form[\s._-]*xiv/i.test(text)
+  ) {
+    return false;
+  }
   if (/form[\s._-]*x(?:[\s._\-]|$)/i.test(text)) return true;
   if (/form___x\b|form_-_x\b/i.test(text)) return true;
   return false;
@@ -520,6 +534,11 @@ function rowMetadataWantsFormXAP(rowItem, fileName) {
     .toLowerCase();
   if (matchesFormXXIHint(rowBlob)) return false;
   if (/contract\s+labou?r/i.test(rowBlob) && /register\s+of\s+fines/i.test(rowBlob)) return false;
+  // matchesFormXHint already excludes Form X_RJ; keep explicit guard for employment-card rows.
+  if (/form[\s._-]*x[\s._-]*rj\b/i.test(rowBlob) || /\bx_rj\b/i.test(rowBlob)) return false;
+  if (/employment\s+card/i.test(rowBlob) && /form[\s._-]*x\b/i.test(rowBlob) && !/form[\s._-]*xiv/i.test(rowBlob)) {
+    return false;
+  }
   return matchesFormXHint(rowBlob);
 }
 
@@ -1076,6 +1095,11 @@ function scoreFormXIVSheet(sheetName, sheetText, blob) {
   if (sheetToken === 'xiii') score -= 220;
   if (matchesFormXIVHint(blob)) score += 40;
   if (blobIndicatesEmploymentCard(sheetBlob, null)) score += 90;
+  // Form X_RJ Employment Card — prefer over Register of Leave sheets in multi-tab workbooks.
+  if (/form[\s._-]*x[\s._-]*rj\b|\bx_rj\b/i.test(blob) && blobIndicatesEmploymentCard(sheetBlob, null)) {
+    score += 80;
+  }
+  if (sheetBlobIndicatesFormXLeaveRegister(sheetBlob)) score -= 280;
   if (
     /register\s+of\s+workmen\s+employed\s+by\s+contractor/i.test(sheetBlob) &&
     !/employment\s+card/i.test(sheetBlob)
@@ -1088,10 +1112,10 @@ function scoreFormXIVSheet(sheetName, sheetText, blob) {
   return score;
 }
 
-/** Pick CLRA Form XIV Employment Card worksheet (not Form XIII Register of Workmen). */
+/** Pick CLRA Form XIV / Form X_RJ Employment Card worksheet (not Form XIII or leave register). */
 export function resolveFormXIVWorkbookSheetName(workbook, hints = {}) {
   const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
-  if (names.length <= 1) return names[0] || null;
+  if (!names.length) return null;
 
   const blob = [
     hints.fileName,
@@ -1099,6 +1123,10 @@ export function resolveFormXIVWorkbookSheetName(workbook, hints = {}) {
     hints.formName,
     hints.item?.formName,
     hints.item?.FormName,
+    hints.item?.description,
+    hints.item?.Description,
+    hints.item?.state,
+    hints.item?.State,
     hints.formHeaderTitle,
     hints.formHeader?.title,
     hints.formHeaderSubtitle,
@@ -1108,7 +1136,28 @@ export function resolveFormXIVWorkbookSheetName(workbook, hints = {}) {
     .join(' ')
     .toLowerCase();
 
-  if (!matchesFormXIVHint(blob) && !blobIndicatesEmploymentCard(blob, null)) return null;
+  const wantsFormXRJ =
+    /form[\s._-]*x[\s._-]*rj\b/i.test(blob) ||
+    /\bx_rj\b/i.test(blob) ||
+    (/rajasthan/i.test(blob) && /employment\s+card/i.test(blob) && /form[\s._-]*x\b/i.test(blob));
+
+  if (names.length === 1) {
+    const only = names[0];
+    const sheetBlob = `${only} ${buildSheetTextBlob(workbook, only)}`;
+    // Single leave-register sheet is not a usable Employment Card template.
+    if (
+      (wantsFormXRJ || matchesFormXIVHint(blob) || blobIndicatesEmploymentCard(blob, null)) &&
+      sheetBlobIndicatesFormXLeaveRegister(sheetBlob) &&
+      !blobIndicatesEmploymentCard(sheetBlob, null)
+    ) {
+      return null;
+    }
+    return only;
+  }
+
+  if (!matchesFormXIVHint(blob) && !blobIndicatesEmploymentCard(blob, null) && !wantsFormXRJ) {
+    return null;
+  }
 
   let best = null;
   let bestScore = -Infinity;
@@ -1124,7 +1173,9 @@ export function resolveFormXIVWorkbookSheetName(workbook, hints = {}) {
 
   const xivSheet = names.find((n) => {
     const sheetText = buildSheetTextBlob(workbook, n);
-    return blobIndicatesEmploymentCard(`${n} ${sheetText}`, null) || matchesFormXIVHint(`${n} ${sheetText}`);
+    const sheetBlob = `${n} ${sheetText}`;
+    if (sheetBlobIndicatesFormXLeaveRegister(sheetBlob)) return false;
+    return blobIndicatesEmploymentCard(sheetBlob, null) || matchesFormXIVHint(sheetBlob);
   });
   return xivSheet || null;
 }

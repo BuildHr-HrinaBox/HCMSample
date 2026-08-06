@@ -500,6 +500,7 @@ import {
   buildFormXIIIAPWorkbookWithTemplateStyles,
   buildFormXXAPWorkbookWithTemplateStyles,
   buildFormXXIAPWorkbookWithTemplateStyles,
+  blobIndicatesEmploymentCard,
   isFormXAPRegisterOfFinesContext,
   isFormXIIIRegisterOfWorkmenContext,
   isFormXIVEmploymentCardContext,
@@ -520,6 +521,7 @@ import {
   resolveFormXIVWorkbookSheetName,
   resolveFormXWorkbookSheetName,
   repickFormXWorkbookSheetIfNeeded,
+  sheetBlobIndicatesFormXLeaveRegister,
   validateFormXAPTemplateAgainstRow,
 } from './statutory/formXAPRegisterOfFines';
 import {
@@ -1290,6 +1292,11 @@ function baseFormNameKey(name) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, ' ');
+  // Form X_RJ / Form_X_RJ — keep state suffix (do not truncate at underscore to "form x").
+  const underscoredState = n.match(/^form[\s._-]+([a-z0-9]+)_(rj|tn|mp|ka|ap|gj|mh)\b/);
+  if (underscoredState) return `form ${underscoredState[1]} ${underscoredState[2]}`;
+  const spacedState = n.match(/^form[\s._-]+([a-z0-9]+)[\s._-]+(rj|tn|mp|ka|ap|gj|mh)\b/);
+  if (spacedState) return `form ${spacedState[1]} ${spacedState[2]}`;
   const m = n.match(/^form\s+[a-z0-9]+/);
   return m ? m[0] : n;
 }
@@ -1303,6 +1310,9 @@ function normalizeStatutoryFormLabelKey(value) {
     .replace(/\s+/g, ' ')
     .trim();
   if (!raw) return '';
+  // Keep state-coded labels distinct: Form_X_RJ ≠ Form_X / Form_X_TN (else wrong template).
+  const stateCoded = raw.match(/^form\s+([a-z0-9]+)\s+(rj|tn|mp|ka|ap|gj|mh)\b/);
+  if (stateCoded) return `form ${stateCoded[1]} ${stateCoded[2]}`;
   const m = raw.match(/^form\s+[a-z0-9]+/);
   return m ? m[0] : raw;
 }
@@ -10202,7 +10212,8 @@ function isFormXLeaveSocialSecurityContext(formHeader, rowItem, fileName, sheetT
     .toLowerCase();
   if (
     /form[_\s-]*x(iv|ix|v|xi|xii|xiii|xv|xvi|xvii|xviii|xix|x{2,})/i.test(blob) ||
-    /form[_\s-]*x[_\s-]*(ap|rj|mp|ka|gujarat|rajasthan)/i.test(blob)
+    /form[_\s-]*x[_\s-]*(ap|rj|mp|ka|gujarat|rajasthan)/i.test(blob) ||
+    /\bx_rj\b/i.test(blob)
   ) {
     return false;
   }
@@ -10466,6 +10477,9 @@ function normalizeStatutoryFormNameKey(v) {
   if (/^form[\s._-]*i$/i.test(raw.replace(/\s+/g, ''))) return 'form i';
   if (/^form[\s._-]*1(?:[\s._-]|$)/i.test(raw) && !/^form[\s._-]*1[0-9]/i.test(raw)) return 'form i';
   if (/pw[\s._-]*form[\s._-]*i/i.test(compact)) return 'form i';
+  // Form X_RJ / Form_X_RJ — do not collapse to "form x" (would match TN/AP leave Form X).
+  const stateCoded = s.match(/^form[\s._-]*([a-z0-9]+)[\s._-]*(rj|tn|mp|ka|ap|gj|mh)\b/i);
+  if (stateCoded) return `form ${stateCoded[1].toLowerCase()} ${stateCoded[2].toLowerCase()}`;
   return s;
 }
 
@@ -10553,6 +10567,38 @@ function scoreFormMasterTemplateMatch(gridRow, templateRow) {
   if (gd && td) {
     if (gd === td) score += 12;
     else if (gd.includes(td) || td.includes(gd)) score += 7;
+  }
+  // Form X_RJ Employment Card must not pick TN/AP Register of Leave Form X templates.
+  const gridBlob = [
+    gridRow?.formName,
+    gridRow?.FormName,
+    gridRow?.description,
+    gridRow?.Description,
+    gridRow?.formFileName,
+    gridRow?.state
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  const templateBlob = [
+    templateRow?.formName,
+    templateRow?.description,
+    templateRow?.formFileName,
+    templateRow?.state
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  const gridWantsEmploymentCard =
+    /form[\s._-]*x[\s._-]*rj\b|\bx_rj\b/i.test(gridBlob) ||
+    (/employment\s+card/i.test(gridBlob) && /form[\s._-]*x\b/i.test(gridBlob));
+  const templateLooksLikeLeave =
+    /register\s+of\s+leave|leave\s+and\s+social|earned\s+leave|form[_\s.-]*x[_\s.-]*tamil/i.test(
+      templateBlob
+    );
+  if (gridWantsEmploymentCard && templateLooksLikeLeave) return -999;
+  if (gridWantsEmploymentCard && /employment\s+card|form[\s._-]*x[\s._-]*rj|\bx_rj\b/i.test(templateBlob)) {
+    score += 30;
   }
   const gv = inferFormUVariantFromRow(gridRow) || inferFormIVariantFromRow(gridRow);
   const tv =
@@ -19546,7 +19592,7 @@ function resolveStatutoryWorkbookSheetName(workbook, hints = {}) {
   const explicitSheet = findStatutorySheetByRomanFormHint(workbook, blob);
   if (explicitSheet) return explicitSheet;
   let targetToken = extractStatutoryFormNumberToken(blob);
-  if (targetToken === 'xiv' || matchesFormXIVHint(blob)) {
+  if (targetToken === 'xiv' || matchesFormXIVHint(blob) || /form[\s._-]*x[\s._-]*rj\b|\bx_rj\b/i.test(blob)) {
     const xivSheet = resolveFormXIVWorkbookSheetName(workbook, hints);
     if (xivSheet) return xivSheet;
   }
@@ -41093,10 +41139,11 @@ const Statutory = ({ userEmail, userRole }) => {
         const entry = await fetchFormTemplateArrayBuffer([fileUrl], templateCacheKey);
         return entry.arrayBuffer;
       };
-      const [arrayBuffer, sampleBlockParallel] = await Promise.all([
+      const [loadedTemplateBuffer, sampleBlockParallel] = await Promise.all([
         loadTemplateArrayBuffer(),
         parallelSamplePromise
       ]);
+      let arrayBuffer = loadedTemplateBuffer;
       if (
         !sampleHeadersForTemplate &&
         Array.isArray(sampleBlockParallel?.headers) &&
@@ -41300,13 +41347,15 @@ const Statutory = ({ userEmail, userRole }) => {
           resolvedDownloadSheetName = parsed.sheetName || xxiiiOtSheet;
         }
       }
-      const wantsFormXAPFinesRepick = isFormXAPRegisterOfFinesContext(
-        parsed?.formHeader,
-        lineItem,
-        fn,
-        '',
-        parsed?.headers || null
-      );
+      const wantsFormXAPFinesRepick =
+        !isFormXRajasthanEmploymentCardContext(parsed?.formHeader, lineItem, fn, '') &&
+        isFormXAPRegisterOfFinesContext(
+          parsed?.formHeader,
+          lineItem,
+          fn,
+          '',
+          parsed?.headers || null
+        );
       if (wantsFormXAPFinesRepick && templateWb.SheetNames?.length >= 1) {
         const formXMismatch = validateFormXAPTemplateAgainstRow(templateWb, {
           ...downloadParseHints,
@@ -41330,6 +41379,105 @@ const Statutory = ({ userEmail, userRole }) => {
               formHeader: undefined
             });
             resolvedDownloadSheetName = parsed.sheetName || xSheet;
+          }
+        }
+      }
+      // Form X_RJ / Form XIV Employment Card — prefer Employment Card sheet over Register of Leave.
+      const wantsFormXIVEmploymentCardDownload =
+        isFormXRajasthanEmploymentCardContext(parsed?.formHeader, lineItem, fn, '') ||
+        isFormXIVMPEmploymentCardContext(parsed?.formHeader, lineItem, fn, '') ||
+        matchesFormXIVHint(
+          [lineItem?.formName, lineItem?.FormName, fn, templateMeta.formFileName]
+            .filter(Boolean)
+            .join(' ')
+        );
+      if (wantsFormXIVEmploymentCardDownload && templateWb.SheetNames?.length >= 1) {
+        const xivSheet = resolveFormXIVWorkbookSheetName(templateWb, {
+          ...downloadParseHints,
+          item: lineItem,
+          formHeader: parsed?.formHeader,
+          formHeaderTitle: parsed?.formHeader?.title,
+          formHeaderSubtitle: parsed?.formHeader?.subtitle
+        });
+        const currentSheetBlob = buildStatutorySheetTextBlob(templateWb, resolvedDownloadSheetName);
+        const currentIsLeave =
+          sheetBlobIndicatesFormXLeaveRegister(
+            `${resolvedDownloadSheetName || ''} ${currentSheetBlob}`
+          ) && !blobIndicatesEmploymentCard(`${resolvedDownloadSheetName || ''} ${currentSheetBlob}`, null);
+        if (xivSheet && (xivSheet !== resolvedDownloadSheetName || currentIsLeave)) {
+          resolvedDownloadSheetName = xivSheet;
+          parsed = parseExcelForm(templateWb, {
+            ...downloadParseHints,
+            preferredSheetName: xivSheet,
+            formHeaderTitle: undefined,
+            formHeaderSubtitle: undefined,
+            formHeader: undefined
+          });
+          resolvedDownloadSheetName = parsed.sheetName || xivSheet;
+        } else if (
+          currentIsLeave &&
+          isFormXRajasthanEmploymentCardContext(parsed?.formHeader, lineItem, fn, '')
+        ) {
+          // Wrong Form Master file (TN Register of Leave linked as Form X_RJ) — try Employment Card template.
+          const alternateTemplate =
+            findFormMasterTemplateRecordByFileNamePattern(
+              formmasterTemplates,
+              /form[\s._-]*x[\s._-]*rj|form_x_rj/i
+            ) ||
+            findFormMasterTemplateRecordByFileNamePattern(
+              formmasterTemplates,
+              /employment[\s._-]*card/i
+            );
+          const alternateId = String(alternateTemplate?.formFile || '').trim();
+          const currentId = String(templateMeta?.formFile || '').trim();
+          if (alternateId && alternateId !== currentId) {
+            const alternateName = alternateTemplate.formFileName || fn;
+            const alternateUrl = `/server/formmaster_function/templates/download/${alternateId}?fileName=${encodeURIComponent(
+              String(alternateName).replace(/[^a-zA-Z0-9._-]/g, '_')
+            )}`;
+            try {
+              const refetched = await fetchFormTemplateArrayBuffer(
+                [alternateUrl],
+                `form-x-rj-employment-card|${alternateId}`,
+                { force: true }
+              );
+              if (isValidExcelArrayBuffer(refetched.arrayBuffer)) {
+                templateWb = XLSX.read(refetched.arrayBuffer, { type: 'array' });
+                // Replace download buffer used later for ExcelJS fill.
+                arrayBuffer = refetched.arrayBuffer;
+                parsed = parseExcelForm(templateWb, {
+                  ...downloadParseHints,
+                  fileName: alternateName,
+                  formFileName: alternateName,
+                  preferredSheetName: undefined,
+                  formHeaderTitle: undefined,
+                  formHeaderSubtitle: undefined,
+                  formHeader: undefined
+                });
+                resolvedDownloadSheetName =
+                  resolveFormXIVWorkbookSheetName(templateWb, {
+                    ...downloadParseHints,
+                    fileName: alternateName,
+                    formFileName: alternateName,
+                    item: lineItem
+                  }) ||
+                  parsed.sheetName ||
+                  templateWb.SheetNames?.[0];
+                if (resolvedDownloadSheetName && resolvedDownloadSheetName !== parsed.sheetName) {
+                  parsed = parseExcelForm(templateWb, {
+                    ...downloadParseHints,
+                    fileName: alternateName,
+                    formFileName: alternateName,
+                    preferredSheetName: resolvedDownloadSheetName,
+                    formHeaderTitle: undefined,
+                    formHeaderSubtitle: undefined,
+                    formHeader: undefined
+                  });
+                }
+              }
+            } catch (altErr) {
+              console.warn('Form X_RJ Employment Card alternate template fetch skipped:', altErr);
+            }
           }
         }
       }
@@ -49725,6 +49873,7 @@ const Statutory = ({ userEmail, userRole }) => {
                       headerFormData: downloadHeaderFormData,
                       rowItem: lineItem || item,
                       sheetText: parsed?.sheetText || formFileModalData?.sheetText || '',
+                      preferredSheetName: resolvedDownloadSheetName || parsed?.sheetName || '',
                     });
                   })()
               : isFormXIXKarnatakaDownload
@@ -51306,12 +51455,30 @@ const Statutory = ({ userEmail, userRole }) => {
         throw new Error('Saved draft is not a valid Excel file. Open Autofill, save again, then download.');
       }
       const templateWb = XLSX.read(templateArrayBuffer, { type: 'array' });
-      const parsed = parseExcelForm(templateWb, {
+      const draftParseHints = {
         fileName: fn,
         formFileName: fileName,
         formName: lineItem?.formName || lineItem?.FormName,
         item: lineItem
-      });
+      };
+      let parsed = parseExcelForm(templateWb, draftParseHints);
+      let draftPreferredSheet =
+        resolveFormXIVWorkbookSheetName(templateWb, {
+          ...draftParseHints,
+          formHeader: parsed?.formHeader,
+          formHeaderTitle: parsed?.formHeader?.title,
+          formHeaderSubtitle: parsed?.formHeader?.subtitle
+        }) || parsed.sheetName || templateWb.SheetNames?.[0] || '';
+      if (draftPreferredSheet && draftPreferredSheet !== parsed.sheetName) {
+        parsed = parseExcelForm(templateWb, {
+          ...draftParseHints,
+          preferredSheetName: draftPreferredSheet,
+          formHeaderTitle: undefined,
+          formHeaderSubtitle: undefined,
+          formHeader: undefined
+        });
+        draftPreferredSheet = parsed.sheetName || draftPreferredSheet;
+      }
       let headersToUse = Array.isArray(parsed.headers) && parsed.headers.length > 0 ? [...parsed.headers] : [];
       let mappedData = [];
       let headerFormData = {};
@@ -51403,6 +51570,7 @@ const Statutory = ({ userEmail, userRole }) => {
           headerFormData,
           rowItem: lineItem || sourceItem || resolvedFormFileItem || null,
           sheetText: parsed?.sheetText || formFileModalData?.sheetText || '',
+          preferredSheetName: draftPreferredSheet || parsed?.sheetName || '',
         });
         triggerFormXIVMPZipDownload(zipResult.blob, zipResult.fileName);
       } else {
@@ -51946,8 +52114,21 @@ const Statutory = ({ userEmail, userRole }) => {
         resolvedFormFileItem,
         resolvedFormFileItem?.formFileName || draftFileHint,
         ''
+      ) ||
+      isFormXRajasthanEmploymentCardContext(
+        null,
+        sourceItem || resolvedFormFileItem,
+        draftFileHint,
+        ''
+      ) ||
+      isFormXRajasthanEmploymentCardContext(
+        null,
+        resolvedFormFileItem,
+        resolvedFormFileItem?.formFileName || draftFileHint,
+        ''
       );
     if (isFormXIVMPDownloadRow) {
+      // Form XIV MP and Form X RJ — regenerate per-employee ZIP (saved draft is a single .xlsx).
       await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem, {
         sampleStatutoryId: draftApiRowId,
         draftApiRowId
@@ -52495,7 +52676,13 @@ const Statutory = ({ userEmail, userRole }) => {
             item: currentItem
           };
           const wantsFormXSave =
-            matchesFormXHint(
+            !isFormXRajasthanEmploymentCardContext(
+              formFileModalData?.parsedFormHeader || formHeader,
+              currentItem,
+              draftFileNameForSaveEarly,
+              formFileModalData?.sheetText || ''
+            ) &&
+            (matchesFormXHint(
               [
                 draftFileNameForSaveEarly,
                 formFileModalData?.formFileName,
@@ -52512,7 +52699,7 @@ const Statutory = ({ userEmail, userRole }) => {
               draftFileNameForSaveEarly,
               formFileModalData?.sheetText || '',
               formFileModalData?.parsedTableHeaders || headersToUse
-            );
+            ));
           const wantsFormXXSave = isFormXXAPRegisterOfDeductionsContext(
             formFileModalData?.parsedFormHeader || formHeader,
             currentItem,
@@ -53093,12 +53280,20 @@ const Statutory = ({ userEmail, userRole }) => {
       );
       const formXIVMPSave =
         !formXIRJSave &&
-        isFormXIVMPEmploymentCardContext(
-        parsedFormHeaderForSave || formHeader,
-        currentItem,
-        draftFileNameForSave,
-        formFileModalData?.sheetText || ''
-      );
+        (isFormXIVMPEmploymentCardContext(
+          parsedFormHeaderForSave || formHeader,
+          currentItem,
+          draftFileNameForSave,
+          formFileModalData?.sheetText || ''
+        ) ||
+          isFormXRajasthanEmploymentCardContext(
+            parsedFormHeaderForSave || formHeader,
+            currentItem,
+            draftFileNameForSave,
+            formFileModalData?.sheetText || ''
+          ) ||
+          String((parsedFormHeaderForSave || formHeader)?.formXIVVariant || '').toLowerCase() ===
+            'rj');
       const formXRJSave =
         formXIVMPSave &&
         (isFormXRajasthanEmploymentCardContext(
@@ -53107,9 +53302,11 @@ const Statutory = ({ userEmail, userRole }) => {
           draftFileNameForSave,
           formFileModalData?.sheetText || ''
         ) ||
-          String((parsedFormHeaderForSave || formHeader)?.formXIVVariant || '').toLowerCase() === 'rj');
+          String((parsedFormHeaderForSave || formHeader)?.formXIVVariant || '').toLowerCase() ===
+            'rj');
       const formXIVKarnatakaSave =
         formXIVMPSave &&
+        !formXRJSave &&
         isFormXIVKarnatakaContext(
           parsedFormHeaderForSave || formHeader,
           currentItem,
@@ -54040,7 +54237,10 @@ const Statutory = ({ userEmail, userRole }) => {
           headersToUse: formXIVMPHeaders,
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
           formFileName: draftFileNameForSave,
-          headerFormData: headerDataForSave
+          headerFormData: headerDataForSave,
+          preferredSheetName: formFileModalData?.sheetName || '',
+          rowItem: currentItem,
+          sheetText: formFileModalData?.sheetText || '',
         }));
         // Form X RJ: ZIP only on View Draft File — do not auto-download after save.
         if (formXRJSave) {
@@ -54052,7 +54252,10 @@ const Statutory = ({ userEmail, userRole }) => {
             headersToUse: formXIVMPHeaders,
             parsedFormHeader: parsedFormHeaderForSave || formHeader,
             formFileName: draftFileNameForSave,
-            headerFormData: headerDataForSave
+            headerFormData: headerDataForSave,
+            preferredSheetName: formFileModalData?.sheetName || '',
+            rowItem: currentItem,
+            sheetText: formFileModalData?.sheetText || '',
           };
         }
       } else if (formVISave && templateWb) {
@@ -85927,6 +86130,12 @@ const Statutory = ({ userEmail, userRole }) => {
             displayFileName,
             buildStatutorySheetTextBlob(workbook, resolvedSheetName),
             parsedRaw?.headers || null
+          ) ||
+          isFormXRajasthanEmploymentCardContext(
+            parsedRaw?.formHeader,
+            item,
+            displayFileName || resolvedFormFileName || '',
+            buildStatutorySheetTextBlob(workbook, resolvedSheetName)
           );
         if (wantsFormXIVView && workbook.SheetNames?.length > 1) {
           const xivSheet = resolveFormXIVWorkbookSheetName(workbook, {
@@ -85946,6 +86155,82 @@ const Statutory = ({ userEmail, userRole }) => {
               formHeader: undefined
             });
             resolvedSheetName = parsedRaw.sheetName || xivSheet;
+          }
+        }
+        // Form X_RJ linked to Register of Leave — swap to Employment Card Form Master file when possible.
+        if (
+          isFormXRajasthanEmploymentCardContext(
+            parsedRaw?.formHeader,
+            item,
+            displayFileName || resolvedFormFileName || '',
+            ''
+          )
+        ) {
+          const viewSheetBlob = `${resolvedSheetName || ''} ${buildStatutorySheetTextBlob(workbook, resolvedSheetName)}`;
+          if (
+            sheetBlobIndicatesFormXLeaveRegister(viewSheetBlob) &&
+            !blobIndicatesEmploymentCard(viewSheetBlob, null)
+          ) {
+            const alternateTemplate =
+              findFormMasterTemplateRecordByFileNamePattern(
+                formmasterTemplates,
+                /form[\s._-]*x[\s._-]*rj|form_x_rj/i
+              ) ||
+              findFormMasterTemplateRecordByFileNamePattern(
+                formmasterTemplates,
+                /employment[\s._-]*card/i
+              );
+            const alternateId = String(alternateTemplate?.formFile || '').trim();
+            const currentId = String(itemForTemplateFetch?.formFile || item?.formFile || '').trim();
+            if (alternateId && alternateId !== currentId) {
+              const alternateName = alternateTemplate.formFileName || displayFileName;
+              const alternateUrl = `/server/formmaster_function/templates/download/${alternateId}?fileName=${encodeURIComponent(
+                String(alternateName).replace(/[^a-zA-Z0-9._-]/g, '_')
+              )}`;
+              try {
+                const refetched = await fetchFormTemplateArrayBuffer(
+                  [alternateUrl],
+                  `form-x-rj-employment-card|${alternateId}`,
+                  { force: true }
+                );
+                if (isValidExcelArrayBuffer(refetched.arrayBuffer)) {
+                  excelArrayBuffer = refetched.arrayBuffer;
+                  workbook = XLSX.read(excelArrayBuffer, { type: 'array' });
+                  displayFileName = alternateName;
+                  parsedRaw = parseExcelForm(workbook, {
+                    ...viewParseHints,
+                    fileName: alternateName,
+                    formFileName: alternateName,
+                    preferredSheetName: undefined,
+                    formHeaderTitle: undefined,
+                    formHeaderSubtitle: undefined,
+                    formHeader: undefined
+                  });
+                  resolvedSheetName =
+                    resolveFormXIVWorkbookSheetName(workbook, {
+                      ...viewParseHints,
+                      fileName: alternateName,
+                      formFileName: alternateName,
+                      item
+                    }) ||
+                    parsedRaw.sheetName ||
+                    workbook.SheetNames?.[0];
+                  if (resolvedSheetName && resolvedSheetName !== parsedRaw.sheetName) {
+                    parsedRaw = parseExcelForm(workbook, {
+                      ...viewParseHints,
+                      fileName: alternateName,
+                      formFileName: alternateName,
+                      preferredSheetName: resolvedSheetName,
+                      formHeaderTitle: undefined,
+                      formHeaderSubtitle: undefined,
+                      formHeader: undefined
+                    });
+                  }
+                }
+              } catch (altErr) {
+                console.warn('Form X_RJ Employment Card alternate template fetch skipped:', altErr);
+              }
+            }
           }
         }
         const wantsFormXXIIView =
@@ -86014,7 +86299,13 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
         const wantsFormXView =
-          (matchesFormXHint(
+          !isFormXRajasthanEmploymentCardContext(
+            null,
+            item,
+            displayFileName || resolvedFormFileName || '',
+            ''
+          ) &&
+          ((matchesFormXHint(
             [item?.formName, item?.FormName, displayFileName, resolvedFormFileName]
               .filter(Boolean)
               .join(' ')
@@ -86025,7 +86316,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 .join(' ')
             )) ||
           isFormXAPRegisterOfFinesContext(null, item, displayFileName) ||
-          isFormXAPRegisterOfFinesContext(null, item, resolvedFormFileName || '');
+          isFormXAPRegisterOfFinesContext(null, item, resolvedFormFileName || ''));
         if (wantsFormXView && workbook.SheetNames?.length >= 1) {
           const formXMismatch = validateFormXAPTemplateAgainstRow(workbook, viewParseHints);
           if (formXMismatch) throw new Error(formXMismatch);
@@ -94621,6 +94912,9 @@ const Statutory = ({ userEmail, userRole }) => {
                                     !/form[_\s-]*x(iv|ix|v|xi|xii|xiii|xv|xvi|xvii|xviii|xix)/i.test(
                                       formWDraftDownloadHint
                                     ) &&
+                                    !/form[_\s-]*x[_\s-]*rj/i.test(formWDraftDownloadHint) &&
+                                    !/\bx_rj\b/i.test(formWDraftDownloadHint) &&
+                                    !/employment\s+card/i.test(formWDraftDownloadHint) &&
                                     !/register\s+of\s+fines/i.test(formWDraftDownloadHint);
                                   const isFormTSEDraftRow = isFormTSEContext(
                                     null,

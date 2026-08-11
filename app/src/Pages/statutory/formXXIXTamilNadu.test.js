@@ -6,6 +6,13 @@ import {
   FORM_XXIX_TN_TABLE_HEADERS,
   applyFormXXIXTamilNaduAutofillFromSite,
   applyFormXXIXTamilNaduNilToMappedRows,
+  buildFormXXIXTamilNaduNilOfMonthLabel,
+  buildFormXXIXTamilNaduNilTableRows,
+  mergeFormXXIXTamilNaduNilRowInExcelJsWorksheet,
+  ensureFormXXIXTamilNaduTitleLayout,
+  resolveFormXXIXTamilNaduNilOfMonthText,
+  resolveFormXXIXTamilNaduRegisterHeadingLine,
+  FORM_XXIX_TN_REGISTER_HEADING_LINE,
   enrichFormXXIXTamilNaduDisplayHeader,
   ensureFormXXIXTamilNaduMonthYearHeaderFields,
   finalizeFormXXIXTamilNaduHeaderFields,
@@ -262,6 +269,134 @@ describe('Form XXIX Tamil Nadu Register of Advances', () => {
     expect(fields[4].key).toBe('form_x_month');
     expect(fields[5].key).toBe('form_x_year');
     expect(fields[5].value).toBe('2025');
+  });
+
+  it('builds NIL of the Month with corresponding month and year', () => {
+    expect(buildFormXXIXTamilNaduNilOfMonthLabel('August', 2026)).toBe('NIL of the Month Aug 2026');
+    expect(buildFormXXIXTamilNaduNilOfMonthLabel('Aug', '2026')).toBe('NIL of the Month Aug 2026');
+    expect(buildFormXXIXTamilNaduNilOfMonthLabel('May', 2026)).toBe('NIL of the Month May 2026');
+    expect(buildFormXXIXTamilNaduNilOfMonthLabel('', 2026)).toBe('NIL of the Month');
+  });
+
+  it('resolves NIL of the Month from header Month/Year fields', () => {
+    expect(
+      resolveFormXXIXTamilNaduNilOfMonthText({
+        headerFormData: { form_x_month: 'May', form_x_year: '2026' },
+      })
+    ).toBe('NIL of the Month May 2026');
+  });
+
+  it('applies period NIL of the Month to advance columns on autofill rows', () => {
+    const nilText = buildFormXXIXTamilNaduNilOfMonthLabel('May', 2026);
+    const rows = applyFormXXIXTamilNaduNilToMappedRows(
+      [
+        {
+          'Name of the Workman': 'rabakaran D',
+          'Employee Number': 'VE1189',
+          'Amount Paid': 'NILL',
+          'Number of Installments to be recovered': '',
+          Remarks: '',
+        },
+      ],
+      FORM_XXIX_TN_TABLE_HEADERS,
+      nilText,
+      { overwrite: true }
+    );
+    expect(rows[0]['Name of the Workman']).toBe('rabakaran D');
+    expect(rows[0]['Employee Number']).toBe('VE1189');
+    expect(rows[0]['Amount Paid']).toBe('NIL of the Month May 2026');
+    expect(rows[0]['Number of Installments to be recovered']).toBe('NIL of the Month May 2026');
+  });
+
+  it('puts FORM XXIX / See Rule / Register heading in column I without merging', () => {
+    const cells = {};
+    const key = (r, c) => `${r},${c}`;
+    // Template parks titles right-aligned in column T (20), sometimes merged.
+    cells[key(1, 20)] = { value: 'FORM XXIX', alignment: { horizontal: 'right' }, font: {} };
+    cells[key(2, 20)] = {
+      value: '[See Rule 78 (1) (d) of the Tamil Nadu Contract Labour (Regulation and Abolition) Rules ,1975]',
+      alignment: { horizontal: 'right' },
+      font: {},
+    };
+    // Fragmented wrap (as seen when wrapText forces stacked lines).
+    cells[key(3, 9)] = { value: 'REGSITER OF\nADVANCES,', alignment: { wrapText: true }, font: {} };
+    cells[key(4, 9)] = { value: 'DEDUCTIONS FOR\nDAME OR LOSS AND FINES', alignment: { wrapText: true }, font: {} };
+    const worksheet = {
+      model: { merges: ['N2:T2', 'N3:T3', 'A1:T1'] },
+      _merges: {
+        A1: { top: 1, left: 1, bottom: 1, right: 20 },
+        N2: { top: 2, left: 14, bottom: 2, right: 20 },
+      },
+      unMergeCells: jest.fn(),
+      mergeCells: jest.fn(),
+      getColumn: jest.fn(() => ({ width: 12 })),
+      getRow: jest.fn(() => ({ height: 15 })),
+      getCell: (r, c) => {
+        const k = key(r, c);
+        if (!cells[k]) cells[k] = { value: null, alignment: {}, font: {}, border: {}, isMerged: false };
+        return cells[k];
+      },
+    };
+    const ok = ensureFormXXIXTamilNaduTitleLayout(worksheet, { titleCol: 9, force: true, colTo: 20 });
+    expect(ok).toBe(true);
+    expect(worksheet.mergeCells).not.toHaveBeenCalled();
+    expect(cells[key(1, 9)].value).toBe('FORM XXIX');
+    expect(cells[key(2, 9)].value).toMatch(/See Rule 78/i);
+    expect(cells[key(3, 9)].value).toBe(FORM_XXIX_TN_REGISTER_HEADING_LINE);
+    expect(cells[key(3, 9)].value).not.toMatch(/\n/);
+    expect(cells[key(3, 9)].alignment.wrapText).toBe(false);
+    expect(cells[key(4, 9)].value).toBeNull();
+    // Horizontal borders on rows 1–3 ending at column T (20); no verticals inside.
+    expect(cells[key(1, 1)].border?.top?.style).toBe('thin');
+    expect(cells[key(1, 1)].border?.left?.style).toBe('thin');
+    expect(cells[key(1, 20)].border?.right?.style).toBe('thin');
+    expect(cells[key(2, 9)].border?.bottom?.style).toBe('thin');
+    expect(cells[key(2, 9)].border?.left).toBeUndefined();
+    expect(cells[key(2, 9)].border?.right).toBeUndefined();
+    expect(cells[key(3, 20)].border?.left).toBeUndefined();
+    expect(cells[key(3, 20)].border?.right?.style).toBe('thin');
+    // Past T must not carry the title box.
+    expect(Object.keys(cells[key(1, 21)]?.border || {}).length).toBe(0);
+    expect(resolveFormXXIXTamilNaduRegisterHeadingLine('REGSITER OF ADVANCES')).toBe(
+      FORM_XXIX_TN_REGISTER_HEADING_LINE
+    );
+  });
+
+  it('builds a single NIL of the Month row with no employee data', () => {
+    const rows = buildFormXXIXTamilNaduNilTableRows(
+      FORM_XXIX_TN_TABLE_HEADERS,
+      'NIL of the Month May 2026'
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]['Name of the Workman']).toBe('NIL of the Month May 2026');
+    expect(rows[0]['Serial Number']).toBe('');
+    expect(rows[0]['Employee Number']).toBe('');
+    expect(rows[0]['Amount Paid']).toBe('');
+  });
+
+  it('merges NIL of the Month across the Excel data band as one centered line', () => {
+    const worksheet = {
+      unMergeCells: jest.fn(),
+      mergeCells: jest.fn(),
+      getCell: jest.fn(() => ({ value: '', alignment: {}, font: {} })),
+      getRow: jest.fn(() => ({ height: 20 })),
+    };
+    const ok = mergeFormXXIXTamilNaduNilRowInExcelJsWorksheet(worksheet, {
+      dataStartRow: 9,
+      sourceRows: [['', 'NIL of the Month May 2026', '', '', '']],
+      colFrom: 1,
+      colTo: 10,
+      nilDisplayText: 'NIL of the Month May 2026',
+    });
+    expect(ok).toBe(true);
+    expect(worksheet.mergeCells).toHaveBeenCalledWith(9, 1, 9, 10);
+    expect(worksheet.getCell).toHaveBeenCalledWith(9, 1);
+    const nilCell = worksheet.getCell.mock.results.find((r) => r.value?.value === 'NIL of the Month May 2026')
+      || worksheet.getCell.mock.results[worksheet.getCell.mock.results.length - 1];
+    // Last getCell(9,1) after clears is the merged master — value set on that object.
+    const lastCell = worksheet.getCell.mock.results.map((r) => r.value).find((c) => c.value === 'NIL of the Month May 2026');
+    expect(lastCell).toBeTruthy();
+    expect(lastCell.alignment).toEqual({ horizontal: 'center', vertical: 'middle', wrapText: false });
   });
 
   it('detects Employee Number header and NILL default columns', () => {

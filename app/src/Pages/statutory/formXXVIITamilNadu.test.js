@@ -11,8 +11,10 @@ import {
   computeFormXXVIITamilNaduOtherDeductions,
   computeFormXXVIITamilNaduTotalDeductions,
   formXXVIITamilNaduNeedsOtherAllowancesGroupThead,
+  hasFormXXVIITamilNaduSamplePayrollNameParts,
   isFormXXVIITamilNaduContext,
   isFormXXVIITamilNaduDailyRatedHeader,
+  isFormXXVIITamilNaduDaysWorkedHeader,
   isFormXXVIITamilNaduOtherAllowancesEccaHeader,
   isFormXXVIITamilNaduOtherDeductionsHeader,
   isFormXXVIITamilNaduOvertimeRateHeader,
@@ -20,7 +22,9 @@ import {
   isFormXXVIITamilNaduSkipAutofillHeader,
   isFormXXVIITamilNaduWagePeriodColumnHeader,
   looksLikeFormXXVIITamilNaduWageHeaders,
+  readFormXXVIITamilNaduPaidDays,
   resolveFormXXVIITamilNaduDailyRated,
+  resolveFormXXVIITamilNaduDaysWorked,
   resolveFormXXVIITamilNaduHra,
   resolveFormXXVIITamilNaduOtherAllowancesEcca,
   resolveFormXXVIITamilNaduOtherDeductions,
@@ -204,6 +208,61 @@ describe('formXXVIITamilNadu Sample Payroll autofill', () => {
   test('TOTAL DEDUCTIONS ← gross_pay − net_pay', () => {
     expect(computeFormXXVIITamilNaduTotalDeductions(104065, 99065)).toBe(5000);
     expect(resolveFormXXVIITamilNaduTotalDeductions(payrollRow)).toBe(5000);
+  });
+
+  test('TOTAL / UNITS days worked ← paid_days only when firstname + lastname present', () => {
+    const totalHdr = 'TOTAL NUMBER OF DAYS WORKED DURING THE WEEK/FN/MONTH';
+    const unitsHdr = 'UNITS OF WORK DONE/NUMBER OF DAYS WORKED';
+    expect(isFormXXVIITamilNaduDaysWorkedHeader(totalHdr)).toBe(true);
+    expect(isFormXXVIITamilNaduDaysWorkedHeader(unitsHdr)).toBe(true);
+
+    expect(readFormXXVIITamilNaduPaidDays({ paid_days: 26 })).toBe('26');
+    expect(hasFormXXVIITamilNaduSamplePayrollNameParts({ first_name: 'Ram', last_name: 'Kumar' })).toBe(
+      true
+    );
+    expect(hasFormXXVIITamilNaduSamplePayrollNameParts({ first_name: 'Ram' })).toBe(false);
+    expect(
+      resolveFormXXVIITamilNaduDaysWorked({
+        paid_days: 26,
+        first_name: 'Ram',
+        last_name: 'Kumar',
+      })
+    ).toBe('26');
+    // Missing paid_days → blank (do not invent calendar days)
+    expect(
+      resolveFormXXVIITamilNaduDaysWorked({
+        first_name: 'Ram',
+        last_name: 'Kumar',
+        gross_pay: 1000,
+      })
+    ).toBe('');
+    // Missing last name → blank even if paid_days exists
+    expect(
+      resolveFormXXVIITamilNaduDaysWorked({
+        paid_days: 31,
+        first_name: 'Ram',
+      })
+    ).toBe('');
+
+    const hdrs = [totalHdr, unitsHdr];
+    const row = { [totalHdr]: '31', [unitsHdr]: '31' };
+    applyFormXXVIITamilNaduPayrollToRow(
+      row,
+      { first_name: 'Ram', last_name: 'Kumar' },
+      hdrs,
+      { overwrite: true }
+    );
+    expect(row[totalHdr]).toBe('');
+    expect(row[unitsHdr]).toBe('');
+
+    applyFormXXVIITamilNaduPayrollToRow(
+      row,
+      { paid_days: 26, firstName: 'Ram', lastName: 'Kumar' },
+      hdrs,
+      { overwrite: true }
+    );
+    expect(row[totalHdr]).toBe('26');
+    expect(row[unitsHdr]).toBe('26');
   });
 
   test('applyFormXXVIITamilNaduPayrollToRow fills mapped columns', () => {

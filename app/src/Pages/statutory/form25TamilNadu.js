@@ -772,3 +772,50 @@ export function applyForm25TamilNaduExportColumnWidths(
   if (summaryCols.signatureManager) setWidth(summaryCols.signatureManager, 16);
   if (summaryCols.remarks) setWidth(summaryCols.remarks, 14);
 }
+
+/**
+ * Form 25 TN templates often keep a form column-index row (merged "9") under the 1…31 day markers.
+ * Writing the first employee into that row leaves days 1–30 blank (merge) with only day 31 writable.
+ */
+export function isForm25TamilNaduFormIndexHeaderRow(dayCellTexts = []) {
+  const vals = (Array.isArray(dayCellTexts) ? dayCellTexts : [])
+    .map((v) => String(v ?? '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (vals.length === 0) return false;
+  const unique = [...new Set(vals.map((v) => v.toLowerCase()))];
+  if (unique.length !== 1) return false;
+  const only = unique[0];
+  // Single form-index number (commonly "9") spanning the day band — not a calendar day row.
+  if (/^\d{1,3}$/.test(only)) {
+    const n = Number(only);
+    return n >= 1 && n <= 20;
+  }
+  return /daily\s+hours|including\s+overtime/.test(only);
+}
+
+/**
+ * Advance dataStartRow past day-marker / form-index header rows so employee 1 lands on a real body row.
+ */
+export function resolveForm25TamilNaduDataStartRow(options = {}) {
+  const headerRow = options.headerRow ?? 1;
+  const markerRow = options.markerRow ?? -1;
+  const parsedDataStartRow = options.parsedDataStartRow ?? -1;
+  const probeRowDayTexts =
+    typeof options.probeRowDayTexts === 'function' ? options.probeRowDayTexts : () => [];
+  const maxProbe = options.maxProbe ?? 6;
+
+  let dataStart =
+    Number(parsedDataStartRow) > 0
+      ? Number(parsedDataStartRow)
+      : markerRow > 0
+        ? markerRow + 1
+        : Math.max(1, Number(headerRow) || 1) + 1;
+  if (markerRow > 0) dataStart = Math.max(dataStart, markerRow + 1);
+
+  for (let i = 0; i < maxProbe; i += 1) {
+    const texts = probeRowDayTexts(dataStart);
+    if (!isForm25TamilNaduFormIndexHeaderRow(texts)) break;
+    dataStart += 1;
+  }
+  return dataStart;
+}

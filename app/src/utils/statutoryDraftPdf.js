@@ -31,6 +31,24 @@ const looksLikeExcelDraftFileLabel = (text) => {
 };
 
 /**
+ * Excel sheet tab labels must not become PDF titles
+ * (e.g. "LWF Act - Form C", bare "Form C").
+ */
+const looksLikeExcelSheetTabName = (text) => {
+  const raw = String(text || '')
+    .replace(EXCEL_EXT_RE, '')
+    .replace(/\.zip$/i, '')
+    .trim();
+  if (!raw) return false;
+  if (looksLikeExcelDraftFileLabel(raw)) return true;
+  if (/\bact\s*[-–—]\s*form\b/i.test(raw)) return true;
+  if (/^lwf\b/i.test(raw) && /\bform\b/i.test(raw)) return true;
+  // Bare short tab names like "Form C" / "Form-C" when used as sheet.name
+  if (/^form\s*[-–.]?\s*[a-z0-9xivlc.]+\s*$/i.test(raw) && raw.length <= 24) return true;
+  return false;
+};
+
+/**
  * Normalize Excel soft-breaks / `_x000d_` and expand a title/meta cell into
  * separate lines (Excel wrapText headings must not become one PDF line).
  */
@@ -84,6 +102,45 @@ const isSystemGeneratedDocumentNoteRow = (row) => {
   if (!Array.isArray(row)) return false;
   const filled = row.map((c) => String(c || '').trim()).filter(Boolean);
   return filled.length === 1 && isSystemGeneratedDocumentNote(filled[0]);
+};
+
+/** Form C LWF legal footnote under the register grid. */
+const FORM_C_UNPAID_ACCUMULATIONS_FOOTNOTE =
+  '*See definition of "Unpaid Accumulations" under Section 2(I) of the Tamil Nadu Labour Welfare Fund Act, 1972';
+
+const isUnpaidAccumulationsFootnoteText = (text) => {
+  const norm = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!norm) return false;
+  if (/see\s+definition\s+of/.test(norm) && /unpaid\s+accumulations/.test(norm)) return true;
+  if (
+    /under\s+section\s*2\s*\(?\s*i\s*\)?/.test(norm) &&
+    /labour\s+welfare\s+fund\s+act/.test(norm)
+  ) {
+    return true;
+  }
+  return false;
+};
+
+const isUnpaidAccumulationsFootnoteRow = (row) => {
+  if (!Array.isArray(row)) return false;
+  const filled = row.map((c) => String(c || '').trim()).filter(Boolean);
+  if (!filled.length) return false;
+  const unique = [...new Set(filled)];
+  return unique.length === 1 && isUnpaidAccumulationsFootnoteText(unique[0]);
+};
+
+const extractUnpaidAccumulationsFootnoteText = (row) => {
+  if (!Array.isArray(row)) return '';
+  for (let i = 0; i < row.length; i += 1) {
+    const t = String(row[i] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (isUnpaidAccumulationsFootnoteText(t)) return t;
+  }
+  return '';
 };
 
 const isZipArrayBuffer = (buf) => {
@@ -275,6 +332,185 @@ const isWageRegisterColHeaderBlob = (blob) => {
   );
 };
 
+/**
+ * Tamil Nadu LWF Form C — "Details of Fines…" + "Quarter ending…" column headers.
+ * Must stay in the grid (never promoted to full-width meta bands).
+ */
+const isFormCLwfColHeaderBlob = (blob) => {
+  const t = String(blob || '').toLowerCase();
+  if (!t) return false;
+  const quarterHits = t.match(/quarter\s+ending/g);
+  if (quarterHits && quarterHits.length >= 2) return true;
+  return /details\s+of\s+fines/.test(t) && /quarter\s+ending/.test(t);
+};
+
+/**
+ * Tamil Nadu Form 25 — S.No / Name / day-band column headers.
+ * Must stay in the grid (not promoted to full-width meta).
+ */
+const isForm25TamilNaduColHeaderBlob = (blob) => {
+  const t = String(blob || '').toLowerCase();
+  if (!t) return false;
+  if (
+    /daily\s+hours\s+of\s+work/.test(t) &&
+    (/s\.?\s*no|name of the worker|scheme of shifts/.test(t) || /\b1\b.*\b2\b.*\b3\b/.test(t))
+  ) {
+    return true;
+  }
+  if (
+    /name of the worker/.test(t) &&
+    /worker\s+identit|time at which work|scheme of shifts|rest\s+interval/.test(t)
+  ) {
+    return true;
+  }
+  return false;
+};
+
+const isPureNilPdfText = (raw) => /^nill?$/i.test(String(raw || '').trim());
+
+/** Form 25 TN muster / compensatory holidays register. */
+const looksLikeForm25TamilNaduPdfContext = (metaLines, rows, sheetName = '') => {
+  const blob = [...(metaLines || []), ...(rows || []).slice(0, 12).flat(), sheetName || '']
+    .join(' ')
+    .toLowerCase();
+  if (/compensatory\s+holidays|muster\s+roll\s+and\s+register\s+of\s+compensatory/.test(blob)) {
+    return true;
+  }
+  if (/form\s*(?:no\.?\s*)?[-–]?\s*25\b/.test(blob) && /tamil\s*nadu|daily\s+hours\s+of\s+work/.test(blob)) {
+    return true;
+  }
+  return /form\s*(?:no\.?\s*)?[-–]?\s*25\b/.test(blob) && /prescribed\s+under\s+rules?\s*77/.test(blob);
+};
+
+/** Last 0-based column that has any non-empty cell in the matrix. */
+const findLastContentColumnIndex = (rows) => {
+  let last = -1;
+  (rows || []).forEach((row) => {
+    if (!Array.isArray(row)) return;
+    for (let c = 0; c < row.length; c += 1) {
+      if (String(row[c] || '').trim()) last = Math.max(last, c);
+    }
+  });
+  return last;
+};
+
+/** 0-based Remarks column from the header band (Form 25 ends here). */
+const findRemarksColumnIndex = (rows, scanRows = 20) => {
+  let remarksIdx = -1;
+  const limit = Math.min((rows || []).length, scanRows);
+  for (let r = 0; r < limit; r += 1) {
+    const row = rows[r] || [];
+    for (let c = 0; c < row.length; c += 1) {
+      if (/^remarks?$/i.test(String(row[c] || '').trim())) {
+        remarksIdx = Math.max(remarksIdx, c);
+      }
+    }
+  }
+  return remarksIdx;
+};
+
+/**
+ * Drop trailing blank columns (e.g. empty cells after Remarks on Form 25).
+ * Optionally clamp to Remarks when that is the last meaningful header.
+ */
+const trimTrailingBlankPdfColumns = (rows, colCount, { clampToRemarks = false } = {}) => {
+  let last = findLastContentColumnIndex(rows);
+  if (clampToRemarks) {
+    const remarksIdx = findRemarksColumnIndex(rows);
+    if (remarksIdx >= 0) last = Math.min(last < 0 ? remarksIdx : last, remarksIdx);
+  }
+  const nextCount = Math.max(1, Math.min(colCount, last + 1));
+  if (nextCount >= colCount) return { rows, colCount };
+  const trimmed = (rows || []).map((row) => {
+    const src = Array.isArray(row) ? row : [];
+    const line = [];
+    for (let c = 0; c < nextCount; c += 1) line.push(String(src[c] ?? ''));
+    return line;
+  });
+  return { rows: trimmed, colCount: nextCount };
+};
+
+/** True when a Form 25 body row looks like a real employee (not leftover template shell). */
+const isForm25TamilNaduEmployeePdfRow = (row) => {
+  if (!Array.isArray(row)) return false;
+  const filled = row.map((c) => String(c || '').trim()).filter(Boolean);
+  if (!filled.length) return false;
+  if (isSystemGeneratedDocumentNote(filled.join(' '))) return false;
+  if (filled.some((v) => /^(P|A|WO|H|L|WOP|OD|SL|CL|EL|NH|FH)$/i.test(v))) return true;
+  // Worker name / ID style tokens (not times, bare numbers, or shift labels alone).
+  return filled.some((v) => {
+    if (/^\d{1,2}:\d{2}/.test(v)) return false;
+    if (/^\d{1,4}$/.test(v)) return false;
+    if (/^(general\s+shift|scheme of shifts|rest(\s+interval)?|nil|n\/?a)$/i.test(v)) return false;
+    if (/daily\s+hours|time at which|worker\s+identit|serial\s+number/i.test(v)) return false;
+    return /[a-z]{2,}/i.test(v);
+  });
+};
+
+/**
+ * Form 25 templates often leave dozens of sample body rows — trim PDF after the last real employee.
+ * Keep header band + footnote / system-note rows.
+ */
+const trimForm25TamilNaduPdfTrailingEmployeeRows = (rows, tableStartRow = 0) => {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  let headerEnd = Math.max(0, tableStartRow);
+  for (let r = tableStartRow; r < Math.min(rows.length, tableStartRow + 8); r += 1) {
+    const blob = (rows[r] || []).join(' ').toLowerCase();
+    if (
+      isForm25TamilNaduColHeaderBlob(blob) ||
+      (/^\d{1,2}$/.test(String(rows[r]?.[0] || '').trim()) &&
+        (rows[r] || []).filter((c) => /^\d{1,2}$/.test(String(c || '').trim())).length >= 10)
+    ) {
+      headerEnd = r;
+    }
+  }
+
+  let lastEmp = -1;
+  for (let r = headerEnd + 1; r < rows.length; r += 1) {
+    if (isForm25TamilNaduEmployeePdfRow(rows[r])) lastEmp = r;
+  }
+  if (lastEmp < 0) return rows;
+
+  const kept = [];
+  for (let r = 0; r < rows.length; r += 1) {
+    if (r <= lastEmp) {
+      kept.push(rows[r]);
+      continue;
+    }
+    // Preserve footer notes that sit below the employee block.
+    if (isSystemGeneratedDocumentNoteRow(rows[r]) || isUnpaidAccumulationsFootnoteRow(rows[r])) {
+      kept.push(rows[r]);
+    }
+  }
+  return kept;
+};
+
+/** Drop rows that belong to a leaked Excel pivot (Row Labels / Count of MALE…). */
+const stripLeakedPivotRowsFromPdfMatrix = (rows, tableStartRow = 0) => {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  const out = [];
+  let dropping = false;
+  for (let r = 0; r < rows.length; r += 1) {
+    const blob = (rows[r] || []).join(' ').toLowerCase();
+    if (
+      r > tableStartRow &&
+      (/^row\s+labels\b/.test(blob.trim()) ||
+        (/row\s+labels/.test(blob) && /count of\s+mal/.test(blob)))
+    ) {
+      dropping = true;
+    }
+    if (dropping) {
+      // Keep system note if it somehow sits after the pivot block.
+      if (isSystemGeneratedDocumentNoteRow(rows[r])) {
+        out.push(rows[r]);
+      }
+      continue;
+    }
+    out.push(rows[r]);
+  }
+  return out;
+};
+
 /** Form W admin band above the leaf table (employer / gender boxes / month-year). */
 const isFormWAdminBandBlob = (blob) => {
   const t = String(blob || '').toLowerCase();
@@ -386,12 +622,34 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
   }
 
   const endRow = Math.min(rows.length - 1, lastContentRow + MAX_TRAILING_EMPTY_AFTER_CONTENT);
+  const earlyBlob = rows
+    .slice(0, Math.min(rows.length, 14))
+    .flat()
+    .concat(sheetName || '')
+    .join(' ')
+    .toLowerCase();
+  const isForm25Tn =
+    /compensatory\s+holidays|form\s*(?:no\.?\s*)?[-–]?\s*25\b/.test(earlyBlob) &&
+    (/prescribed\s+under\s+rules?\s*77|daily\s+hours\s+of\s+work|muster\s+roll/.test(earlyBlob) ||
+      /form\s*(?:no\.?\s*)?[-–]?\s*25\b/.test(earlyBlob));
+
   // Wide day-grid forms (e.g. Form XXVI): keep a few empty trailing cols from !ref
-  // (signature / termination) without inflating narrow sheets to the template width.
-  if (refColCount > maxCol && maxCol >= 20 && refColCount - maxCol <= 8) {
+  // (signature / termination). Form 25 ends at Remarks — never pad blank columns after it.
+  if (
+    !isForm25Tn &&
+    refColCount > maxCol &&
+    maxCol >= 20 &&
+    refColCount - maxCol <= 8
+  ) {
     maxCol = refColCount;
   }
   maxCol = Math.min(Math.max(maxCol, 1), MAX_PDF_COLS);
+
+  // Clamp to Remarks when present so empty template columns after it are dropped.
+  if (isForm25Tn) {
+    const remarksIdx = findRemarksColumnIndex(rows);
+    if (remarksIdx >= 0) maxCol = Math.min(maxCol, remarksIdx + 1);
+  }
 
   const padded = [];
   for (let r = 0; r <= endRow; r += 1) {
@@ -408,7 +666,10 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
   for (let r = 0; r < Math.min(padded.length, 20); r += 1) {
     const filled = padded[r].filter((c) => c);
     const blob = filled.join(' ').toLowerCase();
-    const isColHeader = isWageRegisterColHeaderBlob(blob) && filled.length >= 3;
+    const isColHeader =
+      (isWageRegisterColHeaderBlob(blob) && filled.length >= 3) ||
+      (isFormCLwfColHeaderBlob(blob) && filled.length >= 2) ||
+      (isForm25TamilNaduColHeaderBlob(blob) && filled.length >= 3);
     const isNumberRow =
       filled.filter((c) => /^\d{1,2}$/.test(c)).length >= Math.max(6, filled.length * 0.6);
 
@@ -418,6 +679,15 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
     }
 
     if (filled.length === 0) continue;
+
+    // Form 25 festival-holiday boxes are just 1–5 — never print as underlined meta rows.
+    if (
+      filled.length <= 8 &&
+      filled.every((t) => /^\d{1,2}$/.test(String(t || '').trim()))
+    ) {
+      tableStartRow = r + 1;
+      continue;
+    }
 
     // Form W: employer / Men-Women / Month-Year sit above the leaf header — keep as meta.
     const alreadyFormWMeta = looksLikeFormWPdfContext(metaLines, [], 0);
@@ -460,9 +730,17 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
     break;
   }
 
+  let finalRows = padded;
+  if (isForm25Tn) {
+    finalRows = trimForm25TamilNaduPdfTrailingEmployeeRows(padded, tableStartRow);
+  }
+
+  // Strip any pivot "Row Labels" block that leaked into a statutory sheet matrix.
+  finalRows = stripLeakedPivotRowsFromPdfMatrix(finalRows, tableStartRow);
+
   return {
     name: sheetName,
-    rows: padded,
+    rows: finalRows,
     colCount: maxCol,
     metaLines,
     tableStartRow
@@ -478,7 +756,8 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
 
     workbook.eachSheet((ws) => {
       const key = String(ws.name || '').toLowerCase();
-      const matrix = byName.get(key) || matrices[0];
+      // Never fall back to matrices[0] — that merged Sheet3 pivot rows into Form 15 / Form 25.
+      const matrix = byName.get(key);
       if (!matrix || !matrix.rows.length) return;
 
       // Build merge non-master set
@@ -502,24 +781,34 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
       ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
         const r = rowNumber - 1;
         if (r < 0 || r >= MAX_PDF_DATA_ROWS) return;
-        while (matrix.rows.length <= r && matrix.rows.length < MAX_PDF_DATA_ROWS) {
-          matrix.rows.push(Array.from({ length: matrix.colCount }, () => ''));
-        }
+        // Do not extend the matrix with rows from a mismatched / larger sheet.
         if (r >= matrix.rows.length) return;
 
         row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
           if (nonMaster.has(`${rowNumber},${colNumber}`)) return;
           const c = colNumber - 1;
-          if (c < 0 || c >= MAX_PDF_COLS) return;
-          while (matrix.colCount <= c) {
-            matrix.colCount += 1;
-            matrix.rows.forEach((line) => line.push(''));
-          }
+          if (c < 0 || c >= matrix.colCount || c >= MAX_PDF_COLS) return;
           const text = cellToText(cell.value);
           if (!text) return;
           if (!matrix.rows[r][c]) matrix.rows[r][c] = text;
         });
       });
+
+      // Form 25: ExcelJS enrich can widen past Remarks — trim blank trailing cols again.
+      if (
+        looksLikeForm25TamilNaduPdfContext(matrix.metaLines, matrix.rows, matrix.name)
+      ) {
+        const trimmed = trimTrailingBlankPdfColumns(matrix.rows, matrix.colCount, {
+          clampToRemarks: true
+        });
+        matrix.rows = trimForm25TamilNaduPdfTrailingEmployeeRows(
+          trimmed.rows,
+          matrix.tableStartRow || 0
+        );
+        matrix.colCount = trimmed.colCount;
+      }
+
+      matrix.rows = stripLeakedPivotRowsFromPdfMatrix(matrix.rows, matrix.tableStartRow || 0);
     });
   } catch (err) {
     console.warn('ExcelJS enrich skipped:', err);
@@ -538,6 +827,431 @@ const collectWorkbookMatrices = async (arrayBuffer, label = 'Draft') => {
   });
   if (!matrices.length) return [];
   return enrichMatrixWithExcelJs(arrayBuffer, matrices);
+};
+
+/**
+ * Pivot / helper sheets (e.g. "Sheet3" with Row Labels + Count of MALE) must not become PDF pages.
+ */
+const looksLikeAuxiliaryOrPivotPdfSheet = (matrix) => {
+  const name = String(matrix?.name || '').trim();
+  const blob = [
+    name,
+    ...(matrix?.metaLines || []),
+    ...(matrix?.rows || []).slice(0, 20).flat()
+  ]
+    .join(' ')
+    .toLowerCase();
+  if (/row\s+labels/.test(blob)) return true;
+  if (/count of\s+mal/.test(blob) && /count of\s+fem/.test(blob)) return true;
+  if (/sum of\s+gross\s+wages/.test(blob) && /sum of\s+basic/.test(blob)) return true;
+  if (/pivot|count of male|count of female/.test(blob) && /sum of\s+(gross|basic|house\s+rent)/.test(blob)) {
+    return true;
+  }
+  // Generic "Sheet3" style tab with no statutory form markers — only when clearly not a register.
+  if (
+    /^sheet\s*\d+$/i.test(name) &&
+    !/form\s*(?:no\.?\s*)?[-–.]?\s*\d+|form\s*15|muster\s+roll|register of|prescribed under|compensatory|see\s+sub-?rule/i.test(
+      blob
+    )
+  ) {
+    if (/count of|sum of|row labels|gross wages|basic wage|admin assistant|designation/.test(blob)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/** Form 15 Part 1 TN — Register of Leave with Wages. */
+const looksLikeForm15TamilNaduPdfContext = (metaLines, rows, sheetName = '') => {
+  const blob = [...(metaLines || []), ...(rows || []).slice(0, 12).flat(), sheetName || '']
+    .join(' ')
+    .toLowerCase();
+  if (/form\s*15|form-15|form_15/.test(blob) && (/leave|part\s*i\b|part\s*1\b/.test(blob) || /tamil/.test(blob))) {
+    return true;
+  }
+  if (/register of leave/.test(blob) && (/earned leave|medical leave|see\s+sub-?rule/.test(blob))) {
+    return true;
+  }
+  if (/earned leave/.test(blob) && /medical leave/.test(blob) && /name of the employee/.test(blob)) {
+    return true;
+  }
+  return false;
+};
+
+/**
+ * Catalog / download name says Form 15 Part 1 even when the Excel template still has FORM-X titles.
+ * Used to rewrite PDF (and export) headings — never rewrite a true Form X download.
+ */
+const looksLikeForm15Part1PreferredContext = (preferredTitle = '', fileName = '', sheetName = '') => {
+  const blob = [preferredTitle, fileName, sheetName]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ');
+  if (!blob) return false;
+  if (/form\s*15/.test(blob) && /part\s*2|partii|part_2/.test(blob)) return false;
+  if (/form\s*15/.test(blob) && /part\s*1|parti|part_1/.test(blob)) return true;
+  if (
+    /form\s*15/.test(blob) &&
+    /register\s*of\s*leave\s*with\s*wages/.test(blob) &&
+    !/part\s*2|partii|part_2/.test(blob)
+  ) {
+    return true;
+  }
+  return /form\s*15/.test(blob) && /tamil\s*nadu|tamilnadu/.test(blob) && /leave/.test(blob);
+};
+
+const FORM_15_PART1_PDF_TITLE = 'FORM-15';
+const FORM_15_PART1_PDF_SUBTITLE = 'REGISTER OF LEAVE WITH WAGES';
+
+/** Normalize dashes/spaces so "FORM–X" / "FORM X" still match. */
+const normalizeFormTitleToken = (raw) =>
+  String(raw || '')
+    .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/** True for bare Form X only — never Form XV / XIX / XX / XXVI, etc. */
+const isStandaloneFormXTitle = (raw) => {
+  const t = normalizeFormTitleToken(raw);
+  if (!t) return false;
+  // FORM-X, FORM X, FORMX, Form - X
+  if (/^form[\s._-]*x$/i.test(t)) return true;
+  const compact = t.toLowerCase().replace(/[\s._-]+/g, '');
+  return compact === 'formx';
+};
+
+/** Rewrite Form X template titles when the download is Form 15 Part 1. */
+const rewriteForm15Part1PdfTitles = (titles) => {
+  const list = Array.isArray(titles) ? [...titles] : [];
+  const mapped = list
+    .map((t) => {
+      const raw = normalizeFormTitleToken(t);
+      if (!raw) return '';
+      // Drop Form X entirely — FORM-15 is ensured below (do not keep a mapped duplicate).
+      if (isStandaloneFormXTitle(raw)) return '';
+      if (/register\s+of\s+leave\s+and\s+social\s+security/i.test(raw)) {
+        return FORM_15_PART1_PDF_SUBTITLE;
+      }
+      return raw;
+    })
+    .filter(Boolean)
+    // Safety: strip any leftover Form X variant that survived mapping.
+    .filter((t) => !isStandaloneFormXTitle(t));
+  if (!mapped.some((t) => /form[\s._-]*15\b/i.test(t))) {
+    mapped.unshift(FORM_15_PART1_PDF_TITLE);
+  }
+  if (!mapped.some((t) => /register\s+of\s+leave\s+with\s+wages/i.test(t))) {
+    const formIdx = mapped.findIndex((t) => /form[\s._-]*15\b/i.test(t));
+    mapped.splice(formIdx >= 0 ? formIdx + 1 : 0, 0, FORM_15_PART1_PDF_SUBTITLE);
+  }
+  return mapped.filter(
+    (t, i, arr) => arr.findIndex((x) => normalizeMetaKey(x) === normalizeMetaKey(t)) === i
+  );
+};
+
+/** Scrub Form X strings from meta lines before title/field extraction. */
+const scrubForm15Part1MetaLines = (metaLines) =>
+  (Array.isArray(metaLines) ? metaLines : [])
+    .map((line) => {
+      const raw = normalizeFormTitleToken(line);
+      if (!raw) return '';
+      if (isStandaloneFormXTitle(raw)) return '';
+      if (/register\s+of\s+leave\s+and\s+social\s+security/i.test(raw)) {
+        return FORM_15_PART1_PDF_SUBTITLE;
+      }
+      // Combined cell: "FORM-X REGISTER OF …" — drop the Form X token.
+      return raw
+        .replace(/\bform[\s._\-–—]*x\b(?!\s*[ivxlcdm0-9])/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    })
+    .filter(Boolean);
+
+/** Group banner labels: leave categories + Form 15 Part 2 wage/deduction bands. */
+const isLeaveCategoryGroupLabel = (text) => {
+  const t = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t) return false;
+  const n = t.toLowerCase();
+  if (/^(earned|medical|other)\s+leave$/.test(n)) return true;
+  if (/^maternity\s+benefits?$/.test(n)) return true;
+  if (
+    /\bleave\b/.test(n) &&
+    /earned|medical|other/.test(n) &&
+    !/beginning|availed|balance|period|during|earned\s+during|wages?/.test(n)
+  ) {
+    return true;
+  }
+  return false;
+};
+
+/** Form 15 Part 2 / Form W / Form XXVII style merged group banners (not leaf metric titles). */
+const isWageDeductionGroupLabel = (text) => {
+  const t = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t) return false;
+  const n = t.toLowerCase();
+  if (/^deductions?$/.test(n)) return true;
+  if (/^advances?$/.test(n)) return true;
+  if (/^damages?\s*\/\s*fines?$/.test(n) || /^damages?\s+or\s+fines?$/.test(n)) return true;
+  // Short "Leave Wages" group only — not the long leaf "Leave Wages (Earned…)".
+  if (/^leave\s+wages?$/.test(n)) return true;
+  if (/^other\s+allowances?$/.test(n)) return true;
+  // Form XXVII TN Register of Wages group banners
+  if (/^wages?\s+earned$/.test(n)) return true;
+  if (/other\s+allowances?\s*\/\s*cash\s+payment|cash\s+payment\s+nature/.test(n)) return true;
+  // Mid-tier "OTHER" over PT / Uniform Deposits (not "Other Deductions" leaf)
+  if (/^other$/.test(n)) return true;
+  return false;
+};
+
+/**
+ * Form VI TN — merged banner above holiday date columns:
+ * "Days, dates and months of the year on which National and Festival Holidays…"
+ */
+const isFormVIFestivalGroupLabel = (text) => {
+  const t = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t || t.length < 20) return false;
+  const n = t.toLowerCase();
+  if (/days,?\s+dates\s+and\s+months/.test(n)) return true;
+  if (/enter\s+days\s+dates?/.test(n) && /months/.test(n)) return true;
+  if (
+    /national/.test(n) &&
+    /festival/.test(n) &&
+    /holiday/.test(n) &&
+    (/section\s*3/.test(n) || /tamil\s+nadu\s+industrial\s+establishments/.test(n))
+  ) {
+    return true;
+  }
+  return false;
+};
+
+const isStatutoryGroupHeaderLabel = (text) =>
+  isLeaveCategoryGroupLabel(text) ||
+  isWageDeductionGroupLabel(text) ||
+  isFormVIFestivalGroupLabel(text);
+
+/** True when a leaf header marks the end of a Deductions / Leave Wages group span. */
+const isGroupBandStopLeaf = (text) => {
+  const n = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!n) return false;
+  return (
+    /^net\s+wages?$/.test(n) ||
+    /^gross\s+wages?$/.test(n) ||
+    /^date\s+of\s+payment$/.test(n) ||
+    /^unpaid\s+accumulations?$/.test(n) ||
+    /^remarks?$/.test(n) ||
+    /^overtime\s+wages?$/.test(n) ||
+    /^basic\s+wages?$/.test(n) ||
+    /signature|thumb\s+impression|authori[sz]ed/i.test(n)
+  );
+};
+
+/**
+ * Leaf titles that belong outside a mid-level group (Advances / Damages),
+ * so expansion does not swallow PF / Total Deductions / sibling bands.
+ */
+const isForeignLeafForGroup = (groupLabel, leafText) => {
+  const g = String(groupLabel || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const n = String(leafText || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!n) return false;
+  if (isGroupBandStopLeaf(n)) return true;
+  if (/^advances?$/.test(g)) {
+    return /damage|fine|any\s+other\s+deduction|total\s+deduction|provident|insurance|labour\s+welfare|leave\s+wage|gross\s+wage|overtime|basic\s+wage/.test(
+      n
+    );
+  }
+  if (/damage|fine/.test(g)) {
+    return /advance|any\s+other\s+deduction|total\s+deduction|provident|insurance|labour\s+welfare|leave\s+wage|gross\s+wage|overtime|basic\s+wage/.test(
+      n
+    );
+  }
+  if (/^leave\s+wages?$/.test(g)) {
+    return /gross\s+wage|overtime|basic\s+wage|deduction|provident|net\s+wage/.test(n);
+  }
+  if (/^wages?\s+earned$/.test(g)) {
+    return (
+      /gross\s+wage|deduction|provident|insurance|net\s+wage|signature|unpaid|fines?/.test(n) ||
+      isGroupBandStopLeaf(n)
+    );
+  }
+  if (/other\s+allowances?\s*\/\s*cash\s+payment|cash\s+payment\s+nature/.test(g)) {
+    return (
+      /gross\s+wage|basic\s+wage|dearness|deduction|provident|net\s+wage|overtime/.test(n) ||
+      isGroupBandStopLeaf(n)
+    );
+  }
+  if (/^other$/.test(g)) {
+    return (
+      /fines?|other\s+deduction|total\s+deduction|provident|insurance|gross\s+wage|net\s+wage|signature|unpaid/.test(
+        n
+      ) || isGroupBandStopLeaf(n)
+    );
+  }
+  if (/^deductions?$/.test(g)) {
+    return isGroupBandStopLeaf(n);
+  }
+  // Form VI festival-holiday banner — stop before Remarks / identity columns.
+  if (
+    /days,?\s+dates\s+and\s+months/.test(g) ||
+    (/national/.test(g) && /festival/.test(g) && /holiday/.test(g) && g.length > 40)
+  ) {
+    return (
+      /^remarks?$/.test(n) ||
+      /^(?:s|sr|sl)\.?\s*no\.?$/.test(n) ||
+      /employee\s+code|name\s+of\s+(?:the\s+)?(?:employee|worker)|d\.?o\.?j|date\s+of\s+join/.test(n)
+    );
+  }
+  return false;
+};
+
+const headerBandHasLeafAt = (rows, fromRow, toRow, col) => {
+  for (let r = fromRow; r <= toRow && r < rows.length; r += 1) {
+    const t = String(rows[r]?.[col] || '').trim();
+    if (!t) continue;
+    if (isStatutoryGroupHeaderLabel(t)) continue;
+    if (/^\(?\s*\d{1,2}\s*\)?$/.test(t)) continue; // column index row
+    return true;
+  }
+  return false;
+};
+
+const readLeafTextAtCol = (rows, fromRow, toRow, col) => {
+  for (let r = toRow; r >= fromRow && r < rows.length; r -= 1) {
+    const t = String(rows[r]?.[col] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!t) continue;
+    if (isStatutoryGroupHeaderLabel(t)) continue;
+    if (/^\(?\s*\d{1,2}\s*\)?$/.test(t)) continue;
+    return t;
+  }
+  return '';
+};
+
+const expandStatutoryGroupBandEnd = (rows, groupRow, start, colCount, headerBandEnd, nextGroupStart, groupLabel) => {
+  if (Number.isFinite(nextGroupStart) && nextGroupStart > start) {
+    return nextGroupStart - 1;
+  }
+  let end = start;
+  for (let c = start + 1; c < colCount; c += 1) {
+    const group = String(rows[groupRow]?.[c] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (group) {
+      if (isStatutoryGroupHeaderLabel(group)) break;
+      // Non-group text on the same banner row ends the span.
+      break;
+    }
+    const leaf = readLeafTextAtCol(rows, groupRow + 1, headerBandEnd, c);
+    if (leaf && isForeignLeafForGroup(groupLabel, leaf)) break;
+    if (leaf || headerBandHasLeafAt(rows, groupRow + 1, headerBandEnd, c) || c === start) {
+      end = c;
+      continue;
+    }
+    // Allow a single blank inside a merge; stop on a longer empty run.
+    const nextLeaf = headerBandHasLeafAt(rows, groupRow + 1, headerBandEnd, c + 1);
+    if (!nextLeaf) break;
+    end = c;
+  }
+  return Math.max(start, end);
+};
+
+/**
+ * Detect merged group header bands for leave registers and Form 15 Part 2
+ * (Deductions / Advances / Damages / Leave Wages). Excel merges collapse to the
+ * top-left cell — PDF must re-span those columns and center the label.
+ */
+const detectStatutoryGroupHeaderBands = (rows, tableStart, headerBandEnd, colCount) => {
+  const bands = [];
+  for (let r = tableStart; r <= headerBandEnd && r < rows.length; r += 1) {
+    const found = [];
+    for (let c = 0; c < colCount; c += 1) {
+      const t = String(rows[r]?.[c] || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (isStatutoryGroupHeaderLabel(t)) found.push({ start: c, label: t });
+    }
+    if (!found.length) continue;
+    found.forEach((item, i) => {
+      const nextStart = i + 1 < found.length ? found[i + 1].start : null;
+      const end = expandStatutoryGroupBandEnd(
+        rows,
+        r,
+        item.start,
+        colCount,
+        headerBandEnd,
+        nextStart,
+        item.label
+      );
+      if (end > item.start) {
+        bands.push({
+          labelRow: r,
+          start: item.start,
+          end,
+          label: item.label
+        });
+      }
+    });
+  }
+  return bands;
+};
+
+/** @deprecated alias — leave-only detection now covered by detectStatutoryGroupHeaderBands. */
+const detectLeaveCategoryBands = (rows, tableStart, headerBandEnd, colCount) =>
+  detectStatutoryGroupHeaderBands(rows, tableStart, headerBandEnd, colCount).filter((b) =>
+    isLeaveCategoryGroupLabel(b.label)
+  );
+
+/**
+ * When the workbook contains a primary statutory register, drop unrelated sheets
+ * so PDF is only the form — not Sheet2/Sheet3 pivots that inflate page count.
+ */
+const filterStatutoryPdfMatrices = (matrices) => {
+  const list = Array.isArray(matrices) ? matrices.filter(Boolean) : [];
+  if (!list.length) return list;
+
+  // Always drop pivot / helper sheets first.
+  const withoutAux = list.filter((m) => !looksLikeAuxiliaryOrPivotPdfSheet(m));
+  const pool = withoutAux.length > 0 ? withoutAux : list;
+
+  const form25 = pool.filter((m) =>
+    looksLikeForm25TamilNaduPdfContext(m.metaLines, m.rows, m.name)
+  );
+  if (form25.length > 0) return form25;
+
+  const form15 = pool.filter((m) =>
+    looksLikeForm15TamilNaduPdfContext(m.metaLines, m.rows, m.name)
+  );
+  if (form15.length > 0) return form15;
+
+  // Prefer real form/register sheets over bare SheetN tabs.
+  const formish = pool.filter((m) => {
+    const blob = [...(m.metaLines || []), ...(m.rows || []).slice(0, 8).flat(), m.name || '']
+      .join(' ')
+      .toLowerCase();
+    return (
+      /\bform\b|register of|muster roll|prescribed under|see\s+sub-?rule|earned leave/i.test(blob) &&
+      !looksLikeAuxiliaryOrPivotPdfSheet(m)
+    );
+  });
+  if (formish.length > 0) return formish;
+
+  return pool;
 };
 
 const rowHasContent = (row) =>
@@ -571,6 +1285,117 @@ const isPurePdfNumericText = (raw) => {
     .replace(/%$/, '')
     .trim();
   return /^-?\d+(\.\d+)?$/.test(numericRaw);
+};
+
+/** Form 26 / 26-A / Form 1 TN style "Nil of the month" / "Nil for the month of …" cell text. */
+const isNilOfTheMonthPdfText = (text) => {
+  const t = String(text || '').trim();
+  return /^nill?\s+of\s+the\s+month\b/i.test(t) || /^nil\s+for\s+the\s+month\b/i.test(t);
+};
+
+/** Form 1 TN template spill: signature block / payment date in the amount column. */
+const isNilOfTheMonthIgnorableSpillPdfText = (text) => {
+  const raw = String(text || '')
+    .replace(/_x000d_/gi, '\n')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim();
+  if (!raw) return true;
+  const flat = raw.replace(/\s+/g, ' ').trim();
+  if (/^for\s*\(/i.test(flat)) return true;
+  if (/authorised\s+signatory|authorized\s+signatory/i.test(flat)) return true;
+  if (/signature\s+of\s+employer/i.test(flat)) return true;
+  if (/manager\s*\/\s*authori[sz]ed\s+person/i.test(flat)) return true;
+  // Bare calendar date (31-08-2026) left from template / pay-run stamp
+  if (/^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}$/.test(flat)) return true;
+  // Multiline spill: date + For (… + Authorised Signatory
+  if (
+    /\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}/.test(flat) &&
+    (/for\s*\(/i.test(flat) || /authori[sz]ed\s+signatory/i.test(flat) || /signature\s+of\s+employer/i.test(flat))
+  ) {
+    return true;
+  }
+  return false;
+};
+
+/**
+ * Extra values allowed on a nil-of-month data row (Form 1 TN puts serial + month
+ * beside "Nill of the month" instead of a single merged cell).
+ */
+const isNilOfTheMonthCompanionPdfText = (text) => {
+  const t = String(text || '').trim();
+  if (!t) return true;
+  if (isNilOfTheMonthIgnorableSpillPdfText(t)) return true;
+  if (isNilOfTheMonthPdfText(t)) return true;
+  if (/^nill?$/i.test(t)) return true;
+  if (/^\d{1,4}$/.test(t)) return true; // Sl.No
+  // Aug 2026 / August 2026
+  if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{4}$/i.test(t)) {
+    return true;
+  }
+  if (/^\d{1,2}[-/]\d{4}$/.test(t) || /^\d{4}[-/]\d{1,2}$/.test(t)) return true;
+  return false;
+};
+
+const NIL_OF_THE_MONTH_PDF_DISPLAY = 'Nil of the Month';
+
+const NIL_OF_THE_MONTH_YEAR_RE =
+  /\b((?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?)\s+(\d{4})\b/i;
+
+/** Normalize "Aug 2026" / "August 2026" → "Aug 2026". */
+const formatNilOfTheMonthYearLabel = (monthToken, yearToken) => {
+  const abbr = String(monthToken || '')
+    .replace(/\./g, '')
+    .slice(0, 3);
+  const y = String(yearToken || '').trim();
+  if (!abbr || !/^\d{4}$/.test(y)) return '';
+  return `${abbr.charAt(0).toUpperCase()}${abbr.slice(1).toLowerCase()} ${y}`;
+};
+
+/**
+ * Prefer "Nil of the Month Aug 2026" when the period is on the nil line or a companion cell.
+ */
+const formatNilOfTheMonthPdfDisplay = (nilText, filledTexts = []) => {
+  const fromNil = String(nilText || '').match(NIL_OF_THE_MONTH_YEAR_RE);
+  if (fromNil) {
+    const label = formatNilOfTheMonthYearLabel(fromNil[1], fromNil[2]);
+    return label ? `${NIL_OF_THE_MONTH_PDF_DISPLAY} ${label}` : NIL_OF_THE_MONTH_PDF_DISPLAY;
+  }
+  for (const t of filledTexts) {
+    if (isNilOfTheMonthPdfText(t)) continue;
+    const m = String(t || '').trim().match(
+      /^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(\d{4})$/i
+    );
+    if (!m) continue;
+    const label = formatNilOfTheMonthYearLabel(m[1], m[2]);
+    if (label) return `${NIL_OF_THE_MONTH_PDF_DISPLAY} ${label}`;
+  }
+  return NIL_OF_THE_MONTH_PDF_DISPLAY;
+};
+
+/**
+ * Detect a data row that is a nil-month notice (after Excel merges collapse).
+ * Returns a full-width span so PDF paints one merged, center-aligned box.
+ * Form 1 TN / Form XXIX: "1 | Nill of the month | Aug 2026 | …" → "Nil of the Month Aug 2026".
+ */
+const resolveNilOfTheMonthPdfSpan = (row, colCount, rowIndex, headerBandEnd) => {
+  if (rowIndex <= headerBandEnd || colCount < 2) return null;
+  const filled = [];
+  let nilText = '';
+  for (let c = 0; c < colCount; c += 1) {
+    const t = String(row?.[c] ?? '').trim();
+    if (!t) continue;
+    if (isNilOfTheMonthIgnorableSpillPdfText(t)) continue;
+    filled.push(t);
+    if (isNilOfTheMonthPdfText(t)) nilText = t;
+  }
+  if (!filled.length || !nilText) return null;
+  if (!filled.every((t) => isNilOfTheMonthCompanionPdfText(t))) return null;
+  return {
+    start: 0,
+    end: colCount - 1,
+    text: formatNilOfTheMonthPdfDisplay(nilText, filled)
+  };
 };
 
 /** True when a column header is a serial / Sl. No. style label. */
@@ -714,6 +1539,31 @@ const formWTamilNaduColumnWeight = (headerText, maxDataLen) => {
   return Math.max(6, Math.min(maxDataLen || 4, 9));
 };
 
+/** Form XXVII TN Register of Wages — keep identity cols readable; amount cols compact. */
+const formXXVIITamilNaduColumnWeight = (headerText, maxDataLen) => {
+  const h = String(headerText || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!h) return Math.max(4.5, Math.min(maxDataLen || 3, 7));
+  if (/^(?:s|sr|si|sl)\.?\s*no\b|^serial\s*(?:no|number)/.test(h)) return 3.2;
+  if (/name of(?:\s+the)?\s+(?:work(?:man|er)|employee)/.test(h)) return 11;
+  if (/father|husband/.test(h)) return 8;
+  if (/designation|employee\s*(?:number|id|code)/.test(h)) return 6.5;
+  if (/signature|thumb\s+impression|cheque/.test(h)) return 8;
+  if (/unpaid|umpaid/.test(h)) return 6.5;
+  if (/wage\s*period|number\s+worked|units\s+of\s+work|days\s+worked/.test(h)) return 5;
+  if (/daily\s+rated|piece\s+rate|overtime\s+rate/.test(h)) return 5.5;
+  if (
+    /basic\s+wage|dearness|wash\s+allow|\bhra\b|\bstb\b|cash\s+in\s+lieu|ecca|gross\s+wages?|net\s+wages?|providen|esi|fines?|other\s+deduction|total\s+deduction|\bpt\b|uniform/.test(
+      h
+    )
+  ) {
+    return Math.max(5.5, Math.min(Math.max(maxDataLen || 0, 5) + 1.2, 8.5));
+  }
+  return Math.max(5, Math.min(maxDataLen || 4, 7.5));
+};
+
 const resolveLeafHeaderTexts = (rows, tableStart, headerBandEnd, colCount) => {
   const headers = Array.from({ length: colCount }, () => '');
   for (let c = 0; c < colCount; c += 1) {
@@ -752,6 +1602,56 @@ const stripFieldLabelPrefix = (text, labelRe) =>
     .replace(labelRe, '')
     .replace(/^[\s.:\-–—]+/, '')
     .trim();
+
+/**
+ * Tamil Nadu CLRA Form XXVII — Register of Wages [Rule 78(1)(a)].
+ * Not quarterly returns (Form XXVII AP / other states).
+ */
+const looksLikeFormXXVIITamilNaduRegisterPdfContext = (
+  metaLines,
+  rows,
+  sheetName = '',
+  fileName = ''
+) => {
+  const blob = [
+    ...(metaLines || []),
+    ...(rows || []).slice(0, 14).flat(),
+    sheetName || '',
+    fileName || ''
+  ]
+    .join(' ')
+    .toLowerCase();
+  if (!blob.trim()) return false;
+  if (/quarterly\s+return|form[\s._-]*xxvii[\s._-]*quarter|form[\s._-]*27[\s._-]*quarter/.test(blob)) {
+    return false;
+  }
+  const isXxvii =
+    /form\s*xxvii\b/.test(blob) ||
+    /form[\s._-]*xxvii/.test(blob) ||
+    /form_xxvii/.test(blob) ||
+    (/form[\s._-]*27\b/.test(blob) && /tamil/.test(blob));
+  const isWagesRegister =
+    /register\s+of\s+wages/.test(blob) ||
+    /rule\s*78\s*\(\s*1\s*\)\s*\(\s*a\s*\)/.test(blob) ||
+    (/basic\s+wage/.test(blob) &&
+      /gross\s+wages?/.test(blob) &&
+      /net\s+wages?/.test(blob) &&
+      /deductions?/.test(blob));
+  return isXxvii && isWagesRegister;
+};
+
+/** Pull month name from Form XXVII "Wage Period : May" banner (not body WAGE PERIOD column). */
+const extractMonthFromWagePeriodLine = (line) => {
+  const t = String(line || '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  // Skip Form W style "Wage Period from 1st May … to …"
+  if (/wage\s*period\s+from\b/i.test(t)) return '';
+  const m = t.match(
+    /^wage\s*period\s*:?\s*(january|february|march|april|may|june|july|august|september|october|november|december)\b/i
+  );
+  if (m?.[1]) return m[1];
+  return '';
+};
 
 /** Detect Form XXVI CLRA muster from sheet meta / header band. */
 const detectFormXXVIPdfLayout = (metaLines, rows, tableStart) => {
@@ -1090,9 +1990,23 @@ const isStatutoryFieldMetaLine = (line) => {
 /**
  * Build bordered header model for any statutory form (titles + field rows).
  * Form XXVI keeps Excel-style Month/Date right column when available.
+ * @param {object} [opts]
+ * @param {string} [opts.preferredTitle] catalog form name (e.g. "Form 15 Part 1")
+ * @param {string} [opts.fileName] draft / template file name
  */
-const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '') => {
-  const xxvi = detectFormXXVIPdfLayout(metaLines, rows, tableStart);
+const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '', opts = {}) => {
+  const preferredTitle = opts?.preferredTitle || '';
+  const fileName = opts?.fileName || '';
+  const preferForm15Part1 = looksLikeForm15Part1PreferredContext(
+    preferredTitle,
+    fileName,
+    sheetName
+  );
+  const effectiveMetaLines = preferForm15Part1
+    ? scrubForm15Part1MetaLines(metaLines)
+    : metaLines;
+
+  const xxvi = detectFormXXVIPdfLayout(effectiveMetaLines, rows, tableStart);
   if (xxvi) {
     return {
       titles: [xxvi.title, xxvi.reference, xxvi.subtitle].filter(Boolean),
@@ -1106,14 +2020,20 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
         extractFieldValue('Date', xxvi.date, { requireColon: false }),
         ''
       ],
-      hasSystemNote: (metaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
+      hasSystemNote: (effectiveMetaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
       isFormXXVI: true,
       isFormW: false
     };
   }
 
-  const isFormW = looksLikeFormWPdfContext(metaLines, rows, tableStart);
-  const genderBox = isFormW ? extractFormWGenderBox(metaLines, rows, tableStart) : null;
+  const isFormW = looksLikeFormWPdfContext(effectiveMetaLines, rows, tableStart);
+  const isFormXXVIIRegister = looksLikeFormXXVIITamilNaduRegisterPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName,
+    fileName
+  );
+  const genderBox = isFormW ? extractFormWGenderBox(effectiveMetaLines, rows, tableStart) : null;
 
   const titles = [];
   const fields = [];
@@ -1136,13 +2056,16 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     list.push(raw);
   };
 
-  (metaLines || []).forEach((raw) => {
+  (effectiveMetaLines || []).forEach((raw) => {
     expandStatutoryMetaSegments(raw).forEach((line) => {
       if (!line) return;
+      if (preferForm15Part1 && isStandaloneFormXTitle(line)) return;
       if (isSystemGeneratedDocumentNote(line)) {
         hasSystemNote = true;
         return;
       }
+      // Festival holiday boxes on Form 25 are numbered 1–5 — never print as title rows.
+      if (/^\d{1,2}$/.test(line)) return;
       // Gender box labels/counts are painted as a dedicated bordered box — not as field lines
       if (/^(men|women|male young person|female young person)$/i.test(line)) return;
       if (/^\d{1,4}$/.test(line) && isFormW) return;
@@ -1154,7 +2077,17 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
       }
 
       if (/^month\s*:?\s*/i.test(line) && !/name and|address|nature/i.test(line)) {
-        month = stripFieldLabelPrefix(line, /^month/i);
+        month = stripFieldLabelPrefix(line, /^month/i) || month;
+        return;
+      }
+      // Form XXVII banner: "Wage Period : May" → Month right field (not a left meta row)
+      if (/^wage\s*period\s*:?\s*/i.test(line) && !/wage\s*period\s+from\b/i.test(line)) {
+        const fromWp = extractMonthFromWagePeriodLine(line);
+        if (fromWp) month = month || fromWp;
+        else {
+          const rest = stripFieldLabelPrefix(line, /^wage\s*period/i);
+          if (rest && !/weekly|monthly|fn\b/i.test(rest)) month = month || rest;
+        }
         return;
       }
       if (/^year\s*:?\s*/i.test(line) && !/name and|address|nature|entry|termination/i.test(line)) {
@@ -1185,12 +2118,14 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
   }
 
   const sheet = String(sheetName || '').trim();
-  // Never promote the Excel/ZIP file name (or Sheet1 aliases of it) into the PDF heading.
-  // Also skip sheet tab names like "FORM 1" when the title band already has "FORM - I".
+  // Never promote Excel sheet tab names (e.g. "LWF Act - Form C") into the PDF heading.
+  // Titles already extracted from the sheet body are the printed form name.
   const hasFormTitle = titles.some((t) => /^form\s+/i.test(String(t || '')));
   if (
     sheet &&
     sheet !== 'Sheet1' &&
+    titles.length === 0 &&
+    !looksLikeExcelSheetTabName(sheet) &&
     !looksLikeExcelDraftFileLabel(sheet) &&
     !/^form\s*w$/i.test(sheet) &&
     !(hasFormTitle && /^form\s+/i.test(sheet)) &&
@@ -1200,13 +2135,18 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
   }
 
   const rightFields = [];
-  if (month !== '' || date !== '' || year !== '' || /month|date|year/i.test((metaLines || []).join(' '))) {
-    const hasMonthDateHint = (metaLines || []).some((l) =>
-      /^(month|date|year)\b/i.test(String(l || '').trim())
+  if (
+    month !== '' ||
+    date !== '' ||
+    year !== '' ||
+    /month|date|year|wage\s*period/i.test((effectiveMetaLines || []).join(' '))
+  ) {
+    const hasMonthDateHint = (effectiveMetaLines || []).some((l) =>
+      /^(month|date|year|wage\s*period)\b/i.test(String(l || '').trim())
     );
-    if (hasMonthDateHint || isFormW) {
+    if (hasMonthDateHint || isFormW || isFormXXVIIRegister) {
       rightFields.push(extractFieldValue('Month', month, { requireColon: false }));
-      if (isFormW || year) {
+      if (isFormW || year || isFormXXVIIRegister) {
         rightFields.push(extractFieldValue('Year', year || date, { requireColon: false }));
       } else {
         rightFields.push(extractFieldValue('Date', date, { requireColon: false }));
@@ -1214,14 +2154,38 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     }
   }
 
+  let finalTitles = titles.filter((t) => !looksLikeExcelDraftFileLabel(t));
+  const alreadyForm15LeaveWithWages =
+    finalTitles.some((t) => /form[\s._-]*15\b/i.test(String(t || ''))) &&
+    finalTitles.some((t) => /register\s+of\s+leave\s+with\s+wages/i.test(String(t || '')));
+  // Always drop bare FORM-X when this is Form 15 Part 1 (catalog) or the sheet already
+  // shows FORM-15 + Leave with Wages (partial Excel rewrite left FORM-X behind).
+  if (
+    preferForm15Part1 ||
+    alreadyForm15LeaveWithWages ||
+    finalTitles.some((t) => isStandaloneFormXTitle(t)) &&
+      finalTitles.some((t) => /form[\s._-]*15\b/i.test(String(t || '')))
+  ) {
+    finalTitles = rewriteForm15Part1PdfTitles(finalTitles);
+  }
+  // Last pass: never print Form X next to Form 15.
+  finalTitles = finalTitles.filter((t) => !isStandaloneFormXTitle(t));
+
   return {
-    titles: titles.filter((t) => !looksLikeExcelDraftFileLabel(t)),
-    fields,
+    titles: finalTitles,
+    fields:
+      fields.length === 0 && rightFields.length > 0
+        ? rightFields.map(() => '')
+        : fields,
     rightFields,
     genderBox,
     hasSystemNote,
     isFormXXVI: false,
-    isFormW
+    isFormW,
+    isFormXXVIIRegister,
+    /** Form XXVII: full title box, no Month/Year vertical divider. */
+    titleBoxFullBorder: isFormXXVIIRegister,
+    hideRightBandSplit: isFormXXVIIRegister
   };
 };
 
@@ -1241,6 +2205,8 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
   const rightFields = Array.isArray(headerModel?.rightFields) ? headerModel.rightFields : [];
   const genderBox = headerModel?.genderBox || null;
   const useRightBand = rightFields.some((t) => String(t || '').trim());
+  const hideRightBandSplit = headerModel?.hideRightBandSplit === true;
+  const titleBoxFullBorder = headerModel?.titleBoxFullBorder === true;
   const rightBandW = useRightBand ? Math.min(150, usableWidth * 0.22) : 0;
   const splitX = useRightBand ? x1 - rightBandW : x1;
   let paintedGenderBox = false;
@@ -1279,6 +2245,59 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
     y += h;
   };
 
+  /**
+   * Form XXVII: one outer box around stacked title lines (full L/R borders),
+   * horizontal rules only between lines — no internal verticals.
+   */
+  const paintTitleBoxBlock = (titleSegs) => {
+    const prepared = [];
+    titleSegs.forEach((title) => {
+      expandStatutoryMetaSegments(title).forEach((seg) => {
+        const line = String(seg || '').trim();
+        if (!line) return;
+        const lower = line.toLowerCase();
+        const isFormName = /^form\s+/i.test(line);
+        const isRegister =
+          /^register of\b|^overtime\s+muster\s+roll\b|^muster\s+roll\b|^list of\b|^wage\s+slip\b|^letter\s+of\b|^notice\s+of\b|^combined\b/i.test(
+            line
+          );
+        const isRule = /see\s+(?:sub-)?rule|prescribed\s+under/i.test(lower);
+        const isActBanner = /^the\s+.+\b(act|rules)\b/i.test(line);
+        const bold = isFormName || isRegister || prepared.length === 0;
+        const size = isFormName ? 11 : isRegister ? 10 : isRule || isActBanner ? 8 : 9;
+        const minH = isFormName || isRegister ? 20 : 16;
+        doc.setFont('helvetica', bold ? 'bold' : 'normal');
+        doc.setFontSize(size);
+        const wrapped = doc.splitTextToSize(line, usableWidth - padX * 2);
+        const h = Math.max(minH, wrapped.length * (size + 2) + 8);
+        prepared.push({ line, bold, size, wrapped, h });
+      });
+    });
+    if (!prepared.length) return;
+
+    const totalH = prepared.reduce((a, p) => a + p.h, 0);
+    ensureSpace(totalH);
+    const boxTop = y;
+    strokeRect(x0, boxTop, usableWidth, totalH);
+    doc.setDrawColor(0, 0, 0);
+    doc.setLineWidth(0.7);
+    // Reinforce outer verticals so they meet the table edge (finish at full width).
+    doc.line(x0, boxTop, x0, boxTop + totalH);
+    doc.line(x1, boxTop, x1, boxTop + totalH);
+
+    prepared.forEach((p, idx) => {
+      if (idx > 0) {
+        doc.line(x0, y, x1, y);
+      }
+      doc.setFont('helvetica', p.bold ? 'bold' : 'normal');
+      doc.setFontSize(p.size);
+      doc.setTextColor(0, 0, 0);
+      const textY = y + (p.h - p.wrapped.length * (p.size + 2)) / 2 + p.size;
+      doc.text(p.wrapped, (x0 + x1) / 2, textY, { align: 'center' });
+      y += p.h;
+    });
+  };
+
   const paintSplitBand = (leftText, rightText, { minH = 16 } = {}) => {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
@@ -1291,13 +2310,18 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
     const h = Math.max(minH, Math.max(leftWrapped.length, rightWrapped.length || 1) * lineH + 6);
     ensureSpace(h);
     strokeRect(x0, y, usableWidth, h);
-    if (useRightBand) {
+    // Form XXVII: keep Month/Year on the right without an internal vertical divider.
+    if (useRightBand && !hideRightBandSplit) {
       doc.line(splitX, y, splitX, y + h);
     }
     doc.setTextColor(0, 0, 0);
     doc.text(leftWrapped, x0 + padX, y + 10);
     if (rightWrapped.length) {
-      doc.text(rightWrapped, splitX + padX, y + 10);
+      if (hideRightBandSplit) {
+        doc.text(rightWrapped, x1 - padX, y + 10, { align: 'right' });
+      } else {
+        doc.text(rightWrapped, splitX + padX, y + 10);
+      }
     }
     y += h;
   };
@@ -1362,26 +2386,30 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
   };
 
   // One Excel wrapText title cell → one centered band per line (Form I / Form 10 style).
-  let titlePaintIdx = 0;
-  titles.forEach((title) => {
-    expandStatutoryMetaSegments(title).forEach((seg) => {
-      const lower = String(seg).toLowerCase();
-      const isFormName = /^form\s+/i.test(seg);
-      const isRegister =
-        /^register of\b|^overtime\s+muster\s+roll\b|^muster\s+roll\b|^list of\b|^wage\s+slip\b|^letter\s+of\b|^notice\s+of\b|^combined\b/i.test(
-          seg
-        );
-      const isRule = /see\s+(?:sub-)?rule|prescribed\s+under/i.test(lower);
-      const isActBanner = /^the\s+.+\b(act|rules)\b/i.test(seg);
-      paintFullBand(seg, {
-        bold: isFormName || isRegister || titlePaintIdx === 0,
-        size: isFormName ? 11 : isRegister ? 10 : isRule || isActBanner ? 8 : 9,
-        align: 'center',
-        minH: isFormName || isRegister ? 20 : 16
+  if (titleBoxFullBorder && titles.length) {
+    paintTitleBoxBlock(titles);
+  } else {
+    let titlePaintIdx = 0;
+    titles.forEach((title) => {
+      expandStatutoryMetaSegments(title).forEach((seg) => {
+        const lower = String(seg).toLowerCase();
+        const isFormName = /^form\s+/i.test(seg);
+        const isRegister =
+          /^register of\b|^overtime\s+muster\s+roll\b|^muster\s+roll\b|^list of\b|^wage\s+slip\b|^letter\s+of\b|^notice\s+of\b|^combined\b/i.test(
+            seg
+          );
+        const isRule = /see\s+(?:sub-)?rule|prescribed\s+under/i.test(lower);
+        const isActBanner = /^the\s+.+\b(act|rules)\b/i.test(seg);
+        paintFullBand(seg, {
+          bold: isFormName || isRegister || titlePaintIdx === 0,
+          size: isFormName ? 11 : isRegister ? 10 : isRule || isActBanner ? 8 : 9,
+          align: 'center',
+          minH: isFormName || isRegister ? 20 : 16
+        });
+        titlePaintIdx += 1;
       });
-      titlePaintIdx += 1;
     });
-  });
+  }
 
   fields.forEach((field, idx) => {
     const right = rightFields[idx] || '';
@@ -1414,7 +2442,7 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
 /**
  * Draw one sheet: meta headings once (full width), then full data table.
  */
-const drawMatrixSheet = (doc, matrix, startY) => {
+const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   const marginX = 24;
@@ -1425,7 +2453,10 @@ const drawMatrixSheet = (doc, matrix, startY) => {
   const rows = matrix.rows;
   const tableStart = Math.max(0, matrix.tableStartRow || 0);
   const metaLines = Array.isArray(matrix.metaLines) ? matrix.metaLines : [];
-  const headerModel = buildStatutoryPdfHeaderModel(metaLines, rows, tableStart, matrix.name);
+  const headerModel = buildStatutoryPdfHeaderModel(metaLines, rows, tableStart, matrix.name, {
+    preferredTitle: pdfOpts.preferredTitle || '',
+    fileName: pdfOpts.fileName || ''
+  });
 
   let headerBandEnd = tableStart;
   for (let r = tableStart; r < Math.min(rows.length, tableStart + 8); r += 1) {
@@ -1440,7 +2471,42 @@ const drawMatrixSheet = (doc, matrix, startY) => {
       }
     }
   }
+  // Form XXVII Register of Wages — group → mid → leaf → column-number rows.
+  if (headerModel.isFormXXVIIRegister) {
+    for (let r = tableStart; r < Math.min(rows.length, tableStart + 6); r += 1) {
+      const blob = (rows[r] || []).join(' ').toLowerCase();
+      if (
+        /wages?\s+earned|deductions?|basic\s+wage|gross\s+wages?|net\s+wages?|other\s+allowances?|wash\s+allow/.test(
+          blob
+        )
+      ) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+      const filled = (rows[r] || []).filter((c) => String(c || '').trim());
+      if (filled.filter((c) => /^\d{1,2}$/.test(String(c).trim())).length >= 8) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+    }
+  }
+  // Leave registers + Form 15 Part 2 wage bands + Form VI festival band.
+  for (let r = tableStart; r < Math.min(rows.length, tableStart + 8); r += 1) {
+    const blob = (rows[r] || []).join(' ').toLowerCase();
+    if (
+      /earned\s+leave|medical\s+leave|other\s+leave|maternity\s+benefit|leave\s+at\s+the\s+beginning|leave\s+availed|name\s+of\s+the\s+employee/.test(
+        blob
+      ) ||
+      /deductions|advances|damages\s*\/\s*fine|leave\s+wages|provident\s+fund|gross\s+wages|net\s+wages|advance\s+paid/.test(
+        blob
+      ) ||
+      /days,?\s+dates\s+and\s+months|national\s+and\s+festival\s+holidays|pongal|republic\s+day|diwali|christmas/.test(
+        blob
+      )
+    ) {
+      headerBandEnd = Math.max(headerBandEnd, r);
+    }
+  }
   const dayBand = detectDailyHoursBand(rows, tableStart, headerBandEnd, colCount);
+  const groupBands = detectStatutoryGroupHeaderBands(rows, tableStart, headerBandEnd, colCount);
   // Resolve leaf headers for ALL forms so widths follow column names (Form 11, Form W, …).
   const leafHeaders = resolveLeafHeaderTexts(rows, tableStart, headerBandEnd, colCount);
 
@@ -1455,12 +2521,17 @@ const drawMatrixSheet = (doc, matrix, startY) => {
     let maxDataLen = 0;
     for (let r = tableStart; r < Math.min(rows.length, tableStart + 80); r += 1) {
       if (isSystemGeneratedDocumentNoteRow(rows[r])) continue;
+      if (isUnpaidAccumulationsFootnoteRow(rows[r])) continue;
       const len = String(rows[r][c] || '').length;
       maxLen = Math.max(maxLen, len);
       if (r > headerBandEnd) maxDataLen = Math.max(maxDataLen, len);
     }
     if (headerModel.isFormW) {
       weights.push(formWTamilNaduColumnWeight(leafHeaders[c], maxDataLen || maxLen));
+      continue;
+    }
+    if (headerModel.isFormXXVIIRegister) {
+      weights.push(formXXVIITamilNaduColumnWeight(leafHeaders[c], maxDataLen || maxLen));
       continue;
     }
     weights.push(statutoryHeaderColumnWeight(leafHeaders[c], maxDataLen || maxLen, colCount));
@@ -1475,19 +2546,35 @@ const drawMatrixSheet = (doc, matrix, startY) => {
     ? colCount > 28
       ? 5.2
       : 5.8
-    : colCount > 40
-      ? 4.5
-      : colCount > 28
+    : headerModel.isFormXXVIIRegister
+      ? colCount > 24
         ? 5
-        : colCount > 18
-          ? 5.5
-          : colCount > 14
-            ? 6
-            : colCount > 10
-              ? 7
-              : 8;
+        : 5.4
+      : colCount > 40
+        ? 4.5
+        : colCount > 28
+          ? 5
+          : colCount > 18
+            ? 5.5
+            : colCount > 14
+              ? 6
+              : colCount > 10
+                ? 7
+                : 8;
   let y = startY;
   let pendingSystemNote = false;
+  let pendingUnpaidFootnote = '';
+
+  const looksLikeFormCLwfSheet = (() => {
+    const blob = [...metaLines, ...(rows || []).slice(0, Math.min(rows.length, tableStart + 4)).flat(), matrix.name || '']
+      .join(' ')
+      .toLowerCase();
+    return (
+      (/form\s*-?\s*c\b/.test(blob) || /lwf\b/.test(blob)) &&
+      (/unpaid\s+accumulations|details\s+of\s+fines|quarter\s+ending/.test(blob) ||
+        isFormCLwfColHeaderBlob(blob))
+    );
+  })();
 
   const paintMetaLine = (text, { bold = false, size = 9, align = 'left' } = {}) => {
     const line = String(text || '').replace(/\s+/g, ' ').trim();
@@ -1522,27 +2609,58 @@ const drawMatrixSheet = (doc, matrix, startY) => {
     );
   };
 
+  const groupBandAt = (rowIndex, col) => {
+    if (!groupBands.length || rowIndex > headerBandEnd) return null;
+    return (
+      groupBands.find(
+        (b) => b.labelRow === rowIndex && col >= b.start && col <= b.end
+      ) || null
+    );
+  };
+
   const measureRowHeight = (row, rowIndex) => {
     const mergeDayLabel = isDayBandLabelHeaderRow(row, rowIndex);
+    const nilSpan = resolveNilOfTheMonthPdfSpan(row, colCount, rowIndex, headerBandEnd);
     const isHeaderRow = rowIndex <= headerBandEnd;
     let maxLines = 1;
+
+    if (nilSpan) {
+      const bandW = colXs[nilSpan.end + 1] - colXs[nilSpan.start] - 3;
+      const wrapped = doc.splitTextToSize(nilSpan.text, Math.max(bandW, 6));
+      maxLines = Math.max(1, Math.min(wrapped.length, 3));
+      return Math.max(fontSize + 5, maxLines * (fontSize + 1.5) + 4);
+    }
+
     for (let c = 0; c < colCount; c += 1) {
       if (mergeDayLabel && dayBand && c > dayBand.start && c <= dayBand.end) continue;
+      const groupBand = groupBandAt(rowIndex, c);
+      if (groupBand && c > groupBand.start && c <= groupBand.end) continue;
       const width =
         mergeDayLabel && dayBand && c === dayBand.start
           ? colXs[dayBand.end + 1] - colXs[dayBand.start] - 3
-          : Math.max(colWidths[c] - 3, 6);
+          : groupBand && c === groupBand.start
+            ? colXs[groupBand.end + 1] - colXs[groupBand.start] - 3
+            : Math.max(colWidths[c] - 3, 6);
       const text =
         mergeDayLabel && dayBand && c === dayBand.start
           ? dayBand.label
-          : String(row[c] ?? '') || ' ';
+          : groupBand && c === groupBand.start
+            ? groupBand.label
+            : String(row[c] ?? '') || ' ';
       // Data rows: never wrap pure numbers (they shrink-to-fit when painted).
       if (!isHeaderRow && isPurePdfNumericText(text)) {
         maxLines = Math.max(maxLines, 1);
         continue;
       }
       const wrapped = doc.splitTextToSize(text, Math.max(width, 6));
-      const lineCap = isHeaderRow ? (headerModel.isFormW ? 6 : 8) : 8;
+      const lineCap =
+        groupBand && isFormVIFestivalGroupLabel(groupBand.label)
+          ? 10
+          : isHeaderRow
+            ? headerModel.isFormW
+              ? 6
+              : 8
+            : 8;
       maxLines = Math.max(maxLines, Math.min(wrapped.length, lineCap));
     }
     return Math.max(fontSize + 5, maxLines * (fontSize + 1.5) + 4);
@@ -1551,6 +2669,7 @@ const drawMatrixSheet = (doc, matrix, startY) => {
   const paintGridRow = (row, rowIndex, rowH) => {
     const bold = rowIndex <= headerBandEnd || isLikelyHeaderBandRow(row, rowIndex);
     const mergeDayLabel = isDayBandLabelHeaderRow(row, rowIndex);
+    const nilSpan = resolveNilOfTheMonthPdfSpan(row, colCount, rowIndex, headerBandEnd);
     const isHeaderRow = rowIndex <= headerBandEnd;
     doc.setDrawColor(0, 0, 0);
     doc.setLineWidth(0.4);
@@ -1558,8 +2677,24 @@ const drawMatrixSheet = (doc, matrix, startY) => {
     doc.setFontSize(fontSize);
     doc.setTextColor(0, 0, 0);
 
+    if (nilSpan) {
+      const bandW = colXs[nilSpan.end + 1] - colXs[nilSpan.start];
+      doc.rect(colXs[nilSpan.start], y, bandW, rowH, 'S');
+      const lines = doc
+        .splitTextToSize(nilSpan.text, Math.max(bandW - 4, 8))
+        .slice(0, 3);
+      const textH = lines.length * (fontSize + 1);
+      doc.text(lines, colXs[nilSpan.start] + bandW / 2, y + (rowH - textH) / 2 + fontSize, {
+        align: 'center'
+      });
+      y += rowH;
+      return;
+    }
+
     for (let c = 0; c < colCount; c += 1) {
       if (mergeDayLabel && dayBand && c > dayBand.start && c <= dayBand.end) continue;
+      const groupBand = groupBandAt(rowIndex, c);
+      if (groupBand && c > groupBand.start && c <= groupBand.end) continue;
 
       if (mergeDayLabel && dayBand && c === dayBand.start) {
         const bandW = colXs[dayBand.end + 1] - colXs[dayBand.start];
@@ -1567,6 +2702,20 @@ const drawMatrixSheet = (doc, matrix, startY) => {
         const lines = doc
           .splitTextToSize(dayBand.label, Math.max(bandW - 4, 8))
           .slice(0, 3);
+        const textH = lines.length * (fontSize + 1);
+        doc.text(lines, colXs[c] + bandW / 2, y + (rowH - textH) / 2 + fontSize, {
+          align: 'center'
+        });
+        continue;
+      }
+
+      if (groupBand && c === groupBand.start) {
+        const bandW = colXs[groupBand.end + 1] - colXs[groupBand.start];
+        doc.rect(colXs[c], y, bandW, rowH, 'S');
+        const groupLineCap = isFormVIFestivalGroupLabel(groupBand.label) ? 10 : 3;
+        const lines = doc
+          .splitTextToSize(groupBand.label, Math.max(bandW - 4, 8))
+          .slice(0, groupLineCap);
         const textH = lines.length * (fontSize + 1);
         doc.text(lines, colXs[c] + bandW / 2, y + (rowH - textH) / 2 + fontSize, {
           align: 'center'
@@ -1584,6 +2733,15 @@ const drawMatrixSheet = (doc, matrix, startY) => {
         c >= dayBand.start &&
         c <= dayBand.end &&
         /daily\s+hours/i.test(raw)
+      ) {
+        continue;
+      }
+      // Hide leftover group labels that leaked into leaf header cells
+      if (
+        groupBands.length &&
+        rowIndex <= headerBandEnd &&
+        isStatutoryGroupHeaderLabel(raw) &&
+        !groupBandAt(rowIndex, c)
       ) {
         continue;
       }
@@ -1610,7 +2768,8 @@ const drawMatrixSheet = (doc, matrix, startY) => {
       const lines = doc.splitTextToSize(raw, cellW).slice(0, lineCap);
       if (alignRight) {
         doc.text(lines, colXs[c] + colWidths[c] - 1.5, y + fontSize + 1, { align: 'right' });
-      } else if (isHeaderRow) {
+      } else if (isHeaderRow || isPureNilPdfText(raw)) {
+        // Header labels and Nil/NIL values — center like the Excel register model.
         const textH = lines.length * (fontSize + 1);
         doc.text(lines, colXs[c] + colWidths[c] / 2, y + (rowH - textH) / 2 + fontSize, {
           align: 'center'
@@ -1645,7 +2804,8 @@ const drawMatrixSheet = (doc, matrix, startY) => {
   } else if (
     matrix.name &&
     matrix.name !== 'Sheet1' &&
-    !looksLikeExcelDraftFileLabel(matrix.name)
+    !looksLikeExcelDraftFileLabel(matrix.name) &&
+    !looksLikeExcelSheetTabName(matrix.name)
   ) {
     y = paintBorderedStatutoryHeader(
       doc,
@@ -1658,6 +2818,9 @@ const drawMatrixSheet = (doc, matrix, startY) => {
   if (headerModel.hasSystemNote) pendingSystemNote = true;
   metaLines.forEach((line) => {
     if (isSystemGeneratedDocumentNote(line)) pendingSystemNote = true;
+    if (isUnpaidAccumulationsFootnoteText(line) && !pendingUnpaidFootnote) {
+      pendingUnpaidFootnote = String(line).replace(/\s+/g, ' ').trim();
+    }
   });
 
   for (let r = tableStart; r < rows.length; r += 1) {
@@ -1667,6 +2830,13 @@ const drawMatrixSheet = (doc, matrix, startY) => {
     // Never draw the footer inside Sr. No. — paint after the full column band.
     if (isSystemGeneratedDocumentNoteRow(row)) {
       pendingSystemNote = true;
+      continue;
+    }
+
+    // Form C legal footnote — paint below the grid, above the system-generated note.
+    if (isUnpaidAccumulationsFootnoteRow(row) || isUnpaidAccumulationsFootnoteText(row?.[0])) {
+      const fn = extractUnpaidAccumulationsFootnoteText(row) || String(row?.[0] || '').trim();
+      if (fn && !pendingUnpaidFootnote) pendingUnpaidFootnote = fn;
       continue;
     }
 
@@ -1692,16 +2862,32 @@ const drawMatrixSheet = (doc, matrix, startY) => {
   }
 
   // Also catch a note that landed in the meta band or above the table start.
-  if (!pendingSystemNote) {
+  if (!pendingSystemNote || !pendingUnpaidFootnote) {
     for (let r = 0; r < rows.length; r += 1) {
-      if (isSystemGeneratedDocumentNoteRow(rows[r])) {
+      if (!pendingSystemNote && isSystemGeneratedDocumentNoteRow(rows[r])) {
         pendingSystemNote = true;
-        break;
+      }
+      if (!pendingUnpaidFootnote) {
+        const fn = extractUnpaidAccumulationsFootnoteText(rows[r]);
+        if (fn) pendingUnpaidFootnote = fn;
       }
     }
   }
-  if (pendingSystemNote) {
+
+  // Form C always shows the unpaid-accumulations definition before the system note.
+  if (looksLikeFormCLwfSheet && !pendingUnpaidFootnote) {
+    pendingUnpaidFootnote = FORM_C_UNPAID_ACCUMULATIONS_FOOTNOTE;
+  }
+  if (looksLikeFormCLwfSheet) {
+    pendingSystemNote = true;
+  }
+
+  if (pendingUnpaidFootnote) {
     y += 8;
+    paintMetaLine(pendingUnpaidFootnote, { bold: false, size: 8, align: 'left' });
+  }
+  if (pendingSystemNote) {
+    y += pendingUnpaidFootnote ? 4 : 8;
     paintMetaLine(SYSTEM_GENERATED_DOCUMENT_NOTE, { bold: false, size: 9, align: 'center' });
   }
 
@@ -1739,24 +2925,28 @@ export async function buildStatutoryDraftPdfBlob({
     }
   }
 
-  if (!allMatrices.length) {
+  const matricesForPdf = filterStatutoryPdfMatrices(allMatrices);
+  if (!matricesForPdf.length) {
     throw new Error('Draft Excel has no readable rows to put in the PDF.');
   }
 
-  const maxCols = Math.max(...allMatrices.map((m) => m.colCount));
-  const anyFormW = allMatrices.some((m) =>
+  const maxCols = Math.max(...matricesForPdf.map((m) => m.colCount));
+  const anyFormW = matricesForPdf.some((m) =>
     looksLikeFormWPdfContext(m.metaLines, m.rows, m.tableStartRow || 0)
   );
-  const anyAccidentBook = allMatrices.some((m) => {
+  const anyAccidentBook = matricesForPdf.some((m) => {
     const blob = [...(m.metaLines || []), ...(m.rows || []).slice(0, 8).flat(), m.name || '']
       .join(' ')
       .toLowerCase();
     return /accident\s+book|form\s*(?:no\.?\s*)?11\b/.test(blob);
   });
-  const wide = maxCols > 8 || anyFormW || anyAccidentBook;
+  const anyForm25 = matricesForPdf.some((m) =>
+    looksLikeForm25TamilNaduPdfContext(m.metaLines, m.rows, m.name)
+  );
+  const wide = maxCols > 8 || anyFormW || anyAccidentBook || anyForm25;
   // Form W (~30 wage/deduction cols) needs A2 landscape so amounts stay on one line.
   // Form 11 Accident Book (~18 cols with long headers) and other wide registers need A3.
-  const veryWide = anyFormW || anyAccidentBook || maxCols > 14;
+  const veryWide = anyFormW || anyAccidentBook || anyForm25 || maxCols > 14;
   const doc = new jsPDF({
     unit: 'pt',
     format: anyFormW ? 'a2' : veryWide ? 'a3' : 'a4',
@@ -1764,12 +2954,14 @@ export async function buildStatutoryDraftPdfBlob({
   });
 
   // Bordered header draws form name for every sheet — skip a floating duplicate title.
-  const firstMatrix = allMatrices[0];
+  const firstMatrix = matricesForPdf[0];
+  const pdfHeaderOpts = { preferredTitle: title, fileName };
   const firstHeaderModel = buildStatutoryPdfHeaderModel(
     firstMatrix?.metaLines || [],
     firstMatrix?.rows || [],
     firstMatrix?.tableStartRow || 0,
-    firstMatrix?.name || ''
+    firstMatrix?.name || '',
+    pdfHeaderOpts
   );
   const hasBorderedHeader =
     (firstHeaderModel.titles || []).length > 0 || (firstHeaderModel.fields || []).length > 0;
@@ -1789,12 +2981,12 @@ export async function buildStatutoryDraftPdfBlob({
   }
 
   let y = hasBorderedHeader || !heading ? 20 : 32;
-  for (let i = 0; i < allMatrices.length; i += 1) {
+  for (let i = 0; i < matricesForPdf.length; i += 1) {
     if (i > 0) {
       doc.addPage();
       y = 28;
     }
-    y = drawMatrixSheet(doc, allMatrices[i], y);
+    y = drawMatrixSheet(doc, matricesForPdf[i], y, pdfHeaderOpts);
   }
 
   return doc.output('blob');
@@ -1816,14 +3008,44 @@ export function draftFileNameToPdfName(fileName) {
 /** Test-only helpers for Form W PDF layout detection. */
 export const statutoryDraftPdfTestUtils = {
   isWageRegisterColHeaderBlob,
+  isFormCLwfColHeaderBlob,
+  isForm25TamilNaduColHeaderBlob,
+  looksLikeForm25TamilNaduPdfContext,
+  findRemarksColumnIndex,
+  trimTrailingBlankPdfColumns,
+  isForm25TamilNaduEmployeePdfRow,
+  trimForm25TamilNaduPdfTrailingEmployeeRows,
+  looksLikeAuxiliaryOrPivotPdfSheet,
+  looksLikeForm15TamilNaduPdfContext,
+  looksLikeForm15Part1PreferredContext,
+  rewriteForm15Part1PdfTitles,
+  isStandaloneFormXTitle,
+  detectLeaveCategoryBands,
+  detectStatutoryGroupHeaderBands,
+  isLeaveCategoryGroupLabel,
+  isWageDeductionGroupLabel,
+  isFormVIFestivalGroupLabel,
+  isStatutoryGroupHeaderLabel,
+  filterStatutoryPdfMatrices,
+  stripLeakedPivotRowsFromPdfMatrix,
   isFormWAdminBandBlob,
   isFormWAdminValueRow,
   looksLikeFormWPdfContext,
   formWTamilNaduColumnWeight,
+  formXXVIITamilNaduColumnWeight,
+  looksLikeFormXXVIITamilNaduRegisterPdfContext,
+  extractMonthFromWagePeriodLine,
   isPurePdfNumericText,
+  isPureNilPdfText,
+  isNilOfTheMonthPdfText,
+  resolveNilOfTheMonthPdfSpan,
+  isUnpaidAccumulationsFootnoteText,
+  isUnpaidAccumulationsFootnoteRow,
+  FORM_C_UNPAID_ACCUMULATIONS_FOOTNOTE,
   extractFormWGenderBox,
   sheetToDenseMatrix,
   looksLikeExcelDraftFileLabel,
+  looksLikeExcelSheetTabName,
   buildStatutoryPdfHeaderModel,
   isStatutoryTitleMetaLine,
   expandStatutoryMetaSegments,

@@ -332,3 +332,669 @@ describe('Form W Tamil Nadu PDF alignment helpers', () => {
     expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(usable, 0);
   });
 });
+
+describe('Form 26 nil-of-the-month PDF merge', () => {
+  const { isNilOfTheMonthPdfText, resolveNilOfTheMonthPdfSpan } = statutoryDraftPdfTestUtils;
+
+  test('recognizes Nil / Nill of the month and Nil for the month lines', () => {
+    expect(isNilOfTheMonthPdfText('Nill of the month')).toBe(true);
+    expect(isNilOfTheMonthPdfText('Nil of the month')).toBe(true);
+    expect(isNilOfTheMonthPdfText('Nil for the month of Jun 2026')).toBe(true);
+    expect(isNilOfTheMonthPdfText('Accident description')).toBe(false);
+  });
+
+  test('spans the full table band for a single nil cell after merge collapse', () => {
+    const row = ['Nill of the month', '', '', '', '', '', '', '', '', '', '', '', '', ''];
+    expect(resolveNilOfTheMonthPdfSpan(row, 14, 5, 4)).toEqual({
+      start: 0,
+      end: 13,
+      text: 'Nil of the Month'
+    });
+  });
+
+  test('Form 1 TN / Form XXIX nil row includes month and year in centered text', () => {
+    const row = [
+      '1',
+      'Nill of the month',
+      'Aug 2026',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      ''
+    ];
+    expect(resolveNilOfTheMonthPdfSpan(row, 10, 5, 4)).toEqual({
+      start: 0,
+      end: 9,
+      text: 'Nil of the Month Aug 2026'
+    });
+  });
+
+  test('Form XXIX combined nil line already containing period stays formatted', () => {
+    const row = ['NIL of the Month Aug 2026', '', '', '', '', '', '', '', '', ''];
+    expect(resolveNilOfTheMonthPdfSpan(row, 10, 5, 4)).toEqual({
+      start: 0,
+      end: 9,
+      text: 'Nil of the Month Aug 2026'
+    });
+  });
+
+  test('Form 1 TN nil row ignores signature date spill and still merges full width', () => {
+    const row = [
+      '1',
+      'Nil of the month',
+      'Aug 2026',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '31-08-2026\nFor (Company Name)\nAuthorised Signatory\nSignature of Employer / Manager / Authorised Person',
+      '',
+      '',
+      ''
+    ];
+    expect(resolveNilOfTheMonthPdfSpan(row, 12, 5, 4)).toEqual({
+      start: 0,
+      end: 11,
+      text: 'Nil of the Month Aug 2026'
+    });
+  });
+
+  test('does not treat header rows or accident data rows as nil spans', () => {
+    const header = ['(1) Sl. No.', '(2) Date', '(3) Name'];
+    expect(resolveNilOfTheMonthPdfSpan(header, 3, 3, 4)).toBeNull();
+    const data = ['1', '01-01-2026', 'Ravi'];
+    expect(resolveNilOfTheMonthPdfSpan(data, 3, 5, 4)).toBeNull();
+  });
+});
+
+describe('Form C LWF PDF layout', () => {
+  const {
+    isFormCLwfColHeaderBlob,
+    looksLikeExcelSheetTabName,
+    buildStatutoryPdfHeaderModel,
+    sheetToDenseMatrix,
+    isPureNilPdfText
+  } = statutoryDraftPdfTestUtils;
+
+  test('detects Details + Quarter ending column header row', () => {
+    expect(
+      isFormCLwfColHeaderBlob(
+        'Details of Fines and Unpaid Accumulations (1) Quarter ending 31-March-2024 (2) Quarter ending 30-June-2024 (3) Quarter ending 30-September-2024 (4) Quarter ending 31-December-2024 (5)'
+      )
+    ).toBe(true);
+    expect(isFormCLwfColHeaderBlob('S.No Name of the Employee Basic Wage')).toBe(false);
+  });
+
+  test('treats LWF Act - Form C sheet tab as non-printable title', () => {
+    expect(looksLikeExcelSheetTabName('LWF Act - Form C')).toBe(true);
+    expect(looksLikeExcelSheetTabName('Form C')).toBe(true);
+    expect(looksLikeExcelSheetTabName('Form-C')).toBe(true);
+    expect(looksLikeExcelSheetTabName('Register of Fines and Unpaid Accumulations for the year - 2024')).toBe(
+      false
+    );
+  });
+
+  test('does not put sheet tab name above Form-C titles', () => {
+    const model = buildStatutoryPdfHeaderModel(
+      [
+        'Form-C',
+        '[See rule 29 of the Tamil Nadu Labour Welfare Fund Rules, 1973]',
+        'Register of Fines and Unpaid Accumulations for the year - 2024'
+      ],
+      [],
+      0,
+      'LWF Act - Form C'
+    );
+    expect(model.titles.some((t) => /lwf\s+act/i.test(t))).toBe(false);
+    expect(model.titles[0]).toMatch(/form\s*-?\s*c/i);
+  });
+
+  test('keeps quarter header row in the table matrix instead of meta bands', () => {
+    const XLSX = require('xlsx');
+    const aoa = [
+      ['Form-C', '', '', '', ''],
+      ['[See rule 29 of the Tamil Nadu Labour Welfare Fund Rules, 1973]', '', '', '', ''],
+      ['Register of Fines and Unpaid Accumulations for the year - 2024', '', '', '', ''],
+      ['TN-Palani, Vayona Energy Pvt Ltd', '', '', '', ''],
+      [
+        'Details of Fines and Unpaid Accumulations (1)',
+        'Quarter ending 31-March-2024 (2)',
+        'Quarter ending 30-June-2024 (3)',
+        'Quarter ending 30-September-2024 (4)',
+        'Quarter ending 31-December-2024 (5)'
+      ],
+      ['1. Total Realisations under fines', 'Nil', 'Nil', 'Nil', 'Nil'],
+      ['(i) Basic Wages', 'Nil', 'Nil', 'Nil', 'Nil']
+    ];
+    const sheet = XLSX.utils.aoa_to_sheet(aoa);
+    const matrix = sheetToDenseMatrix(sheet, 'LWF Act - Form C');
+    expect(matrix.tableStartRow).toBe(4);
+    expect(matrix.metaLines.join(' ')).not.toMatch(/quarter\s+ending/i);
+    expect(matrix.rows[matrix.tableStartRow][1]).toMatch(/quarter\s+ending/i);
+    expect(isPureNilPdfText('Nil')).toBe(true);
+    expect(isPureNilPdfText('NIL')).toBe(true);
+  });
+
+  test('detects unpaid accumulations footnote for placement above system note', () => {
+    const { isUnpaidAccumulationsFootnoteText, isUnpaidAccumulationsFootnoteRow, FORM_C_UNPAID_ACCUMULATIONS_FOOTNOTE } =
+      statutoryDraftPdfTestUtils;
+    expect(
+      isUnpaidAccumulationsFootnoteText(
+        '*See definition of "Unpaid Accumulations" under Section 2(I) of the Tamil Nadu Labour Welfare Fund Act, 1972'
+      )
+    ).toBe(true);
+    expect(
+      isUnpaidAccumulationsFootnoteRow([
+        '*See definition of" Unpaid Accumulations" under Section 2(I) of the Tamil Nadu Labour WelfareFund Act.1972',
+        '',
+        '',
+        ''
+      ])
+    ).toBe(true);
+    expect(FORM_C_UNPAID_ACCUMULATIONS_FOOTNOTE).toMatch(/unpaid\s+accumulations/i);
+    expect(isUnpaidAccumulationsFootnoteText('Nil')).toBe(false);
+  });
+});
+
+describe('Form 25 Tamil Nadu PDF trailing columns', () => {
+  const {
+    looksLikeForm25TamilNaduPdfContext,
+    findRemarksColumnIndex,
+    trimTrailingBlankPdfColumns,
+    sheetToDenseMatrix,
+    buildStatutoryPdfHeaderModel
+  } = statutoryDraftPdfTestUtils;
+
+  test('detects Form 25 compensatory holidays context', () => {
+    expect(
+      looksLikeForm25TamilNaduPdfContext(
+        ['FORM No - 25', 'MUSTER ROLL AND REGISTER OF COMPENSATORY HOLIDAYS'],
+        [],
+        'Form 25'
+      )
+    ).toBe(true);
+  });
+
+  test('trims blank columns after Remarks', () => {
+    const rows = [
+      ['S.No', 'Name', '1', '2', 'Total Days Worked', 'Remarks', '', '', ''],
+      ['1', 'Ravi', '8', '8', '2', '', '', '', '']
+    ];
+    expect(findRemarksColumnIndex(rows)).toBe(5);
+    const trimmed = trimTrailingBlankPdfColumns(rows, 9, { clampToRemarks: true });
+    expect(trimmed.colCount).toBe(6);
+    expect(trimmed.rows[0]).toEqual(['S.No', 'Name', '1', '2', 'Total Days Worked', 'Remarks']);
+    expect(trimmed.rows[0].length).toBe(6);
+  });
+
+  test('sheet matrix does not pad empty columns after Remarks for Form 25', () => {
+    const XLSX = require('xlsx');
+    const header = Array(50).fill('');
+    header[0] = 'S.No';
+    header[1] = 'Name of the Worker';
+    header[2] = 'Worker Identity Number';
+    header[3] = 'Time at which work commences';
+    header[4] = 'Rest interval';
+    header[5] = 'Time at which work ends';
+    header[6] = 'Scheme of Shifts';
+    header[7] = 'Daily Hours of work including overtime (if any)*';
+    for (let d = 1; d <= 31; d += 1) header[6 + d] = String(d);
+    header[38] = 'Total Days Worked';
+    header[39] = 'Total Hours Worked';
+    header[40] = 'Number of days on Loss of Pay';
+    header[41] = 'Remarks';
+    // Intentionally leave cols 42–49 blank (template padding).
+    const aoa = [
+      ['FORM No - 25', ...Array(49).fill('')],
+      ['MUSTER ROLL AND REGISTER OF COMPENSATORY HOLIDAYS', ...Array(49).fill('')],
+      ['[Prescribed under rules 77(4), 103]', ...Array(49).fill('')],
+      header,
+      ['1', 'Ravi', 'E1', '09:00', '1hr', '18:00', 'General', ...Array(31).fill('8'), '20', '160', '0', '', ...Array(8).fill('')]
+    ];
+    const sheet = XLSX.utils.aoa_to_sheet(aoa);
+    // Inflate !ref past Remarks like a padded Excel template.
+    sheet['!ref'] = 'A1:AX10';
+    const matrix = sheetToDenseMatrix(sheet, 'Form 25');
+    expect(matrix.colCount).toBe(42); // 0..41 inclusive → Remarks
+    expect(matrix.rows[matrix.tableStartRow][41]).toMatch(/remarks/i);
+    expect(matrix.rows[matrix.tableStartRow][42]).toBeUndefined();
+  });
+
+  test('does not promote festival holiday box numbers into PDF titles', () => {
+    const model = buildStatutoryPdfHeaderModel(
+      ['FORM No - 25', 'MUSTER ROLL AND REGISTER OF COMPENSATORY HOLIDAYS', '1', '2', '3', '4', '5'],
+      [],
+      0,
+      'Form 25'
+    );
+    expect(model.titles.some((t) => /^\d+$/.test(t))).toBe(false);
+    expect(model.titles.some((t) => /form\s*no/i.test(t))).toBe(true);
+  });
+
+  test('drops leftover template employee rows after the last real worker', () => {
+    const { trimForm25TamilNaduPdfTrailingEmployeeRows, isForm25TamilNaduEmployeePdfRow } =
+      statutoryDraftPdfTestUtils;
+    const header = [
+      'S.No',
+      'Name of the Worker',
+      'Scheme of Shifts',
+      '1',
+      '2',
+      '3',
+      'Remarks'
+    ];
+    const rows = [
+      header,
+      ['1', 'S Muthu Kumaran', 'General Shift', 'A', 'WO', 'A', ''],
+      ['2', 'Mugundhan K', 'General Shift', 'WO', 'A', 'A', ''],
+      ['3', '', 'General Shift', '09:00', '', '', ''], // template shell — no name / attendance
+      ['4', '', 'General Shift', '', '', '', ''],
+      ['This is a System Generated Document', '', '', '', '', '', '']
+    ];
+    expect(isForm25TamilNaduEmployeePdfRow(rows[1])).toBe(true);
+    expect(isForm25TamilNaduEmployeePdfRow(rows[3])).toBe(false);
+    const trimmed = trimForm25TamilNaduPdfTrailingEmployeeRows(rows, 0);
+    expect(trimmed).toHaveLength(4); // header + 2 employees + system note
+    expect(trimmed[1][1]).toBe('S Muthu Kumaran');
+    expect(trimmed[2][1]).toBe('Mugundhan K');
+    expect(trimmed[trimmed.length - 1][0]).toMatch(/system generated/i);
+  });
+
+  test('drops Sheet3 pivot pages and keeps only Form 25 sheet', () => {
+    const { filterStatutoryPdfMatrices, looksLikeAuxiliaryOrPivotPdfSheet } = statutoryDraftPdfTestUtils;
+    const form25 = {
+      name: 'Form 25',
+      metaLines: ['FORM No - 25', 'MUSTER ROLL AND REGISTER OF COMPENSATORY HOLIDAYS'],
+      rows: [
+        ['S.No', 'Name of the Worker', '1', '2', 'Remarks'],
+        ['1', 'Ravi', 'A', 'WO', '']
+      ],
+      tableStartRow: 0,
+      colCount: 5
+    };
+    const sheet3 = {
+      name: 'Sheet3',
+      metaLines: [],
+      rows: [
+        ['Row Labels', '', '', 'Count of MALE', 'Count of FEMALE', 'Sum of Gross Wages'],
+        ['Admin Assistant', '', '', '1', '0', '25000']
+      ],
+      tableStartRow: 0,
+      colCount: 6
+    };
+    expect(looksLikeAuxiliaryOrPivotPdfSheet(sheet3)).toBe(true);
+    expect(looksLikeAuxiliaryOrPivotPdfSheet(form25)).toBe(false);
+    const filtered = filterStatutoryPdfMatrices([form25, sheet3]);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].name).toBe('Form 25');
+  });
+
+  test('keeps Form 15 Part 1 and drops Sheet3 pivot pages', () => {
+    const {
+      filterStatutoryPdfMatrices,
+      looksLikeForm15TamilNaduPdfContext,
+      stripLeakedPivotRowsFromPdfMatrix
+    } = statutoryDraftPdfTestUtils;
+    const form15 = {
+      name: 'Form 15 Part 1',
+      metaLines: ['FORM-15', 'REGISTER OF LEAVE WITH WAGES', '[See sub-rule (1)]'],
+      rows: [
+        ['S.No', 'Name of the employee', 'Employee Identification No.', 'Gender', 'Earned Leave'],
+        ['1', 'Prabakaran', 'VE1189', 'Male', '0']
+      ],
+      tableStartRow: 0,
+      colCount: 5
+    };
+    const sheet3 = {
+      name: 'Sheet3',
+      metaLines: [],
+      rows: [
+        ['Row Labels', '', '', 'Count of MALE', 'Count of FEMALE'],
+        ['Admin Assistant', '', '', '2', '1']
+      ],
+      tableStartRow: 0,
+      colCount: 5
+    };
+    expect(looksLikeForm15TamilNaduPdfContext(form15.metaLines, form15.rows, form15.name)).toBe(
+      true
+    );
+    const filtered = filterStatutoryPdfMatrices([form15, sheet3]);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].name).toBe('Form 15 Part 1');
+
+    const leaked = [
+      ['S.No', 'Name of the employee', 'Gender'],
+      ['1', 'Prabakaran', 'Male'],
+      ['Row Labels', '', 'Count of MALE'],
+      ['Admin Assistant', '', '1'],
+      ['This is a System Generated Document', '', '']
+    ];
+    const cleaned = stripLeakedPivotRowsFromPdfMatrix(leaked, 0);
+    expect(cleaned.map((r) => r[0])).toEqual([
+      'S.No',
+      '1',
+      'This is a System Generated Document'
+    ]);
+  });
+
+  test('rewrites Form X titles when preferred context is Form 15 Part 1', () => {
+    const {
+      looksLikeForm15Part1PreferredContext,
+      rewriteForm15Part1PdfTitles,
+      buildStatutoryPdfHeaderModel
+    } = statutoryDraftPdfTestUtils;
+    expect(
+      looksLikeForm15Part1PreferredContext('Form 15 Part 1', 'Form_15_Part_1_-_TamilNadu.xlsx')
+    ).toBe(true);
+    expect(looksLikeForm15Part1PreferredContext('Form X', 'Form_X_-_TamilNadu.xlsx')).toBe(false);
+
+    expect(
+      rewriteForm15Part1PdfTitles([
+        'FORM-X',
+        'REGISTER OF LEAVE AND SOCIAL SECURITY BENEFITS',
+        '[See sub-rule (1) of rule (16)]'
+      ])
+    ).toEqual([
+      'FORM-15',
+      'REGISTER OF LEAVE WITH WAGES',
+      '[See sub-rule (1) of rule (16)]'
+    ]);
+
+    // FORM-15 already present + leftover FORM-X must drop Form X.
+    expect(rewriteForm15Part1PdfTitles(['FORM-15', 'FORM-X', 'REGISTER OF LEAVE WITH WAGES'])).toEqual(
+      ['FORM-15', 'REGISTER OF LEAVE WITH WAGES']
+    );
+
+    const model = buildStatutoryPdfHeaderModel(
+      ['FORM-15', 'FORM-X', 'REGISTER OF LEAVE WITH WAGES', '[See sub-rule (1) of rule (16)]'],
+      [],
+      0,
+      'Sheet1',
+      {
+        preferredTitle: 'Form 15 Part 1',
+        fileName: 'Form_15_Part_1_-_TamilNadu.xlsx'
+      }
+    );
+    expect(model.titles[0]).toMatch(/form[\s._-]*15/i);
+    expect(model.titles.some((t) => /leave with wages/i.test(t))).toBe(true);
+    expect(model.titles.some((t) => /^form[\s._-]*x$/i.test(t))).toBe(false);
+    expect(model.titles.join(' ')).not.toMatch(/\bform[\s._-]*x\b/i);
+  });
+
+  test('detects Earned / Medical / Other / Maternity leave group header bands', () => {
+    const { detectLeaveCategoryBands } = statutoryDraftPdfTestUtils;
+    const rows = [
+      [
+        'Name of the employee',
+        'Employee Identification No.',
+        '',
+        'Earned Leave',
+        '',
+        '',
+        '',
+        'Medical Leave',
+        '',
+        '',
+        'Other Leave',
+        '',
+        '',
+        'Maternity Benefits',
+        '',
+        ''
+      ],
+      [
+        '',
+        '',
+        'Gender',
+        'Leave at the beginning of the Month',
+        'Leave earned during the Period',
+        'Leave availed during the Month',
+        'Leave balance at the end of the Month',
+        'Leave at beginning of the Month',
+        'Leave availed during the Month',
+        'Leave balance at end of the Month',
+        'Leave at beginning of the Month',
+        'Leave availed during the Month',
+        'Leave Balance at end of the Month',
+        'Date of giving notice',
+        'Amount of Maternity Benefit',
+        'Subsequent Maternity'
+      ]
+    ];
+    const bands = detectLeaveCategoryBands(rows, 0, 1, 16);
+    expect(bands).toHaveLength(4);
+    expect(bands[0]).toMatchObject({ label: 'Earned Leave', start: 3, end: 6 });
+    expect(bands[1]).toMatchObject({ label: 'Medical Leave', start: 7, end: 9 });
+    expect(bands[2]).toMatchObject({ label: 'Other Leave', start: 10, end: 12 });
+    expect(bands[3]).toMatchObject({ label: 'Maternity Benefits', start: 13, end: 15 });
+  });
+
+  test('detects Form 15 Part 2 Deductions / Advances / Damages group bands', () => {
+    const { detectStatutoryGroupHeaderBands } = statutoryDraftPdfTestUtils;
+    // Cols: OT, LeaveWages, Gross, PF, ESI, LWF, AdvPaid, AdvPend, AdvRec, AdvPend2,
+    //       DamImp, DamPend, DamMade, DamPend2, AnyOther, TotalDed, Net, DatePay
+    const rows = [
+      [
+        '',
+        '',
+        '',
+        'Deductions',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        ''
+      ],
+      [
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        'Advances',
+        '',
+        '',
+        '',
+        'Damages / Fine',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        ''
+      ],
+      [
+        'Overtime Wages',
+        'Leave Wages (Earned Leave / National, Festival & Special Holidays / Other)',
+        'Gross Wages',
+        'Provident Fund No.',
+        "Employees' State Insurance Corporation No.",
+        'Labour Welfare Fund',
+        'Advance Paid',
+        'Advance recovery pending at the beginning of the month',
+        'Advance Recovered',
+        'Pending Recovery',
+        'Deduction imposed on Damages, Loss or Fines',
+        'Deduction recovery pending at beginning of the month',
+        'Deduction made on Damages, Loss or Fines',
+        'Pending Recovery',
+        'Any other Deductions',
+        'Total Deductions',
+        'Net Wages',
+        'Date of payment'
+      ],
+      ['10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27']
+    ];
+    const bands = detectStatutoryGroupHeaderBands(rows, 0, 3, 18);
+    const byLabel = Object.fromEntries(bands.map((b) => [b.label, b]));
+    expect(byLabel.Deductions).toMatchObject({ start: 3, end: 15, labelRow: 0 });
+    expect(byLabel.Advances).toMatchObject({ start: 6, end: 9, labelRow: 1 });
+    expect(byLabel['Damages / Fine']).toMatchObject({ start: 10, end: 13, labelRow: 1 });
+  });
+
+  test('detects Form VI festival holiday group band across day/date columns', () => {
+    const {
+      detectStatutoryGroupHeaderBands,
+      isFormVIFestivalGroupLabel
+    } = statutoryDraftPdfTestUtils;
+    const festivalTitle =
+      'Days, dates and months of the year on which National and Festival Holidays are allowed under the section 3 of the Tamil Nadu Industrial Establishments (National and Festival Holidays) Act, 1958 (Tamil Nadu Act XXXIII of 1958)';
+    expect(isFormVIFestivalGroupLabel(festivalTitle)).toBe(true);
+    const rows = [
+      [
+        'S.No',
+        'Employee Code',
+        'Name of the Employee',
+        'D.O.J',
+        festivalTitle,
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        'Remarks'
+      ],
+      [
+        '',
+        '',
+        '',
+        '',
+        '01/01/2022 (PONGAL)',
+        '26/01/2022 (REPUBLIC DAY)',
+        '14/04/2022 (TAMIL NEW YEAR)',
+        '15/04/2022 (GOOD FRIDAY)',
+        '01/05/2022 (MAY DAY)',
+        '03/05/2022 (RAMZAN)',
+        '15/08/2022 (INDEPENDENCE DAY)',
+        '19/08/2022 (KRISHNA JAYANTHI)',
+        '31/08/2022 (VINAYAKAR CHATHURTHI)',
+        '04/10/2022 (AYUDHA POOJA)',
+        '05/10/2022 (VIJAYA DASHAMI)',
+        '24/10/2022 (DIWALI)',
+        '25/12/2022 (CHRISTMAS)',
+        ''
+      ]
+    ];
+    const bands = detectStatutoryGroupHeaderBands(rows, 0, 1, 18);
+    expect(bands).toHaveLength(1);
+    expect(bands[0].start).toBe(4);
+    expect(bands[0].end).toBe(16);
+    expect(bands[0].label).toContain('Days, dates and months');
+  });
+});
+
+describe('Form XXVII Tamil Nadu Register of Wages PDF', () => {
+  test('detects Form XXVII register context and maps Wage Period to Month', () => {
+    const {
+      looksLikeFormXXVIITamilNaduRegisterPdfContext,
+      extractMonthFromWagePeriodLine,
+      buildStatutoryPdfHeaderModel
+    } = statutoryDraftPdfTestUtils;
+
+    expect(extractMonthFromWagePeriodLine('Wage Period : May')).toBe('May');
+    expect(extractMonthFromWagePeriodLine('Wage Period from 1st May 2024 to 31st May 2024')).toBe(
+      ''
+    );
+
+    const meta = [
+      'FORM XXVII',
+      'See Rule 78 (1) (a) of the Tamil Nadu Contract Labour (Regulation and Abolition) Rules, 1975',
+      'REGISTER OF WAGES',
+      'Address of the Establishment : Vayona Energy Pvt Ltd, Theni',
+      'Wage Period : May',
+      'Year: 2026'
+    ];
+    expect(
+      looksLikeFormXXVIITamilNaduRegisterPdfContext(meta, [], 'Sheet1', 'Form_XXVII_-_TamilNadu.xlsx')
+    ).toBe(true);
+
+    const model = buildStatutoryPdfHeaderModel(meta, [], 0, 'Sheet1', {
+      fileName: 'Form_XXVII_-_TamilNadu.xlsx'
+    });
+    expect(model.isFormXXVIIRegister).toBe(true);
+    expect(model.titleBoxFullBorder).toBe(true);
+    expect(model.hideRightBandSplit).toBe(true);
+    expect(model.titles[0]).toMatch(/FORM XXVII/i);
+    expect(model.titles.some((t) => /REGISTER OF WAGES/i.test(t))).toBe(true);
+    expect(model.rightFields[0]).toMatch(/Month\s*:\s*May/i);
+    expect(model.rightFields[1]).toMatch(/Year\s*:\s*2026/i);
+    expect(model.fields.some((t) => /Wage Period/i.test(t))).toBe(false);
+  });
+
+  test('merges WAGES EARNED and DEDUCTIONS group bands', () => {
+    const { detectStatutoryGroupHeaderBands, isWageDeductionGroupLabel } =
+      statutoryDraftPdfTestUtils;
+    expect(isWageDeductionGroupLabel('WAGES EARNED')).toBe(true);
+    expect(isWageDeductionGroupLabel('DEDUCTIONS')).toBe(true);
+
+    const rows = [
+      [
+        'S.No',
+        'Name',
+        'WAGES EARNED',
+        '',
+        '',
+        '',
+        'GROSS WAGES',
+        'DEDUCTIONS',
+        '',
+        '',
+        'NET WAGES'
+      ],
+      [
+        '',
+        '',
+        'BASIC WAGE',
+        'DA',
+        'HRA',
+        'OTHER ALLOWANCES, ECCA',
+        'GROSS WAGES',
+        'PF',
+        'ESI',
+        'TOTAL DEDUCTIONS',
+        'NET WAGES'
+      ],
+      ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11']
+    ];
+    const bands = detectStatutoryGroupHeaderBands(rows, 0, 2, 11);
+    const wages = bands.find((b) => /wages?\s+earned/i.test(b.label));
+    const deductions = bands.find((b) => /^deductions?$/i.test(b.label));
+    expect(wages).toBeTruthy();
+    expect(wages.start).toBe(2);
+    expect(wages.end).toBeGreaterThanOrEqual(4);
+    expect(deductions).toBeTruthy();
+    expect(deductions.start).toBe(7);
+  });
+
+  test('Form XXVII column weights prefer name over short amount labels', () => {
+    const { formXXVIITamilNaduColumnWeight } = statutoryDraftPdfTestUtils;
+    expect(formXXVIITamilNaduColumnWeight('Name of the Workman', 20)).toBeGreaterThan(
+      formXXVIITamilNaduColumnWeight('HRA', 6)
+    );
+    expect(formXXVIITamilNaduColumnWeight('S.No', 2)).toBeLessThan(
+      formXXVIITamilNaduColumnWeight('BASIC WAGE', 8)
+    );
+  });
+});

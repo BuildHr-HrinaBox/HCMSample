@@ -218,6 +218,14 @@ describe('Form XX AP Register of Deductions NIL columns', () => {
     expect(isFormXXAPDeductionNilHeader('First instalment')).toBe(true);
     expect(isFormXXAPDeductionNilHeader('Last instalment')).toBe(true);
     expect(isFormXXAPDeductionNilHeader('Remarks')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('No. of Installment')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('First installment')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('Last installment')).toBe(true);
+    expect(
+      isFormXXAPDeductionNilHeader(
+        'Whether work man showed cause against deduction Amount of deduction imposed'
+      )
+    ).toBe(true);
     expect(isFormXXAPDeductionNilHeader('Name of workmen')).toBe(false);
     expect(isFormXXAPDeductionNilHeader('S.No')).toBe(false);
   });
@@ -235,5 +243,40 @@ describe('Form XX AP Register of Deductions NIL columns', () => {
     expect(rows[0]['First instalment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
     expect(rows[0]['Last instalment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
     expect(rows[0]['Remarks']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+  });
+
+  it('overwrites People-fetched names with NIL on download', () => {
+    const rows = applyFormXXAPDeductionsNilToMappedRows(
+      [
+        {
+          'Name of workmen': 'Ravi',
+          "Name of Person in whose presence Employee's explanation was heard": 'Karthick',
+          'No. of Installment': '3',
+          'First installment': '01-01-2026',
+          'Last installment': '01-03-2026',
+          'Whether workman showed cause against deduction': 'Yes',
+        },
+      ],
+      [
+        'Name of workmen',
+        "Name of Person in whose presence Employee's explanation was heard",
+        'Whether workman showed cause against deduction',
+        'No. of Installment',
+        'First installment',
+        'Last installment',
+      ],
+      undefined,
+      { overwrite: true }
+    );
+    expect(rows[0]['Name of workmen']).toBe('Ravi');
+    expect(rows[0]["Name of Person in whose presence Employee's explanation was heard"]).toBe(
+      FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT
+    );
+    expect(rows[0]['Whether workman showed cause against deduction']).toBe(
+      FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT
+    );
+    expect(rows[0]['No. of Installment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+    expect(rows[0]['First installment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+    expect(rows[0]['Last installment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
   });
 });

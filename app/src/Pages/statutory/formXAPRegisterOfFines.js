@@ -125,24 +125,49 @@ function formXXAPHeaderBare(header) {
 /**
  * Form XX damage / cause / recovery columns that default to NIL when no case exists
  * (Particulars, Date of damage, showed cause, explanation witness, amount, instalments, remarks).
+ * Never People-autofill these — download Excel/PDF must show NIL, not employee names.
  */
 export function isFormXXAPDeductionNilHeader(header) {
   const bare = formXXAPHeaderBare(header);
   if (!bare) return false;
+  // Never treat workmen / father columns as NIL targets.
+  if (
+    /\bname\s+of\s+(?:the\s+)?workmen\b|\bname\s+of\s+workman\b/.test(bare) ||
+    (/^name\s+of\b/.test(bare) &&
+      /workmen|workman|worker|employee/.test(bare) &&
+      !/presence|explanation/.test(bare))
+  ) {
+    return false;
+  }
+  if (/father|husband/.test(bare) && !/presence|explanation|showed\s+cause/.test(bare)) {
+    return false;
+  }
   if (/particulars\s+of\s+damage|date\s+of\s+damage|amount\s+of\s+deduction/.test(bare)) return true;
   if (/date\s+of\s+recovery/.test(bare)) return true;
   if (
-    /show\s+cause|showed\s+cause|whether\s+work\s*man|whether\s+workman|against\s+deduction|total\s+amount|instalment|remarks?/.test(
+    /show\s+cause|showed\s+cause|whether\s+work\s*man|whether\s+workman|against\s+deduction|total\s+amount/.test(
       bare
     )
   ) {
     return true;
   }
-  if (/name\s+of\s+person.*presence|presence.*explanation|explanation\s+was\s+heard/.test(bare)) {
+  // instalment (UK) and installment (US)
+  if (/install?ments?/.test(bare)) return true;
+  if (/\bremarks?\b/.test(bare)) return true;
+  if (
+    /name\s+of\s+person.*presence|presence.*explanation|explanation\s+was\s+heard|whose\s+presence/.test(
+      bare
+    )
+  ) {
     return true;
   }
-  if (/^first\s+instalment|^last\s+instalment|^no\.?\s*of\s+instalment/.test(bare)) return true;
+  if (/^first\s+install?ment|^last\s+install?ment|^no\.?\s*of\s+install?ment/.test(bare)) return true;
   return false;
+}
+
+/** Skip People / payroll autofill for Form XX NIL columns. */
+export function isFormXXAPSkipAutofillHeader(header) {
+  return isFormXXAPDeductionNilHeader(header);
 }
 
 export function applyFormXXAPDeductionsNilToRow(row, headers, helpers = {}) {
@@ -1998,12 +2023,16 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
   }
 
   // Write only data cells — never clear header rows (preserves merged column headers).
+  // Force NIL on damage / cause / installment / explanation-presence columns (no People names).
   for (let i = 0; i < sourceRows.length; i += 1) {
     const row = sourceRows[i];
     const rowValues = rowValuesForExport(row);
     for (let j = 0; j < writableCols.length; j += 1) {
-      const { col: targetCol } = writableCols[j];
-      const value = rowValues[j];
+      const { col: targetCol, label } = writableCols[j];
+      let value = rowValues[j];
+      if (isFormXXAPDeductionNilHeader(label) || isFormXXAPDeductionNilHeader(sourceHeaders[j])) {
+        value = FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT;
+      }
       if (value == null || value === '') continue;
       const cell = worksheet.getCell(dataStartRow + i, targetCol);
       if (

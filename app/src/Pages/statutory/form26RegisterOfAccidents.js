@@ -34,32 +34,13 @@ export function findForm26NilPrimaryHeader(headers) {
   return (headers && headers[0]) || null;
 }
 
-/** Merge "Nill of the month" across data columns up to (but not including) Remarks. */
+/** Merge "Nill of the month" across the full data table band (all columns). */
 export function resolveForm26NilSpanInfo(headers) {
   const primary = findForm26NilPrimaryHeader(headers);
   if (!primary) return null;
   const startIdx = (headers || []).indexOf(primary);
   if (startIdx < 0) return null;
-  let span = 1;
-  for (let i = startIdx + 1; i < headers.length; i += 1) {
-    const h = headers[i];
-    const s = String(h || '')
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-      .trim();
-    const bare = s.replace(/^\(?\d+\)?\s*/, '').trim();
-    if (
-      /\(14\)|^14\)/.test(s) ||
-      (/remarks/.test(bare) && (/initials/.test(bare) || /manager/.test(bare) || /manage/.test(bare)))
-    ) {
-      break;
-    }
-    span += 1;
-  }
-  // Single-cell nil is hard to see on a 14-col register — span the full table band.
-  if (span <= 1 && headers.length - startIdx > 1) {
-    span = headers.length - startIdx;
-  }
+  const span = Math.max(1, (headers || []).length - startIdx);
   return { startIdx, span, primaryHeader: primary };
 }
 

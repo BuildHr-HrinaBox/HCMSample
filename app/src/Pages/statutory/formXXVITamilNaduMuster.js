@@ -582,6 +582,62 @@ function pickFormXXVITamilNaduRateOfWagesValue(payrollRow) {
   return '';
 }
 
+/** First / last name from People emp or Sample Payroll (both required for Rate of Wages). */
+export function readFormXXVITamilNaduPersonNameParts(empOrPayroll = null, payrollRow = null) {
+  const pick = (src) => {
+    if (!src || typeof src !== 'object') return { firstName: '', lastName: '' };
+    const flat =
+      src.employee_name || src.paid_days != null || src.gross_pay != null || src.payroll_payload
+        ? { ...flattenPayrollEarningColumns(src), ...src }
+        : src;
+    const firstName = String(
+      flat.FirstName ??
+        flat.firstName ??
+        flat.first_name ??
+        flat.firstname ??
+        flat['First Name'] ??
+        flat.First_Name ??
+        ''
+    ).trim();
+    const lastName = String(
+      flat.LastName ??
+        flat.lastName ??
+        flat.last_name ??
+        flat.lastname ??
+        flat['Last Name'] ??
+        flat.Last_Name ??
+        flat.Surname ??
+        flat.surname ??
+        ''
+    ).trim();
+    return { firstName, lastName };
+  };
+
+  const fromEmp = pick(empOrPayroll);
+  if (fromEmp.firstName && fromEmp.lastName) return fromEmp;
+  const fromPayroll = pick(payrollRow || (empOrPayroll !== payrollRow ? empOrPayroll : null));
+  if (fromPayroll.firstName && fromPayroll.lastName) return fromPayroll;
+  return {
+    firstName: fromEmp.firstName || fromPayroll.firstName || '',
+    lastName: fromEmp.lastName || fromPayroll.lastName || ''
+  };
+}
+
+export function hasFormXXVITamilNaduPersonNameParts(empOrPayroll = null, payrollRow = null) {
+  const { firstName, lastName } = readFormXXVITamilNaduPersonNameParts(empOrPayroll, payrollRow);
+  return Boolean(firstName && lastName);
+}
+
+/**
+ * Rate of Wages ← gross_pay only when the person has both firstname and lastname
+ * (People or Sample Payroll).
+ */
+export function resolveFormXXVITamilNaduRateOfWages(payrollRow, emp = null) {
+  if (!hasFormXXVITamilNaduPersonNameParts(emp, payrollRow)) return '';
+  const rate = pickFormXXVITamilNaduRateOfWagesValue(payrollRow);
+  return rate === '' ? '' : String(rate);
+}
+
 function normalizeFormXXVITamilNaduMatchKey(value) {
   return String(value ?? '')
     .trim()
@@ -644,18 +700,27 @@ function formXXVITamilNaduKeysLooselyMatch(a, b) {
   const right = normalizeFormXXVITamilNaduMatchKey(b);
   if (!left || !right) return false;
   if (left === right) return true;
-  if (left.length >= 4 && right.length >= 4 && (left.includes(right) || right.includes(left))) {
-    return true;
-  }
+  // Avoid substring theft ("raja" → "rajeshkumar"). Only allow full-token equality
+  // after stripping spaces/punctuation already done by normalize.
   return false;
+}
+
+/** Rate of Wages / Number of Days Worked — SamplePayroll only (never People fuzzy-fill). */
+export function isFormXXVITamilNaduPayrollOnlyHeader(header) {
+  return (
+    isFormXXVITamilNaduNumberOfDaysWorkedHeader(header) ||
+    isFormXXVITamilNaduRateOfWagesHeader(header)
+  );
 }
 
 /**
  * Form XXVI payroll columns from SamplePayroll:
  * - Number of Days Worked ← Paid_days
- * - Rate of Wages ← gross_pay
+ * - Rate of Wages ← gross_pay (only when firstname + lastname present)
  * Prefer resolvePayrollRow(emp, row, index) when provided (same path as Form V).
  * Mutates rows in place; returns { paidDaysHits, rateHits }.
+ * When a person has no SamplePayroll match (or empty Paid_days / gross_pay), those
+ * columns are cleared so Autofill never shows another employee's leftover values.
  */
 export function applyFormXXVITamilNaduPaidDaysToMappedRows(
   rows,
@@ -681,13 +746,19 @@ export function applyFormXXVITamilNaduPaidDaysToMappedRows(
     : [];
   const payrollList = Array.isArray(payrollRows) ? payrollRows : [];
 
+  const clearPayrollOnlyColumns = (row) => {
+    if (!overwrite || !row || typeof row !== 'object') return;
+    if (daysHeader) row[daysHeader] = '';
+    if (rateHeader) row[rateHeader] = '';
+  };
+
   const payrollByKey = new Map();
   payrollList.forEach((pr) => {
     const paid = pickFormXXVITamilNaduPaidDaysValue(pr);
     const rate = pickFormXXVITamilNaduRateOfWagesValue(pr);
     if (paid === '' && rate === '') return;
     formXXVITamilNaduEmployeeMatchKeys(pr).forEach((k) => {
-      if (!payrollByKey.has(k)) payrollByKey.set(k, { paid, rate });
+      if (!payrollByKey.has(k)) payrollByKey.set(k, { paid, rate, payrollRow: pr });
     });
   });
 
@@ -695,7 +766,8 @@ export function applyFormXXVITamilNaduPaidDaysToMappedRows(
     if (resolvePayrollRow) {
       const emp = unwrapEmp(employeesForMapping[index] || null);
       const payrollRow = resolvePayrollRow(emp, row, index);
-      if (payrollRow) return payrollRow;
+      // Resolver owns matching — never loosely steal another employee's payroll.
+      return payrollRow || null;
     }
     const keys = formXXVITamilNaduEmployeeMatchKeys(row);
     for (let i = 0; i < keys.length; i += 1) {
@@ -704,6 +776,7 @@ export function applyFormXXVITamilNaduPaidDaysToMappedRows(
         return {
           paid_days: cached.paid,
           gross_pay: cached.rate,
+          ...(cached.payrollRow && typeof cached.payrollRow === 'object' ? cached.payrollRow : {}),
           __fromKeyCache: true
         };
       }
@@ -714,6 +787,7 @@ export function applyFormXXVITamilNaduPaidDaysToMappedRows(
           return {
             paid_days: cached.paid,
             gross_pay: cached.rate,
+            ...(cached.payrollRow && typeof cached.payrollRow === 'object' ? cached.payrollRow : {}),
             __fromKeyCache: true
           };
         }
@@ -726,8 +800,13 @@ export function applyFormXXVITamilNaduPaidDaysToMappedRows(
   let rateHits = 0;
   rows.forEach((row, index) => {
     if (!row || typeof row !== 'object') return;
+    const emp = unwrapEmp(employeesForMapping[index] || null);
     const payrollRow = resolvePayrollForRow(row, index);
-    if (!payrollRow) return;
+    if (!payrollRow || payrollRow.fetch_error) {
+      // No SamplePayroll row for this person — leave Rate / Days Worked blank.
+      clearPayrollOnlyColumns(row);
+      return;
+    }
 
     if (daysHeader) {
       const cur = String(row[daysHeader] ?? '').trim();
@@ -736,16 +815,21 @@ export function applyFormXXVITamilNaduPaidDaysToMappedRows(
         if (paid !== '') {
           row[daysHeader] = String(paid);
           paidDaysHits += 1;
+        } else if (overwrite) {
+          row[daysHeader] = '';
         }
       }
     }
     if (rateHeader) {
       const cur = String(row[rateHeader] ?? '').trim();
       if (overwrite || !cur) {
-        const rate = pickFormXXVITamilNaduRateOfWagesValue(payrollRow);
+        const rate = resolveFormXXVITamilNaduRateOfWages(payrollRow, emp);
         if (rate !== '') {
-          row[rateHeader] = String(rate);
+          row[rateHeader] = rate;
           rateHits += 1;
+        } else if (overwrite) {
+          // Missing firstname/lastname or empty gross_pay — never keep leftover values.
+          row[rateHeader] = '';
         }
       }
     }
@@ -810,6 +894,111 @@ export function listFormXXVITamilNaduDayHeaders(headers) {
     if (day >= 1 && day <= 31) out.push({ header, day });
   });
   return out;
+}
+
+function formXXVITamilNaduDayKeyStyle(existingDayHeader) {
+  const h = String(existingDayHeader || '').trim();
+  if (/^10_(\d{1,2})$/i.test(h)) return { kind: 'band', parent: '10' };
+  const daily = h.match(/^(daily\s+hours\s+of\s+work)_(\d{1,2})$/i);
+  if (daily) return { kind: 'band', parent: daily[1] };
+  if (/^\d{1,2}$/.test(h)) return { kind: 'bare' };
+  const m = h.match(/^(.*_)(\d{1,2})$/);
+  if (m) return { kind: 'band', parent: m[1].replace(/_$/, '') };
+  return { kind: 'band', parent: FORM_XXVI_TN_DAY_BAND_PARENT };
+}
+
+function synthesizeFormXXVITamilNaduDayHeader(day, style) {
+  if (style?.kind === 'bare') return String(day);
+  const parent = style?.parent || FORM_XXVI_TN_DAY_BAND_PARENT;
+  return `${parent}_${day}`;
+}
+
+/**
+ * When parsed headers only capture a partial day band (often 1–14 from the form
+ * column-index row), synthesize missing days through the end of the month so the
+ * Autofill UI shows the full Register of Employment grid.
+ */
+export function ensureFormXXVITamilNaduDayColumnHeaders(headers, daysInMonth = 31) {
+  const monthDays = Math.min(Math.max(Number(daysInMonth) || 31, 28), 31);
+  const base = Array.isArray(headers) ? [...headers] : [];
+  while (base.length > 0 && !String(base[base.length - 1] || '').trim()) base.pop();
+
+  const dayByNum = new Map();
+  const prefix = [];
+  const suffix = [];
+  let seenDay = false;
+
+  base.forEach((header) => {
+    if (isFormXXVITamilNaduNonTableHeaderField(header)) return;
+    if (isFormXXVITamilNaduRateOfWagesHeaderKey(header)) {
+      if (!seenDay) prefix.push(header);
+      else suffix.push(header);
+      return;
+    }
+    if (isFormXXVITamilNaduNumberOfDaysWorkedHeader(header)) {
+      seenDay = true;
+      suffix.push(header);
+      return;
+    }
+    const day = resolveFormXXVITamilNaduDayNumberFromHeader(header);
+    const looksDay =
+      day >= 1 &&
+      day <= 31 &&
+      isFormXXVITamilNaduDayHeaderKey(header) &&
+      !/serial|name|age|sex|address|designation|father|husband|entry|termination|signature|thumb|contractor|representative|wages|rate/i.test(
+        String(header || '')
+      );
+    if (looksDay) {
+      seenDay = true;
+      if (!dayByNum.has(day)) dayByNum.set(day, header);
+      return;
+    }
+    if (!seenDay) prefix.push(header);
+    else suffix.push(header);
+  });
+
+  if (dayByNum.size === 0) return base;
+  if (dayByNum.size >= monthDays) {
+    const days = [...dayByNum.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, header]) => header);
+    return [...prefix, ...days, ...suffix];
+  }
+
+  // Partial band (e.g. only 1–14) — pad missing days using the same key style.
+  const sample = dayByNum.values().next().value;
+  const style = formXXVITamilNaduDayKeyStyle(sample);
+  for (let day = 1; day <= monthDays; day += 1) {
+    if (!dayByNum.has(day)) {
+      dayByNum.set(day, synthesizeFormXXVITamilNaduDayHeader(day, style));
+    }
+  }
+  const days = [...dayByNum.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, header]) => header);
+  return [...prefix, ...days, ...suffix];
+}
+
+/** Rebuild group-label row after day-column expansion (Daily hours of work band). */
+export function buildFormXXVITamilNaduColumnGroupLabels(headers, parentLabel = 'Daily hours of work') {
+  const list = Array.isArray(headers) ? headers : [];
+  const labels = new Array(list.length).fill('');
+  const parent = String(parentLabel || 'Daily hours of work').trim() || 'Daily hours of work';
+  list.forEach((h, i) => {
+    const day = resolveFormXXVITamilNaduDayNumberFromHeader(h);
+    if (
+      day >= 1 &&
+      day <= 31 &&
+      isFormXXVITamilNaduDayHeaderKey(h) &&
+      !isFormXXVITamilNaduRateOfWagesHeaderKey(h) &&
+      !isFormXXVITamilNaduNumberOfDaysWorkedHeader(h)
+    ) {
+      labels[i] = parent;
+    } else {
+      labels[i] = String(h || '').trim();
+    }
+  });
+  return labels;
 }
 
 const headerAliasBucket = (key) => {

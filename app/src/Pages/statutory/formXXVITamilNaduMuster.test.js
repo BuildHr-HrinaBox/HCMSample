@@ -7,12 +7,15 @@ import {
   buildFormXXVITamilNaduWorksiteText,
   enrichFormXXVITamilNaduDisplayHeader,
   getFormXXVITamilNaduEmployeeName,
+  hasFormXXVITamilNaduPersonNameParts,
   isFormXXVITamilNaduClraContext,
   isFormXXVITamilNaduDayHeaderKey,
   isFormXXVITamilNaduHeaderFieldLayoutFormHeader,
   isFormXXVITamilNaduRateOfWagesHeaderKey,
   detectFormXXVITamilNaduDayColumnMap,
+  ensureFormXXVITamilNaduDayColumnHeaders,
   readFormXXVITamilNaduCellValue,
+  resolveFormXXVITamilNaduRateOfWages,
   stripFormXXVITamilNaduNonTableHeaders,
 } from './formXXVITamilNaduMuster';
 import { isFormXVIIITamilNaduClraContext } from './formXVIIITamilNaduWagesMuster';
@@ -137,8 +140,20 @@ describe('formXXVITamilNaduMuster worksite + employee name', () => {
       { 'Name of the Workman': 'Raja', 'Number of Days Worked': '', 'Rate of Wages': '' }
     ];
     const payroll = [
-      { employee_name: 'Rajeshkumar', paid_days: 26, gross_pay: 25000 },
-      { employee_name: 'Raja', Paid_days: 24, gross: 22000 }
+      {
+        employee_name: 'Rajeshkumar',
+        first_name: 'Rajesh',
+        last_name: 'Kumar',
+        paid_days: 26,
+        gross_pay: 25000
+      },
+      {
+        employee_name: 'Raja',
+        FirstName: 'Raja',
+        LastName: 'K',
+        Paid_days: 24,
+        gross: 22000
+      }
     ];
     const hits = applyFormXXVITamilNaduPaidDaysToMappedRows(rows, headers, payroll, {
       overwrite: true
@@ -156,16 +171,117 @@ describe('formXXVITamilNaduMuster worksite + employee name', () => {
     const rows = [
       { 'Name of the Workman': 'Venkatesan', 'Number of Days Worked': '', 'Rate of Wages': '' }
     ];
-    const employees = [{ EmployeeName: 'Venkatesan', EmployeeID: 'E1' }];
+    const employees = [{ FirstName: 'Venkat', LastName: 'Esan', EmployeeID: 'E1' }];
     const hits = applyFormXXVITamilNaduPaidDaysToMappedRows(rows, headers, [], {
       overwrite: true,
       employeesForMapping: employees,
-      resolvePayrollRow: () => ({ employee_name: 'Venkatesan', paidDays: 28, gross_pay: 28000 })
+      resolvePayrollRow: () => ({
+        employee_name: 'Venkatesan',
+        first_name: 'Venkat',
+        last_name: 'Esan',
+        paidDays: 28,
+        gross_pay: 28000
+      })
     });
     expect(hits.paidDaysHits).toBe(1);
     expect(hits.rateHits).toBe(1);
     expect(rows[0]['Number of Days Worked']).toBe('28');
     expect(rows[0]['Rate of Wages']).toBe('28000');
+  });
+
+  test('clears Rate of Wages and Days Worked when person has no SamplePayroll row', () => {
+    const headers = ['Name of the Workman', 'Number of Days Worked', 'Rate of Wages'];
+    const rows = [
+      {
+        'Name of the Workman': 'Prabakaran',
+        'Number of Days Worked': '31',
+        'Rate of Wages': '80990'
+      },
+      {
+        'Name of the Workman': 'NoPayrollPerson',
+        'Number of Days Worked': '31',
+        'Rate of Wages': '80990'
+      }
+    ];
+    const payroll = [
+      {
+        employee_name: 'Prabakaran',
+        first_name: 'Prabakaran',
+        last_name: 'D',
+        paid_days: 26,
+        gross_pay: 25000
+      }
+    ];
+    const hits = applyFormXXVITamilNaduPaidDaysToMappedRows(rows, headers, payroll, {
+      overwrite: true,
+      employeesForMapping: [
+        { FirstName: 'Prabakaran', LastName: 'D' },
+        { FirstName: 'NoPayroll', LastName: 'Person' }
+      ],
+      resolvePayrollRow: (emp) => {
+        const name = `${emp?.FirstName || ''} ${emp?.LastName || ''}`.trim().toLowerCase();
+        if (name.includes('prabakaran')) return payroll[0];
+        return null;
+      }
+    });
+    expect(hits.paidDaysHits).toBe(1);
+    expect(hits.rateHits).toBe(1);
+    expect(rows[0]['Number of Days Worked']).toBe('26');
+    expect(rows[0]['Rate of Wages']).toBe('25000');
+    expect(rows[1]['Number of Days Worked']).toBe('');
+    expect(rows[1]['Rate of Wages']).toBe('');
+  });
+
+  test('does not assign another employee payroll via substring name match', () => {
+    const headers = ['Name of the Workman', 'Number of Days Worked', 'Rate of Wages'];
+    const rows = [
+      { 'Name of the Workman': 'Raja', 'Number of Days Worked': '99', 'Rate of Wages': '1' }
+    ];
+    const payroll = [
+      {
+        employee_name: 'Rajeshkumar',
+        first_name: 'Rajesh',
+        last_name: 'Kumar',
+        paid_days: 26,
+        gross_pay: 25000
+      }
+    ];
+    applyFormXXVITamilNaduPaidDaysToMappedRows(rows, headers, payroll, { overwrite: true });
+    expect(rows[0]['Number of Days Worked']).toBe('');
+    expect(rows[0]['Rate of Wages']).toBe('');
+  });
+
+  test('Rate of Wages requires firstname and lastname', () => {
+    expect(
+      hasFormXXVITamilNaduPersonNameParts({ FirstName: 'Prabakaran', LastName: 'D' })
+    ).toBe(true);
+    expect(hasFormXXVITamilNaduPersonNameParts({ FirstName: 'Prabakaran' })).toBe(false);
+    expect(
+      resolveFormXXVITamilNaduRateOfWages(
+        { gross_pay: 80990, first_name: 'Prabakaran' },
+        { FirstName: 'Prabakaran' }
+      )
+    ).toBe('');
+    expect(
+      resolveFormXXVITamilNaduRateOfWages(
+        { gross_pay: 80990, first_name: 'Prabakaran', last_name: 'D' },
+        null
+      )
+    ).toBe('80990');
+
+    const headers = ['Name of the Workman', 'Rate of Wages'];
+    const rows = [{ 'Name of the Workman': 'Prabakaran', 'Rate of Wages': '80990' }];
+    const hits = applyFormXXVITamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [{ employee_name: 'Prabakaran', first_name: 'Prabakaran', gross_pay: 80990 }],
+      {
+        overwrite: true,
+        employeesForMapping: [{ FirstName: 'Prabakaran' }]
+      }
+    );
+    expect(hits.rateHits).toBe(0);
+    expect(rows[0]['Rate of Wages']).toBe('');
   });
 
   test('Rate of Wages is not treated as a day header', () => {
@@ -194,5 +310,32 @@ describe('formXXVITamilNaduMuster worksite + employee name', () => {
     expect(map.get(1)).toBe(11);
     expect(map.get(31)).toBe(41);
     expect(map.size).toBe(31);
+  });
+
+  test('ensureFormXXVITamilNaduDayColumnHeaders pads partial 1–14 day band to 1–31', () => {
+    const headers = [
+      'Serial Number',
+      'Name of the Workman',
+      'Rate of Wages',
+      ...Array.from({ length: 14 }, (_, i) => `10_${i + 1}`),
+      'Number of Days Worked',
+      'Signature or Thumb impression of the Workman'
+    ];
+    const ensured = ensureFormXXVITamilNaduDayColumnHeaders(headers);
+    const dayKeys = ensured.filter((h) => /^10_(\d{1,2})$/.test(h));
+    expect(dayKeys).toHaveLength(31);
+    expect(dayKeys[0]).toBe('10_1');
+    expect(dayKeys[30]).toBe('10_31');
+    expect(ensured.indexOf('Rate of Wages')).toBeLessThan(ensured.indexOf('10_1'));
+    expect(ensured.indexOf('10_31')).toBeLessThan(ensured.indexOf('Number of Days Worked'));
+  });
+
+  test('ensureFormXXVITamilNaduDayColumnHeaders keeps a full 31-day band unchanged', () => {
+    const headers = [
+      'Name of the Workman',
+      ...Array.from({ length: 31 }, (_, i) => `10_${i + 1}`),
+      'Number of Days Worked'
+    ];
+    expect(ensureFormXXVITamilNaduDayColumnHeaders(headers)).toEqual(headers);
   });
 });

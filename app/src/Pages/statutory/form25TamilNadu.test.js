@@ -21,6 +21,8 @@ import {
   resolveForm25TamilNaduExportHeaders,
   trimForm25TamilNaduHeadersAfterRemarks,
   writeForm25TamilNaduPeriodToWorksheet,
+  isForm25TamilNaduFormIndexHeaderRow,
+  resolveForm25TamilNaduDataStartRow,
 } from './form25TamilNadu';
 
 describe('Form 25 Tamil Nadu header autofill (Compensatory Holidays)', () => {
@@ -347,5 +349,25 @@ describe('Form 25 Tamil Nadu Excel alignment', () => {
     ];
     expect(looksLikeForm25APMusterPartialHeaders(tnHeaders)).toBe(false);
     expect(headersIndicateForm25APMusterTable(tnHeaders)).toBe(false);
+  });
+
+  test('detects form column-index header row under the day band', () => {
+    expect(isForm25TamilNaduFormIndexHeaderRow(['9', '9', '9', '', ''])).toBe(true);
+    expect(isForm25TamilNaduFormIndexHeaderRow(Array(31).fill('9'))).toBe(true);
+    expect(isForm25TamilNaduFormIndexHeaderRow(['1', '2', '3', '4', '5'])).toBe(false);
+    expect(isForm25TamilNaduFormIndexHeaderRow(['A', 'A', 'WO'])).toBe(false);
+  });
+
+  test('skips form-index row so first employee starts on the next body row', () => {
+    const probe = {
+      11: Array(31).fill('9'),
+      12: Array(31).fill(''),
+    };
+    const start = resolveForm25TamilNaduDataStartRow({
+      headerRow: 9,
+      markerRow: 10,
+      probeRowDayTexts: (r) => probe[r] || [],
+    });
+    expect(start).toBe(12);
   });
 });

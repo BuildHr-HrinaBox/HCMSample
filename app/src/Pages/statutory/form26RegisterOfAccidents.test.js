@@ -86,11 +86,11 @@ describe('form26RegisterOfAccidents nil month', () => {
     expect(isForm26NilMonthLineValue('Nil for the month of Jul 2026')).toBe(true);
   });
 
-  test('nil span covers the table band up to Remarks on 14-col Form 26', () => {
+  test('nil span covers the full table band including Remarks on 14-col Form 26', () => {
     const info = resolveForm26NilSpanInfo(FORM26_ACCIDENT_HEADERS_14);
     expect(info).toEqual({
       startIdx: 0,
-      span: 13,
+      span: 14,
       primaryHeader: '(1)Sl. No.',
     });
   });

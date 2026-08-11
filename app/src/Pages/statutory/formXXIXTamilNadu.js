@@ -3,6 +3,9 @@
 export const FORM_XXIX_TN_TITLE = 'FORM XXIX';
 export const FORM_XXIX_TN_SUBTITLE =
   'Register of Advances, Deductions for Damage or Loss and Fines (Contract Labour)';
+/** Exact template heading line (preserves template spelling REGSITER / DAME). */
+export const FORM_XXIX_TN_REGISTER_HEADING_LINE =
+  'REGSITER OF ADVANCES, DEDUCTIONS FOR DAME OR LOSS AND FINES';
 export const FORM_XXIX_TN_REFERENCE =
   '[See Rule 78 (1) (d) of the Tamil Nadu Contract Labour (Regulation and Abolition) Rules ,1975]';
 
@@ -587,8 +590,440 @@ export function writeFormXXIXTamilNaduMonthYearToExcelJsWorksheet(worksheet, hea
   return wroteMonth || wroteYear;
 }
 
+function formXXIXExcelJsCellText(val) {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'object') {
+    if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+    if (val.text != null) return String(val.text);
+    if (val.result != null) return String(val.result);
+  }
+  return String(val);
+}
+
+function parseFormXXIXMergeLabel(label) {
+  const m = String(label || '')
+    .trim()
+    .match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+  if (!m) return null;
+  const colToNum = (col) => {
+    let n = 0;
+    const s = String(col || '').toUpperCase();
+    for (let i = 0; i < s.length; i += 1) n = n * 26 + (s.charCodeAt(i) - 64);
+    return n;
+  };
+  return {
+    r1: Number(m[2]),
+    c1: colToNum(m[1]),
+    r2: Number(m[4]),
+    c2: colToNum(m[3]),
+  };
+}
+
+const looksLikeFormXXIXTitle = (t) => /^form\s*[-–]?\s*xxix\b/i.test(String(t || '').trim());
+const looksLikeFormXXIXReference = (t) =>
+  /see\s*rule\s*78|rule\s*78\s*\(\s*1\s*\)\s*\(\s*d\s*\)|contract\s+labour\s*\(regulation/i.test(
+    String(t || '').trim()
+  );
+const looksLikeFormXXIXSubtitle = (t) => {
+  const s = String(t || '').replace(/\s+/g, ' ').trim();
+  if (!s || looksLikeFormXXIXTitle(s) || looksLikeFormXXIXReference(s)) return false;
+  return (
+    /regist[er]+ of advances/i.test(s) ||
+    /regsiter\s+of\s+advances/i.test(s) ||
+    (/advances/i.test(s) && /deduction|damage|dame|fines?/i.test(s)) ||
+    /^regsiter\s+of\b/i.test(s) ||
+    /^deductions?\s+for\s+dame/i.test(s) ||
+    /dame\s+or\s+loss\s+and\s+fines?/i.test(s)
+  );
+};
+
+const toSingleLineFormXXIXHeading = (txt) =>
+  String(txt || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * Prefer the official template single-line register heading when the sheet already
+ * has REGSITER / DAME wording (or fragmented wrap pieces of it).
+ */
+export function resolveFormXXIXTamilNaduRegisterHeadingLine(existingText = '') {
+  const flat = toSingleLineFormXXIXHeading(existingText);
+  if (/regsiter|dame\s+or\s+loss/i.test(flat) || /regist[er]+\s+of\s+advances/i.test(flat)) {
+    return FORM_XXIX_TN_REGISTER_HEADING_LINE;
+  }
+  if (flat && looksLikeFormXXIXSubtitle(flat)) return flat;
+  return FORM_XXIX_TN_REGISTER_HEADING_LINE;
+}
+
+/**
+ * Excel download: place FORM XXIX / See Rule / Register description in column I only.
+ * Do not merge heading cells (template often parks them right-aligned / merged into column T).
+ */
+export function ensureFormXXIXTamilNaduTitleLayout(worksheet, options = {}) {
+  if (!worksheet) return false;
+  // Column I = 9
+  const titleCol = Math.max(1, Number(options.titleCol) || 9);
+  const scanCols = Math.max(titleCol + 16, Number(options.colTo) || 30, 30);
+  const scanTo = Math.max(3, Number(options.scanTo) || 8);
+
+  const findHit = (matcher) => {
+    for (let r = 1; r <= scanTo; r += 1) {
+      for (let c = 1; c <= scanCols; c += 1) {
+        const t = formXXIXExcelJsCellText(worksheet.getCell(r, c)?.value).replace(/\s+/g, ' ').trim();
+        if (matcher(t)) return { row: r, col: c, text: t };
+      }
+    }
+    return null;
+  };
+
+  const titleHit = findHit(looksLikeFormXXIXTitle);
+  const refHit = findHit(looksLikeFormXXIXReference);
+  // Join fragmented wrap pieces (e.g. "REGSITER OF" + "ADVANCES, DEDUCTIONS…") into one line.
+  const subtitlePieces = [];
+  for (let r = 1; r <= scanTo; r += 1) {
+    for (let c = 1; c <= scanCols; c += 1) {
+      const t = formXXIXExcelJsCellText(worksheet.getCell(r, c)?.value).replace(/\s+/g, ' ').trim();
+      if (looksLikeFormXXIXSubtitle(t)) subtitlePieces.push({ row: r, col: c, text: t });
+    }
+  }
+  const subHit = subtitlePieces[0]
+    ? {
+        row: Math.min(...subtitlePieces.map((p) => p.row)),
+        col: subtitlePieces[0].col,
+        text: toSingleLineFormXXIXHeading(subtitlePieces.map((p) => p.text).join(' ')),
+      }
+    : findHit(looksLikeFormXXIXSubtitle);
+
+  // Always force rows 1–3 for this template when any XXIX heading exists (or force=true).
+  const force = options.force === true;
+  if (!titleHit && !refHit && !subHit && !force) return false;
+
+  const titleText = toSingleLineFormXXIXHeading(titleHit?.text || FORM_XXIX_TN_TITLE);
+  const refText = toSingleLineFormXXIXHeading(refHit?.text || FORM_XXIX_TN_REFERENCE);
+  const subText = resolveFormXXIXTamilNaduRegisterHeadingLine(subHit?.text || '');
+
+  // Keep headings on fixed template rows 1 / 2 / 3 (never spill Month/Year row).
+  const titleRow = 1;
+  const refRow = 2;
+  const subRow = 3;
+
+  const collectMergeRefsForRow = (row) => {
+    const refs = new Set();
+    const modelMerges = Array.isArray(worksheet.model?.merges) ? worksheet.model.merges : [];
+    modelMerges.forEach((label) => {
+      const m = parseFormXXIXMergeLabel(label);
+      if (!m) return;
+      if (row < m.r1 || row > m.r2) return;
+      refs.add(String(label));
+    });
+    const internal = worksheet._merges || worksheet.merges || {};
+    Object.keys(internal).forEach((key) => {
+      const merge = internal[key];
+      const top = Number(merge?.top ?? merge?.model?.top);
+      const left = Number(merge?.left ?? merge?.model?.left);
+      const bottom = Number(merge?.bottom ?? merge?.model?.bottom);
+      const right = Number(merge?.right ?? merge?.model?.right);
+      if (![top, left, bottom, right].every((n) => Number.isFinite(n))) return;
+      if (row < top || row > bottom) return;
+      refs.add(`${top},${left},${bottom},${right}`);
+      // Also try Excel A1-style from key when present.
+      if (key && /:/.test(key)) refs.add(key);
+    });
+    // Common template merges that park titles on the right (ending at col T = 20).
+    ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S'].forEach(
+      (start) => {
+        refs.add(`${start}${row}:T${row}`);
+        refs.add(`${start}${row}:U${row}`);
+      }
+    );
+    return [...refs];
+  };
+
+  const unmergeRowHard = (row) => {
+    collectMergeRefsForRow(row).forEach((ref) => {
+      try {
+        if (/^\d+,\d+,\d+,\d+$/.test(ref)) {
+          const [t, l, b, r] = ref.split(',').map(Number);
+          worksheet.unMergeCells(t, l, b, r);
+        } else {
+          worksheet.unMergeCells(ref);
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    });
+    // Last resort: walk cells and unmerge via master address.
+    for (let c = 1; c <= scanCols; c += 1) {
+      try {
+        const cell = worksheet.getCell(row, c);
+        if (!cell?.isMerged) continue;
+        const master = cell.master || cell;
+        const addr = master.address || `${master.row || row},${master.col || c}`;
+        try {
+          worksheet.unMergeCells(addr);
+        } catch (_) {
+          /* ignore */
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  };
+
+  const clearHeadingCellsInRow = (row) => {
+    for (let c = 1; c <= scanCols; c += 1) {
+      const cell = worksheet.getCell(row, c);
+      const t = formXXIXExcelJsCellText(cell?.value).replace(/\s+/g, ' ').trim();
+      if (
+        !t ||
+        looksLikeFormXXIXTitle(t) ||
+        looksLikeFormXXIXReference(t) ||
+        looksLikeFormXXIXSubtitle(t)
+      ) {
+        // Clear every heading copy, including empty slaves after unmerge.
+        if (
+          looksLikeFormXXIXTitle(t) ||
+          looksLikeFormXXIXReference(t) ||
+          looksLikeFormXXIXSubtitle(t) ||
+          c !== titleCol
+        ) {
+          if (
+            looksLikeFormXXIXTitle(t) ||
+            looksLikeFormXXIXReference(t) ||
+            looksLikeFormXXIXSubtitle(t)
+          ) {
+            cell.value = null;
+          }
+        }
+      }
+      if (c !== titleCol) {
+        const ct = formXXIXExcelJsCellText(cell?.value).replace(/\s+/g, ' ').trim();
+        if (looksLikeFormXXIXTitle(ct) || looksLikeFormXXIXReference(ct) || looksLikeFormXXIXSubtitle(ct)) {
+          cell.value = null;
+        }
+      }
+      try {
+        cell.alignment = {
+          ...(cell.alignment || {}),
+          horizontal: c === titleCol ? 'center' : 'general',
+          textRotation: 0,
+        };
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  };
+
+  const writeTitleCell = (row, text, { bold = true, size } = {}) => {
+    if (row < 1 || !text) return;
+    unmergeRowHard(row);
+    clearHeadingCellsInRow(row);
+    // Explicitly wipe column T (and neighbors) so right-side ghosts cannot remain.
+    for (let c = titleCol + 1; c <= scanCols; c += 1) {
+      const cell = worksheet.getCell(row, c);
+      const t = formXXIXExcelJsCellText(cell?.value).replace(/\s+/g, ' ').trim();
+      if (
+        !t ||
+        looksLikeFormXXIXTitle(t) ||
+        looksLikeFormXXIXReference(t) ||
+        looksLikeFormXXIXSubtitle(t)
+      ) {
+        if (looksLikeFormXXIXTitle(t) || looksLikeFormXXIXReference(t) || looksLikeFormXXIXSubtitle(t)) {
+          cell.value = null;
+        }
+      }
+    }
+    // Always clear T specifically.
+    try {
+      worksheet.getCell(row, 20).value = null;
+    } catch (_) {
+      /* ignore */
+    }
+    const cell = worksheet.getCell(row, titleCol);
+    cell.value = toSingleLineFormXXIXHeading(text);
+    cell.alignment = {
+      ...(cell.alignment || {}),
+      horizontal: 'center',
+      vertical: 'middle',
+      // Template shows one continuous line — do not wrap into stacked rows.
+      wrapText: false,
+      shrinkToFit: false,
+      textRotation: 0,
+    };
+    cell.font = {
+      ...(cell.font || {}),
+      bold,
+      ...(size ? { size } : {}),
+    };
+    try {
+      const excelRow = worksheet.getRow(row);
+      if (excelRow && (excelRow.height == null || excelRow.height < 18)) excelRow.height = 22;
+    } catch (_) {
+      /* ignore */
+    }
+  };
+
+  // Widen column I so the long register heading can display as one line.
+  try {
+    const col = worksheet.getColumn(titleCol);
+    const current = Number(col?.width) || 10;
+    if (col) col.width = Math.max(current, 48);
+  } catch (_) {
+    /* ignore */
+  }
+
+  writeTitleCell(titleRow, titleText, { bold: true, size: 14 });
+  writeTitleCell(refRow, refText, { bold: false, size: 10 });
+  writeTitleCell(subRow, subText, { bold: true, size: 11 });
+
+  // Clear leftover wrap fragments on rows 3–4 outside the single-line heading cell.
+  for (let r = 3; r <= 4; r += 1) {
+    for (let c = 1; c <= scanCols; c += 1) {
+      if (r === subRow && c === titleCol) continue;
+      const cell = worksheet.getCell(r, c);
+      const t = formXXIXExcelJsCellText(cell?.value).replace(/\s+/g, ' ').trim();
+      if (looksLikeFormXXIXSubtitle(t) || /^regsiter\b/i.test(t) || /^deductions?\s+for\b/i.test(t)) {
+        cell.value = null;
+      }
+    }
+  }
+
+  // Final pass: ensure no heading text remains outside column I on rows 1–3.
+  [titleRow, refRow, subRow].forEach((row) => {
+    for (let c = 1; c <= scanCols; c += 1) {
+      if (c === titleCol) continue;
+      const cell = worksheet.getCell(row, c);
+      const t = formXXIXExcelJsCellText(cell?.value).replace(/\s+/g, ' ').trim();
+      if (looksLikeFormXXIXTitle(t) || looksLikeFormXXIXReference(t) || looksLikeFormXXIXSubtitle(t)) {
+        cell.value = null;
+      }
+    }
+  });
+
+  // Title box ends at column T (20) — same right edge as the data table (do not use scan colTo).
+  const borderColTo =
+    Number(options.borderColTo) > 0 ? Math.min(Number(options.borderColTo), 20) : 20;
+  const thin = { style: 'thin', color: { argb: 'FF000000' } };
+  const clearPast = Math.max(scanCols, Number(options.colTo) || 0, borderColTo + 8);
+  [titleRow, refRow, subRow].forEach((row) => {
+    for (let c = 1; c <= clearPast; c += 1) {
+      try {
+        const cell = worksheet.getCell(row, c);
+        if (c > borderColTo) {
+          // Strip any leftover borders past column T.
+          cell.border = {};
+          continue;
+        }
+        const border = { top: thin, bottom: thin };
+        if (c === 1) border.left = thin;
+        if (c === borderColTo) border.right = thin;
+        cell.border = border;
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  });
+
+  return true;
+}
+
 /** Default for Advance / Damage / Fines / Signature leaf columns (no advances/deductions/fines). */
 export const FORM_XXIX_TN_NIL = 'NILL';
+
+/** Empty-register notice (Form XXIX / CLRA advances) — period appended separately. */
+export const FORM_XXIX_TN_NIL_OF_MONTH_TEXT = 'NIL of the Month';
+
+const FORM_XXIX_TN_MONTH_ABBR = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec'
+];
+
+/**
+ * Build "NIL of the Month Aug 2026" from a month name/abbr + year.
+ */
+export function buildFormXXIXTamilNaduNilOfMonthLabel(monthNameOrAbbr, year) {
+  const raw = String(monthNameOrAbbr || '').trim();
+  const y = Number(year);
+  if (!raw || !Number.isFinite(y) || y < 1900) return FORM_XXIX_TN_NIL_OF_MONTH_TEXT;
+  const idx = FORM_XXIX_TN_MONTH_ABBR.findIndex(
+    (m) => m.toLowerCase() === raw.slice(0, 3).toLowerCase()
+  );
+  const fromFull = [
+    'january',
+    'february',
+    'march',
+    'april',
+    'may',
+    'june',
+    'july',
+    'august',
+    'september',
+    'october',
+    'november',
+    'december'
+  ].findIndex((m) => m === raw.toLowerCase());
+  const abbr =
+    idx >= 0
+      ? FORM_XXIX_TN_MONTH_ABBR[idx]
+      : fromFull >= 0
+        ? FORM_XXIX_TN_MONTH_ABBR[fromFull]
+        : raw.slice(0, 3).replace(/^./, (c) => c.toUpperCase());
+  if (!abbr) return FORM_XXIX_TN_NIL_OF_MONTH_TEXT;
+  return `${FORM_XXIX_TN_NIL_OF_MONTH_TEXT} ${abbr} ${y}`;
+}
+
+/** True when a cell is the Form XXIX nil default (NILL or NIL of the Month …). */
+export function isFormXXIXTamilNaduNilCellValue(v) {
+  const s = String(v ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return false;
+  if (/^nil+l?$/i.test(s)) return true;
+  return /^nill?\s+of\s+the\s+month\b/i.test(s);
+}
+
+/**
+ * Prefer Month:/Year: header fields; otherwise fall back to selected period.
+ */
+export function resolveFormXXIXTamilNaduNilOfMonthText({
+  monthName,
+  year,
+  headerFormData,
+  selectedMonthStr,
+  item,
+  resolvePeriod,
+} = {}) {
+  const hdr = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+  const hdrMonth = String(
+    monthName ?? hdr.form_x_month ?? hdr.form_xxix_month ?? ''
+  ).trim();
+  const hdrYearRaw = year ?? hdr.form_x_year ?? hdr.form_xxix_year ?? '';
+  const hdrYear = String(hdrYearRaw).trim();
+  if (hdrMonth && hdrYear) {
+    return buildFormXXIXTamilNaduNilOfMonthLabel(hdrMonth, hdrYear);
+  }
+  if (typeof resolvePeriod === 'function') {
+    const period = resolvePeriod(selectedMonthStr, item) || {};
+    return buildFormXXIXTamilNaduNilOfMonthLabel(
+      hdrMonth || period.fullMonth || period.monthName || '',
+      hdrYear || period.year || ''
+    );
+  }
+  return buildFormXXIXTamilNaduNilOfMonthLabel(hdrMonth, hdrYear);
+}
 
 const normFormXXIXTamilNaduNilHeader = (h) =>
   String(h || '')
@@ -662,7 +1097,7 @@ export function applyFormXXIXTamilNaduNilToRow(row, headers, helpers = {}) {
       !overwrite &&
       existing &&
       !/^enter\b/i.test(existing) &&
-      !/^nil+l?$/i.test(existing) &&
+      !isFormXXIXTamilNaduNilCellValue(existing) &&
       existing.toLowerCase() !== 'n/a' &&
       existing !== '-' &&
       existing !== '—'
@@ -685,6 +1120,108 @@ export function applyFormXXIXTamilNaduNilToMappedRows(
   return mappedData.map((row) =>
     applyFormXXIXTamilNaduNilToRow(row, headers, { nilText, overwrite })
   );
+}
+
+/**
+ * Single empty-register row: "NIL of the Month May 2026" in the name column (no People rows).
+ * Also accepts template typos like "Name of the Wokmen".
+ */
+export function buildFormXXIXTamilNaduNilTableRows(headers, nilOfMonthText) {
+  const hdrs =
+    Array.isArray(headers) && headers.length > 0 ? headers : FORM_XXIX_TN_TABLE_HEADERS;
+  const row = {};
+  hdrs.forEach((h) => {
+    row[h] = '';
+  });
+  const text = String(nilOfMonthText || FORM_XXIX_TN_NIL_OF_MONTH_TEXT).trim();
+  let nameHdr = null;
+  let serialHdr = null;
+  hdrs.forEach((h) => {
+    const s = normFormXXIXTamilNaduNilHeader(h)
+      .replace(/^\(?\d+\)?\s*/, '')
+      .replace(/\s*\(\d+\)\s*$/, '')
+      .trim();
+    if (
+      !nameHdr &&
+      (/^name of (?:the )?workm[ae]n$/.test(s) ||
+        /^name of (?:the )?wokm[ae]n$/.test(s) ||
+        s === 'name')
+    ) {
+      nameHdr = h;
+    }
+    if (!serialHdr && (/^serial(\s+number)?$/.test(s) || /^s\.?\s*no\.?$/.test(s) || /^sl\.?\s*no\.?$/.test(s))) {
+      serialHdr = h;
+    }
+  });
+  // Prefer name column so SL.NO stays blank until Excel merge rewrites the band.
+  const primary = nameHdr || hdrs.find((h) => h !== serialHdr) || serialHdr || hdrs[0];
+  if (primary && text) row[primary] = text;
+  return [row];
+}
+
+/** Detect Form XXIX empty-register nil-of-month cell text. */
+export function isFormXXIXTamilNaduNilMonthValue(v) {
+  return /^nill?\s+of\s+the\s+month\b/i.test(String(v ?? '').trim());
+}
+
+/**
+ * Excel download: merge the nil-of-month data row across the full table band (single centered line).
+ */
+export function mergeFormXXIXTamilNaduNilRowInExcelJsWorksheet(
+  worksheet,
+  { dataStartRow, sourceRows, colFrom, colTo, nilDisplayText = '' } = {}
+) {
+  if (!worksheet || !Array.isArray(sourceRows) || sourceRows.length === 0) return false;
+  const startCol = Number(colFrom);
+  const endCol = Number(colTo);
+  if (!Number.isFinite(startCol) || !Number.isFinite(endCol) || endCol < startCol) return false;
+  let merged = false;
+  for (let i = 0; i < sourceRows.length; i += 1) {
+    const row = sourceRows[i] || [];
+    const cells = Array.isArray(row)
+      ? row.map((v) => String(v ?? '').trim())
+      : Object.values(row || {}).map((v) => String(v ?? '').trim());
+    const nilFromRow = cells.find((t) => isFormXXIXTamilNaduNilMonthValue(t));
+    if (!nilFromRow && !String(nilDisplayText || '').trim()) continue;
+    let display = String(nilDisplayText || '').trim() || nilFromRow;
+    // Flatten multi-line / wrapped template spill into one line.
+    display = display.replace(/\s+/g, ' ').trim();
+    if (!isFormXXIXTamilNaduNilMonthValue(display)) {
+      display = FORM_XXIX_TN_NIL_OF_MONTH_TEXT;
+    }
+    const targetRowNum = Number(dataStartRow) + i;
+    if (!Number.isFinite(targetRowNum) || targetRowNum < 1) continue;
+    for (let c = startCol; c <= endCol; c += 1) {
+      try {
+        worksheet.unMergeCells(targetRowNum, c, targetRowNum, c);
+      } catch (_) {
+        /* ignore */
+      }
+      const cell = worksheet.getCell(targetRowNum, c);
+      cell.value = '';
+    }
+    try {
+      worksheet.unMergeCells(targetRowNum, startCol, targetRowNum, endCol);
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      worksheet.mergeCells(targetRowNum, startCol, targetRowNum, endCol);
+    } catch (_) {
+      /* ignore */
+    }
+    const nilCell = worksheet.getCell(targetRowNum, startCol);
+    nilCell.value = display;
+    nilCell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: false };
+    nilCell.font = { ...(nilCell.font || {}), bold: false };
+    try {
+      worksheet.getRow(targetRowNum).height = 28;
+    } catch (_) {
+      /* ignore */
+    }
+    merged = true;
+  }
+  return merged;
 }
 
 export { FORM_XXIX_TN_HEADER_KEYS };

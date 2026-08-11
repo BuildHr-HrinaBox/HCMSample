@@ -19,6 +19,7 @@ import {
  *     FINES | OTHER DEDUCTIONS | TOTAL DEDUCTIONS
  *
  * Autofill (Sample Payroll):
+ *   TOTAL / UNITS days worked ← paid_days (only when firstname + lastname + paid_days present)
  *   DAILY/PIECE/MONTHLY RATED ← gross_pay
  *   WAGE PERIOD ← "Monthly"
  *   OVERTIME RATE ← (Basic/26/8)*2
@@ -579,6 +580,16 @@ function moneyTextFormXXVIITamilNadu(value) {
   return String(Math.round(n * 100) / 100);
 }
 
+function firstPresentFormXXVII(...vals) {
+  for (let i = 0; i < vals.length; i += 1) {
+    const v = vals[i];
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    return v;
+  }
+  return '';
+}
+
 /** DAILY RATED / PIECE RATED / MONTHLY RATED ← gross_pay */
 export function isFormXXVIITamilNaduDailyRatedHeader(header) {
   const s = formXXVIITamilNaduHeaderNorm(header);
@@ -593,6 +604,103 @@ export function isFormXXVIITamilNaduDailyRatedHeader(header) {
     /daily\s+rate/.test(s) ||
     (/piece\s+rate/.test(s) && !/over[\s-]*time/.test(s))
   );
+}
+
+/**
+ * TOTAL NUMBER OF DAYS WORKED… / UNITS OF WORK DONE/NUMBER OF DAYS WORKED
+ * ← Sample Payroll paid_days only.
+ */
+export function isFormXXVIITamilNaduDaysWorkedHeader(header) {
+  const s = formXXVIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (/daily\s+rated|piece\s+rated|monthly\s+rated|over[\s-]*time|wage\s*period/.test(s)) {
+    return false;
+  }
+  if (/units?\s+of\s+work/.test(s) && /days?\s+worked/.test(s)) return true;
+  if (/number\s+of\s+days\s+worked|no\.?\s*of\s+days\s+worked/.test(s)) return true;
+  if (/total\s+number\s+of\s+days/.test(s) && /worked/.test(s)) return true;
+  if (/days?\s+worked/.test(s) && /week|fortnight|fn|month/.test(s)) return true;
+  return /days?\s+worked/.test(s);
+}
+
+/** Read firstname / lastname from a Sample Payroll row (required for days-worked autofill). */
+export function readFormXXVIITamilNaduSamplePayrollNameParts(payrollRow) {
+  if (!payrollRow || typeof payrollRow !== 'object' || payrollRow.fetch_error) {
+    return { firstName: '', lastName: '' };
+  }
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const firstName = String(
+    firstPresentFormXXVII(
+      flat.first_name,
+      flat.firstname,
+      flat.FirstName,
+      flat['First Name'],
+      flat.firstName,
+      payrollRow.first_name,
+      payrollRow.firstname,
+      payrollRow.FirstName,
+      payrollRow['First Name'],
+      payrollRow.firstName
+    ) || ''
+  ).trim();
+  const lastName = String(
+    firstPresentFormXXVII(
+      flat.last_name,
+      flat.lastname,
+      flat.LastName,
+      flat['Last Name'],
+      flat.lastName,
+      payrollRow.last_name,
+      payrollRow.lastname,
+      payrollRow.LastName,
+      payrollRow['Last Name'],
+      payrollRow.lastName
+    ) || ''
+  ).trim();
+  return { firstName, lastName };
+}
+
+export function hasFormXXVIITamilNaduSamplePayrollNameParts(payrollRow) {
+  const { firstName, lastName } = readFormXXVIITamilNaduSamplePayrollNameParts(payrollRow);
+  return Boolean(firstName && lastName);
+}
+
+/** Read paid_days from Sample Payroll (empty when missing). */
+export function readFormXXVIITamilNaduPaidDays(payrollRow) {
+  if (!payrollRow || typeof payrollRow !== 'object' || payrollRow.fetch_error) return '';
+  const flat = flattenPayrollEarningColumns(payrollRow);
+  const raw = firstPresentFormXXVII(
+    flat.paid_days,
+    flat.Paid_days,
+    flat['paid_days'],
+    flat['Paid_days'],
+    flat.paidDays,
+    flat['Paid Days'],
+    flat.days_worked,
+    flat['days_worked'],
+    flat.no_of_days_worked,
+    payrollRow.paid_days,
+    payrollRow.Paid_days,
+    payrollRow['paid_days'],
+    payrollRow['Paid_days'],
+    payrollRow.paidDays,
+    payrollRow['Paid Days'],
+    payrollRow.days_worked,
+    payrollRow.no_of_days_worked
+  );
+  if (raw === '' || raw == null) return '';
+  const n = Number(String(raw).replace(/,/g, '').trim());
+  if (!Number.isFinite(n) || n < 0) return '';
+  return String(n);
+}
+
+/**
+ * Days-worked columns ← paid_days only when Sample Payroll has
+ * firstname + lastname + paid_days (never Form 25 / calendar defaults).
+ */
+export function resolveFormXXVIITamilNaduDaysWorked(payrollRow) {
+  if (!hasFormXXVIITamilNaduSamplePayrollNameParts(payrollRow)) return '';
+  return readFormXXVIITamilNaduPaidDays(payrollRow);
 }
 
 /** Body column "WAGE PERIOD — WEEKLY/FN/MONTHLY" (not banner "Wage Period : April"). */
@@ -722,16 +830,6 @@ export function resolveFormXXVIITamilNaduHra(payrollRow) {
   );
 }
 
-function firstPresentFormXXVII(...vals) {
-  for (let i = 0; i < vals.length; i += 1) {
-    const v = vals[i];
-    if (v === null || v === undefined) continue;
-    if (typeof v === 'string' && v.trim() === '') continue;
-    return v;
-  }
-  return '';
-}
-
 /** OTHER ALLOWANCES, ECCA = gross_pay − basic − hra */
 export function computeFormXXVIITamilNaduOtherAllowancesEcca(grossPay, basic, hra) {
   const g = parseFormXXVIITamilNaduMoney(grossPay);
@@ -837,6 +935,7 @@ export function applyFormXXVIITamilNaduPayrollToRow(row, payrollRow, headers, he
   };
 
   let hit = false;
+  const daysWorked = resolveFormXXVIITamilNaduDaysWorked(payrollRow);
   const dailyRated = resolveFormXXVIITamilNaduDailyRated(payrollRow);
   const otRate = resolveFormXXVIITamilNaduOvertimeRate(payrollRow);
   const hra = resolveFormXXVIITamilNaduHra(payrollRow);
@@ -851,6 +950,20 @@ export function applyFormXXVIITamilNaduPayrollToRow(row, payrollRow, headers, he
   headers.forEach((header) => {
     if (isFormXXVIITamilNaduWagePeriodColumnHeader(header)) {
       if (setCell(header, FORM_XXVII_TN_WAGE_PERIOD_DEFAULT)) hit = true;
+      return;
+    }
+    // Days worked: paid_days only when firstname + lastname + paid_days exist; else clear
+    // Form 25 / calendar leftovers.
+    if (isFormXXVIITamilNaduDaysWorkedHeader(header)) {
+      if (daysWorked !== '') {
+        if (setCell(header, daysWorked)) hit = true;
+      } else if (overwrite) {
+        const cur = String(row[header] ?? '').trim();
+        if (cur) {
+          row[header] = '';
+          hit = true;
+        }
+      }
       return;
     }
     if (!payrollRow || payrollRow.fetch_error) return;

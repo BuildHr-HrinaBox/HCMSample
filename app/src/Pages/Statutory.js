@@ -160,13 +160,16 @@ import {
   FORM_XXVI_TN_RIGHT_HEADERS,
   applyFormXXVITamilNaduAutofillFromSite,
   applyFormXXVITamilNaduPaidDaysToMappedRows,
+  buildFormXXVITamilNaduColumnGroupLabels,
   buildFormXXVITamilNaduWorksiteText,
   buildFormXXVITamilNaduWorkbookWithTemplateStyles,
   enrichFormXXVITamilNaduDisplayHeader,
+  ensureFormXXVITamilNaduDayColumnHeaders,
   getFormXXVITamilNaduEmployeeName,
   isFormXXVITamilNaduClraContext,
   isFormXXVITamilNaduHeaderFieldLayoutFormHeader,
   isFormXXVITamilNaduNonTableHeaderField,
+  isFormXXVITamilNaduPayrollOnlyHeader,
   resolveFormXXVITamilNaduHeaderFieldLayout,
   stripFormXXVITamilNaduNonTableHeaders,
 } from './statutory/formXXVITamilNaduMuster';
@@ -189,6 +192,11 @@ import {
 } from './statutory/formXVIIITamilNaduWagesMuster';
 import {
   FORM_XXIX_TN_NIL,
+  buildFormXXIXTamilNaduNilOfMonthLabel,
+  buildFormXXIXTamilNaduNilTableRows,
+  mergeFormXXIXTamilNaduNilRowInExcelJsWorksheet,
+  ensureFormXXIXTamilNaduTitleLayout,
+  resolveFormXXIXTamilNaduNilOfMonthText,
   applyFormXXIXTamilNaduAutofillFromSite,
   applyFormXXIXTamilNaduNilToMappedRows,
   enrichFormXXIXTamilNaduDisplayHeader,
@@ -197,6 +205,7 @@ import {
   isFormXXIXTamilNaduEmployeeNumberHeader,
   isFormXXIXTamilNaduHeaderFieldLayoutFormHeader,
   isFormXXIXTamilNaduNilDefaultHeader,
+  isFormXXIXTamilNaduNilMonthValue,
   looksLikeFormXXIXTamilNaduTableHeaders,
   resolveFormXXIXTamilNaduEmployeeId,
   resolveFormXXIXTamilNaduTableHeaders,
@@ -216,6 +225,7 @@ import {
   isFormXXVIITamilNaduOtherDeductionsHeader,
   isFormXXVIITamilNaduOvertimeRateHeader,
   isFormXXVIITamilNaduSkipAutofillHeader,
+  isFormXXVIITamilNaduDaysWorkedHeader,
   isFormXXVIITamilNaduWagePeriodColumnHeader,
   resolveFormXXVIITamilNaduPeriodParts,
   resolveFormXXVIITamilNaduTableHeaders,
@@ -328,6 +338,7 @@ import {
   isFormITamilNaduSkipAutofillHeader,
   isFormITamilNaduSuspensionBlankDefaultHeader,
   isFormITamilNaduSuspensionFooterLikeValue,
+  isFormITamilNaduSuspensionNilMonthValue,
   formITamilNaduSuspensionRowIsFooterLike,
   isFormITamilNaduSuspensionWorkbookContext,
   sheetLooksLikeFormITamilNaduWorkmenRegister,
@@ -497,6 +508,7 @@ import {
   FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT,
   applyFormXXAPDeductionsNilToMappedRows,
   isFormXXAPDeductionNilHeader,
+  isFormXXAPSkipAutofillHeader,
   buildFormXIIIAPWorkbookWithTemplateStyles,
   buildFormXXAPWorkbookWithTemplateStyles,
   buildFormXXIAPWorkbookWithTemplateStyles,
@@ -1081,6 +1093,25 @@ import {
   toFormXSectionHeadersFromForm15,
 } from './statutory/form15TamilNaduLeave';
 import {
+  isForm15RajasthanContext,
+  remapForm15RajasthanRowsToHeaders,
+  resolveForm15RajasthanTableHeaders,
+} from './statutory/form15Rajasthan';
+import {
+  enrichForm11RajasthanDisplayHeader,
+  headersIndicateForm11RajasthanEmployment,
+  isForm11RajasthanContext,
+  isForm11RajasthanEmploymentLayoutFormHeader,
+  isForm11RajasthanNameHeader,
+  isForm11RajasthanSkipAutofillHeader,
+  isForm11RajasthanYoungPersonHeader,
+  remapForm11RajasthanRowsToHeaders,
+  repairForm11RajasthanTableHeadersFromWorkbook,
+  resolveForm11RajasthanTableHeaders,
+  resolveForm11RajasthanYoungPersonValue,
+  sanitizeForm11RajasthanCellValue,
+} from './statutory/form11Rajasthan';
+import {
   FORM_25_AP_FACTORY_HEADER_SPECS,
   FORM_25_AP_MUSTER_PREFIX_COUNT,
   FORM_25_AP_PERIOD_OF_WORK_DEFAULT,
@@ -1122,6 +1153,7 @@ import {
   resolveForm25TamilNaduDayNumberFromHeader,
   resolveForm25TamilNaduExportCellValue,
   resolveForm25TamilNaduExportHeaders,
+  resolveForm25TamilNaduDataStartRow,
   trimForm25TamilNaduHeadersAfterRemarks,
   writeForm25TamilNaduPeriodToWorksheet,
 } from './statutory/form25TamilNadu';
@@ -3818,6 +3850,30 @@ function resolveStatutoryAutofillHeadersFromModal(headersToUse, modalData, table
     return resolveFormARajasthanTableHeaders(hdrs);
   }
   if (
+    /form[\s._-]*15[\s._-]*rj|\bform_15_rj\b|\b15_rj\b/i.test(fnBlob) ||
+    isForm15RajasthanContext(
+      modalData?.parsedFormHeader,
+      modalData?.item,
+      fnBlob,
+      modalData?.sheetText || '',
+      hdrs
+    )
+  ) {
+    return resolveForm15RajasthanTableHeaders(hdrs);
+  }
+  if (
+    /form[\s._-]*11[\s._-]*rj|\bform_11_rj\b|\b11_rj\b/i.test(fnBlob) ||
+    isForm11RajasthanContext(
+      modalData?.parsedFormHeader,
+      modalData?.item,
+      fnBlob,
+      modalData?.sheetText || '',
+      hdrs
+    )
+  ) {
+    return resolveForm11RajasthanTableHeaders(hdrs);
+  }
+  if (
     /form[\s._-]*xix[\s._-]*rj|\bxix_rj\b/i.test(fnBlob) ||
     isFormXIXRajasthanOvertimeRegisterContext(
       modalData?.parsedFormHeader,
@@ -4151,6 +4207,20 @@ function resolveAutofillTableHeaders(currentHeaders, hints = {}) {
     )
   ) {
     return resolveFormARajasthanTableHeaders(trimmed.length > 0 ? trimmed : raw);
+  }
+  if (
+    isForm15RajasthanContext(
+      { title: hints.formHeaderTitle, subtitle: hints.formHeaderSubtitle },
+      hints.item,
+      hints.fileName || hints.formFileName,
+      hints.sheetText || '',
+      trimmed.length > 0 ? trimmed : raw
+    ) ||
+    /form[\s._-]*15[\s._-]*rj|\bform_15_rj\b|\b15_rj\b/i.test(
+      `${hints.fileName || ''} ${hints.formFileName || ''}`
+    )
+  ) {
+    return resolveForm15RajasthanTableHeaders(trimmed.length > 0 ? trimmed : raw);
   }
   return trimmed;
 }
@@ -5081,6 +5151,10 @@ function isForm11PeriodOfWorkContext(formHeader, rowItem, fileName, tableHeaders
     isForm2APHeaderFieldLayoutFormHeader(formHeader) ||
     isForm2APChangeNoticeContext(formHeader, rowItem, fileName, sheetText)
   ) {
+    return false;
+  }
+  // Rajasthan Form 11 Register of Employment is not AP period-of-work.
+  if (isForm11RajasthanContext(formHeader, rowItem, fileName, sheetText, tableHeaders)) {
     return false;
   }
   const parts = [
@@ -14053,6 +14127,7 @@ const headersIndicateForm11AccidentBook = (tableHeaders) => {
 
 const isForm11EsicAccidentBookContext = (formHeader, rowItem, fileName, tableHeaders, sheetText = '') => {
   if (isForm11PeriodOfWorkContext(formHeader, rowItem, fileName, tableHeaders, sheetText)) return false;
+  if (isForm11RajasthanContext(formHeader, rowItem, fileName, sheetText, tableHeaders)) return false;
   const parts = [
     rowItem?.formName,
     rowItem?.FormName,
@@ -14757,15 +14832,20 @@ const applyFormXXAPDeductionsNilTableRows = (headers, existingRows, selectedMont
 const prepareFormXXAPDeductionsExportRows = (headers, existingRows, selectedMonthStr, item) => {
   const rows = Array.isArray(existingRows) ? existingRows : [];
   const substantiveRows = rows.filter((r) => formXXAPDeductionsRowHasEntry(r, headers));
+  // Always overwrite damage / cause / installment / explanation-presence columns with NIL
+  // (never keep People-fetched names on download).
+  const nilOpts = { overwrite: true };
   if (substantiveRows.length > 0) {
-    return applyFormXXAPDeductionsNilToMappedRows(substantiveRows, headers);
+    return applyFormXXAPDeductionsNilToMappedRows(substantiveRows, headers, undefined, nilOpts);
   }
   const kept = rows.filter(
     (row) => formXXAPDeductionsRowHasEntry(row, headers) || formXXAPDeductionsRowIsNilMonthEntry(row, headers)
   );
   return applyFormXXAPDeductionsNilToMappedRows(
     applyFormXXAPDeductionsNilTableRows(headers, kept, selectedMonthStr, item),
-    headers
+    headers,
+    undefined,
+    nilOpts
   );
 };
 
@@ -14943,22 +15023,41 @@ const form12AdvancesRowHasAdvanceEntry = (row, headers) => {
   });
 };
 
-const buildForm12AdvancesNilTableRows = (headers, nilPrimaryText, monthYearLabel) => {
+const buildForm12AdvancesNilTableRows = (headers, nilPrimaryText, monthYearLabel, helpers = {}) => {
   const primaryHdr = findForm12AdvancesNilPrimaryHeader(headers);
   const monthHdr = findForm12AdvancesNilMonthYearHeader(headers, primaryHdr);
+  const combineMonthYear = helpers.combineMonthYear === true;
   const row = {};
   (headers || []).forEach((h) => {
     row[h] = '';
   });
-  if (primaryHdr && nilPrimaryText) row[primaryHdr] = nilPrimaryText;
-  if (monthHdr && monthYearLabel) row[monthHdr] = monthYearLabel;
+  let primaryText = nilPrimaryText;
+  if (combineMonthYear && monthYearLabel) {
+    const alreadyHasPeriod =
+      /nill?\s+of\s+the\s+month/i.test(String(nilPrimaryText || '')) &&
+      /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{4}\b/i.test(
+        String(nilPrimaryText || '')
+      );
+    primaryText = alreadyHasPeriod
+      ? nilPrimaryText
+      : `${String(nilPrimaryText || 'NIL of the Month').trim()} ${monthYearLabel}`.replace(/\s+/g, ' ').trim();
+  }
+  if (primaryHdr && primaryText) row[primaryHdr] = primaryText;
+  // When combined into the primary cell, do not also park "Aug 2026" in a second column.
+  if (!combineMonthYear && monthHdr && monthYearLabel) row[monthHdr] = monthYearLabel;
   return [row];
 };
 
-const applyForm12AdvancesNilTableRows = (headers, existingRows, selectedMonthStr, item) => {
+const applyForm12AdvancesNilTableRows = (headers, existingRows, selectedMonthStr, item, helpers = {}) => {
   const { fullMonth, year } = resolveForm11MonthYear(selectedMonthStr, item);
-  const nilPrimaryText = FORM12_ADVANCES_NIL_OF_MONTH_TEXT;
   const monthYearLabel = buildForm11NilMonthYearLabel(fullMonth, year);
+  const combineMonthYear = helpers.combineMonthYear === true;
+  const nilPrimaryText =
+    helpers.nilPrimaryText != null
+      ? String(helpers.nilPrimaryText)
+      : combineMonthYear
+        ? buildFormXXIXTamilNaduNilOfMonthLabel(fullMonth, year)
+        : FORM12_ADVANCES_NIL_OF_MONTH_TEXT;
   const rows = Array.isArray(existingRows) ? existingRows : [];
   if (rows.some((r) => form12AdvancesRowHasAdvanceEntry(r, headers))) return rows;
   if (rows.some((r) => form12AdvancesRowIsNilMonthEntry(r, headers))) {
@@ -14967,12 +15066,25 @@ const applyForm12AdvancesNilTableRows = (headers, existingRows, selectedMonthStr
     return rows.map((r) => {
       if (!form12AdvancesRowIsNilMonthEntry(r, headers)) return r;
       const updated = { ...r };
-      if (primaryHdr) updated[primaryHdr] = nilPrimaryText;
-      if (monthHdr && monthYearLabel) updated[monthHdr] = monthYearLabel;
+      if (primaryHdr) {
+        const alreadyHasPeriod =
+          /nill?\s+of\s+the\s+month/i.test(nilPrimaryText) &&
+          /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{4}\b/i.test(nilPrimaryText);
+        updated[primaryHdr] =
+          combineMonthYear && monthYearLabel && !alreadyHasPeriod
+            ? `${String(nilPrimaryText || 'NIL of the Month').trim()} ${monthYearLabel}`
+                .replace(/\s+/g, ' ')
+                .trim()
+            : nilPrimaryText;
+      }
+      if (combineMonthYear && monthHdr) updated[monthHdr] = '';
+      else if (monthHdr && monthYearLabel) updated[monthHdr] = monthYearLabel;
       return updated;
     });
   }
-  return buildForm12AdvancesNilTableRows(headers, nilPrimaryText, monthYearLabel);
+  return buildForm12AdvancesNilTableRows(headers, nilPrimaryText, monthYearLabel, {
+    combineMonthYear,
+  });
 };
 
 const form12AdvancesRowHasEmployeeMasterEntry = (row, headers) => {
@@ -15000,7 +15112,13 @@ const form12AdvancesDownloadHasSubstantiveRows = (rows, headers) => {
   return rows.some((row) => form12AdvancesRowHasSubstantiveEntry(row, headers));
 };
 
-const prepareForm12AdvancesExportRows = (headers, existingRows, selectedMonthStr, item) => {
+const prepareForm12AdvancesExportRows = (
+  headers,
+  existingRows,
+  selectedMonthStr,
+  item,
+  helpers = {}
+) => {
   const rows = Array.isArray(existingRows) ? existingRows : [];
   const substantiveRows = rows.filter((r) => form12AdvancesRowHasSubstantiveEntry(r, headers));
   if (substantiveRows.length > 0) return substantiveRows;
@@ -15008,7 +15126,7 @@ const prepareForm12AdvancesExportRows = (headers, existingRows, selectedMonthStr
     (row) =>
       form12AdvancesRowHasSubstantiveEntry(row, headers) || form12AdvancesRowIsNilMonthEntry(row, headers)
   );
-  return applyForm12AdvancesNilTableRows(headers, kept, selectedMonthStr, item);
+  return applyForm12AdvancesNilTableRows(headers, kept, selectedMonthStr, item, helpers);
 };
 
 const isFormXAPFinesSerialHeader = (h) => isWageRegisterSerialHeaderCell(h);
@@ -16210,25 +16328,50 @@ const rebuildFormXXVIDailyHoursHeaders = ({
 
   let dayRow = -1;
   let dayColByNum = new Map();
-  let bestHits = 0;
+  let bestScore = -1;
+  const scanFrom = 0;
+  const scoreDayMap = (cols) => {
+    if (!cols || cols.size < 5) return -1;
+    const day1 = cols.get(1) ?? cols.get(2);
+    if (day1 == null) return -1;
+    let run = 0;
+    for (let d = 1; d <= 31; d += 1) {
+      if (!cols.has(d)) break;
+      if (d > 1 && cols.get(d) !== cols.get(d - 1) + 1) break;
+      run += 1;
+    }
+    // Column-index rows are typically (1)–(14) at the table edge — deprioritize.
+    const looksLikeColIndexRow = cols.size <= 16 && day1 <= scanFrom + 1;
+    if (looksLikeColIndexRow && run < 20) return run * 0.25;
+    return run * 10 + cols.size;
+  };
   for (let r = tableHeaderRow; r <= Math.min(tableHeaderRow + 5, jsonData.length - 1); r += 1) {
     const cols = new Map();
     for (let c = 0; c < Math.max(effectiveSheetCols, 45); c += 1) {
-      const raw = String(getMergedAwareCellText(r, c) || '').trim();
+      const raw = String(getMergedAwareCellText(r, c) || '')
+        .trim()
+        .replace(/[()]/g, '');
       if (!/^\d{1,2}$/.test(raw)) continue;
       const num = parseInt(raw, 10);
       if (num >= 1 && num <= 31) cols.set(num, c);
     }
-    if (cols.size > bestHits) {
-      bestHits = cols.size;
+    const score = scoreDayMap(cols);
+    if (score > bestScore) {
+      bestScore = score;
       dayRow = r;
       dayColByNum = cols;
     }
   }
-  if (dayRow < 0 || bestHits < 5) return null;
+  if (dayRow < 0 || bestScore < 5 || dayColByNum.size < 5) return null;
+  // Reject maps that still look like identity column numbers (1)–(9)/(1)–(14).
+  {
+    const day1Col = dayColByNum.get(1) ?? dayColByNum.get(2);
+    if (dayColByNum.size <= 16 && day1Col != null && day1Col <= scanFrom + 1) return null;
+  }
 
-  const dayColsSorted = [...dayColByNum.entries()].sort((a, b) => a[1] - b[1]);
+  let dayColsSorted = [...dayColByNum.entries()].sort((a, b) => a[1] - b[1]);
   const bandStartCol = dayColsSorted[0][1];
+  // Physical last day marker in the sheet (do not invent Excel cols past the template band).
   const bandEndCol = dayColsSorted[dayColsSorted.length - 1][1];
   const columnNumberRow = dayRow - 1;
   let columnBandParent = '10';
@@ -16272,7 +16415,16 @@ const rebuildFormXXVIDailyHoursHeaders = ({
     leftColEntries.push({ col, label });
   }
 
-  const daySubs = dayColsSorted.map(([num]) => String(num));
+  let daySubs = dayColsSorted.map(([num]) => String(num));
+  // Partial day markers (often only 1–14 from column-index bleed) — pad header keys to 1–31.
+  // Missing days stay blank in row data; Excel export remaps via the real template day band.
+  if (daySubs.length >= 5 && daySubs.length < 31) {
+    const present = new Set(daySubs.map((d) => Number(d)));
+    for (let d = 1; d <= 31; d += 1) {
+      if (!present.has(d)) daySubs.push(String(d));
+    }
+    daySubs = daySubs.sort((a, b) => Number(a) - Number(b));
+  }
   const dailyExpanded = daySubs.map((d) => `${columnBandParent}_${d}`);
 
   const rightHeaders = [];
@@ -21800,6 +21952,42 @@ const unmergeExcelJSVerticalMergesInRange = (worksheet, rowFrom, rowTo, colFrom,
     const mc1 = XLSX.utils.decode_col(start[1].toUpperCase()) + 1;
     const mc2 = XLSX.utils.decode_col(end[1].toUpperCase()) + 1;
     if (mr2 <= mr1) continue; // horizontal-only merge — keep
+    if (mr2 < r0 || mr1 > r1) continue;
+    if (mc2 < c0 || mc1 > c1) continue;
+    toRemove.push(range);
+  }
+  toRemove.forEach((range) => {
+    try {
+      worksheet.unMergeCells(range);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+};
+
+/**
+ * Unmerge any merges (horizontal or vertical) intersecting a body rectangle.
+ * Form 25 TN: form-index "9" merge across days 1–30 on the first body row swallows attendance.
+ */
+const unmergeExcelJSAllMergesInRange = (worksheet, rowFrom, rowTo, colFrom, colTo) => {
+  if (!worksheet) return;
+  const merges = worksheet?.model?.merges;
+  if (!Array.isArray(merges) || merges.length === 0) return;
+  const r0 = Math.max(1, rowFrom);
+  const r1 = Math.max(r0, rowTo);
+  const c0 = Math.max(1, colFrom);
+  const c1 = Math.max(c0, colTo);
+  const toRemove = [];
+  for (const range of merges) {
+    const parts = String(range || '').split(':');
+    if (parts.length !== 2) continue;
+    const start = parts[0].match(/^([A-Z]+)(\d+)$/i);
+    const end = parts[1].match(/^([A-Z]+)(\d+)$/i);
+    if (!start || !end) continue;
+    const mr1 = parseInt(start[2], 10);
+    const mr2 = parseInt(end[2], 10);
+    const mc1 = XLSX.utils.decode_col(start[1].toUpperCase()) + 1;
+    const mc2 = XLSX.utils.decode_col(end[1].toUpperCase()) + 1;
     if (mr2 < r0 || mr1 > r1) continue;
     if (mc2 < c0 || mc1 > c1) continue;
     toRemove.push(range);
@@ -32394,11 +32582,37 @@ const Statutory = ({ userEmail, userRole }) => {
         templateRow: startRow,
         templateBodyRows: 1
       });
-      clearExcelJSTrailingTableCells(worksheet, {
+    }
+
+    // Form XXIX TN: merge "NIL of the Month May 2026" across the full data band (single centered line).
+    const formXXIXExportContext = isFormXXIXTamilNaduContext(
+      parsedFormHeader,
+      null,
+      formFileName || '',
+      headersToUse,
+      ''
+    );
+    if (formXXIXExportContext && sourceRows.some((r) => (r || []).some((c) => isFormXXIXTamilNaduNilMonthValue(c)))) {
+      const xxixNilText = resolveFormXXIXTamilNaduNilOfMonthText({
+        headerFormData: headerFormData && typeof headerFormData === 'object' ? headerFormData : {},
+        selectedMonthStr: '',
+        item: null,
+        resolvePeriod: null,
+      });
+      // Prefer text already on the row (includes period); fall back to header Month/Year.
+      const rowNil = (sourceRows[0] || []).map((v) => String(v ?? '').trim()).find((t) => isFormXXIXTamilNaduNilMonthValue(t));
+      const displayNil =
+        rowNil && /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{4}\b/i.test(rowNil)
+          ? rowNil.replace(/\s+/g, ' ').trim()
+          : xxixNilText && /\b\d{4}\b/.test(xxixNilText)
+            ? xxixNilText
+            : rowNil || xxixNilText || 'NIL of the Month';
+      mergeFormXXIXTamilNaduNilRowInExcelJsWorksheet(worksheet, {
         dataStartRow: startRow,
-        dataRowCount: bodyRowsToPaint,
-        afterCol: tableColMax,
-        throughCol: tableColMax + 30
+        sourceRows,
+        colFrom: tableColMin,
+        colTo: tableColMax,
+        nilDisplayText: displayNil,
       });
     }
 
@@ -32419,9 +32633,19 @@ const Statutory = ({ userEmail, userRole }) => {
         formFileName || '',
         headersToUse,
         ''
-      )
+      ) ||
+      matchesFormXXIXHint(formFileName || '') ||
+      matchesFormXXIXHint(parsedFormHeader?.title || '')
     ) {
       writeFormXXIXTamilNaduMonthYearToExcelJsWorksheet(worksheet, headerValues);
+      // Run last so later header writers cannot leave titles stuck in column T.
+      ensureFormXXIXTamilNaduTitleLayout(worksheet, {
+        titleCol: 9, // Column I
+        colTo: Math.max(tableColMax || 20, 24),
+        borderColTo: 20, // Box ends at column T (Remarks)
+        scanTo: Math.max(8, headerRow || 8),
+        force: true,
+      });
     }
 
     const out = await workbook.xlsx.writeBuffer();
@@ -34242,15 +34466,22 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
 
-    let dataStartRow =
-      parsedDataStartIndex != null && parsedDataStartIndex >= 0
-        ? parsedDataStartIndex + 1
-        : markerCols.length >= 5 && markerRow > 0
-          ? markerRow + 1
-          : headerRow + 1;
-    if (markerCols.length >= 5 && markerRow > 0) {
-      dataStartRow = Math.max(dataStartRow, markerRow + 1);
-    }
+    let dataStartRow = resolveForm25TamilNaduDataStartRow({
+      headerRow,
+      markerRow,
+      parsedDataStartRow:
+        parsedDataStartIndex != null && parsedDataStartIndex >= 0 ? parsedDataStartIndex + 1 : -1,
+      probeRowDayTexts: (rowNum) => {
+        const cols =
+          markerCols.length > 0
+            ? markerCols
+            : dayColsByNumber.size > 0
+              ? [...dayColsByNumber.values()].sort((a, b) => a - b)
+              : [];
+        return cols.map((c) => excelCellValueToString(worksheet.getCell(rowNum, c)?.value));
+      },
+      maxProbe: 6,
+    });
 
     const form25HeadersProbe = [
       parsedFormHeader?.title,
@@ -34611,6 +34842,31 @@ const Statutory = ({ userEmail, userRole }) => {
     const preparedMeaningful = preparedPrimary.filter((row) => rowLooksMeaningful(row));
     const sourceRows = preparedMeaningful.map((row, idx) => toForm25OrderedValues(row, idx));
 
+    // Break template merges on the body (form-index "9" across days, tall vertical sample merges)
+    // so employee 1 attendance is not swallowed into a single merged cell.
+    if (!form25APMusterExport && sourceRows.length > 0) {
+      const bodyColFrom = startCol;
+      const bodyColTo = Math.max(
+        tableColMax,
+        lastDayCol > 0 ? lastDayCol : startCol,
+        ...(markerCols.length ? markerCols : [startCol])
+      );
+      unmergeExcelJSAllMergesInRange(
+        worksheet,
+        dataStartRow,
+        dataStartRow + sourceRows.length + 5,
+        bodyColFrom,
+        bodyColTo
+      );
+      unmergeExcelJSVerticalMergesInRange(
+        worksheet,
+        dataStartRow,
+        dataStartRow + sourceRows.length + 30,
+        bodyColFrom,
+        bodyColTo
+      );
+    }
+
     const isNumericMarkerTemplateRow = (r) => {
       if (!markerCols || markerCols.length < 5) return false;
       let numericHits = 0;
@@ -34622,7 +34878,15 @@ const Statutory = ({ userEmail, userRole }) => {
     };
     const isHeaderBandRow = (r) => r >= headerRow && r < dataStartRow;
     const clearFromRow = Math.max(1, dataStartRow);
-    const clearToRow = Math.min(maxScanRows, Math.max(dataStartRow + sourceRows.length + 30, clearFromRow + 30));
+    // Clear the full template body — leftover sample employees become dozens of PDF pages.
+    const clearToRow = Math.min(
+      maxScanRows,
+      Math.max(
+        worksheet.rowCount || 0,
+        dataStartRow + sourceRows.length + 80,
+        dataStartRow + 150
+      )
+    );
     for (let r = clearFromRow; r <= clearToRow; r++) {
       if (isNumericMarkerTemplateRow(r) || isHeaderBandRow(r)) continue;
       for (let j = 0; j < orderedCols.length; j++) {
@@ -36896,6 +37160,37 @@ const Statutory = ({ userEmail, userRole }) => {
       });
     }
 
+    // Form 15 Part 1 reuses the Form X leave-register template — rewrite FORM-X titles.
+    if (forceForm15Part1LeaveWrite) {
+      const maxTitleRows = Math.min(Math.max(1, headerRow - 1), 25);
+      const maxTitleCols = Math.min(30, worksheet.columnCount || 30);
+      let wroteForm15Title = false;
+      for (let r = 1; r <= maxTitleRows; r += 1) {
+        for (let c = 1; c <= maxTitleCols; c += 1) {
+          const cell = worksheet.getCell(r, c);
+          const raw = String(excelCellValueToString(cell?.value) || '')
+            .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!raw) continue;
+          if (/^form[\s._-]*15\b/i.test(raw)) wroteForm15Title = true;
+          const compact = raw.toLowerCase().replace(/[\s._-]+/g, '');
+          if (/^form[\s._-]*x$/i.test(raw) || compact === 'formx') {
+            if (!wroteForm15Title && c === 1) {
+              cell.value = 'FORM-15';
+              wroteForm15Title = true;
+            } else {
+              cell.value = '';
+            }
+            continue;
+          }
+          if (/register\s+of\s+leave\s+and\s+social\s+security/i.test(raw)) {
+            cell.value = 'REGISTER OF LEAVE WITH WAGES';
+          }
+        }
+      }
+    }
+
     const out = await workbook.xlsx.writeBuffer();
     const fileName =
       formFileName ||
@@ -38748,30 +39043,109 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
 
-    // Suspension register: strip leftover template dates / footer spill from the
-    // "Amount of subsistence allowance paid…" column in and below the data block.
-    if (formISuspensionExportContext && amountColIndex >= 0) {
-      const amountExcelCol = startCol + amountColIndex;
+    // Suspension register: strip leftover template dates / footer spill BEFORE nil merge
+    // (amount + signature columns often hold 31-08-2026 + Authorised Signatory).
+    if (formISuspensionExportContext) {
+      const scrubEndCol = startCol + maxColsToWrite - 1;
       const scrubTo = Math.min(
         maxScanRows,
-        Math.max(dataStartRow + sourceRows.length + 12, dataStartRow + 16)
+        Math.max(dataStartRow + sourceRows.length + 16, dataStartRow + 20)
       );
-      for (let r = dataStartRow; r <= scrubTo; r += 1) {
-        const cell = worksheet.getCell(r, amountExcelCol);
-        if (cell && cell.isMerged && cell.master && cell.master !== cell) continue;
-        const raw = String(excelCellValueToString(cell?.value) || '').trim();
-        if (r < dataStartRow + sourceRows.length) {
-          cell.value = '';
-          continue;
-        }
+      const looksLikeSpill = (raw) => {
+        const flat = String(raw || '')
+          .replace(/\r?\n/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!flat) return true;
+        if (isFormITamilNaduSuspensionFooterLikeValue(flat)) return true;
+        if (/^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}$/.test(flat)) return true;
         if (
-          !raw ||
-          isFormITamilNaduSuspensionFooterLikeValue(raw) ||
-          /^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}$/.test(raw) ||
-          /^nil$/i.test(raw)
+          /\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}/.test(flat) &&
+          (/for\s*\(/i.test(flat) ||
+            /authori[sz]ed\s+signatory/i.test(flat) ||
+            /signature\s+of\s+employer/i.test(flat))
         ) {
-          cell.value = null;
+          return true;
         }
+        return /^nil$/i.test(flat);
+      };
+      for (let r = dataStartRow; r <= scrubTo; r += 1) {
+        for (let c = startCol; c <= scrubEndCol; c += 1) {
+          const cell = worksheet.getCell(r, c);
+          if (cell && cell.isMerged && cell.master && cell.master !== cell) continue;
+          const raw = String(excelCellValueToString(cell?.value) || '').trim();
+          const inNilDataRow = r < dataStartRow + sourceRows.length;
+          const rowVals = inNilDataRow ? sourceRows[r - dataStartRow] || [] : [];
+          const isNilRow = rowVals.some((v) => isFormITamilNaduSuspensionNilMonthValue(v));
+          if (inNilDataRow && isNilRow) {
+            // Amount / signature spill must not sit beside "Nil of the month".
+            if (looksLikeSpill(raw) || (amountColIndex >= 0 && c === startCol + amountColIndex)) {
+              cell.value = '';
+            }
+            continue;
+          }
+          if (inNilDataRow && amountColIndex >= 0 && c === startCol + amountColIndex) {
+            cell.value = '';
+            continue;
+          }
+          if (!inNilDataRow && looksLikeSpill(raw)) {
+            cell.value = null;
+          }
+        }
+      }
+    }
+
+    // Form 1 TN subsistence: merge "Nil of the Month Aug 2026" across the full data band (centered).
+    if (formISuspensionExportContext) {
+      const endCol = startCol + maxColsToWrite - 1;
+      const monthYearFromCells = (cells) => {
+        for (const raw of cells) {
+          const t = String(raw ?? '').trim();
+          if (/^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{4}$/i.test(t)) {
+            const parts = t.split(/\s+/);
+            const abbr = parts[0].replace(/\./g, '').slice(0, 3);
+            return `${abbr.charAt(0).toUpperCase()}${abbr.slice(1).toLowerCase()} ${parts[1]}`;
+          }
+          const embedded = t.match(
+            /\b((?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?)\s+(\d{4})\b/i
+          );
+          if (embedded && /nill?\s+of\s+the\s+month/i.test(t)) {
+            const abbr = embedded[1].replace(/\./g, '').slice(0, 3);
+            return `${abbr.charAt(0).toUpperCase()}${abbr.slice(1).toLowerCase()} ${embedded[2]}`;
+          }
+        }
+        return '';
+      };
+      for (let i = 0; i < sourceRows.length; i += 1) {
+        const row = sourceRows[i] || [];
+        const nilText = row
+          .map((v) => String(v ?? '').trim())
+          .find((t) => isFormITamilNaduSuspensionNilMonthValue(t));
+        if (!nilText) continue;
+        const monthYearLabel = monthYearFromCells(row);
+        const targetRowNum = dataStartRow + i;
+        for (let c = startCol; c <= endCol; c += 1) {
+          try {
+            worksheet.unMergeCells(targetRowNum, c, targetRowNum, c);
+          } catch (_) {
+            /* ignore */
+          }
+          const cell = worksheet.getCell(targetRowNum, c);
+          cell.value = '';
+        }
+        try {
+          worksheet.unMergeCells(targetRowNum, startCol, targetRowNum, endCol);
+        } catch (_) {
+          /* ignore */
+        }
+        try {
+          worksheet.mergeCells(targetRowNum, startCol, targetRowNum, endCol);
+        } catch (_) {
+          /* ignore */
+        }
+        const nilCell = worksheet.getCell(targetRowNum, startCol);
+        nilCell.value = monthYearLabel ? `Nil of the Month ${monthYearLabel}` : 'Nil of the Month';
+        nilCell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
       }
     }
 
@@ -44720,58 +45094,62 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
       // Form XII / AP Form XXII Register of Advances: keep employee rows; nil only when no employees and no advances.
+      // Form XXIX TN: never export People rows — one "NIL of the Month …" row only.
       if (isForm12AdvancesDownload) {
-        mappedData = prepareForm12AdvancesExportRows(
+        const formXXIXNilMonthDownload = isFormXXIXTamilNaduContext(
+          parsed?.formHeader || formFileModalData?.parsedFormHeader,
+          item,
+          fn || templateMeta?.formFileName || '',
           headersToUse,
-          Array.isArray(mappedData) ? mappedData : [],
-          selectedMonth,
-          item
+          sheetTextForDownload || formFileModalData?.sheetText || ''
         );
-        if (
-          isFormXXIXTamilNaduContext(
-            parsed?.formHeader || formFileModalData?.parsedFormHeader,
+        if (formXXIXNilMonthDownload) {
+          const xxixNilText = resolveFormXXIXTamilNaduNilOfMonthText({
+            headerFormData:
+              downloadHeaderFormData || formFileModalData?.parsedHeaderFormData || {},
+            selectedMonthStr: selectedMonth,
             item,
-            fn || templateMeta?.formFileName || '',
+            resolvePeriod: resolveForm11MonthYear,
+          });
+          mappedData = buildFormXXIXTamilNaduNilTableRows(headersToUse, xxixNilText);
+        } else {
+          mappedData = prepareForm12AdvancesExportRows(
             headersToUse,
-            sheetTextForDownload || formFileModalData?.sheetText || ''
-          )
-        ) {
-          mappedData = applyFormXXIXTamilNaduNilToMappedRows(
-            mappedData,
-            headersToUse,
-            FORM_XXIX_TN_NIL,
-            { overwrite: false }
+            Array.isArray(mappedData) ? mappedData : [],
+            selectedMonth,
+            item
           );
-        } else if (
-          isFormXXIITamilNaduContext(
-            parsed?.formHeader || formFileModalData?.parsedFormHeader,
-            item,
-            fn || templateMeta?.formFileName || '',
-            headersToUse,
-            sheetTextForDownload || formFileModalData?.sheetText || ''
-          )
-        ) {
-          mappedData = applyFormXXIITamilNaduNilToMappedRows(
-            mappedData,
-            headersToUse,
-            FORM_XXII_TN_NIL,
-            { overwrite: false }
-          );
-        } else if (
-          isFormXIIAPRegisterOfAdvancesContext(
-            parsed?.formHeader || formFileModalData?.parsedFormHeader,
-            item,
-            fn || templateMeta?.formFileName || '',
-            headersToUse,
-            sheetTextForDownload || formFileModalData?.sheetText || ''
-          )
-        ) {
-          mappedData = applyFormXIIAPNilToMappedRows(
-            mappedData,
-            headersToUse,
-            FORM_XII_AP_NIL,
-            { overwrite: false }
-          );
+          if (
+            isFormXXIITamilNaduContext(
+              parsed?.formHeader || formFileModalData?.parsedFormHeader,
+              item,
+              fn || templateMeta?.formFileName || '',
+              headersToUse,
+              sheetTextForDownload || formFileModalData?.sheetText || ''
+            )
+          ) {
+            mappedData = applyFormXXIITamilNaduNilToMappedRows(
+              mappedData,
+              headersToUse,
+              FORM_XXII_TN_NIL,
+              { overwrite: false }
+            );
+          } else if (
+            isFormXIIAPRegisterOfAdvancesContext(
+              parsed?.formHeader || formFileModalData?.parsedFormHeader,
+              item,
+              fn || templateMeta?.formFileName || '',
+              headersToUse,
+              sheetTextForDownload || formFileModalData?.sheetText || ''
+            )
+          ) {
+            mappedData = applyFormXIIAPNilToMappedRows(
+              mappedData,
+              headersToUse,
+              FORM_XII_AP_NIL,
+              { overwrite: false }
+            );
+          }
         }
         savedDraftRowMatrix = null;
       }
@@ -47839,57 +48217,60 @@ const Statutory = ({ userEmail, userRole }) => {
         savedDraftRowMatrix = null;
       }
       if (isForm12AdvancesDownload) {
-        mappedData = prepareForm12AdvancesExportRows(
+        const formXXIXNilMonthDownload = isFormXXIXTamilNaduContext(
+          parsed?.formHeader || formFileModalData?.parsedFormHeader,
+          item,
+          fn || templateMeta?.formFileName || '',
           headersToUse,
-          Array.isArray(mappedData) ? mappedData : [],
-          selectedMonth,
-          item
+          sheetTextForDownload || formFileModalData?.sheetText || ''
         );
-        if (
-          isFormXXIXTamilNaduContext(
-            parsed?.formHeader || formFileModalData?.parsedFormHeader,
+        if (formXXIXNilMonthDownload) {
+          const xxixNilText = resolveFormXXIXTamilNaduNilOfMonthText({
+            headerFormData:
+              downloadHeaderFormData || formFileModalData?.parsedHeaderFormData || {},
+            selectedMonthStr: selectedMonth,
             item,
-            fn || templateMeta?.formFileName || '',
+            resolvePeriod: resolveForm11MonthYear,
+          });
+          mappedData = buildFormXXIXTamilNaduNilTableRows(headersToUse, xxixNilText);
+        } else {
+          mappedData = prepareForm12AdvancesExportRows(
             headersToUse,
-            sheetTextForDownload || formFileModalData?.sheetText || ''
-          )
-        ) {
-          mappedData = applyFormXXIXTamilNaduNilToMappedRows(
-            mappedData,
-            headersToUse,
-            FORM_XXIX_TN_NIL,
-            { overwrite: false }
+            Array.isArray(mappedData) ? mappedData : [],
+            selectedMonth,
+            item
           );
-        } else if (
-          isFormXXIITamilNaduContext(
-            parsed?.formHeader || formFileModalData?.parsedFormHeader,
-            item,
-            fn || templateMeta?.formFileName || '',
-            headersToUse,
-            sheetTextForDownload || formFileModalData?.sheetText || ''
-          )
-        ) {
-          mappedData = applyFormXXIITamilNaduNilToMappedRows(
-            mappedData,
-            headersToUse,
-            FORM_XXII_TN_NIL,
-            { overwrite: false }
-          );
-        } else if (
-          isFormXIIAPRegisterOfAdvancesContext(
-            parsed?.formHeader || formFileModalData?.parsedFormHeader,
-            item,
-            fn || templateMeta?.formFileName || '',
-            headersToUse,
-            sheetTextForDownload || formFileModalData?.sheetText || ''
-          )
-        ) {
-          mappedData = applyFormXIIAPNilToMappedRows(
-            mappedData,
-            headersToUse,
-            FORM_XII_AP_NIL,
-            { overwrite: false }
-          );
+          if (
+            isFormXXIITamilNaduContext(
+              parsed?.formHeader || formFileModalData?.parsedFormHeader,
+              item,
+              fn || templateMeta?.formFileName || '',
+              headersToUse,
+              sheetTextForDownload || formFileModalData?.sheetText || ''
+            )
+          ) {
+            mappedData = applyFormXXIITamilNaduNilToMappedRows(
+              mappedData,
+              headersToUse,
+              FORM_XXII_TN_NIL,
+              { overwrite: false }
+            );
+          } else if (
+            isFormXIIAPRegisterOfAdvancesContext(
+              parsed?.formHeader || formFileModalData?.parsedFormHeader,
+              item,
+              fn || templateMeta?.formFileName || '',
+              headersToUse,
+              sheetTextForDownload || formFileModalData?.sheetText || ''
+            )
+          ) {
+            mappedData = applyFormXIIAPNilToMappedRows(
+              mappedData,
+              headersToUse,
+              FORM_XII_AP_NIL,
+              { overwrite: false }
+            );
+          }
         }
         savedDraftRowMatrix = null;
       }
@@ -48077,7 +48458,9 @@ const Statutory = ({ userEmail, userRole }) => {
           if (isFormCRajasthanDownload) {
             mappedData = applyFormCRajasthanNilToMappedRows(mappedData, headersToUse);
           } else {
-            mappedData = applyFormXXAPDeductionsNilToMappedRows(mappedData, headersToUse);
+            mappedData = applyFormXXAPDeductionsNilToMappedRows(mappedData, headersToUse, undefined, {
+              overwrite: true
+            });
           }
           savedDraftRowMatrix = null;
         }
@@ -55151,7 +55534,9 @@ const Statutory = ({ userEmail, userRole }) => {
         );
         const formXXRows = formCRajasthanSave
           ? applyFormCRajasthanNilToMappedRows(formXXRowsRaw, formXXHeaders)
-          : applyFormXXAPDeductionsNilToMappedRows(formXXRowsRaw, formXXHeaders);
+          : applyFormXXAPDeductionsNilToMappedRows(formXXRowsRaw, formXXHeaders, undefined, {
+              overwrite: true,
+            });
         let formXXHeaderDataForSave = headerDataForSave;
         if (formCRajasthanSave) {
           const resolvedSiteForCRJSave = resolveStatutorySiteNameForContractorAutofill(currentItem, {
@@ -58323,6 +58708,90 @@ const Statutory = ({ userEmail, userRole }) => {
         return;
       }
 
+      // Form XXIX TN Register of Advances / Damage / Fines — never fetch People;
+      // one "NIL of the Month May 2026" row from the selected Month/Year.
+      {
+        const xxixEarlyFileName = String(
+          modalData?.fileName ||
+            modalData?.formFileName ||
+            options?.fileName ||
+            formFileModalData?.fileName ||
+            formFileModalData?.formFileName ||
+            ''
+        );
+        const xxixEarlyFormHeader =
+          modalData?.parsedFormHeader ||
+          options?.parsedFormHeader ||
+          formFileModalData?.parsedFormHeader ||
+          {};
+        const xxixEarlyItem = modalData?.item || options?.item || formFileModalData?.item || null;
+        const xxixEarlySheetText =
+          modalData?.sheetText || formFileModalData?.sheetText || options?.sheetText || '';
+        const xxixEarlyBlocksXviii =
+          isFormXVIIITamilNaduClraContext(
+            xxixEarlyFormHeader,
+            xxixEarlyItem,
+            xxixEarlyFileName,
+            currentHeaders,
+            xxixEarlySheetText
+          ) ||
+          /form[\s._-]*xviii(?![a-z])/i.test(xxixEarlyFileName) ||
+          /form[\s._-]*18(?!\d)/i.test(xxixEarlyFileName);
+        const xxixEarlyContext =
+          !xxixEarlyBlocksXviii &&
+          (isFormXXIXTamilNaduContext(
+            xxixEarlyFormHeader,
+            xxixEarlyItem,
+            xxixEarlyFileName,
+            currentHeaders,
+            xxixEarlySheetText
+          ) ||
+            matchesFormXXIXHint(xxixEarlyFileName) ||
+            isFormXXIXTamilNaduHeaderFieldLayoutFormHeader(xxixEarlyFormHeader));
+        if (xxixEarlyContext) {
+          const xxixHeaders = resolveFormXXIXTamilNaduTableHeaders(
+            stripFormXXIXTamilNaduMonthYearFromTableHeaders(currentHeaders)
+          );
+          const nilText = resolveFormXXIXTamilNaduNilOfMonthText({
+            headerFormData: {
+              ...(modalData?.parsedHeaderFormData ||
+                formFileModalData?.parsedHeaderFormData ||
+                options?.parsedHeaderFormData ||
+                {}),
+              ...(headerFormData && typeof headerFormData === 'object' ? headerFormData : {}),
+            },
+            selectedMonthStr: selectedMonth,
+            item: xxixEarlyItem,
+            resolvePeriod: resolveForm11MonthYear,
+          });
+          const nilRows = buildFormXXIXTamilNaduNilTableRows(xxixHeaders, nilText);
+          if (!returnMappedData) {
+            if (xxixHeaders.join('\n') !== (currentHeaders || []).join('\n')) {
+              setTableHeaders(xxixHeaders);
+              setFormFileModalData((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      parsedTableHeaders: xxixHeaders,
+                      columnGroupLabels: sanitizeFormXXIXTamilNaduColumnGroupLabels(
+                        prev.columnGroupLabels,
+                        xxixHeaders.length
+                      ),
+                    }
+                  : prev
+              );
+            }
+            setFormTableData(nilRows);
+            setTableAutofillLoading(false);
+            setTableAutofillProgress('');
+            setSuccess(`Form XXIX: ${nilText}`);
+            setTimeout(() => setSuccess(''), 5000);
+          }
+          if (returnMappedData) return nilRows;
+          return;
+        }
+      }
+
       // AP Form XXVII Quarterly Returns — show "Nill of the month" when no return rows exist (manual entry form).
       if (
         !form27CEarlyContext &&
@@ -59254,6 +59723,46 @@ const Statutory = ({ userEmail, userRole }) => {
         currentHeaders = ensureFormXXIIAPDayColumnHeaders(
           resolveFormXXIIExportHeaders(currentHeaders, xxiiHeaderRowsHint)
         );
+      }
+      // Form XXVI TN: ensure full day band 1–31 (templates often only expose 1–14).
+      if (
+        formXXVIAutofillContext ||
+        isFormXXVITamilNaduClraContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || formFileModalData?.parsedFormHeader || {},
+          modalData?.item || options?.item || formFileModalData?.item || null,
+          String(
+            modalData?.fileName ||
+              modalData?.formFileName ||
+              formFileModalData?.fileName ||
+              formFileModalData?.formFileName ||
+              options?.fileName ||
+              ''
+          ),
+          currentHeaders,
+          modalData?.sheetText || formFileModalData?.sheetText || ''
+        )
+      ) {
+        const ensuredXxviHdrs = ensureFormXXVITamilNaduDayColumnHeaders(currentHeaders);
+        if (
+          ensuredXxviHdrs.length !== currentHeaders.length ||
+          ensuredXxviHdrs.some((h, i) => h !== currentHeaders[i])
+        ) {
+          currentHeaders = ensuredXxviHdrs;
+          const xxviGroupLabels = buildFormXXVITamilNaduColumnGroupLabels(currentHeaders);
+          if (!returnMappedData) {
+            setTableHeaders(currentHeaders);
+            setFormFileModalData((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    parsedTableHeaders: currentHeaders,
+                    parsedColumnGroupLabels: xxviGroupLabels,
+                    columnGroupLabels: xxviGroupLabels
+                  }
+                : prev
+            );
+          }
+        }
       }
       const form25HeadersJoined = currentHeaders.map((h) => String(h || '').toLowerCase()).join('\n');
       const form25DayColumnCount = currentHeaders.filter((h) => isLikelyDayOfMonthColumnHeader(h)).length;
@@ -60385,6 +60894,18 @@ const Statutory = ({ userEmail, userRole }) => {
           );
         }
       }
+      const formXXIXNilOfMonthText = formXXIXTamilNaduAutofillContext
+        ? resolveFormXXIXTamilNaduNilOfMonthText({
+            headerFormData:
+              modalData?.parsedHeaderFormData ||
+              formFileModalData?.parsedHeaderFormData ||
+              options?.parsedHeaderFormData ||
+              {},
+            selectedMonthStr: selectedMonth,
+            item: formXXIXAutofillItem,
+            resolvePeriod: resolveForm11MonthYear,
+          })
+        : FORM_XXIX_TN_NIL;
       const formXXAPClraWorkmenAutofillContext =
         formXXAPDeductionsAutofillContext ||
         formXXIAPFinesAutofillContext ||
@@ -60469,25 +60990,6 @@ const Statutory = ({ userEmail, userRole }) => {
           .trim();
         return /nature\s+of\s+employ/.test(bare) || (/designat/.test(bare) && /employ/.test(bare));
       };
-      const isFormXXAPSkipAutofillHeader = (h) => {
-        const bare = String(h || '')
-          .toLowerCase()
-          .replace(/\s+/g, ' ')
-          .replace(/^\(?\d+\)?\s*/, '')
-          .trim();
-        if (/particulars\s+of\s+damage|date\s+of\s+damage|amount\s+of\s+deduction/.test(bare)) return true;
-        if (
-          /show\s+cause|showed\s+cause|whether\s+work\s*man|whether\s+workman|against\s+deduction|total\s+amount|instalment|remarks?/.test(
-            bare
-          )
-        ) {
-          return true;
-        }
-        if (/name\s+of\s+person.*presence|presence.*explanation|explanation\s+was\s+heard/.test(bare)) {
-          return true;
-        }
-        return false;
-      };
       const isFormXXIAPSkipAutofillHeader = (h) => {
         const bare = String(h || '')
           .toLowerCase()
@@ -60520,6 +61022,33 @@ const Statutory = ({ userEmail, userRole }) => {
             currentHeaders,
             String(formFileModalData?.sheetText || '')
           ));
+
+      const form11RJAutofillContext =
+        isForm11RajasthanContext(
+          modalData?.parsedFormHeader || options?.parsedFormHeader || {},
+          modalData?.item || options?.item || null,
+          String(modalData?.fileName || modalData?.formFileName || options?.fileName || ''),
+          String(modalData?.sheetText || options?.sheetText || ''),
+          currentHeaders
+        ) ||
+        (isFormFileModalOpen &&
+          isForm11RajasthanContext(
+            formFileModalData?.parsedFormHeader || {},
+            formFileModalData?.item,
+            String(formFileModalData?.fileName || formFileModalData?.formFileName || ''),
+            String(formFileModalData?.sheetText || ''),
+            currentHeaders
+          )) ||
+        /form[\s._-]*11[\s._-]*rj|\bform_11_rj\b|\b11_rj\b/i.test(
+          String(
+            modalData?.fileName ||
+              modalData?.formFileName ||
+              formFileModalData?.fileName ||
+              formFileModalData?.formFileName ||
+              options?.fileName ||
+              ''
+          )
+        );
 
       const form26AutofillContext =
         isForm26RegisterOfAccidentsContext(
@@ -69544,6 +70073,12 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
+          // Form XXVI TN: Rate of Wages / Number of Days Worked ← SamplePayroll only.
+          if (formXXVIAutofillContext && isFormXXVITamilNaduPayrollOnlyHeader(header)) {
+            row[header] = '';
+            return;
+          }
+
           // Day-of-month grid (Form 25 / Form V / Form T): never fuzzy-map People fields; attendance fills these later.
           if (
             isLikelyDayOfMonthColumnHeader(header) ||
@@ -69731,6 +70266,29 @@ const Statutory = ({ userEmail, userRole }) => {
 
           if (formXIXRJOvertimeAutofillContext && isFormXIXRJDesignationDepartmentHeader(header)) {
             row[header] = sanitizeValue(resolveFormXIXRJDesignationAndDepartment(emp));
+            return;
+          }
+
+          if (form11RJAutofillContext && isForm11RajasthanNameHeader(header)) {
+            row[header] = sanitizeValue(
+              getEmployeeDisplayName(emp) ||
+                getFormXXIIIEmployeeFullName(emp) ||
+                getEmployeeLookupName(emp) ||
+                getFallbackName(emp) ||
+                ''
+            );
+            return;
+          }
+
+          if (form11RJAutofillContext && isForm11RajasthanYoungPersonHeader(header)) {
+            row[header] = sanitizeValue(
+              resolveForm11RajasthanYoungPersonValue(computeAgeFromDobForStatutory(emp))
+            );
+            return;
+          }
+
+          if (form11RJAutofillContext && isForm11RajasthanSkipAutofillHeader(header)) {
+            row[header] = '';
             return;
           }
 
@@ -70136,7 +70694,7 @@ const Statutory = ({ userEmail, userRole }) => {
           }
 
           if (formXXIXTamilNaduAutofillContext && isFormXXIXTamilNaduNilDefaultHeader(header)) {
-            row[header] = FORM_XXIX_TN_NIL;
+            row[header] = formXXIXNilOfMonthText;
             return;
           }
 
@@ -70158,7 +70716,7 @@ const Statutory = ({ userEmail, userRole }) => {
           ) {
             row[header] =
               formXXIXTamilNaduAutofillContext && isFormXXIXTamilNaduNilDefaultHeader(header)
-                ? FORM_XXIX_TN_NIL
+                ? formXXIXNilOfMonthText
                 : formXXIITamilNaduAutofillContext && isFormXXIITamilNaduNilDefaultHeader(header)
                   ? FORM_XXII_TN_NIL
                   : formXIIAPAdvancesAutofillContext && isFormXIIAPNilDefaultHeader(header)
@@ -70223,7 +70781,7 @@ const Statutory = ({ userEmail, userRole }) => {
           ) {
             row[header] =
               formXXIXTamilNaduAutofillContext && isFormXXIXTamilNaduNilDefaultHeader(header)
-                ? FORM_XXIX_TN_NIL
+                ? formXXIXNilOfMonthText
                 : formXXIITamilNaduAutofillContext && isFormXXIITamilNaduNilDefaultHeader(header)
                   ? FORM_XXII_TN_NIL
                   : formXIIAPAdvancesAutofillContext && isFormXIIAPNilDefaultHeader(header)
@@ -71768,7 +72326,7 @@ const Statutory = ({ userEmail, userRole }) => {
             }
 
             if (formXXIXTamilNaduAutofillContext && isFormXXIXTamilNaduNilDefaultHeader(header)) {
-              row[header] = FORM_XXIX_TN_NIL;
+              row[header] = formXXIXNilOfMonthText;
               return;
             }
 
@@ -71790,7 +72348,7 @@ const Statutory = ({ userEmail, userRole }) => {
             ) {
               row[header] =
                 formXXIXTamilNaduAutofillContext && isFormXXIXTamilNaduNilDefaultHeader(header)
-                  ? FORM_XXIX_TN_NIL
+                  ? formXXIXNilOfMonthText
                   : formXXIITamilNaduAutofillContext && isFormXXIITamilNaduNilDefaultHeader(header)
                     ? FORM_XXII_TN_NIL
                     : formXIIAPAdvancesAutofillContext && isFormXIIAPNilDefaultHeader(header)
@@ -71855,7 +72413,7 @@ const Statutory = ({ userEmail, userRole }) => {
             ) {
               row[header] =
                 formXXIXTamilNaduAutofillContext && isFormXXIXTamilNaduNilDefaultHeader(header)
-                  ? FORM_XXIX_TN_NIL
+                  ? formXXIXNilOfMonthText
                   : formXXIITamilNaduAutofillContext && isFormXXIITamilNaduNilDefaultHeader(header)
                     ? FORM_XXII_TN_NIL
                     : formXIIAPAdvancesAutofillContext && isFormXIIAPNilDefaultHeader(header)
@@ -72791,7 +73349,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 skipHeaders.forEach((header) => {
                   row[header] =
                     formXXIXTamilNaduAutofillContext && isFormXXIXTamilNaduNilDefaultHeader(header)
-                      ? FORM_XXIX_TN_NIL
+                      ? formXXIXNilOfMonthText
                       : formXXIITamilNaduAutofillContext && isFormXXIITamilNaduNilDefaultHeader(header)
                         ? FORM_XXII_TN_NIL
                         : formXIIAPAdvancesAutofillContext && isFormXIIAPNilDefaultHeader(header)
@@ -72804,7 +73362,7 @@ const Statutory = ({ userEmail, userRole }) => {
               mappedData = applyFormXXIXTamilNaduNilToMappedRows(
                 mappedData,
                 currentHeaders,
-                FORM_XXIX_TN_NIL,
+                formXXIXNilOfMonthText,
                 { overwrite: true }
               );
             } else if (formXXIITamilNaduAutofillContext) {
@@ -76115,8 +76673,8 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       // Form W: Number of days worked from Form 25 Total Worked Days
-      // (Form W Tamil Nadu uses payroll paid_days instead — skip Form 25.)
-      if (isLikelyFormW && !formWTamilNaduAutofillContext) {
+      // (Form W Tamil Nadu + Form XXVII TN use Sample Payroll paid_days instead — skip Form 25.)
+      if (isLikelyFormW && !formWTamilNaduAutofillContext && !formXXVIITamilNaduAutofillContext) {
         try {
           console.log('Fetching Form 25 data for Form W days worked...');
           const form25Res = await fetch('/server/form25_function/form25?perPage=200');
@@ -76502,7 +77060,15 @@ const Statutory = ({ userEmail, userRole }) => {
               []
             );
           }
-          if (!payrollRow || payrollRow.fetch_error) return;
+          if (!payrollRow || payrollRow.fetch_error) {
+            // No Sample Payroll match — clear Form 25 / leftover days-worked values.
+            currentHeaders.forEach((header) => {
+              if (isFormXXVIITamilNaduDaysWorkedHeader(header) && String(row[header] ?? '').trim()) {
+                row[header] = '';
+              }
+            });
+            return;
+          }
           const payrollMap = buildFormWPayrollMap(payrollRow);
           if (xxviiFormWHeaders) {
             applyFormWPayrollToRow(row, payrollMap, xxviiFormWHeaders, {
@@ -79342,7 +79908,7 @@ const Statutory = ({ userEmail, userRole }) => {
             skipHeaders.forEach((header) => {
               row[header] =
                 formXXIXTamilNaduAutofillContext && isFormXXIXTamilNaduNilDefaultHeader(header)
-                  ? FORM_XXIX_TN_NIL
+                  ? formXXIXNilOfMonthText
                   : formXXIITamilNaduAutofillContext && isFormXXIITamilNaduNilDefaultHeader(header)
                     ? FORM_XXII_TN_NIL
                     : formXIIAPAdvancesAutofillContext && isFormXIIAPNilDefaultHeader(header)
@@ -79352,7 +79918,7 @@ const Statutory = ({ userEmail, userRole }) => {
           });
           console.log(
             formXXIXTamilNaduAutofillContext
-              ? `Applied Form XXIX TN NILL defaults: ${skipHeaders.filter(isFormXXIXTamilNaduNilDefaultHeader).join(', ')}`
+              ? `Applied Form XXIX TN NIL of the Month defaults: ${skipHeaders.filter(isFormXXIXTamilNaduNilDefaultHeader).join(', ')}`
               : formXXIITamilNaduAutofillContext
                 ? `Applied Form XXII TN NILL defaults: ${skipHeaders.filter(isFormXXIITamilNaduNilDefaultHeader).join(', ')}`
                 : formXIIAPAdvancesAutofillContext
@@ -79364,7 +79930,7 @@ const Statutory = ({ userEmail, userRole }) => {
           mappedData = applyFormXXIXTamilNaduNilToMappedRows(
             mappedData,
             currentHeaders,
-            FORM_XXIX_TN_NIL,
+            formXXIXNilOfMonthText,
             { overwrite: true }
           );
         } else if (formXXIITamilNaduAutofillContext) {
@@ -79893,20 +80459,35 @@ const Statutory = ({ userEmail, userRole }) => {
       if (formXXVITamilNaduPaidDaysContext && Array.isArray(mappedData)) {
         // Remove worksite / header-only labels if they leaked into the grid.
         const strippedXxviHeaders = stripFormXXVITamilNaduNonTableHeaders(currentHeaders);
-        if (strippedXxviHeaders.length !== currentHeaders.length) {
-          currentHeaders = strippedXxviHeaders;
+        const ensuredXxviPaidDaysHeaders = ensureFormXXVITamilNaduDayColumnHeaders(strippedXxviHeaders);
+        if (
+          ensuredXxviPaidDaysHeaders.length !== currentHeaders.length ||
+          ensuredXxviPaidDaysHeaders.some((h, i) => h !== currentHeaders[i])
+        ) {
+          currentHeaders = ensuredXxviPaidDaysHeaders;
           mappedData = mappedData.map((row) => {
             if (!row || typeof row !== 'object') return row;
             const out = { ...row };
             Object.keys(out).forEach((k) => {
               if (isFormXXVITamilNaduNonTableHeaderField(k)) delete out[k];
             });
+            currentHeaders.forEach((h) => {
+              if (!(h in out)) out[h] = '';
+            });
             return out;
           });
           if (!returnMappedData) {
+            const xxviPaidDaysGroups = buildFormXXVITamilNaduColumnGroupLabels(currentHeaders);
             setTableHeaders(currentHeaders);
             setFormFileModalData((prev) =>
-              prev ? { ...prev, parsedTableHeaders: currentHeaders } : prev
+              prev
+                ? {
+                    ...prev,
+                    parsedTableHeaders: currentHeaders,
+                    parsedColumnGroupLabels: xxviPaidDaysGroups,
+                    columnGroupLabels: xxviPaidDaysGroups
+                  }
+                : prev
             );
           }
         }
@@ -80007,7 +80588,7 @@ const Statutory = ({ userEmail, userRole }) => {
                     const viaPeople = resolvePayrollRowForPeople(emp, xxviPayrollRows);
                     if (viaPeople) return viaPeople;
                   }
-                  // Fallback: match SamplePayroll by workman name on the form row.
+                  // Fallback: exact workman-name match only (no substring theft across employees).
                   if (row && Array.isArray(xxviPayrollRows) && xxviPayrollRows.length > 0) {
                     const nameHdr = currentHeaders.find((h) => {
                       const n = String(h || '')
@@ -80021,7 +80602,10 @@ const Statutory = ({ userEmail, userRole }) => {
                           (n.includes('workman') || n.includes('worker') || n.includes('employee')))
                       );
                     });
-                    const rowName = String((nameHdr && row[nameHdr]) || '').trim().toLowerCase();
+                    const rowName = String((nameHdr && row[nameHdr]) || '')
+                      .trim()
+                      .toLowerCase()
+                      .replace(/\s+/g, ' ');
                     if (rowName) {
                       const hit = xxviPayrollRows.find((pr) => {
                         const flat = flattenPayrollEarningColumns(pr);
@@ -80032,11 +80616,14 @@ const Statutory = ({ userEmail, userRole }) => {
                           flat.EmployeeName,
                           flat['Employee Name']
                         ]
-                          .map((v) => String(v || '').trim().toLowerCase())
+                          .map((v) =>
+                            String(v || '')
+                              .trim()
+                              .toLowerCase()
+                              .replace(/\s+/g, ' ')
+                          )
                           .filter(Boolean);
-                        return candidates.some(
-                          (c) => c === rowName || c.includes(rowName) || rowName.includes(c)
-                        );
+                        return candidates.some((c) => c === rowName);
                       });
                       if (hit) return hit;
                     }
@@ -80072,16 +80659,25 @@ const Statutory = ({ userEmail, userRole }) => {
                 'Form XXVI Rate of Wages: no gross_pay matched — ensure SamplePayroll has gross_pay for the selected month'
               );
             }
-          } else if (
-            currentHeaders.some((h) =>
-              /number\s+of\s+days?\s+worked|days?\s+worked/i.test(String(h || ''))
-            ) &&
-            !returnMappedData &&
-            !isStaleAutofillRun()
-          ) {
-            console.warn(
-              'Form XXVI Number of Days Worked: no SamplePayroll rows loaded for Paid_days'
-            );
+          } else {
+            // No SamplePayroll rows — clear Rate of Wages / Days Worked so People leftovers never show.
+            mappedData.forEach((row) => {
+              if (!row || typeof row !== 'object') return;
+              currentHeaders.forEach((header) => {
+                if (isFormXXVITamilNaduPayrollOnlyHeader(header)) row[header] = '';
+              });
+            });
+            if (
+              currentHeaders.some((h) =>
+                /number\s+of\s+days?\s+worked|days?\s+worked/i.test(String(h || ''))
+              ) &&
+              !returnMappedData &&
+              !isStaleAutofillRun()
+            ) {
+              console.warn(
+                'Form XXVI Number of Days Worked: no SamplePayroll rows loaded for Paid_days'
+              );
+            }
           }
         } catch (xxviPaidDaysErr) {
           console.warn(
@@ -84837,6 +85433,119 @@ const Statutory = ({ userEmail, userRole }) => {
       sheetTextBlobFinal
     );
 
+    // Form 15 RJ (Notice of Weekly Holidays): Excel merges each title across 2–3 cells —
+    // collapse so Name / Designation / Day of the week each appear once in the modal.
+    if (
+      isForm15RajasthanContext(
+        formHeaderInfo,
+        hints.item,
+        hints.fileName || hints.formFileName || firstSheetName,
+        sheetTextBlobFinal,
+        headersToUse
+      )
+    ) {
+      const priorForm15RjHdrs = Array.isArray(headersToUse) ? [...headersToUse] : [];
+      const nextForm15RjHdrs = resolveForm15RajasthanTableHeaders(headersToUse);
+      if (
+        nextForm15RjHdrs.length > 0 &&
+        (nextForm15RjHdrs.length !== priorForm15RjHdrs.length ||
+          nextForm15RjHdrs.some((h, i) => h !== priorForm15RjHdrs[i]))
+      ) {
+        const priorRows = tableData.map((row) => ({ ...row }));
+        headersToUse = nextForm15RjHdrs;
+        headers = nextForm15RjHdrs;
+        expandedHeaders = [...nextForm15RjHdrs];
+        tableData.length = 0;
+        remapForm15RajasthanRowsToHeaders(priorRows, priorForm15RjHdrs, nextForm15RjHdrs).forEach(
+          (r) => tableData.push(r)
+        );
+        columnGroupLabels = null;
+      }
+    }
+
+    // Form 11 RJ Register of Employment: restore 12 leaf columns + skip 1…12 index row.
+    if (
+      isForm11RajasthanContext(
+        formHeaderInfo,
+        hints.item,
+        hints.fileName || hints.formFileName || firstSheetName,
+        sheetTextBlobFinal,
+        headersToUse
+      ) ||
+      /form[\s._-]*11[\s._-]*rj|\bform_11_rj\b|\b11_rj\b/i.test(
+        `${hints.fileName || ''} ${hints.formFileName || ''} ${firstSheetName || ''}`
+      )
+    ) {
+      const priorForm11RjHdrs = Array.isArray(headersToUse) ? [...headersToUse] : [];
+      let nextForm11RjHdrs = resolveForm11RajasthanTableHeaders(headersToUse);
+      if (
+        !headersIndicateForm11RajasthanEmployment(priorForm11RjHdrs) ||
+        priorForm11RjHdrs.length < 10 ||
+        priorForm11RjHdrs.some((h) => /days\s+of\s+month\s+time/i.test(String(h || '')))
+      ) {
+        const repaired = repairForm11RajasthanTableHeadersFromWorkbook(workbook, {
+          sheetName: firstSheetName,
+        });
+        if (repaired?.headers?.length >= 8) {
+          nextForm11RjHdrs = repaired.headers;
+          if (Number.isFinite(repaired.headerRowIndex)) headerRowIndex = repaired.headerRowIndex;
+          if (Number.isFinite(repaired.dataStartIndex)) startIndex = repaired.dataStartIndex;
+          if (Number.isFinite(repaired.tableStartCol)) tableStartCol = repaired.tableStartCol;
+        }
+      } else if (headerRowIndex >= 0) {
+        // Stacked combine often ends on leaf row; next row is 1…12 — skip it for data.
+        const probeRow = (stackedHeaderBandEnd >= 0 ? stackedHeaderBandEnd : headerRowIndex) + 1;
+        if (probeRow < jsonData.length) {
+          let numHits = 0;
+          for (let hi = 0; hi < Math.min(12, nextForm11RjHdrs.length); hi += 1) {
+            const t = String(getMergedAwareCellText(probeRow, tableStartCol + hi) || '')
+              .replace(/\s+/g, '')
+              .trim();
+            if (t === String(hi + 1)) numHits += 1;
+          }
+          if (numHits >= 8) startIndex = probeRow + 1;
+        }
+      }
+      formHeaderInfo = enrichForm11RajasthanDisplayHeader(
+        formHeaderInfo,
+        hints.fileName || hints.formFileName || firstSheetName,
+        hints.item,
+        nextForm11RjHdrs,
+        sheetTextBlobFinal
+      );
+      if (
+        nextForm11RjHdrs.length > 0 &&
+        (nextForm11RjHdrs.length !== priorForm11RjHdrs.length ||
+          nextForm11RjHdrs.some((h, i) => h !== priorForm11RjHdrs[i]))
+      ) {
+        const priorRows = tableData.map((row) => ({ ...row }));
+        headersToUse = nextForm11RjHdrs;
+        headers = nextForm11RjHdrs;
+        expandedHeaders = [...nextForm11RjHdrs];
+        tableData.length = 0;
+        remapForm11RajasthanRowsToHeaders(priorRows, priorForm11RjHdrs, nextForm11RjHdrs).forEach(
+          (r) => tableData.push(r)
+        );
+        // Re-read body rows from sheet when remap left empties (misaligned stacked headers).
+        if (
+          priorRows.length === 0 ||
+          tableData.every((row) => !Object.values(row).some((v) => String(v ?? '').trim()))
+        ) {
+          tableData.length = 0;
+          for (let i = startIndex; i < jsonData.length; i += 1) {
+            const rowData = {};
+            nextForm11RjHdrs.forEach((h, hi) => {
+              rowData[h] = sanitizeForm11RajasthanCellValue(
+                getMergedAwareCellText(i, tableStartCol + hi)
+              );
+            });
+            if (Object.values(rowData).some((val) => val)) tableData.push(rowData);
+          }
+        }
+        columnGroupLabels = null;
+      }
+    }
+
     return {
       formHeader: formHeaderInfo,
       tableData: tableData,
@@ -87211,6 +87920,89 @@ const Statutory = ({ userEmail, userRole }) => {
             parsed.expandedHeaders = tableHeadersForModal;
           }
         }
+        const form15RJModalOpen =
+          isForm15RajasthanContext(
+            formHeaderForModal,
+            item,
+            displayFileName || resolvedFormFileName || '',
+            sheetTextForVariant,
+            tableHeadersForModal
+          ) ||
+          /form[\s._-]*15[\s._-]*rj|\bform_15_rj\b|\b15_rj\b/i.test(
+            `${displayFileName || ''} ${resolvedFormFileName || ''}`
+          );
+        if (form15RJModalOpen) {
+          const priorForm15RjModalHdrs = Array.isArray(tableHeadersForModal)
+            ? [...tableHeadersForModal]
+            : [];
+          tableHeadersForModal = resolveForm15RajasthanTableHeaders(tableHeadersForModal);
+          if (Array.isArray(parsed.tableData) && parsed.tableData.length > 0) {
+            parsed.tableData = remapForm15RajasthanRowsToHeaders(
+              parsed.tableData,
+              priorForm15RjModalHdrs,
+              tableHeadersForModal
+            );
+          }
+          parsed.headers = tableHeadersForModal;
+          if (Array.isArray(parsed.expandedHeaders)) {
+            parsed.expandedHeaders = tableHeadersForModal;
+          }
+          parsed.columnGroupLabels = null;
+        }
+        const form11RJModalOpen =
+          isForm11RajasthanContext(
+            formHeaderForModal,
+            item,
+            displayFileName || resolvedFormFileName || '',
+            sheetTextForVariant,
+            tableHeadersForModal
+          ) ||
+          /form[\s._-]*11[\s._-]*rj|\bform_11_rj\b|\b11_rj\b/i.test(
+            `${displayFileName || ''} ${resolvedFormFileName || ''}`
+          );
+        if (form11RJModalOpen) {
+          const priorForm11RjModalHdrs = Array.isArray(tableHeadersForModal)
+            ? [...tableHeadersForModal]
+            : [];
+          const repairedModal = repairForm11RajasthanTableHeadersFromWorkbook(workbook, {
+            sheetName: parsed.sheetName,
+          });
+          if (repairedModal?.headers?.length >= 8) {
+            tableHeadersForModal = repairedModal.headers;
+            if (Number.isFinite(repairedModal.headerRowIndex)) {
+              parsed.headerRowIndex = repairedModal.headerRowIndex;
+              parsed.originalHeaderRowIndex = repairedModal.headerRowIndex;
+            }
+            if (Number.isFinite(repairedModal.dataStartIndex)) {
+              parsed.dataStartIndex = repairedModal.dataStartIndex;
+            }
+            if (Number.isFinite(repairedModal.tableStartCol)) {
+              parsed.tableStartCol = repairedModal.tableStartCol;
+            }
+          } else {
+            tableHeadersForModal = resolveForm11RajasthanTableHeaders(tableHeadersForModal);
+          }
+          if (Array.isArray(parsed.tableData) && parsed.tableData.length > 0) {
+            parsed.tableData = remapForm11RajasthanRowsToHeaders(
+              parsed.tableData,
+              priorForm11RjModalHdrs,
+              tableHeadersForModal
+            );
+          }
+          parsed.headers = tableHeadersForModal;
+          if (Array.isArray(parsed.expandedHeaders)) {
+            parsed.expandedHeaders = tableHeadersForModal;
+          }
+          parsed.columnGroupLabels = null;
+          formHeaderForModal = enrichForm11RajasthanDisplayHeader(
+            formHeaderForModal,
+            displayFileName || resolvedFormFileName || '',
+            item,
+            tableHeadersForModal,
+            sheetTextForVariant
+          );
+          parsed.formHeader = formHeaderForModal;
+        }
         const formXIXRJModalOpen =
           isFormXIXRJOvertimeAutofillContext(
             formHeaderForModal,
@@ -87955,6 +88747,7 @@ const Statutory = ({ userEmail, userRole }) => {
           displayFileName,
           tableHeadersForModal
         );
+        let formXXIXTamilNaduModalOpen = false;
         const formCGJGujaratModalOpen = isFormCGJGujaratContext(
           formHeaderForModal,
           item,
@@ -88291,21 +89084,26 @@ const Statutory = ({ userEmail, userRole }) => {
           const priorXxviHeaders = Array.isArray(tableHeadersForModal)
             ? [...tableHeadersForModal]
             : [];
-          tableHeadersForModal = stripFormXXVITamilNaduNonTableHeaders(tableHeadersForModal);
+          tableHeadersForModal = ensureFormXXVITamilNaduDayColumnHeaders(
+            stripFormXXVITamilNaduNonTableHeaders(tableHeadersForModal)
+          );
           parsed.headers = tableHeadersForModal;
-          if (Array.isArray(parsed.columnGroupLabels) && priorXxviHeaders.length) {
-            parsed.columnGroupLabels = priorXxviHeaders
-              .map((h, i) =>
-                isFormXXVITamilNaduNonTableHeaderField(h) ? null : parsed.columnGroupLabels[i] ?? ''
-              )
-              .filter((x) => x != null);
-          }
+          parsed.columnGroupLabels = buildFormXXVITamilNaduColumnGroupLabels(
+            tableHeadersForModal,
+            Array.isArray(parsed.columnGroupLabels)
+              ? parsed.columnGroupLabels.find((g) => /daily\s+hours|hours\s+of\s+work/i.test(String(g || ''))) ||
+                'Daily hours of work'
+              : 'Daily hours of work'
+          );
           if (Array.isArray(parsed.tableData) && parsed.tableData.length > 0) {
             parsed.tableData = parsed.tableData.map((row) => {
               if (!row || typeof row !== 'object') return row;
               const out = { ...row };
               priorXxviHeaders.forEach((h) => {
                 if (isFormXXVITamilNaduNonTableHeaderField(h)) delete out[h];
+              });
+              tableHeadersForModal.forEach((h) => {
+                if (!(h in out)) out[h] = '';
               });
               return out;
             });
@@ -88516,6 +89314,9 @@ const Statutory = ({ userEmail, userRole }) => {
             tableHeadersForModal,
             sheetTextForVariant
           );
+          formXXIXTamilNaduModalOpen =
+            isXXIXTamilNadu ||
+            (isXXIX && !isXXII && matchesFormXXIXHint(displayFileName));
           if (isXXIXTamilNadu) {
             formHeaderForModal = enrichFormXXIXTamilNaduDisplayHeader(
               formHeaderForModal,
@@ -89553,7 +90354,17 @@ const Statutory = ({ userEmail, userRole }) => {
                       tableHeadersForModal
                     )
                 : form12AdvancesModalOpen
-                  ? shouldAutofill
+                  ? formXXIXTamilNaduModalOpen
+                    ? buildFormXXIXTamilNaduNilTableRows(
+                        tableHeadersForModal,
+                        resolveFormXXIXTamilNaduNilOfMonthText({
+                          headerFormData: initialHeaderFormData || {},
+                          selectedMonthStr: selectedMonth,
+                          item,
+                          resolvePeriod: resolveForm11MonthYear,
+                        })
+                      )
+                    : shouldAutofill
                     ? filterStatutoryDraftTableRows(
                         remapFormARowsByColumnIndex(parsed.tableData || [], parsed.headers || [], tableHeadersForModal),
                         tableHeadersForModal
@@ -89671,9 +90482,24 @@ const Statutory = ({ userEmail, userRole }) => {
                 : formXAPFinesModalOpen
                   ? initialModalRows
                 : form12AdvancesModalOpen
-                  ? shouldAutofill
+                  ? formXXIXTamilNaduModalOpen
+                    ? buildFormXXIXTamilNaduNilTableRows(
+                        tableHeadersForModal,
+                        resolveFormXXIXTamilNaduNilOfMonthText({
+                          headerFormData: initialHeaderFormData || {},
+                          selectedMonthStr: selectedMonth,
+                          item,
+                          resolvePeriod: resolveForm11MonthYear,
+                        })
+                      )
+                    : shouldAutofill
                     ? initialModalRows
-                    : applyForm12AdvancesNilTableRows(tableHeadersForModal, initialModalRows, selectedMonth, item)
+                    : applyForm12AdvancesNilTableRows(
+                        tableHeadersForModal,
+                        initialModalRows,
+                        selectedMonth,
+                        item
+                      )
                 : form27CModalOpen
                   ? []
                 : formXXVIIQuarterlyModalOpen
@@ -90037,7 +90863,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 setError('Could not load the saved draft. Loading employee data from Zoho People…');
                 setTimeout(() => setError(''), 4000);
               }
-              if (form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formXXVIIQuarterlyModalOpen || formITamilNaduSuspensionModalOpen) {
+              if (form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formXXVIIQuarterlyModalOpen || formITamilNaduSuspensionModalOpen || formXXIXTamilNaduModalOpen) {
                 setTableAutofillLoading(false);
                 setTableAutofillProgress('');
               } else {
@@ -90065,7 +90891,7 @@ const Statutory = ({ userEmail, userRole }) => {
               });
               }
             }
-          } else if (form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formXXVIIQuarterlyModalOpen || formITamilNaduSuspensionModalOpen) {
+          } else if (form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formXXVIIQuarterlyModalOpen || formITamilNaduSuspensionModalOpen || formXXIXTamilNaduModalOpen) {
             setTableAutofillLoading(false);
             setTableAutofillProgress('');
           } else {
@@ -90114,7 +90940,22 @@ const Statutory = ({ userEmail, userRole }) => {
                 : formXAPFinesModalOpen
                   ? prepareFormXAPFinesExportRows(tableHeadersForModal, parsed.tableData || [], selectedMonth, item)
                 : form12AdvancesModalOpen
-                  ? applyForm12AdvancesNilTableRows(tableHeadersForModal, parsed.tableData || [], selectedMonth, item)
+                  ? formXXIXTamilNaduModalOpen
+                    ? buildFormXXIXTamilNaduNilTableRows(
+                        tableHeadersForModal,
+                        resolveFormXXIXTamilNaduNilOfMonthText({
+                          headerFormData: initialHeaderFormData || {},
+                          selectedMonthStr: selectedMonth,
+                          item,
+                          resolvePeriod: resolveForm11MonthYear,
+                        })
+                      )
+                    : applyForm12AdvancesNilTableRows(
+                      tableHeadersForModal,
+                      parsed.tableData || [],
+                      selectedMonth,
+                      item
+                    )
                 : formXXVIIQuarterlyModalOpen
                   ? applyFormXXVIIQuarterlyNilTableRows(tableHeadersForModal, parsed.tableData || [], selectedMonth, item)
                 : formITamilNaduSuspensionModalOpen
@@ -91258,7 +92099,9 @@ const Statutory = ({ userEmail, userRole }) => {
         formFileModalData?.sheetText || ''
       )
     ) {
-      baseHeaders = stripFormXXVITamilNaduNonTableHeaders(baseHeaders);
+      baseHeaders = ensureFormXXVITamilNaduDayColumnHeaders(
+        stripFormXXVITamilNaduNonTableHeaders(baseHeaders)
+      );
     }
     if (
       isFormXXVIITamilNaduContext(
@@ -91372,6 +92215,35 @@ const Statutory = ({ userEmail, userRole }) => {
       )
     ) {
       return resolveFormARajasthanTableHeaders(baseHeaders);
+    }
+    if (
+      isForm15RajasthanContext(
+        displayFormHeader,
+        item,
+        fn || formFileModalData?.formFileName || '',
+        formFileModalData?.sheetText || '',
+        baseHeaders
+      ) ||
+      /form[\s._-]*15[\s._-]*rj|\bform_15_rj\b|\b15_rj\b/i.test(
+        `${fn} ${formFileModalData?.formFileName || ''} ${item?.formName || ''} ${item?.FormName || ''}`
+      )
+    ) {
+      return resolveForm15RajasthanTableHeaders(baseHeaders);
+    }
+    if (
+      isForm11RajasthanContext(
+        displayFormHeader,
+        item,
+        fn || formFileModalData?.formFileName || '',
+        formFileModalData?.sheetText || '',
+        baseHeaders
+      ) ||
+      isForm11RajasthanEmploymentLayoutFormHeader(displayFormHeader) ||
+      /form[\s._-]*11[\s._-]*rj|\bform_11_rj\b|\b11_rj\b/i.test(
+        `${fn} ${formFileModalData?.formFileName || ''} ${item?.formName || ''} ${item?.FormName || ''}`
+      )
+    ) {
+      return resolveForm11RajasthanTableHeaders(baseHeaders);
     }
     if (
       isFormQKarnatakaTableLayoutFormHeader(displayFormHeader) ||
@@ -92878,6 +93750,116 @@ const Statutory = ({ userEmail, userRole }) => {
       </>
     );
   }, [formDRJAutofillGrid, displayTableHeaders]);
+
+  /** Form 11 RJ Register of Employment — Excel-style Days of Month band + leaf headers. */
+  const form11RJGroupedThead = useMemo(() => {
+    const hdrs = displayTableHeaders;
+    const item = formFileModalData?.item;
+    const fn = [
+      formFileModalData?.fileName,
+      formFileModalData?.formFileName,
+      item?.formFileName,
+      item?.FormFileName,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    if (!Array.isArray(hdrs) || hdrs.length < 8) return null;
+    if (
+      !isForm11RajasthanContext(
+        displayFormHeader,
+        item,
+        fn,
+        formFileModalData?.sheetText || '',
+        hdrs
+      ) &&
+      !isForm11RajasthanEmploymentLayoutFormHeader(displayFormHeader) &&
+      !/form[\s._-]*11[\s._-]*rj|\bform_11_rj\b|\b11_rj\b/i.test(fn)
+    ) {
+      return null;
+    }
+    if (!headersIndicateForm11RajasthanEmployment(hdrs) && hdrs.length !== 12) return null;
+
+    const resolved = resolveForm11RajasthanTableHeaders(hdrs);
+    const groupHeaderStyle = {
+      backgroundColor: STAT_FORM_FILE_ACCENT_BG,
+      color: 'white',
+      padding: '10px 8px',
+      textAlign: 'center',
+      fontWeight: '700',
+      fontSize: '12px',
+      border: `1px solid ${STAT_FORM_FILE_ACCENT_BORDER}`,
+      verticalAlign: 'middle',
+      whiteSpace: 'normal',
+      lineHeight: 1.3,
+    };
+    const leafHeaderStyle = {
+      ...groupHeaderStyle,
+      fontWeight: '600',
+      fontSize: '11px',
+      minWidth: '56px',
+    };
+    const stickyLeafStyle = { ...leafHeaderStyle, position: 'sticky', top: 0, zIndex: 10 };
+
+    const labelAt = (i, fallback) => formatStatutoryTableHeaderLabel(resolved[i] || fallback);
+
+    return (
+      <>
+        <tr>
+          <th rowSpan={2} style={groupHeaderStyle} title={resolved[0]}>
+            {labelAt(0, 'Name of Persons Employed')}
+          </th>
+          <th rowSpan={2} style={groupHeaderStyle} title={resolved[1]}>
+            {labelAt(1, 'Whether young person or not')}
+          </th>
+          <th colSpan={2} style={groupHeaderStyle} title="Days of Month">
+            Days of Month
+          </th>
+          <th rowSpan={2} style={stickyLeafStyle} title={resolved[4]}>
+            {labelAt(4, '1')}
+          </th>
+          <th style={stickyLeafStyle} title={resolved[5]}>
+            2
+          </th>
+          <th rowSpan={2} style={stickyLeafStyle} title={resolved[6]}>
+            {labelAt(6, '3')}
+          </th>
+          <th rowSpan={2} style={groupHeaderStyle} title={resolved[7]}>
+            {labelAt(7, 'Total hours worked during the month')}
+          </th>
+          <th rowSpan={2} style={groupHeaderStyle} title={resolved[8]}>
+            {labelAt(8, '*Days on which overtime work is done and extent of such overtime on each day')}
+          </th>
+          <th rowSpan={2} style={groupHeaderStyle} title={resolved[9]}>
+            {labelAt(9, 'Extent of overtime worked during the month')}
+          </th>
+          <th rowSpan={2} style={groupHeaderStyle} title={resolved[10]}>
+            {labelAt(10, 'Extent of overtime worked during the quarter')}
+          </th>
+          <th rowSpan={2} style={groupHeaderStyle} title={resolved[11]}>
+            {labelAt(11, 'Extent of overtime worked during the year')}
+          </th>
+        </tr>
+        <tr>
+          <th style={leafHeaderStyle} title={resolved[2]}>
+            {labelAt(2, 'Time at which employment commences')}
+          </th>
+          <th style={leafHeaderStyle} title={resolved[3]}>
+            {labelAt(3, 'Time at which employment ceases')}
+          </th>
+          <th style={leafHeaderStyle} title="Rest interval">
+            Rest interval
+          </th>
+        </tr>
+      </>
+    );
+  }, [
+    displayTableHeaders,
+    displayFormHeader,
+    formFileModalData?.item,
+    formFileModalData?.fileName,
+    formFileModalData?.formFileName,
+    formFileModalData?.sheetText,
+  ]);
 
   const formHLeaveBookThead = useMemo(() => {
     const wb = formFileModalData?.rawData;
@@ -95830,7 +96812,7 @@ const Statutory = ({ userEmail, userRole }) => {
               backgroundColor: 'white',
               borderRadius: '12px',
               width: '90%',
-              maxWidth: registerOfWagesMergedTheadRows || formVDailyHoursThead || formDRJGroupedThead || formDRemunerationThead || form11PeriodOfWorkThead || form6APHumidityThead || form25APMusterThead ? 'min(98vw, 1900px)' : '1200px',
+              maxWidth: registerOfWagesMergedTheadRows || formVDailyHoursThead || formDRJGroupedThead || formDRemunerationThead || form11PeriodOfWorkThead || form11RJGroupedThead || form6APHumidityThead || form25APMusterThead ? 'min(98vw, 1900px)' : '1200px',
               maxHeight: '90vh',
               minHeight: 0,
               display: 'flex',
@@ -97431,7 +98413,7 @@ const Statutory = ({ userEmail, userRole }) => {
                       borderRadius: '8px'
                     }}>
                       <table className="form-file-modal-table" style={{
-                        width: formVDailyHoursThead || registerOfWagesMergedTheadRows ? 'max-content' : '100%',
+                        width: formVDailyHoursThead || registerOfWagesMergedTheadRows || form11RJGroupedThead ? 'max-content' : '100%',
                         minWidth: '100%',
                         borderCollapse: 'collapse',
                         backgroundColor: 'white'
@@ -97439,6 +98421,8 @@ const Statutory = ({ userEmail, userRole }) => {
                         <thead>
                           {formXIXRJFlatThead ? (
                             formXIXRJFlatThead
+                          ) : form11RJGroupedThead ? (
+                            form11RJGroupedThead
                           ) : formIIMaharashtraThead ? (
                             formIIMaharashtraThead
                           ) : formTSEThead ? (

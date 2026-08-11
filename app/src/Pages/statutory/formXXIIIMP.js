@@ -84,6 +84,27 @@ export function resolveFormXXIIIMPAprilDefaultNormalRate(emp) {
   return match?.normalRate != null ? String(match.normalRate).trim() : '';
 }
 
+/** People record salary when Sample Payroll has no row for the employee. */
+export function resolveFormXXIIIMPPeopleSalary(emp = {}) {
+  const raw =
+    emp?.monthly_salary ??
+    emp?.['monthly_salary'] ??
+    emp?.MonthlySalary ??
+    emp?.['Monthly Salary'] ??
+    emp?.BasicSalary ??
+    emp?.['Basic Salary'] ??
+    emp?.Basic ??
+    emp?.['Basic'] ??
+    emp?.CTC ??
+    emp?.['CTC'] ??
+    '';
+  const s = String(raw ?? '').replace(/[,₹]/g, '').trim();
+  if (!s) return '';
+  const n = Number(s);
+  if (Number.isFinite(n) && n > 0) return String(n);
+  return s;
+}
+
 export function isFormXXIIIMPContext(formHeader, rowItem, fileName, sheetText = '') {
   const parts = [
     rowItem?.formName,
@@ -112,14 +133,24 @@ export function isFormXXIIIMPContext(formHeader, rowItem, fileName, sheetText = 
   return hasMP && hasXXIII;
 }
 
-/** Normal rate of wages — April template defaults, then payroll net pay. */
+/**
+ * Normal rate of wages for Form XXIII MP:
+ * 1) Sample Payroll net_pay (when present)
+ * 2) People MonthlySalary / Basic / CTC (when payroll row is missing)
+ * 3) April template defaults only as last resort
+ *
+ * Never prefer template dummy rates over live payroll or People salary.
+ */
 export function resolveFormXXIIIMPNormalRateForEmployee(emp, payrollRow = null, monthCandidates = null) {
+  if (payrollRow && !payrollRow.fetch_error) {
+    const fromPayroll = String(readPayrollNetPayForStatutory(payrollRow) ?? '').trim();
+    if (fromPayroll) return fromPayroll;
+  }
+  const fromPeople = resolveFormXXIIIMPPeopleSalary(emp);
+  if (fromPeople) return fromPeople;
   if (isAprilPayrollMonthCandidates(monthCandidates)) {
     const aprilDefault = resolveFormXXIIIMPAprilDefaultNormalRate(emp);
     if (aprilDefault) return aprilDefault;
-  }
-  if (payrollRow && !payrollRow.fetch_error) {
-    return String(readPayrollNetPayForStatutory(payrollRow) ?? '').trim();
   }
   return '';
 }

@@ -7,7 +7,33 @@ import {
   isFormXXIIIMPOvertimeRateHeader,
   isFormXXIIIMPOvertimeEarningsHeader,
   isFormXXIIIMPOtWagesPaidDateHeader,
+  resolveFormXXIIIMPNormalRateForEmployee,
+  resolveFormXXIIIMPPeopleSalary,
 } from './formXXIIIMP';
+
+describe('Form XXIII MP Normal rate of wages', () => {
+  it('prefers payroll net_pay over April template defaults', () => {
+    const emp = { FirstName: 'Prem', LastName: 'Singh Bhati' };
+    const rate = resolveFormXXIIIMPNormalRateForEmployee(
+      emp,
+      { net_pay: 65303 },
+      ['2026-04']
+    );
+    expect(rate).toBe('65303');
+  });
+
+  it('uses People MonthlySalary when payroll row is missing', () => {
+    const emp = { FirstName: 'Tejpal', LastName: 'Singh', MonthlySalary: 72590 };
+    expect(resolveFormXXIIIMPPeopleSalary(emp)).toBe('72590');
+    expect(resolveFormXXIIIMPNormalRateForEmployee(emp, null, ['2026-05'])).toBe('72590');
+  });
+
+  it('falls back to April template default only when payroll and People salary are missing', () => {
+    const emp = { FirstName: 'Prem', LastName: 'Singh Bhati' };
+    expect(resolveFormXXIIIMPNormalRateForEmployee(emp, null, ['2026-04'])).toBe('122603');
+    expect(resolveFormXXIIIMPNormalRateForEmployee(emp, null, ['2026-05'])).toBe('');
+  });
+});
 
 describe('Form XXIII MP overtime NIL columns', () => {
   const headers = [

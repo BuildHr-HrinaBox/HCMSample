@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Building,
-  ClipboardList,
   BookMarked,
+  ClipboardList,
   CheckCircle2,
+  FileText,
   MapPin,
   ShieldCheck,
 } from 'lucide-react';
@@ -12,47 +13,41 @@ import HcmHeaderProfileMenu from '../components/HcmHeaderProfileMenu';
 import ComplianceHealthDashboard from '../components/ComplianceHealthDashboard';
 import {
   buildInchargeSiteScopeFromList,
-  fetchInchargeDisplayScopeFromSites,
   filterSitesForLoginUser,
-  getActCategoryFromActSector,
-  industryLabelToActCategory,
   isOrgWideSiteViewer,
-  sectorMatchesInchargeSiteIndustries,
-  statesFieldMatchesInchargeSiteStates,
 } from '../utils/siteInchargeScope';
 import { resolveLoginEmailString } from '../utils/resolveLoginEmail';
 import './newdashboard.css';
 
-const DEFAULT_METRICS = [
+const OVERVIEW_METRICS = [
   {
     key: 'companies',
     label: 'Active Companies',
     value: 0,
-    hint: 'Registered organizations',
     icon: Building,
     tone: 'green',
   },
   {
     key: 'sites',
-    label: 'Active Site',
+    label: 'Active Sites',
     value: 0,
-    hint: 'Locations under management',
     icon: MapPin,
     tone: 'orange',
   },
+];
+
+const STATUS_METRICS = [
   {
     key: 'due',
     label: 'Approved',
     value: 0,
-    hint: '0% of total',
     icon: CheckCircle2,
-    tone: 'teal',
+    tone: 'green',
   },
   {
     key: 'policies',
     label: 'Returned',
     value: 0,
-    hint: '0% of total',
     icon: BookMarked,
     tone: 'purple',
   },
@@ -60,16 +55,21 @@ const DEFAULT_METRICS = [
     key: 'approvals',
     label: 'Pending for Approval',
     value: 0,
-    hint: '0% of total',
     icon: ClipboardList,
     tone: 'blue',
+  },
+  {
+    key: 'yetToSubmit',
+    label: 'Yet to Submit',
+    value: 0,
+    icon: FileText,
+    tone: 'orange',
   },
 ];
 
 const COMPANY_API = '/server/company_function/company';
 /** Site count from Catalyst sitemanagement_function (same as Site Management page). */
 const SITE_MANAGEMENT_API = '/server/sitemanagement_function/sitemanagement';
-const STATUTORY_API = '/server/statutoryreg_function/statutory';
 
 const SITE_MANAGEMENT_CACHE_KEY = 'siteManagementData';
 
@@ -109,98 +109,9 @@ async function fetchSiteDetailsFromSiteManagement() {
   }
 }
 
-/**
- * Keep statutory rows that belong to the logged-in site incharge scope
- * (Site Management industry → act category + state), same rules as Calendar / Act Description.
- */
-function statutoryRowMatchesSiteScope(row, scope) {
-  const actCategories = scope?.actCategories;
-  if (!Array.isArray(actCategories) || actCategories.length === 0) return true;
-
-  const act = row?.act ?? row?.Act ?? '';
-  const sector = row?.sector ?? row?.Sector ?? '';
-  const cat = getActCategoryFromActSector(act, sector);
-  if (!actCategories.includes(cat)) return false;
-
-  if (String(sector || '').trim()) {
-    const sectorCat =
-      industryLabelToActCategory(sector) || getActCategoryFromActSector('', sector);
-    if (sectorCat && sectorCat !== 'other' && !actCategories.includes(sectorCat)) {
-      return false;
-    }
-    const inds = scope?.industryLabels;
-    if (
-      Array.isArray(inds) &&
-      inds.length > 0 &&
-      sectorCat &&
-      sectorCat !== 'other' &&
-      !sectorMatchesInchargeSiteIndustries(sector, inds)
-    ) {
-      return false;
-    }
-  }
-
-  const sts = scope?.stateLabels;
-  if (Array.isArray(sts) && sts.length > 0) {
-    const stateField = row?.states ?? row?.state ?? row?.State ?? '';
-    // Same as Statutory: blank / other states excluded for site incharge.
-    if (!statesFieldMatchesInchargeSiteStates(stateField, sts)) {
-      return false;
-    }
-  }
-
-  const siteNames = scope?.siteNames;
-  if (Array.isArray(siteNames) && siteNames.length > 0) {
-    const rowSite = String(row?.site ?? row?.Site ?? row?.siteName ?? row?.SiteName ?? '')
-      .trim()
-      .toLowerCase();
-    if (rowSite) {
-      const allowed = new Set(siteNames.map((s) => String(s).trim().toLowerCase()).filter(Boolean));
-      if (!allowed.has(rowSite)) return false;
-    }
-  }
-
-  return true;
-}
-
-/** Align dashboard KPI buckets with Statutory Status column (Pending / Approved / Returned). */
-function getStatutoryScorecardStatus(item) {
-  const raw = item?.status != null && item.status !== '' ? item.status : item?.Status;
-  const norm = String(raw || '').trim();
-  const normalized = norm.toLowerCase();
-  const rawApproval =
-    item?.approval != null && item.approval !== '' ? item.approval : item?.Approval;
-  const approvalNorm = String(rawApproval || '').trim().toLowerCase();
-
-  if (
-    approvalNorm === 'approved' ||
-    approvalNorm === 'approve' ||
-    normalized === 'approved' ||
-    normalized === 'approve'
-  ) {
-    return 'approved';
-  }
-  if (
-    approvalNorm === 'rejected' ||
-    approvalNorm === 'reject' ||
-    normalized === 'rejected' ||
-    normalized === 'reject'
-  ) {
-    return 'returned';
-  }
-
-  const sendForApproval = String(item?.sendForApproval ?? item?.SendForApproval ?? '')
-    .trim()
-    .toLowerCase();
-  if (sendForApproval === 'sent' || normalized === 'pending') {
-    return 'pending';
-  }
-
-  return 'other';
-}
-
 function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInitials = 'RA', userEmail }) {
-  const [metrics, setMetrics] = useState(DEFAULT_METRICS);
+  const [overviewMetrics, setOverviewMetrics] = useState(OVERVIEW_METRICS);
+  const [statusMetrics, setStatusMetrics] = useState(STATUS_METRICS);
 
   const now = new Date();
   const welcomeDate = now.toLocaleDateString('en-IN', {
@@ -216,19 +127,38 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
     timeZoneName: 'short',
   });
 
+  /** Mirror Compliance Health bucket counts on the top Compliance Status cards. */
+  const handleHealthCounts = useCallback((counts) => {
+    if (!counts || typeof counts !== 'object') return;
+    const approved = Number(counts.approved) || 0;
+    const pending = Number(counts.pending) || 0;
+    const returned = Number(counts.returned) || 0;
+    const yetToSubmit = Number(counts.yetToSubmit) || 0;
+
+    setStatusMetrics((prev) =>
+      prev.map((metric) => {
+        const valueByKey = {
+          due: approved,
+          policies: returned,
+          approvals: pending,
+          yetToSubmit,
+        };
+        if (!(metric.key in valueByKey)) return metric;
+        return { ...metric, value: valueByKey[metric.key] };
+      })
+    );
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
-    const loadMetrics = async () => {
+    const loadOverviewMetrics = async () => {
       try {
-        const [companyRes, siteDetails, statutoryRes, siteScope, loginEmail] =
-          await Promise.all([
-            fetch(COMPANY_API, { cache: 'no-store' }),
-            fetchSiteDetailsFromSiteManagement(),
-            fetch(STATUTORY_API, { cache: 'no-store' }),
-            fetchInchargeDisplayScopeFromSites(userEmail),
-            resolveLoginEmailString(userEmail),
-          ]);
+        const [companyRes, siteDetails, loginEmail] = await Promise.all([
+          fetch(COMPANY_API, { cache: 'no-store' }),
+          fetchSiteDetailsFromSiteManagement(),
+          resolveLoginEmailString(userEmail),
+        ]);
 
         // Active Site = sites assigned to this login in Site Management (incharge email match).
         const inchargeScope = buildInchargeSiteScopeFromList(siteDetails, loginEmail);
@@ -246,52 +176,14 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
           activeCompanies = Array.isArray(companyDetails) ? companyDetails.length : 0;
         }
 
-        let pendingApprovals = 0;
-        let approvedForms = 0;
-        let rejectedForms = 0;
-        const hasSiteScope =
-          Array.isArray(siteScope?.actCategories) && siteScope.actCategories.length > 0;
-
-        if (statutoryRes.ok) {
-          const statutoryJson = await statutoryRes.json();
-          const allStatutory = Array.isArray(statutoryJson?.data?.statutoryData)
-            ? statutoryJson.data.statutoryData
-            : [];
-
-          // Site login: count only statutory rows for that Site Management assignment.
-          const statutoryData = hasSiteScope
-            ? allStatutory.filter((item) => statutoryRowMatchesSiteScope(item, siteScope))
-            : allStatutory;
-
-          statutoryData.forEach((item) => {
-            const bucket = getStatutoryScorecardStatus(item);
-            if (bucket === 'pending') pendingApprovals += 1;
-            else if (bucket === 'approved') approvedForms += 1;
-            else if (bucket === 'returned') rejectedForms += 1;
-          });
-        }
-
         if (!cancelled) {
-          const scorecardTotal = pendingApprovals + approvedForms + rejectedForms;
-          const pctOfTotal = (n) =>
-            scorecardTotal > 0 ? `${Math.round((n / scorecardTotal) * 100)}% of total` : '0% of total';
-
-          setMetrics((prev) =>
+          setOverviewMetrics((prev) =>
             prev.map((metric) => {
               if (metric.key === 'companies') {
-                return { ...metric, value: activeCompanies, hint: 'Registered organizations' };
+                return { ...metric, value: activeCompanies };
               }
               if (metric.key === 'sites') {
-                return { ...metric, value: activeSites, hint: 'Locations under management' };
-              }
-              if (metric.key === 'approvals') {
-                return { ...metric, value: pendingApprovals, hint: pctOfTotal(pendingApprovals) };
-              }
-              if (metric.key === 'due') {
-                return { ...metric, value: approvedForms, hint: pctOfTotal(approvedForms) };
-              }
-              if (metric.key === 'policies') {
-                return { ...metric, value: rejectedForms, hint: pctOfTotal(rejectedForms) };
+                return { ...metric, value: activeSites };
               }
               return metric;
             })
@@ -299,25 +191,18 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
         }
       } catch (_) {
         if (!cancelled) {
-          setMetrics((prev) =>
-            prev.map((metric) => {
-              if (
-                metric.key === 'companies' ||
-                metric.key === 'sites' ||
-                metric.key === 'approvals' ||
-                metric.key === 'due' ||
-                metric.key === 'policies'
-              ) {
-                return { ...metric, value: 0 };
-              }
-              return metric;
-            })
+          setOverviewMetrics((prev) =>
+            prev.map((metric) =>
+              metric.key === 'companies' || metric.key === 'sites'
+                ? { ...metric, value: 0 }
+                : metric
+            )
           );
         }
       }
     };
 
-    loadMetrics();
+    loadOverviewMetrics();
 
     return () => {
       cancelled = true;
@@ -353,44 +238,77 @@ function NewDashboard({ userName = 'Ravi Kumar', userRole = 'HR Admin', userInit
               <div className="nd-welcome-art" aria-hidden>
                 <div className="nd-welcome-checklist">
                   <div className="nd-welcome-check-row">
-                    <CheckCircle2 size={18} className="nd-wc-ok" />
+                    <CheckCircle2 size={20} className="nd-wc-ok" />
                     <span />
                   </div>
                   <div className="nd-welcome-check-row">
-                    <CheckCircle2 size={18} className="nd-wc-ok" />
+                    <CheckCircle2 size={20} className="nd-wc-ok" />
                     <span />
                   </div>
                   <div className="nd-welcome-check-row">
-                    <CheckCircle2 size={18} className="nd-wc-dim" />
+                    <CheckCircle2 size={20} className="nd-wc-dim" />
                     <span />
                   </div>
                 </div>
                 <div className="nd-welcome-shield">
-                  <ShieldCheck size={40} strokeWidth={1.5} />
+                  <ShieldCheck size={48} strokeWidth={1.5} />
                 </div>
               </div>
             </div>
           </section>
 
-          <section className="nd-metrics">
-            {metrics.map((m) => {
-              const Icon = m.icon;
-              return (
-                <article key={m.key} className={`nd-metric nd-metric--${m.tone}`}>
-                  <div className="nd-metric-icon-wrap">
-                    <Icon size={20} strokeWidth={2} />
-                  </div>
-                  <div className="nd-metric-body">
-                    <span className="nd-metric-label">{m.label}</span>
-                    <span className="nd-metric-value">{m.value}</span>
-                    {m.hint ? <span className="nd-metric-hint">{m.hint}</span> : null}
-                  </div>
-                </article>
-              );
-            })}
+          <section className="nd-metrics" aria-label="Dashboard overview and compliance status">
+            <div className="nd-metrics-panel nd-metrics-panel--overview">
+              <h3 className="nd-metrics-panel-title nd-metrics-panel-title--overview">
+                Organization & Site Overview
+              </h3>
+              <div className="nd-metrics-overview-grid">
+                {overviewMetrics.map((m) => {
+                  const Icon = m.icon;
+                  return (
+                    <article key={m.key} className={`nd-metric nd-metric--${m.tone}`}>
+                      <div className="nd-metric-icon-wrap">
+                        <Icon size={24} strokeWidth={2} />
+                      </div>
+                      <div className="nd-metric-body">
+                        <span className="nd-metric-label">{m.label}</span>
+                        <span className="nd-metric-value">{m.value}</span>
+                        {m.hint ? <span className="nd-metric-hint">{m.hint}</span> : null}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="nd-metrics-panel nd-metrics-panel--status">
+              <h3 className="nd-metrics-panel-title nd-metrics-panel-title--status">
+                Compliance Status
+              </h3>
+              <div className="nd-metrics-status-grid">
+                {statusMetrics.map((m) => {
+                  const Icon = m.icon;
+                  return (
+                    <article key={m.key} className={`nd-metric nd-metric--status nd-metric--${m.tone}`}>
+                      <div className="nd-metric-icon-wrap">
+                        <Icon size={24} strokeWidth={2} />
+                      </div>
+                      <div className="nd-metric-body">
+                        <span className="nd-metric-label">{m.label}</span>
+                        <span className="nd-metric-value">{m.value}</span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
           </section>
 
-          <ComplianceHealthDashboard userRole={userRole} userEmail={userEmail} />
+          <ComplianceHealthDashboard
+            userRole={userRole}
+            userEmail={userEmail}
+            onCountsChange={handleHealthCounts}
+          />
         </main>
       </div>
     </div>

@@ -1630,41 +1630,6 @@ const CalendarPicker = ({ userEmail, userRole }) => {
         <div className="hcm-cal-summary-row">
           <button
             type="button"
-            className={`hcm-cal-summary-card yet ${activeStatusFilter === DISPLAY_STATUS.YET ? 'active' : ''}`}
-            onClick={() => handleStatusTagClick(DISPLAY_STATUS.YET)}
-          >
-            <div className="hcm-cal-summary-icon" aria-hidden>
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="#fff" strokeWidth="2" />
-                <path d="M14 2v6h6" stroke="#fff" strokeWidth="2" />
-                <path d="M9 15h6M9 11h2" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
-              </svg>
-            </div>
-            <div>
-              <div className="hcm-cal-summary-label">Yet to Submit</div>
-              <div className="hcm-cal-summary-value">{yetToCompleteCount}</div>
-              <div className="hcm-cal-summary-sub">↑ {todayDueCount} Due Today</div>
-            </div>
-          </button>
-          <button
-            type="button"
-            className={`hcm-cal-summary-card pending ${activeStatusFilter === DISPLAY_STATUS.PENDING ? 'active' : ''}`}
-            onClick={() => handleStatusTagClick(DISPLAY_STATUS.PENDING)}
-          >
-            <div className="hcm-cal-summary-icon" aria-hidden>
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-                <circle cx="12" cy="12" r="9" stroke="#fff" strokeWidth="2" />
-                <path d="M12 7v5l3 2" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
-              </svg>
-            </div>
-            <div>
-              <div className="hcm-cal-summary-label">Pending</div>
-              <div className="hcm-cal-summary-value">{pendingCount}</div>
-              <div className="hcm-cal-summary-sub">Awaiting Approval</div>
-            </div>
-          </button>
-          <button
-            type="button"
             className={`hcm-cal-summary-card approved ${activeStatusFilter === DISPLAY_STATUS.APPROVED ? 'active' : ''}`}
             onClick={() => handleStatusTagClick(DISPLAY_STATUS.APPROVED)}
           >
@@ -1698,6 +1663,41 @@ const CalendarPicker = ({ userEmail, userRole }) => {
               <div className="hcm-cal-summary-sub">Need Correction</div>
             </div>
           </button>
+          <button
+            type="button"
+            className={`hcm-cal-summary-card pending ${activeStatusFilter === DISPLAY_STATUS.PENDING ? 'active' : ''}`}
+            onClick={() => handleStatusTagClick(DISPLAY_STATUS.PENDING)}
+          >
+            <div className="hcm-cal-summary-icon" aria-hidden>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="9" stroke="#fff" strokeWidth="2" />
+                <path d="M12 7v5l3 2" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </div>
+            <div>
+              <div className="hcm-cal-summary-label">Pending for approval</div>
+              <div className="hcm-cal-summary-value">{pendingCount}</div>
+              <div className="hcm-cal-summary-sub">Awaiting Approval</div>
+            </div>
+          </button>
+          <button
+            type="button"
+            className={`hcm-cal-summary-card yet ${activeStatusFilter === DISPLAY_STATUS.YET ? 'active' : ''}`}
+            onClick={() => handleStatusTagClick(DISPLAY_STATUS.YET)}
+          >
+            <div className="hcm-cal-summary-icon" aria-hidden>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" stroke="#fff" strokeWidth="2" />
+                <path d="M14 2v6h6" stroke="#fff" strokeWidth="2" />
+                <path d="M9 15h6M9 11h2" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </div>
+            <div>
+              <div className="hcm-cal-summary-label">Yet to Submit</div>
+              <div className="hcm-cal-summary-value">{yetToCompleteCount}</div>
+              <div className="hcm-cal-summary-sub">↑ {todayDueCount} Due Today</div>
+            </div>
+          </button>
         </div>
 
         <div className="hcm-cal-forms-section">
@@ -1721,20 +1721,6 @@ const CalendarPicker = ({ userEmail, userRole }) => {
                   </button>
                   <button
                     type="button"
-                    className={`hcm-cal-tab ${activeStatusFilter === DISPLAY_STATUS.YET ? 'active' : ''}`}
-                    onClick={() => handleStatusTagClick(DISPLAY_STATUS.YET)}
-                  >
-                    Yet to Submit
-                  </button>
-                  <button
-                    type="button"
-                    className={`hcm-cal-tab ${activeStatusFilter === DISPLAY_STATUS.PENDING ? 'active' : ''}`}
-                    onClick={() => handleStatusTagClick(DISPLAY_STATUS.PENDING)}
-                  >
-                    Pending
-                  </button>
-                  <button
-                    type="button"
                     className={`hcm-cal-tab ${activeStatusFilter === DISPLAY_STATUS.APPROVED ? 'active' : ''}`}
                     onClick={() => handleStatusTagClick(DISPLAY_STATUS.APPROVED)}
                   >
@@ -1746,6 +1732,20 @@ const CalendarPicker = ({ userEmail, userRole }) => {
                     onClick={() => handleStatusTagClick(DISPLAY_STATUS.RETURNED)}
                   >
                     Returned
+                  </button>
+                  <button
+                    type="button"
+                    className={`hcm-cal-tab ${activeStatusFilter === DISPLAY_STATUS.PENDING ? 'active' : ''}`}
+                    onClick={() => handleStatusTagClick(DISPLAY_STATUS.PENDING)}
+                  >
+                    Pending
+                  </button>
+                  <button
+                    type="button"
+                    className={`hcm-cal-tab ${activeStatusFilter === DISPLAY_STATUS.YET ? 'active' : ''}`}
+                    onClick={() => handleStatusTagClick(DISPLAY_STATUS.YET)}
+                  >
+                    Yet to Submit
                   </button>
                 </div>
               </div>

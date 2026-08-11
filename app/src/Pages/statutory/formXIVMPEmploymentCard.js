@@ -1539,15 +1539,24 @@ const detectFormXRajasthanWorksheetLayout = (worksheet, maxScanRow = 24) => {
   for (let r = 1; r <= maxScanRow; r += 1) {
     const labelB = formXIVMPExcelCellValueToString(worksheet.getCell(r, 2)?.value).trim();
     if (/name\s+and\s+address\s+.*contractor/i.test(labelB)) contractorLabelInB = true;
-    for (let c = 1; c <= 10; c += 1) {
+    // Form X_RJ is tabular: several workman column headers on one row (not stacked 1./2./3. labels).
+    let headerHits = 0;
+    for (let c = 1; c <= 12; c += 1) {
       const cellNorm = formXIVMPHeaderNorm(
         formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value)
       );
-      if (/name\s+of\s+the\s+workman/.test(cellNorm)) {
-        tableHeaderRow = true;
-        break;
+      if (!cellNorm) continue;
+      if (/name\s+of\s+the\s+workman/.test(cellNorm)) headerHits += 1;
+      if (/serial|s\.?\s*no|sl\.?\s*no/.test(cellNorm) && /register|workman/.test(cellNorm)) {
+        headerHits += 1;
       }
+      if (/nature/.test(cellNorm) && /employ|designat/.test(cellNorm)) headerHits += 1;
+      if (/wage\s+period/.test(cellNorm)) headerHits += 1;
+      if (/tenure|period\s+of\s+employ/.test(cellNorm)) headerHits += 1;
+      if (/wage/.test(cellNorm) && /rate|piece|place/.test(cellNorm)) headerHits += 1;
+      if (/remark/.test(cellNorm)) headerHits += 1;
     }
+    if (headerHits >= 3) tableHeaderRow = true;
   }
   return contractorLabelInB && tableHeaderRow;
 };
@@ -1910,46 +1919,123 @@ const isFormXIVLabelContinuationCell = (cellStr, workmanSpecs = null) => {
   return specs.some((spec) => looksLikeFormXIVMPWorkmanLabelCell(s, spec));
 };
 
+const isFormXIVStackedWorkmanKeyword = (norm) =>
+  /workman|serial|s\.?\s*no|designat|employ|wage|tenure|remarks|entry\s+into\s+service/.test(
+    String(norm || '')
+  );
+
+/** True when col A is only an ordinal (1 / 1.) and the workman label sits in B–D. */
+const isFormXIVSplitOrdinalLabelRow = (worksheet, row) => {
+  if (!worksheet || row < 1) return false;
+  const ordinalCell = formXIVMPExcelCellValueToString(worksheet.getCell(row, 1)?.value).trim();
+  if (!/^\d+[\.\)]?$/.test(ordinalCell)) return false;
+  for (let c = 2; c <= 4; c += 1) {
+    const labelStr = formXIVMPExcelCellValueToString(worksheet.getCell(row, c)?.value).trim();
+    if (!labelStr) continue;
+    if (isFormXIVStackedWorkmanKeyword(formXIVMPHeaderNorm(labelStr))) return true;
+  }
+  return false;
+};
+
 const findFormXIVValueColumnBesideLabel = (worksheet, row, labelCol, fallbackCol, workmanSpecs = null) => {
   if (!worksheet || row < 1 || labelCol < 1) return fallbackCol;
-  for (let vc = labelCol + 1; vc <= 14; vc += 1) {
+  // Never write into empty cells that are part of the label's merge (A–D band).
+  const ranges = parseExcelJsMergeRanges(worksheet);
+  let skipUntil = labelCol;
+  for (let i = 0; i < ranges.length; i += 1) {
+    const m = ranges[i];
+    if (row >= m.top && row <= m.bottom && labelCol >= m.left && labelCol <= m.right) {
+      skipUntil = Math.max(skipUntil, m.right);
+      break;
+    }
+  }
+  for (let vc = skipUntil + 1; vc <= 14; vc += 1) {
     const nt = formXIVMPExcelCellValueToString(worksheet.getCell(row, vc)?.value).trim();
     if (!nt) return vc;
     if (isFormXIVPlaceholderCell(nt)) return vc;
     if (isFormXIVLabelContinuationCell(nt, workmanSpecs)) continue;
     if (/^[_\s.-]+$/.test(nt)) return vc;
   }
-  return Math.max(fallbackCol, labelCol + 1);
+  return Math.max(fallbackCol, skipUntil + 1);
 };
 
-const detectFormXIVStackedWorkmanLayout = (worksheet, maxScanRow = 45) => {
+export const detectFormXIVStackedWorkmanLayout = (worksheet, maxScanRow = 45) => {
   if (!worksheet) return false;
   let numberedLabelHits = 0;
+  let splitOrdinalHits = 0;
   for (let r = 1; r <= maxScanRow; r += 1) {
     for (let c = 1; c <= 4; c += 1) {
       const cellStr = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
       if (!cellStr || !/^\d+[\.\)]\s*/.test(cellStr)) continue;
       const norm = formXIVMPHeaderNorm(cellStr);
-      if (
-        /workman|serial|s\.?\s*no|designat|employ|wage|tenure|remarks|entry\s+into\s+service/.test(norm)
-      ) {
+      if (isFormXIVStackedWorkmanKeyword(norm)) {
         numberedLabelHits += 1;
         break;
       }
     }
+    if (isFormXIVSplitOrdinalLabelRow(worksheet, r)) {
+      splitOrdinalHits += 1;
+    }
   }
-  if (numberedLabelHits < 3) return false;
+  if (Math.max(numberedLabelHits, splitOrdinalHits) < 3) return false;
+
   for (let r = 1; r <= maxScanRow; r += 1) {
     const labelA = formXIVMPExcelCellValueToString(worksheet.getCell(r, 1)?.value).trim();
-    if (!labelA || !/^1[\.\)]\s*/.test(labelA) || !/workman/i.test(labelA)) continue;
+    const labelB = formXIVMPExcelCellValueToString(worksheet.getCell(r, 2)?.value).trim();
+    const combinedInA = /^1[\.\)]\s*/.test(labelA) && /workman/i.test(labelA);
+    const splitRow1 = /^1[\.\)]?$/.test(labelA) && /workman/i.test(labelB);
+    const combinedInB = /^1[\.\)]\s*/.test(labelB) && /workman/i.test(labelB);
+    if (!combinedInA && !splitRow1 && !combinedInB) continue;
+
     const colE = formXIVMPExcelCellValueToString(
       worksheet.getCell(r, FORM_XIV_MP_STACKED_VALUE_COL)?.value
     ).trim();
     if (!colE || isFormXIVPlaceholderCell(colE)) return true;
-    const colB = formXIVMPExcelCellValueToString(worksheet.getCell(r, FORM_XIV_GJ_DEFAULT_VALUE_COL)?.value).trim();
+
+    // Split ordinal templates keep labels in B–D; values belong in E even when C looks empty.
+    if (splitOrdinalHits >= 3) return true;
+
+    const colB = formXIVMPExcelCellValueToString(
+      worksheet.getCell(r, FORM_XIV_GJ_DEFAULT_VALUE_COL)?.value
+    ).trim();
     if (!colB || isFormXIVPlaceholderCell(colB)) return false;
   }
   return true;
+};
+
+/** Keep stacked Employment Card label/value columns readable after ExcelJS rewrite. */
+const ensureFormXIVStackedColumnAlignment = (worksheet) => {
+  if (!worksheet || !detectFormXIVStackedWorkmanLayout(worksheet)) return;
+  const minWidths = {
+    1: 5,
+    2: 28,
+    3: 14,
+    4: 14,
+    5: 28,
+    6: 14,
+    7: 14,
+    8: 14,
+  };
+  Object.entries(minWidths).forEach(([col, minW]) => {
+    const column = worksheet.getColumn(Number(col));
+    const current = Number(column.width) || 0;
+    if (current < minW) column.width = minW;
+  });
+  for (let r = 1; r <= 40; r += 1) {
+    for (let c = 1; c <= 8; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      const text = formXIVMPExcelCellValueToString(cell.value).trim();
+      if (!text) continue;
+      const nextAlign = {
+        ...(cell.alignment || {}),
+        wrapText: true,
+        vertical: 'top',
+        shrinkToFit: false,
+      };
+      if (!nextAlign.horizontal) nextAlign.horizontal = 'left';
+      cell.alignment = nextAlign;
+    }
+  }
 };
 
 const setFormXIVMPWorkmanCellValue = (worksheet, row, col, value, options = {}) => {
@@ -2469,6 +2555,11 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
       writeFormXIVRJBoxedHeaderValue(worksheet, excelRow, labelCol, value);
       return;
     }
+    // Stacked MP/KA cards: labels occupy A–D (often merged); values must stay in column E.
+    if (stackedLayout) {
+      writeAt(excelRow, FORM_XIV_MP_STACKED_VALUE_COL, value);
+      return;
+    }
     const targetCol =
       labelCol != null && labelCol >= 1
         ? findFormXIVValueColumnBesideLabel(worksheet, excelRow, labelCol, defaultValueCol, workmanSpecs)
@@ -2494,6 +2585,11 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
       }
       if (rjBoxedLayout) {
         writeFormXIVRJBoxedHeaderValue(worksheet, labelExcelRow, labelExcelCol, val);
+        return;
+      }
+      if (stackedLayout) {
+        const targetRow = (parsedField?.valueRow ?? parsedField?.labelRow ?? labelExcelRow - 1) + 1;
+        writeAt(targetRow, FORM_XIV_MP_STACKED_VALUE_COL, val);
         return;
       }
       const targetRow = (parsedField.valueRow ?? parsedField.labelRow) + 1;
@@ -2522,6 +2618,9 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
   });
   if (gjBoxedLayout) {
     restoreFormXIVGJHeaderLabels(worksheet, gjHeaderLabelSnapshots, parsedFields);
+  }
+  if (stackedLayout) {
+    ensureFormXIVStackedColumnAlignment(worksheet);
   }
 }
 
@@ -2679,6 +2778,9 @@ export function writeFormXIVMPWorkmanFieldsToWorksheet(worksheet, row, headers, 
   writeFormXIVMPWorkmanFieldsViaPositions(worksheet, row, layout.positions, {
     variant: layout.variant || 'mp',
   });
+  if (layout.stackedLayout) {
+    ensureFormXIVStackedColumnAlignment(worksheet);
+  }
 }
 
 /** Preserve manual edits from the modal grid when rebuilding all employee rows for export. */
@@ -2803,6 +2905,7 @@ export async function buildFormXIVMPWorkbookWithTemplateStyles({
       writeFormXIVMPWorkmanFieldsToWorksheet(worksheet, employeeRow, hdrs);
     }
   }
+  ensureFormXIVStackedColumnAlignment(worksheet);
 
   const out = await workbook.xlsx.writeBuffer();
   const fileName =
@@ -2946,6 +3049,7 @@ async function prepareFormXIVMPFastZipTemplate({
       };
     });
   }
+  ensureFormXIVStackedColumnAlignment(worksheet);
   const preparedBuffer = await workbook.xlsx.writeBuffer();
   const templateZip = await JSZip.loadAsync(preparedBuffer);
   const sheetEntry = resolveFormXIVMPWorksheetEntry(templateZip.files);

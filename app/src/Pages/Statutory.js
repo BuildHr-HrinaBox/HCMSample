@@ -9556,6 +9556,19 @@ function overlayFormXXIIIOvertimeFromEnriched(baseRows, enrichedRows, headers) {
       const lower = v.toLowerCase();
       if (/^enter\b/.test(lower) || lower.includes('enter ') || lower.includes('select ')) return;
       if (v === '0' && isFormXXIIINormalRateOfWagesHeader(hdr)) return;
+      // Keep autofill Normal rate — download enrich must not replace live salary with template dummy.
+      if (isFormXXIIINormalRateOfWagesHeader(hdr)) {
+        const existing = String(base[i]?.[hdr] ?? '').trim();
+        if (
+          existing &&
+          existing !== '0' &&
+          !/^enter\b/i.test(existing) &&
+          !existing.toLowerCase().includes('enter ') &&
+          !existing.toLowerCase().includes('select ')
+        ) {
+          return;
+        }
+      }
       base[i][hdr] = er[hdr];
     });
   }
@@ -10241,18 +10254,11 @@ function applyFormXLeaveMonthYearToHeaderData(headerData, selectedMonthStr, item
 /** Shared Month:/Year: fill for Form X leave register and Form V Register of Employment. */
 const applyStatutorySeparateMonthYearToHeaderData = applyFormXLeaveMonthYearToHeaderData;
 
-/** Form 10 "Month ending" display — matches template style e.g. June-2023. */
-function formatForm10MonthEndingDisplay(selectedMonthStr, item, wagePeriodLine = '') {
-  const { fullMonth, year } = resolveForm25PeriodMonthYear(selectedMonthStr, item, wagePeriodLine);
-  if (!fullMonth || !year) return '';
-  return `${fullMonth}-${year}`;
-}
-
-/** Overwrite Form 10 header Month ending with the UI month filter + corresponding year. */
-function applyForm10MonthEndingToHeaderData(headerData, selectedMonthStr, item, wagePeriodLine = '') {
+/** Form 10 header Month ending — left blank on Excel download / header apply. */
+function applyForm10MonthEndingToHeaderData(headerData, _selectedMonthStr, _item, _wagePeriodLine = '') {
   const out = headerData && typeof headerData === 'object' ? { ...headerData } : {};
-  const v = formatForm10MonthEndingDisplay(selectedMonthStr, item, wagePeriodLine);
-  if (v) out.form10_header_month_ending = v;
+  // Keep Month ending blank (do not autofill from UI month filter).
+  out.form10_header_month_ending = '';
   // Keep factory aliases in sync so Excel writers find the value under either key.
   const factory = String(
     out.form10_header_factory || out.statutory_factory_name_address || ''
@@ -22880,18 +22886,16 @@ const writeForm10Form12HeaderFieldsToExcelJsWorksheet = (worksheet, headerFormDa
     if (me.writeMode === 'full') {
       // Keep the Month ending box as label-only; value goes beside the box (not inside).
       cell.value = form10MonthEndingLabelOnly;
-      if (vM) {
-        const valueCol = form10MonthValueColAfterLabel(Number(me.r) + 1, Number(me.c) + 1);
-        worksheet.getCell(Number(me.r) + 1, valueCol).value = vM;
-      }
+      const valueCol = form10MonthValueColAfterLabel(Number(me.r) + 1, Number(me.c) + 1);
+      worksheet.getCell(Number(me.r) + 1, valueCol).value = vM || '';
     } else {
-      cell.value = vM;
+      cell.value = vM || '';
     }
   }
   // Rewrite leftover template "Month ending: …" / bare Month-YYYY cells in the header band.
-  // The Month ending box stays label-only; corresponding month is written beside it (not inside).
-  const monthEndingVal = String(headerFormData.form10_header_month_ending ?? '').trim();
-  if (monthEndingVal) {
+  // The Month ending box stays label-only; value (or blank) goes beside it (not inside).
+  if (Object.prototype.hasOwnProperty.call(headerFormData, 'form10_header_month_ending')) {
+    const monthEndingVal = String(headerFormData.form10_header_month_ending ?? '').trim();
     const monthNames =
       'January|February|March|April|May|June|July|August|September|October|November|December';
     const bareMonthYearRe = new RegExp(`^(${monthNames})-\\d{4}$`, 'i');
@@ -22912,9 +22916,11 @@ const writeForm10Form12HeaderFieldsToExcelJsWorksheet = (worksheet, headerFormDa
           const adjRaw = String(adj?.value ?? '')
             .replace(/\s+/g, ' ')
             .trim();
-          if (!adjRaw || bareMonthYearRe.test(adjRaw)) adj.value = monthEndingVal;
+          if (!adjRaw || bareMonthYearRe.test(adjRaw) || !monthEndingVal) {
+            adj.value = monthEndingVal || '';
+          }
         } else if (bareMonthYearRe.test(raw)) {
-          cell.value = monthEndingVal;
+          cell.value = monthEndingVal || '';
         }
       }
     }
@@ -29881,18 +29887,20 @@ const Statutory = ({ userEmail, userRole }) => {
         if (me.writeMode === 'full') {
           // Keep the Month ending box as label-only; value goes beside the box (not inside).
           writeCellPreserveStyle(ref, form10MonthEndingLabelOnlySheet);
-          if (vM) {
-            const valueCol = form10MonthValueColAfterLabelSheet(me.r, me.c);
-            writeCellPreserveStyle(XLSX.utils.encode_cell({ r: me.r, c: valueCol }), vM);
-          }
+          const valueCol = form10MonthValueColAfterLabelSheet(me.r, me.c);
+          writeCellPreserveStyle(XLSX.utils.encode_cell({ r: me.r, c: valueCol }), vM || '');
         } else {
-          writeCellPreserveStyle(ref, String(vM));
+          writeCellPreserveStyle(ref, String(vM || ''));
         }
       }
       // Also rewrite leftover template Month ending / Month-YYYY cells in the header band.
-      // Month ending box stays label-only; corresponding month is written beside it.
-      const monthEndingValSheet = String(headerFormData.form10_header_month_ending ?? '').trim();
-      if (monthEndingValSheet) {
+      // Month ending box stays label-only; value (or blank) goes beside it.
+      if (
+        headerFormData &&
+        typeof headerFormData === 'object' &&
+        Object.prototype.hasOwnProperty.call(headerFormData, 'form10_header_month_ending')
+      ) {
+        const monthEndingValSheet = String(headerFormData.form10_header_month_ending ?? '').trim();
         const monthNames =
           'January|February|March|April|May|June|July|August|September|October|November|December';
         const bareMonthYearRe = new RegExp(`^(${monthNames})-\\d{4}$`, 'i');
@@ -29910,11 +29918,11 @@ const Statutory = ({ userEmail, userRole }) => {
               const adjRef = XLSX.utils.encode_cell({ r, c: valueCol });
               const adjCell = ws[adjRef];
               const adjRaw = adjCell?.v != null ? String(adjCell.v).replace(/\s+/g, ' ').trim() : '';
-              if (!adjRaw || bareMonthYearRe.test(adjRaw)) {
-                writeCellPreserveStyle(adjRef, monthEndingValSheet);
+              if (!adjRaw || bareMonthYearRe.test(adjRaw) || !monthEndingValSheet) {
+                writeCellPreserveStyle(adjRef, monthEndingValSheet || '');
               }
             } else if (bareMonthYearRe.test(raw)) {
-              writeCellPreserveStyle(ref, monthEndingValSheet);
+              writeCellPreserveStyle(ref, monthEndingValSheet || '');
             }
           }
         }
@@ -52367,10 +52375,8 @@ const Statutory = ({ userEmail, userRole }) => {
   /** Download PDF of the same Excel data used by Download Draft File. */
   const handleDownloadDraftPdf = async (draftApiRowId, fileName, sourceItem, resolvedFormFileItem) => {
     const lineItem = sourceItem || resolvedFormFileItem || {};
-    const pdfTitle =
-      lineItem?.formName ||
-      lineItem?.FormName ||
-      String(fileName || 'Statutory Draft').replace(/\.(xlsx|xls|xlsm|xlsb|zip)$/i, '');
+    // Prefer catalog form name only — never use the Excel draft file name as a PDF heading.
+    const pdfTitle = String(lineItem?.formName || lineItem?.FormName || '').trim();
     const pdfDownloadName = draftFileNameToPdfName(
       fileName ||
         sourceItem?.draftFileName ||

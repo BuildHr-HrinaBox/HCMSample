@@ -11,6 +11,68 @@ const MAX_ZIP_EXCEL_FILES = 60;
 const MAX_TRAILING_EMPTY_AFTER_CONTENT = 2;
 const SYSTEM_GENERATED_DOCUMENT_NOTE = 'This is a System Generated Document';
 
+/**
+ * True when text looks like a draft Excel/ZIP file base name
+ * (e.g. "Form_W_-_TamilNadu"), not a real form heading.
+ */
+const looksLikeExcelDraftFileLabel = (text) => {
+  const raw = String(text || '')
+    .replace(EXCEL_EXT_RE, '')
+    .replace(/\.zip$/i, '')
+    .trim();
+  if (!raw) return false;
+  // Filename-style separators: Form_W_-_TamilNadu, Form-L-Gujarat.xlsx stem
+  if (/_-_/.test(raw) || /__+/.test(raw)) return true;
+  if (/^form[_\s.-]+[a-z0-9xivlc.]+[_\s.-]+-+[_\s.-]*[a-z]/i.test(raw)) return true;
+  // Underscore-heavy catalog names that are not printed form titles
+  const underscores = (raw.match(/_/g) || []).length;
+  if (underscores >= 2 && /form/i.test(raw)) return true;
+  return false;
+};
+
+/**
+ * Normalize Excel soft-breaks / `_x000d_` and expand a title/meta cell into
+ * separate lines (Excel wrapText headings must not become one PDF line).
+ */
+const normalizeStatutoryMultilineText = (raw) =>
+  String(raw || '')
+    .replace(/_x000d_/gi, '\n')
+    .replace(/\u000d/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+const TITLE_CONCAT_SPLIT_RE =
+  /\s+(?=(?:REGISTER\s+OF|OVERTIME\s+MUSTER\s+ROLL|(?<!OVERTIME\s)MUSTER\s+ROLL|LIST\s+OF|WAGE\s+SLIP|LETTER\s+OF|NOTICE\s+OF|COMBINED\s+|\(Prescribed\s+under\b|\[Prescribed\s+under\b|\[?\(?See\b|THE\s+(?:TAMIL|ANDHRA|KARNATAKA|RAJASTHAN|MADHYA|GUJARAT|TELANGANA|KERALA|WEST\s+BENGAL|ODISHA|PUNJAB|HARYANA|CENTRAL)\b))/i;
+
+const expandStatutoryMetaSegments = (raw) => {
+  const normalized = normalizeStatutoryMultilineText(raw);
+  if (!normalized) return [];
+  let parts = normalized
+    .split(/\n+/)
+    .map((s) => s.replace(/[ \t\u00a0]+/g, ' ').trim())
+    .filter(Boolean);
+
+  // SheetJS / some exports flatten wrapText titles into one long line — re-split.
+  if (parts.length === 1) {
+    const blob = parts[0];
+    const looksLikeStackedTitle =
+      /^form\b/i.test(blob) &&
+      blob.length > 36 &&
+      (TITLE_CONCAT_SPLIT_RE.test(blob) ||
+        /register of|see\s+(?:sub-)?rule|prescribed\s+under|overtime\s+muster/i.test(blob));
+    if (looksLikeStackedTitle) {
+      const split = blob
+        .split(TITLE_CONCAT_SPLIT_RE)
+        .map((s) => s.replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+      if (split.length > 1) parts = split;
+    }
+  }
+  return parts;
+};
+
 const isSystemGeneratedDocumentNote = (text) =>
   /^this\s+is\s+a\s+system\s+generated\s+document\.?$/i.test(
     String(text || '')
@@ -367,7 +429,9 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
       filled.forEach((t) => {
         if (!unique.includes(t)) unique.push(t);
       });
-      unique.forEach((t) => metaLines.push(t));
+      unique.forEach((t) => {
+        expandStatutoryMetaSegments(t).forEach((seg) => metaLines.push(seg));
+      });
       tableStartRow = r + 1;
       continue;
     }
@@ -378,14 +442,16 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
       filled.forEach((t) => {
         if (!unique.includes(t)) unique.push(t);
       });
-      unique.forEach((t) => metaLines.push(t));
+      unique.forEach((t) => {
+        expandStatutoryMetaSegments(t).forEach((seg) => metaLines.push(seg));
+      });
       tableStartRow = r + 1;
       continue;
     }
 
     // Many columns but duplicated meta text already collapsed to col0
     if (filled.length === 1 && isFormMetaText(filled[0])) {
-      metaLines.push(filled[0]);
+      expandStatutoryMetaSegments(filled[0]).forEach((seg) => metaLines.push(seg));
       tableStartRow = r + 1;
       continue;
     }
@@ -507,6 +573,122 @@ const isPurePdfNumericText = (raw) => {
   return /^-?\d+(\.\d+)?$/.test(numericRaw);
 };
 
+/** True when a column header is a serial / Sl. No. style label. */
+const isPdfSerialNumberHeader = (headerText) => {
+  const h = String(headerText || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!h) return false;
+  if (/^\(?\s*\d{1,2}\s*\)?$/.test(h)) return false;
+  return /^(?:s|sr|si|sl)\.?\s*no\.?$|^serial\s*(?:no\.?|number)\b|^sl\.?\s*no\b/i.test(h);
+};
+
+/**
+ * Weight a column from its header name (+ data length) so PDF widths
+ * follow column titles automatically for every statutory form.
+ */
+const statutoryHeaderColumnWeight = (headerText, maxDataLen = 0, colCount = 12) => {
+  const h = String(headerText || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const lower = h.toLowerCase();
+  const headerLen = h.length;
+  const dataLen = Math.max(0, Number(maxDataLen) || 0);
+  const wideForm = colCount > 16;
+
+  if (isPdfSerialNumberHeader(h)) return Math.max(10, Math.min(12, 5 + Math.min(dataLen, 3)));
+
+  // Short categorical headers — keep a floor so Sex/Age/Photo do not collapse.
+  if (/^(sex|gender|age|photo|male|female)$/i.test(lower)) return 5.5;
+  if (/^(nil|remarks?)$/i.test(lower)) return Math.max(5.5, Math.min(8, 4 + dataLen * 0.25));
+
+  // ESI / insurance / id
+  if (/insurance\s*no|esi\s*no|identification/i.test(lower)) {
+    return Math.max(6.5, Math.min(9, 5 + Math.min(dataLen, 8) * 0.35));
+  }
+
+  // Date / time short labels
+  if (/^(date|time)\b/i.test(lower) && headerLen <= 28) {
+    return Math.max(5.5, Math.min(8.5, 4.5 + Math.min(dataLen, 12) * 0.25));
+  }
+
+  // Name / address identity columns
+  if (/name.*address|address.*name|name of|injured person|name\s*&\s*address/i.test(lower)) {
+    return Math.max(12, Math.min(wideForm ? 18 : 20, Math.max(headerLen * 0.16, dataLen * 0.45, 12)));
+  }
+
+  // Long Form 11-style narrative headers
+  if (headerLen >= 55) {
+    return Math.max(12, Math.min(wideForm ? 20 : 22, headerLen * 0.2 + Math.min(dataLen, 10) * 0.25));
+  }
+  if (headerLen >= 28) {
+    return Math.max(8.5, Math.min(16, headerLen * 0.2 + Math.min(dataLen, 14) * 0.3));
+  }
+
+  const fromHeader = Math.min(Math.max(headerLen * 0.22, 4.5), wideForm ? 12 : 14);
+  const fromData = Math.min(Math.max(dataLen * 0.45, 3.5), wideForm ? 11 : 14);
+  return Math.max(fromHeader, fromData, 4.5);
+};
+
+/**
+ * Raise columns that fell below a header-based minimum, then renormalize to usableWidth.
+ */
+const enforcePdfColumnMinWidths = (widths, headers, usableWidth) => {
+  const src = Array.isArray(widths) ? widths.map((w) => Math.max(0, Number(w) || 0)) : [];
+  if (!src.length) return src;
+  const total = Math.max(1, Number(usableWidth) || src.reduce((a, b) => a + b, 0));
+  const mins = src.map((_, i) => {
+    const h = String(headers?.[i] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const lower = h.toLowerCase();
+    if (isPdfSerialNumberHeader(h)) return Math.max(52, total * 0.08);
+    if (/^(sex|gender|age|photo)$/i.test(h)) return Math.max(28, total * 0.045);
+    if (h.length >= 55) return Math.max(56, total * 0.09);
+    if (h.length >= 28 || /name|address|witness|signature|occupation|department/i.test(lower)) {
+      return Math.max(36, total * 0.06);
+    }
+    return Math.max(18, total * 0.03);
+  });
+
+  let next = src.map((w, i) => Math.max(w, mins[i]));
+  let sum = next.reduce((a, b) => a + b, 0) || 1;
+  if (sum > total) {
+    let overflow = sum - total;
+    for (let pass = 0; pass < 8 && overflow > 0.01; pass += 1) {
+      const shrinkable = next.map((w, i) => Math.max(0, w - mins[i]));
+      const shrinkSum = shrinkable.reduce((a, b) => a + b, 0);
+      if (shrinkSum < 0.01) {
+        // All columns already at mins — scale as a last resort.
+        next = next.map((w) => (w / (sum || 1)) * total);
+        sum = total;
+        overflow = 0;
+        break;
+      }
+      const take = Math.min(overflow, shrinkSum);
+      next = next.map((w, i) => w - (take * shrinkable[i]) / shrinkSum);
+      sum = next.reduce((a, b) => a + b, 0) || 1;
+      overflow = sum - total;
+    }
+  } else if (Math.abs(sum - total) > 0.01) {
+    const extra = total - sum;
+    const growable = next.map((w, i) => Math.max(0, w - mins[i]));
+    const growSum = growable.reduce((a, b) => a + b, 0);
+    if (growSum > 0.01) {
+      next = next.map((w, i) => w + (extra * growable[i]) / growSum);
+    } else {
+      next = next.map((w) => (w / sum) * total);
+    }
+  }
+  // Final normalize only when needed — avoid FP shrink below hard mins.
+  const finalSum = next.reduce((a, b) => a + b, 0) || 1;
+  if (Math.abs(finalSum - total) <= 0.05) {
+    return next;
+  }
+  return next.map((w) => (w / finalSum) * total);
+};
+
 /** Leaf-header-aware weights so Form W amount columns stay wide enough for 6–7 digit figures. */
 const formWTamilNaduColumnWeight = (headerText, maxDataLen) => {
   const h = String(headerText || '')
@@ -536,20 +718,31 @@ const resolveLeafHeaderTexts = (rows, tableStart, headerBandEnd, colCount) => {
   const headers = Array.from({ length: colCount }, () => '');
   for (let c = 0; c < colCount; c += 1) {
     let best = '';
+    let numberFallback = '';
     for (let r = headerBandEnd; r >= tableStart; r -= 1) {
       const t = String(rows[r]?.[c] || '')
         .replace(/\s+/g, ' ')
         .trim();
       if (!t) continue;
+      // Column index row "(9)" / "9" — keep looking upward for the real label.
+      if (/^\(?\s*\d{1,2}\s*\)?$/.test(t)) {
+        if (!numberFallback) numberFallback = t;
+        continue;
+      }
       // Prefer the deepest (leaf) non-group label; skip ultra-wide group banners alone.
-      if (/^deductions$/i.test(t) || /^advances$/i.test(t) || /^damages\s*\/\s*fine$/i.test(t)) {
+      if (
+        /^deductions$/i.test(t) ||
+        /^advances$/i.test(t) ||
+        /^damages\s*\/\s*fine$/i.test(t) ||
+        /^details of injury$/i.test(t)
+      ) {
         if (!best) best = t;
         continue;
       }
       best = t;
       break;
     }
-    headers[c] = best;
+    headers[c] = best || numberFallback;
   }
   return headers;
 };
@@ -854,13 +1047,23 @@ const isStatutoryTitleMetaLine = (line) => {
   const t = String(line || '').replace(/\s+/g, ' ').trim();
   if (!t || isSystemGeneratedDocumentNote(t)) return false;
   const lower = t.toLowerCase();
-  if (/^form\s*[a-z0-9xivlc.\-]+\b/i.test(t) && t.length < 40) return true;
-  if (/see\s+rule|\[see\s+rule|\(see\s+rule/i.test(lower)) return true;
+  if (/^form\s*(?:no\.?\s*)?[-–.]?\s*[a-z0-9xivlc.]+\b/i.test(t) && t.length < 48) return true;
+  if (/see\s+(?:sub-)?rule|\[see\s+|^\(see\s+/i.test(lower)) return true;
+  if (/^\(?prescribed\s+under\b|^\[prescribed\s+under\b/i.test(t)) return true;
   if (/^register of\b/i.test(t)) return true;
-  if (/^muster\s+roll\b/i.test(t)) return true;
+  if (/^overtime\s+muster\s+roll\b|^muster\s+roll\b/i.test(t)) return true;
   if (/^list of\b/i.test(t) && t.length < 60) return true;
+  if (/^wage\s+slip\b|^letter\s+of\b|^notice\s+of\b|^combined\b/i.test(t) && t.length < 80) {
+    return true;
+  }
+  // Act / rules banner under the form name (Excel line 3–4)
+  if (/^the\s+.+\b(act|rules)\b/i.test(t) && t.length <= 180 && !/:/.test(t)) return true;
   // License / return style short titles without a field colon
-  if (!/:/.test(t) && t.length <= 72 && /form|register|return|notice|accident|wages|employment/i.test(lower)) {
+  if (
+    !/:/.test(t) &&
+    t.length <= 100 &&
+    /form|register|return|notice|accident|wages|employment|muster|overtime/i.test(lower)
+  ) {
     return true;
   }
   return false;
@@ -934,45 +1137,46 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
   };
 
   (metaLines || []).forEach((raw) => {
-    const line = String(raw || '').replace(/\s+/g, ' ').trim();
-    if (!line) return;
-    if (isSystemGeneratedDocumentNote(line)) {
-      hasSystemNote = true;
-      return;
-    }
-    // Gender box labels/counts are painted as a dedicated bordered box — not as field lines
-    if (/^(men|women|male young person|female young person)$/i.test(line)) return;
-    if (/^\d{1,4}$/.test(line) && isFormW) return;
-    // Total line is the top row of the gender box when counts exist
-    if (genderBox && /total\s+number\s+of\s+persons?\s+employed/i.test(line)) {
-      const m = line.match(/total\s+number\s+of\s+persons?\s+employed\s*:?\s*(\d{1,5})?/i);
-      if (m?.[1] && !genderBox.total) genderBox.total = m[1];
-      return;
-    }
+    expandStatutoryMetaSegments(raw).forEach((line) => {
+      if (!line) return;
+      if (isSystemGeneratedDocumentNote(line)) {
+        hasSystemNote = true;
+        return;
+      }
+      // Gender box labels/counts are painted as a dedicated bordered box — not as field lines
+      if (/^(men|women|male young person|female young person)$/i.test(line)) return;
+      if (/^\d{1,4}$/.test(line) && isFormW) return;
+      // Total line is the top row of the gender box when counts exist
+      if (genderBox && /total\s+number\s+of\s+persons?\s+employed/i.test(line)) {
+        const m = line.match(/total\s+number\s+of\s+persons?\s+employed\s*:?\s*(\d{1,5})?/i);
+        if (m?.[1] && !genderBox.total) genderBox.total = m[1];
+        return;
+      }
 
-    if (/^month\s*:?\s*/i.test(line) && !/name and|address|nature/i.test(line)) {
-      month = stripFieldLabelPrefix(line, /^month/i);
-      return;
-    }
-    if (/^year\s*:?\s*/i.test(line) && !/name and|address|nature|entry|termination/i.test(line)) {
-      year = stripFieldLabelPrefix(line, /^year/i);
-      return;
-    }
-    if (/^(?:date)\s*:?\s*/i.test(line) && !/name and|address|nature|entry|termination|payment/i.test(line)) {
-      date = stripFieldLabelPrefix(line, /^date/i);
-      return;
-    }
-    if (isStatutoryTitleMetaLine(line)) {
-      pushUnique(titles, line, { asTitle: true });
-      return;
-    }
-    if (isStatutoryFieldMetaLine(line) || isFormMetaText(line)) {
-      pushUnique(fields, line);
-      return;
-    }
-    // Leftover meta — treat short lines as titles, longer as fields
-    if (line.length <= 64 && !/:/.test(line)) pushUnique(titles, line, { asTitle: true });
-    else pushUnique(fields, line);
+      if (/^month\s*:?\s*/i.test(line) && !/name and|address|nature/i.test(line)) {
+        month = stripFieldLabelPrefix(line, /^month/i);
+        return;
+      }
+      if (/^year\s*:?\s*/i.test(line) && !/name and|address|nature|entry|termination/i.test(line)) {
+        year = stripFieldLabelPrefix(line, /^year/i);
+        return;
+      }
+      if (/^(?:date)\s*:?\s*/i.test(line) && !/name and|address|nature|entry|termination|payment/i.test(line)) {
+        date = stripFieldLabelPrefix(line, /^date/i);
+        return;
+      }
+      if (isStatutoryTitleMetaLine(line)) {
+        pushUnique(titles, line, { asTitle: true });
+        return;
+      }
+      if (isStatutoryFieldMetaLine(line) || isFormMetaText(line)) {
+        pushUnique(fields, line);
+        return;
+      }
+      // Leftover meta — treat short lines as titles, longer as fields
+      if (line.length <= 90 && !/:/.test(line)) pushUnique(titles, line, { asTitle: true });
+      else pushUnique(fields, line);
+    });
   });
 
   if (isFormW) {
@@ -981,10 +1185,15 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
   }
 
   const sheet = String(sheetName || '').trim();
+  // Never promote the Excel/ZIP file name (or Sheet1 aliases of it) into the PDF heading.
+  // Also skip sheet tab names like "FORM 1" when the title band already has "FORM - I".
+  const hasFormTitle = titles.some((t) => /^form\s+/i.test(String(t || '')));
   if (
     sheet &&
     sheet !== 'Sheet1' &&
+    !looksLikeExcelDraftFileLabel(sheet) &&
     !/^form\s*w$/i.test(sheet) &&
+    !(hasFormTitle && /^form\s+/i.test(sheet)) &&
     !titles.some((t) => normalizeMetaKey(t).includes(normalizeMetaKey(sheet).slice(0, 12)))
   ) {
     titles.unshift(sheet);
@@ -1006,7 +1215,7 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
   }
 
   return {
-    titles,
+    titles: titles.filter((t) => !looksLikeExcelDraftFileLabel(t)),
     fields,
     rightFields,
     genderBox,
@@ -1152,16 +1361,25 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
     y += h + 6;
   };
 
-  titles.forEach((title, idx) => {
-    const lower = String(title).toLowerCase();
-    const isFormName = /^form\s+/i.test(title);
-    const isRegister = /^register of\b|^muster\s+roll\b|^list of\b/i.test(title);
-    const isRule = /see\s+rule/i.test(lower);
-    paintFullBand(title, {
-      bold: isFormName || isRegister || idx === 0,
-      size: isFormName ? 11 : isRegister ? 10 : isRule ? 8 : 9,
-      align: 'center',
-      minH: isFormName ? 20 : 16
+  // One Excel wrapText title cell → one centered band per line (Form I / Form 10 style).
+  let titlePaintIdx = 0;
+  titles.forEach((title) => {
+    expandStatutoryMetaSegments(title).forEach((seg) => {
+      const lower = String(seg).toLowerCase();
+      const isFormName = /^form\s+/i.test(seg);
+      const isRegister =
+        /^register of\b|^overtime\s+muster\s+roll\b|^muster\s+roll\b|^list of\b|^wage\s+slip\b|^letter\s+of\b|^notice\s+of\b|^combined\b/i.test(
+          seg
+        );
+      const isRule = /see\s+(?:sub-)?rule|prescribed\s+under/i.test(lower);
+      const isActBanner = /^the\s+.+\b(act|rules)\b/i.test(seg);
+      paintFullBand(seg, {
+        bold: isFormName || isRegister || titlePaintIdx === 0,
+        size: isFormName ? 11 : isRegister ? 10 : isRule || isActBanner ? 8 : 9,
+        align: 'center',
+        minH: isFormName || isRegister ? 20 : 16
+      });
+      titlePaintIdx += 1;
     });
   });
 
@@ -1223,9 +1441,8 @@ const drawMatrixSheet = (doc, matrix, startY) => {
     }
   }
   const dayBand = detectDailyHoursBand(rows, tableStart, headerBandEnd, colCount);
-  const leafHeaders = headerModel.isFormW
-    ? resolveLeafHeaderTexts(rows, tableStart, headerBandEnd, colCount)
-    : null;
+  // Resolve leaf headers for ALL forms so widths follow column names (Form 11, Form W, …).
+  const leafHeaders = resolveLeafHeaderTexts(rows, tableStart, headerBandEnd, colCount);
 
   const weights = [];
   for (let c = 0; c < colCount; c += 1) {
@@ -1242,15 +1459,15 @@ const drawMatrixSheet = (doc, matrix, startY) => {
       maxLen = Math.max(maxLen, len);
       if (r > headerBandEnd) maxDataLen = Math.max(maxDataLen, len);
     }
-    if (headerModel.isFormW && leafHeaders) {
+    if (headerModel.isFormW) {
       weights.push(formWTamilNaduColumnWeight(leafHeaders[c], maxDataLen || maxLen));
       continue;
     }
-    const cap = colCount > 36 ? 22 : 36;
-    weights.push(Math.min(Math.max(maxLen, 3), cap));
+    weights.push(statutoryHeaderColumnWeight(leafHeaders[c], maxDataLen || maxLen, colCount));
   }
   const weightSum = weights.reduce((a, b) => a + b, 0) || 1;
-  const colWidths = weights.map((w) => (w / weightSum) * usableWidth);
+  const rawWidths = weights.map((w) => (w / weightSum) * usableWidth);
+  const colWidths = enforcePdfColumnMinWidths(rawWidths, leafHeaders, usableWidth);
   const colXs = [marginX];
   for (let i = 0; i < colWidths.length; i += 1) colXs.push(colXs[i] + colWidths[i]);
 
@@ -1262,10 +1479,10 @@ const drawMatrixSheet = (doc, matrix, startY) => {
       ? 4.5
       : colCount > 28
         ? 5
-        : colCount > 20
+        : colCount > 18
           ? 5.5
           : colCount > 14
-            ? 6.5
+            ? 6
             : colCount > 10
               ? 7
               : 8;
@@ -1425,7 +1642,11 @@ const drawMatrixSheet = (doc, matrix, startY) => {
       { pageWidth, pageHeight, marginX, marginTop, marginBottom, usableWidth },
       y
     );
-  } else if (matrix.name && matrix.name !== 'Sheet1') {
+  } else if (
+    matrix.name &&
+    matrix.name !== 'Sheet1' &&
+    !looksLikeExcelDraftFileLabel(matrix.name)
+  ) {
     y = paintBorderedStatutoryHeader(
       doc,
       { titles: [matrix.name], fields: [], rightFields: [] },
@@ -1526,10 +1747,16 @@ export async function buildStatutoryDraftPdfBlob({
   const anyFormW = allMatrices.some((m) =>
     looksLikeFormWPdfContext(m.metaLines, m.rows, m.tableStartRow || 0)
   );
-  const wide = maxCols > 8 || anyFormW;
+  const anyAccidentBook = allMatrices.some((m) => {
+    const blob = [...(m.metaLines || []), ...(m.rows || []).slice(0, 8).flat(), m.name || '']
+      .join(' ')
+      .toLowerCase();
+    return /accident\s+book|form\s*(?:no\.?\s*)?11\b/.test(blob);
+  });
+  const wide = maxCols > 8 || anyFormW || anyAccidentBook;
   // Form W (~30 wage/deduction cols) needs A2 landscape so amounts stay on one line.
-  // Form XXVI / day-grid musters need A3 landscape so cols 1–14 (incl. days 1–31) fit.
-  const veryWide = anyFormW || maxCols > 28;
+  // Form 11 Accident Book (~18 cols with long headers) and other wide registers need A3.
+  const veryWide = anyFormW || anyAccidentBook || maxCols > 14;
   const doc = new jsPDF({
     unit: 'pt',
     format: anyFormW ? 'a2' : veryWide ? 'a3' : 'a4',
@@ -1546,17 +1773,22 @@ export async function buildStatutoryDraftPdfBlob({
   );
   const hasBorderedHeader =
     (firstHeaderModel.titles || []).length > 0 || (firstHeaderModel.fields || []).length > 0;
-  const heading = String(title || fileName || 'Statutory Draft')
-    .replace(/\.(xlsx|xls|xlsm|xlsb|zip)$/i, '')
+  // Use a real form title only — never the Excel/ZIP draft file name as a PDF heading.
+  const headingCandidate = String(title || '')
+    .replace(EXCEL_EXT_RE, '')
+    .replace(/\.zip$/i, '')
+    .trim()
     .slice(0, 120);
-  if (!hasBorderedHeader) {
+  const heading =
+    headingCandidate && !looksLikeExcelDraftFileLabel(headingCandidate) ? headingCandidate : '';
+  if (!hasBorderedHeader && heading) {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(11);
     doc.setTextColor(0, 0, 0);
     doc.text(heading, doc.internal.pageSize.getWidth() / 2, 20, { align: 'center' });
   }
 
-  let y = hasBorderedHeader ? 20 : 32;
+  let y = hasBorderedHeader || !heading ? 20 : 32;
   for (let i = 0; i < allMatrices.length; i += 1) {
     if (i > 0) {
       doc.addPage();
@@ -1590,5 +1822,14 @@ export const statutoryDraftPdfTestUtils = {
   formWTamilNaduColumnWeight,
   isPurePdfNumericText,
   extractFormWGenderBox,
-  sheetToDenseMatrix
+  sheetToDenseMatrix,
+  looksLikeExcelDraftFileLabel,
+  buildStatutoryPdfHeaderModel,
+  isStatutoryTitleMetaLine,
+  expandStatutoryMetaSegments,
+  normalizeStatutoryMultilineText,
+  isPdfSerialNumberHeader,
+  statutoryHeaderColumnWeight,
+  enforcePdfColumnMinWidths,
+  resolveLeafHeaderTexts
 };

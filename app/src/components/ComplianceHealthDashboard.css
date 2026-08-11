@@ -123,7 +123,8 @@
 }
 
 .chd-grid--health-trend {
-  grid-template-columns: 1.05fr 1fr;
+  grid-template-columns: 1fr 1fr;
+  align-items: stretch;
 }
 
 .chd-card {
@@ -149,6 +150,11 @@
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.chd-filters--outside-trend {
+  justify-content: flex-end;
+  margin: 0 0 12px;
 }
 
 .chd-card-head h3 {
@@ -207,12 +213,27 @@
 .chd-card--trend {
   display: flex;
   flex-direction: column;
+  overflow: visible;
+}
+
+.chd-card--health {
+  display: flex;
+  flex-direction: column;
+}
+
+.chd-card--health .chd-health-body {
+  flex: 1;
+}
+
+.chd-card--health .chd-health-footer {
+  margin-top: auto;
 }
 
 .chd-trend-wrap {
   position: relative;
   flex: 1;
   min-height: 220px;
+  overflow: visible;
 }
 
 .chd-card--trend .chd-trend-svg {
@@ -236,8 +257,29 @@
   line-height: 1.35;
 }
 
+.chd-trend-tooltip--align-start {
+  transform: translate(0, calc(-100% - 12px));
+}
+
+.chd-trend-tooltip--align-end {
+  transform: translate(-100%, calc(-100% - 12px));
+}
+
 .chd-trend-tooltip--below {
   transform: translate(-50%, 14px);
+}
+
+.chd-trend-tooltip--below.chd-trend-tooltip--align-start {
+  transform: translate(0, 14px);
+}
+
+.chd-trend-tooltip--below.chd-trend-tooltip--align-end {
+  transform: translate(-100%, 14px);
+}
+
+.chd-trend-tooltip--pinned {
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.28);
+  outline: 1px solid rgba(148, 163, 184, 0.45);
 }
 
 .chd-trend-tooltip-month {
@@ -411,6 +453,10 @@
   grid-template-columns: 1.25fr 1fr;
 }
 
+.chd-grid--industry {
+  grid-template-columns: 1fr;
+}
+
 .chd-swatch {
   width: 10px;
   height: 10px;
@@ -426,6 +472,152 @@
 .chd-card--industry .chd-industry-svg {
   flex: 1;
   min-height: 240px;
+}
+
+.chd-card--act {
+  align-self: start;
+  height: auto;
+  padding: 10px 14px 6px;
+}
+
+.chd-card--act .chd-card-head {
+  margin-bottom: 0;
+}
+
+.chd-card--act .chd-legend {
+  justify-content: flex-start;
+  margin-top: 12px;
+  margin-bottom: 14px;
+}
+
+.chd-act-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-top: 0;
+  min-height: 0;
+}
+
+.chd-act-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.chd-act-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 200px) 1fr 36px;
+  align-items: center;
+  column-gap: 12px;
+}
+
+.chd-act-name {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: #374151;
+  line-height: 1.2;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chd-act-bar-wrap {
+  min-width: 0;
+  height: 14px;
+  display: flex;
+  align-items: center;
+}
+
+.chd-act-bar {
+  display: flex;
+  height: 14px;
+  border-radius: 0;
+  overflow: hidden;
+  min-width: 8px;
+  max-width: 100%;
+}
+
+.chd-act-seg {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-width: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  line-height: 1;
+  box-sizing: border-box;
+}
+
+.chd-act-total {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7280;
+  text-align: right;
+}
+
+.chd-act-axis {
+  display: grid;
+  grid-template-columns: minmax(140px, 200px) 1fr 36px;
+  column-gap: 12px;
+  margin-top: 2px;
+  align-items: start;
+}
+
+.chd-act-axis-spacer,
+.chd-act-axis-end {
+  display: block;
+}
+
+.chd-act-axis-track {
+  position: relative;
+  height: 14px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.chd-act-tick {
+  position: absolute;
+  top: 4px;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: #9ca3af;
+}
+
+.chd-act-tick:first-child {
+  transform: translateX(0);
+}
+
+.chd-act-axis-label {
+  text-align: center;
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 2px;
+  padding-left: min(200px, 28%);
+}
+
+@media (max-width: 720px) {
+  .chd-act-row,
+  .chd-act-axis {
+    grid-template-columns: minmax(100px, 120px) 1fr 28px;
+    column-gap: 8px;
+  }
+
+  .chd-act-name {
+    font-size: 11px;
+  }
+
+  .chd-act-bar {
+    height: 14px;
+  }
+
+  .chd-act-bar-wrap {
+    height: 14px;
+  }
+
+  .chd-act-seg {
+    font-size: 10px;
+  }
 }
 
 .chd-location-body {
@@ -450,6 +642,8 @@
   height: 280px;
   overflow: hidden;
   position: relative;
+  padding: 4px;
+  box-sizing: border-box;
 }
 
 .chd-india-map {
@@ -464,6 +658,12 @@
 .chd-india-map .leaflet-container {
   background: #f3f4f6;
   font: inherit;
+  cursor: default !important;
+}
+
+.chd-india-map .leaflet-grab,
+.chd-india-map .leaflet-dragging .leaflet-grab {
+  cursor: default !important;
 }
 
 .chd-india-map .leaflet-tile-pane {
@@ -606,6 +806,10 @@
 
 @media (max-width: 1100px) {
   .chd-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chd-grid--health-trend {
     grid-template-columns: 1fr;
   }
 

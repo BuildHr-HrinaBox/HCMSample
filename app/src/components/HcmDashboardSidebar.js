@@ -198,7 +198,7 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
                   onFocus={item.id === 'settings' ? prefetchSettings : undefined}
                   onClick={item.id === 'settings' ? prefetchSettings : undefined}
                 >
-                  <Icon size={20} strokeWidth={2} aria-hidden />
+                  <Icon size={24} strokeWidth={2} aria-hidden />
                   <span className="nd-nav-item-label">{item.label}</span>
                 </Link>
               );
@@ -224,10 +224,10 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
                     onClick={() => toggleGroup(item.id)}
                     aria-expanded={groupOpen}
                   >
-                    <Icon size={20} strokeWidth={2} />
+                    <Icon size={24} strokeWidth={2} />
                     <span className="nd-nav-group-label">{item.label}</span>
                     <ChevronRight
-                      size={18}
+                      size={20}
                       strokeWidth={2}
                       className={`nd-nav-group-chevron${groupOpen ? ' nd-nav-group-chevron--open' : ''}`}
                       aria-hidden

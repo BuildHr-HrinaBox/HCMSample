@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ChevronDown } from 'lucide-react';
 import { MapContainer, GeoJSON, Marker, Popup, useMap } from 'react-leaflet';
@@ -49,6 +49,15 @@ const LOCATION_STATUS_ORDER = ['yetToSubmit', 'pending', 'approved', 'returned']
 const INDUSTRY_STATUS_ORDER = ['approved', 'pending', 'yetToSubmit', 'returned'];
 /** Trend legend order (image-1 model): Approved → Pending → Yet to Submit → Returned. */
 const TREND_STATUS_ORDER = ['approved', 'pending', 'yetToSubmit', 'returned'];
+
+/** Site-login “Compliance by Act” legend (image model). */
+const ACT_CHART_STATUS_ORDER = ['approved', 'pending', 'returned', 'yetToSubmit'];
+const ACT_CHART_LABELS = {
+  approved: 'Approved',
+  pending: 'Pending',
+  returned: 'Returned',
+  yetToSubmit: 'Yet to Submit',
+};
 
 const MONTH_NAME_INDEX = {
   jan: 0,
@@ -296,7 +305,30 @@ const monthKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).
 const monthLabel = (date) =>
   date.toLocaleDateString('en-IN', { month: 'short' });
 
-function rowIdentityKey(row, { ignoreSite = false } = {}) {
+/** Normalize MonthFilter / due month so Mar vs April rows stay distinct. */
+function rowMonthKeyPart(row) {
+  const raw = row?.monthFilter ?? row?.MonthFilter ?? row?.monthfilter;
+  if (raw != null && String(raw).trim() !== '') {
+    const idx = parseMonthIndex(raw);
+    if (idx != null) return `m${idx}`;
+    return String(raw).trim().toLowerCase().slice(0, 3);
+  }
+  const dueRaw = row?.dueDate ?? row?.DueDate;
+  if (dueRaw != null && String(dueRaw).trim() !== '') {
+    if (!isDayOnlyDueDate(dueRaw) && !/^monthly\s*basis$/i.test(String(dueRaw).trim())) {
+      const ts = parseDateValue(dueRaw);
+      if (ts != null) {
+        const d = new Date(ts);
+        return monthKey(new Date(d.getFullYear(), d.getMonth(), 1));
+      }
+      const idx = parseMonthIndex(dueRaw);
+      if (idx != null) return `m${idx}`;
+    }
+  }
+  return 'nomonth';
+}
+
+function rowIdentityKey(row, { ignoreSite = false, ignoreMonth = false } = {}) {
   const form = String(row?.formName ?? row?.FormName ?? '')
     .trim()
     .toLowerCase();
@@ -309,9 +341,10 @@ function rowIdentityKey(row, { ignoreSite = false } = {}) {
   const site = String(row?.site ?? row?.Site ?? row?.siteName ?? row?.SiteName ?? '')
     .trim()
     .toLowerCase();
+  const month = ignoreMonth ? '*' : rowMonthKeyPart(row);
   if (!form && !act && !desc) return '';
-  if (ignoreSite) return `${form}|${act}|${desc}`;
-  return `${form}|${act}|${desc}|${site}`;
+  if (ignoreSite) return `${form}|${act}|${desc}|${month}`;
+  return `${form}|${act}|${desc}|${site}|${month}`;
 }
 
 function workflowScore(row) {
@@ -352,53 +385,95 @@ function overlayMasterOntoWorkflow(master, workflow) {
       master.State,
     dueDate: workflow.dueDate ?? workflow.DueDate ?? master.dueDate ?? master.DueDate,
     site: workflow.site ?? workflow.Site ?? master.site ?? master.Site,
+    monthFilter:
+      workflow.monthFilter ??
+      workflow.MonthFilter ??
+      workflow.monthfilter ??
+      master.monthFilter ??
+      master.MonthFilter ??
+      master.monthfilter,
+    MonthFilter:
+      workflow.MonthFilter ??
+      workflow.monthFilter ??
+      workflow.monthfilter ??
+      master.MonthFilter ??
+      master.monthFilter ??
+      master.monthfilter,
+    monthfilter:
+      workflow.monthfilter ??
+      workflow.monthFilter ??
+      workflow.MonthFilter ??
+      master.monthfilter ??
+      master.monthFilter ??
+      master.MonthFilter,
   };
 }
 
-/** Prefer statutory workflow rows; add unique checklist-bulk lines as yet-to-submit only once. */
-function mergeStatutoryWithBulk(statutory, bulk) {
+/** Prefer statutory workflow rows; keep one row per form+site+month. */
+function mergeStatutoryWithBulk(statutory, bulk, now = new Date()) {
   const byKey = new Map();
-  const byFormActDesc = new Map();
+  /** form|act|desc → Map(monthPart → row) so month history is not collapsed. */
+  const byFormActDescMonths = new Map();
+  const currentMonthPart = `m${now.getMonth()}`;
+
+  const rememberSoft = (row) => {
+    const softBase = rowIdentityKey(row, { ignoreSite: true, ignoreMonth: true });
+    if (!softBase) return;
+    const monthPart = rowMonthKeyPart(row);
+    if (!byFormActDescMonths.has(softBase)) byFormActDescMonths.set(softBase, new Map());
+    const monthMap = byFormActDescMonths.get(softBase);
+    monthMap.set(monthPart, pickStrongerRow(monthMap.get(monthPart), row));
+  };
+
+  const pickSoftMatch = (softBase, preferredMonth) => {
+    const monthMap = byFormActDescMonths.get(softBase);
+    if (!monthMap || monthMap.size === 0) return null;
+    if (preferredMonth && monthMap.has(preferredMonth)) return monthMap.get(preferredMonth);
+    if (monthMap.has(currentMonthPart)) return monthMap.get(currentMonthPart);
+    if (monthMap.has('nomonth')) return monthMap.get('nomonth');
+    let best = null;
+    monthMap.forEach((row) => {
+      best = pickStrongerRow(best, row);
+    });
+    return best;
+  };
 
   (statutory || []).forEach((row) => {
     const fullKey = rowIdentityKey(row) || `stat-${byKey.size}-${String(row?.id ?? '')}`;
     const next = pickStrongerRow(byKey.get(fullKey), row);
     byKey.set(fullKey, next);
-
-    const softKey = rowIdentityKey(row, { ignoreSite: true });
-    if (softKey) {
-      byFormActDesc.set(softKey, pickStrongerRow(byFormActDesc.get(softKey), next));
-    }
+    rememberSoft(next);
   });
 
   (bulk || []).forEach((row) => {
-    const softKey = rowIdentityKey(row, { ignoreSite: true });
-    if (!softKey) return;
+    const softBase = rowIdentityKey(row, { ignoreSite: true, ignoreMonth: true });
+    if (!softBase) return;
 
+    const bulkMonth = rowMonthKeyPart(row);
     const fullKey = rowIdentityKey(row);
     const exact = fullKey ? byKey.get(fullKey) : null;
-    const soft = byFormActDesc.get(softKey);
+    const soft = pickSoftMatch(softBase, bulkMonth === 'nomonth' ? currentMonthPart : bulkMonth);
 
     if (exact) {
       const merged = overlayMasterOntoWorkflow(row, exact);
       byKey.set(fullKey, merged);
-      byFormActDesc.set(softKey, pickStrongerRow(byFormActDesc.get(softKey), merged));
+      rememberSoft(merged);
       return;
     }
 
     if (soft) {
-      // Bulk often has no site — attach metadata onto the best matching statutory row.
+      // Bulk often has no MonthFilter — attach onto the matching month's statutory row.
       const softFullKey =
-        rowIdentityKey(soft) || `stat-soft-${String(soft?.id ?? softKey)}`;
+        rowIdentityKey(soft) || `stat-soft-${String(soft?.id ?? softBase)}`;
       const merged = overlayMasterOntoWorkflow(row, soft);
       byKey.set(softFullKey, merged);
-      byFormActDesc.set(softKey, merged);
+      rememberSoft(merged);
       return;
     }
 
-    const insertKey = fullKey || `bulk-${byKey.size}-${softKey}`;
+    const insertKey = fullKey || `bulk-${byKey.size}-${softBase}`;
     byKey.set(insertKey, row);
-    byFormActDesc.set(softKey, row);
+    rememberSoft(row);
   });
 
   return [...byKey.values()];
@@ -415,6 +490,19 @@ function itemActivityTimestamp(item) {
     item?.submittedDate ?? item?.SubmittedDate,
     item?.modifiedTime ?? item?.ModifiedTime ?? item?.MODIFIEDTIME,
     item?.createdTime ?? item?.CreatedTime ?? item?.CREATEDTIME,
+  ];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const ts = parseDateValue(candidates[i]);
+    if (ts != null) return ts;
+  }
+  return null;
+}
+
+/** Workflow event month only — never created/modified (those dump open rows into one month). */
+function itemWorkflowMonthTimestamp(item) {
+  const candidates = [
+    item?.approvedDate ?? item?.ApprovedDate,
+    item?.submittedDate ?? item?.SubmittedDate,
   ];
   for (let i = 0; i < candidates.length; i += 1) {
     const ts = parseDateValue(candidates[i]);
@@ -444,48 +532,59 @@ function isMonthlyRecurringDue(item) {
 }
 
 /**
- * Resolve a one-shot calendar month for a row (YYYY-MM), or null when the row
- * should count as open inventory across the whole 6-month window.
- * Do NOT use MonthFilter here — that is a Statutory UI month and dumps all
- * monthly rows into one column (July/August spike).
+ * Statutory month for a row inside the trend window.
+ * Uses MonthFilter (Statutory) → real due date → approved/submitted date.
+ * Does NOT use created/modified time (that wrongly piled Yet to Submit into one month).
  */
-function resolveTrendMonthKey(item, windowKeys) {
+function resolveTrendMonthKey(item, windowKeys, now = new Date()) {
   const windowSet = new Set(windowKeys);
+  const currentKey = monthKey(new Date(now.getFullYear(), now.getMonth(), 1));
 
-  if (isMonthlyRecurringDue(item)) return null;
+  // 1) Statutory MonthFilter is the source of truth for month history.
+  const monthFilter = item?.monthFilter ?? item?.MonthFilter ?? item?.monthfilter;
+  if (monthFilter != null && String(monthFilter).trim() !== '') {
+    const fromFilter = monthIndexToWindowKey(parseMonthIndex(monthFilter), windowKeys);
+    if (fromFilter) return fromFilter;
+    return undefined;
+  }
 
+  // 2) Real calendar due date (not "Monthly Basis" / day-only).
   const dueRaw = item?.dueDate ?? item?.DueDate;
-  if (dueRaw != null && String(dueRaw).trim() !== '') {
+  if (
+    dueRaw != null &&
+    String(dueRaw).trim() !== '' &&
+    !isMonthlyRecurringDue(item)
+  ) {
     const dueTs = parseDateValue(dueRaw);
     if (dueTs != null) {
       const d = new Date(dueTs);
       const key = monthKey(new Date(d.getFullYear(), d.getMonth(), 1));
       if (windowSet.has(key)) return key;
-      // Due before the window → open from the first month; after → skip one-shot.
-      if (key < windowKeys[0]) return null;
       return undefined;
     }
     const fromDueName = monthIndexToWindowKey(parseMonthIndex(dueRaw), windowKeys);
     if (fromDueName) return fromDueName;
   }
 
-  const activity = itemActivityTimestamp(item);
-  if (activity != null) {
-    const d = new Date(activity);
+  // 3) Approved / submitted event month (workflow only).
+  const workflowTs = itemWorkflowMonthTimestamp(item);
+  if (workflowTs != null) {
+    const d = new Date(workflowTs);
     const key = monthKey(new Date(d.getFullYear(), d.getMonth(), 1));
     if (windowSet.has(key)) return key;
-    if (key < windowKeys[0]) return null;
     return undefined;
   }
 
-  // Undated live rows → open inventory across the window (image-1 model).
-  return null;
+  // 4) Open / undated statutory+bulk lines → current month only.
+  return windowSet.has(currentKey) ? currentKey : undefined;
 }
 
 /**
- * Image-1 line model: open compliance inventory over the last 6 months.
- * Monthly / undated rows count in every month; one-shot dated rows carry
- * forward from their month through the end of the window.
+ * Last-6-months trend.
+ * Every month uses the same obligation universe as Compliance Health / top KPI
+ * cards: count every statutory row (no form+site dedupe) so totals match (e.g. 111).
+ * Past months: apply MonthFilter / workflow history status when available for a
+ * form+site; remaining rows count as Yet to Submit.
  */
 function buildTrendSeries(items, now = new Date()) {
   const months = [];
@@ -494,23 +593,40 @@ function buildTrendSeries(items, now = new Date()) {
     months.push({ key: monthKey(d), label: monthLabel(d), date: d, ...EMPTY_COUNTS });
   }
   const windowKeys = months.map((m) => m.key);
+  const currentKey = months[months.length - 1]?.key;
+  const list = items || [];
 
-  items.forEach((item) => {
-    const bucket = getComplianceBucket(item);
-    const key = resolveTrendMonthKey(item, windowKeys);
-    if (key === undefined) return;
+  // Past-month history: form+site → best workflow row tagged for that month.
+  const historyByMonth = new Map(windowKeys.map((k) => [k, new Map()]));
+  list.forEach((row) => {
+    const mk = resolveTrendMonthKey(row, windowKeys, now);
+    if (!mk || mk === currentKey) return;
+    const base = rowIdentityKey(row, { ignoreMonth: true });
+    if (!base) return;
+    const map = historyByMonth.get(mk);
+    map.set(base, pickStrongerRow(map.get(base), row));
+  });
 
-    if (key == null) {
-      months.forEach((m) => {
-        m[bucket] += 1;
+  months.forEach((m) => {
+    if (m.key === currentKey) {
+      list.forEach((item) => {
+        m[getComplianceBucket(item)] += 1;
       });
       return;
     }
 
-    let on = false;
-    months.forEach((m) => {
-      if (m.key === key) on = true;
-      if (on) m[bucket] += 1;
+    const histMap = historyByMonth.get(m.key) || new Map();
+    const usedHistory = new Set();
+
+    // Same row count as Health (111): history status when known, else Yet to Submit.
+    list.forEach((item) => {
+      const base = rowIdentityKey(item, { ignoreMonth: true });
+      if (base && histMap.has(base) && !usedHistory.has(base)) {
+        usedHistory.add(base);
+        m[getComplianceBucket(histMap.get(base))] += 1;
+        return;
+      }
+      m.yetToSubmit += 1;
     });
   });
 
@@ -620,28 +736,36 @@ function rowMatchesSelectedSite(row, selectedSite, siteRecords) {
   return stateOk && industryOk;
 }
 
-function itemInPeriod(item, period, now = new Date()) {
-  // Live snapshot — same universe as top KPI cards (Approved / Pending / Returned).
-  // Period still filters Last Month / This Year for historical views.
-  if (period === 'thisMonth' || period === 'last6Months') return true;
-
-  const activity = itemActivityTimestamp(item);
+function periodWindowKeys(period, now = new Date()) {
   const y = now.getFullYear();
   const m = now.getMonth();
-
-  if (period === 'thisYear') {
-    if (activity == null) return true;
-    return new Date(activity).getFullYear() === y;
+  if (period === 'thisMonth') {
+    return [monthKey(new Date(y, m, 1))];
   }
-
   if (period === 'lastMonth') {
-    const prev = new Date(y, m - 1, 1);
-    if (activity == null) return false;
-    const d = new Date(activity);
-    return d.getFullYear() === prev.getFullYear() && d.getMonth() === prev.getMonth();
+    return [monthKey(new Date(y, m - 1, 1))];
   }
+  if (period === 'last6Months') {
+    const keys = [];
+    for (let i = 5; i >= 0; i -= 1) {
+      keys.push(monthKey(new Date(y, m - i, 1)));
+    }
+    return keys;
+  }
+  if (period === 'thisYear') {
+    const keys = [];
+    for (let i = 0; i <= m; i += 1) {
+      keys.push(monthKey(new Date(y, i, 1)));
+    }
+    return keys;
+  }
+  return [monthKey(new Date(y, m, 1))];
+}
 
-  return true;
+function itemInPeriod(item, period, now = new Date()) {
+  const windowKeys = periodWindowKeys(period, now);
+  const key = resolveTrendMonthKey(item, windowKeys, now);
+  return Boolean(key);
 }
 
 function countBuckets(items) {
@@ -816,6 +940,48 @@ function buildIndustrySeries(items, allowedCategories = null) {
   return groups.map((g) => byKey[g.label]);
 }
 
+/** Display label for an act row (site “Compliance by Act” chart). */
+function actDisplayName(item) {
+  const raw = String(item?.act ?? item?.Act ?? item?.actName ?? item?.ActName ?? '').trim();
+  if (!raw) return 'Other Acts';
+  const lower = raw.toLowerCase();
+  if (/factor/.test(lower)) return 'Factories Act, 1948';
+  if (/\besi\b|employees.?state.?insurance/.test(lower)) return 'ESI Act, 1948';
+  if (/\bepf\b|provident.?fund|employees.?provident/.test(lower)) return 'EPF Act, 1952';
+  if (/shops?\s*&?\s*est/.test(lower) || /shops and establishment/.test(lower)) {
+    return 'Shops & Establishments Act';
+  }
+  if (/professional.?tax|profession.?tax/.test(lower)) return 'Professional Tax Act';
+  if (/clra|contract.?labour/.test(lower)) return 'CLRA Act, 1970';
+  if (/minimum.?wages/.test(lower)) return 'Minimum Wages Act';
+  if (/payment.?of.?wages/.test(lower)) return 'Payment of Wages Act';
+  if (/payment.?of.?bonus/.test(lower)) return 'Payment of Bonus Act';
+  if (/maternity/.test(lower)) return 'Maternity Benefit Act';
+  if (/industrial.?disputes/.test(lower)) return 'Industrial Disputes Act';
+  return raw.length > 40 ? `${raw.slice(0, 38)}…` : raw;
+}
+
+/**
+ * Horizontal stacked-bar series by Act (site login chart model).
+ */
+function buildActSeries(items) {
+  const map = new Map();
+  (items || []).forEach((item) => {
+    const name = actDisplayName(item);
+    if (!map.has(name)) {
+      map.set(name, { act: name, ...EMPTY_COUNTS, total: 0 });
+    }
+    const row = map.get(name);
+    row[getComplianceBucket(item)] += 1;
+    row.total += 1;
+  });
+
+  return [...map.values()]
+    .filter((row) => row.total > 0)
+    .sort((a, b) => b.total - a.total || a.act.localeCompare(b.act))
+    .slice(0, 8);
+}
+
 async function fetchSiteDetails() {
   try {
     const res = await fetch(SITE_MANAGEMENT_API, { cache: 'no-store' });
@@ -853,21 +1019,46 @@ function MapInvalidateSize() {
   return null;
 }
 
-function FitIndiaBounds({ geojson }) {
+/** Fit full India (incl. western states like Gujarat) inside the map box. */
+function FitIndiaBounds({ geojson, locations }) {
   const map = useMap();
   useEffect(() => {
     if (!geojson) return undefined;
-    try {
-      const layer = L.geoJSON(geojson);
-      const bounds = layer.getBounds();
-      if (bounds.isValid()) {
-        map.fitBounds(bounds, { padding: [8, 8], maxZoom: 5 });
+
+    const applyFit = () => {
+      try {
+        map.invalidateSize();
+        const layer = L.geoJSON(geojson);
+        let bounds = layer.getBounds();
+        if (!bounds.isValid()) return;
+
+        // Include marker positions so pins (e.g. Gujarat purple) are never clipped.
+        (locations || []).forEach((loc) => {
+          if (Number.isFinite(loc.lat) && Number.isFinite(loc.lng)) {
+            bounds.extend([loc.lat, loc.lng]);
+          }
+        });
+
+        // Light geographic padding so western pins stay inside the frame.
+        bounds = bounds.pad(0.02);
+        map.fitBounds(bounds, {
+          paddingTopLeft: [10, 8],
+          paddingBottomRight: [10, 8],
+          maxZoom: 6,
+          animate: false,
+        });
+        // Slight zoom-in so India fills the box without large empty margins.
+        const nextZoom = Math.min((map.getZoom() || 4) + 0.35, 6);
+        map.setZoom(nextZoom, { animate: false });
+      } catch {
+        /* ignore invalid geojson */
       }
-    } catch {
-      /* ignore invalid geojson */
-    }
-    return undefined;
-  }, [map, geojson]);
+    };
+
+    applyFit();
+    const t = setTimeout(applyFit, 120);
+    return () => clearTimeout(t);
+  }, [map, geojson, locations]);
   return null;
 }
 
@@ -927,21 +1118,27 @@ function IndiaLocationMap({ locations }) {
 
   return (
     <MapContainer
-      center={[22.5, 82]}
+      center={[22.5, 80]}
       zoom={4}
-      minZoom={4}
-      maxZoom={7}
+      minZoom={3}
+      maxZoom={6}
+      zoomSnap={0.25}
+      zoomDelta={0.25}
       scrollWheelZoom={false}
-      dragging
+      dragging={false}
+      doubleClickZoom={false}
+      touchZoom={false}
+      boxZoom={false}
+      keyboard={false}
       zoomControl={false}
       attributionControl={false}
       className="chd-india-map"
-      style={{ height: '100%', width: '100%', background: '#f3f4f6' }}
-      maxBounds={L.latLngBounds([6, 68], [37, 98])}
+      style={{ height: '100%', width: '100%', background: '#f3f4f6', cursor: 'default' }}
+      maxBounds={L.latLngBounds([5, 66], [38, 100])}
       maxBoundsViscosity={1}
     >
       <MapInvalidateSize />
-      <FitIndiaBounds geojson={indiaGeo} />
+      <FitIndiaBounds geojson={indiaGeo} locations={markers} />
       {indiaGeo ? <GeoJSON data={indiaGeo} style={() => INDIA_MAP_STYLE} /> : null}
       {markers.map((loc) => (
         <Marker key={loc.state} position={[loc.lat, loc.lng]} icon={loc.icon} zIndexOffset={600}>
@@ -996,22 +1193,29 @@ function LocationBars({ rows }) {
 function IndustryBars({ series }) {
   const width = 420;
   const height = 260;
-  const pad = { top: 28, right: 16, bottom: 36, left: 48 };
+  const pad = { top: 28, right: 16, bottom: 40, left: 44 };
   const chartW = width - pad.left - pad.right;
   const chartH = height - pad.top - pad.bottom;
   const keys = INDUSTRY_STATUS_ORDER;
+  const rows = (series || []).filter((row) => (Number(row.total) || 0) > 0);
   const rawMax = Math.max(
     0,
-    ...series.flatMap((row) => keys.map((key) => Number(row[key]) || 0))
+    ...rows.flatMap((row) => keys.map((key) => Number(row[key]) || 0))
   );
-  const maxY = Math.max(30, Math.ceil(rawMax / 5) * 5 || 30);
+  // Scale to data — avoid a forced 0–30 axis that makes small current-month counts look wrong.
+  const niceStep = rawMax <= 10 ? 2 : rawMax <= 25 ? 5 : 10;
+  const maxY = Math.max(niceStep, Math.ceil(rawMax / niceStep) * niceStep);
   const ticks = [];
-  for (let v = 0; v <= maxY; v += 5) ticks.push(v);
+  for (let v = 0; v <= maxY; v += niceStep) ticks.push(v);
 
-  const groupCount = Math.max(series.length, 1);
+  if (!rows.length) {
+    return <div className="chd-empty">No industry compliance data yet.</div>;
+  }
+
+  const groupCount = Math.max(rows.length, 1);
   const groupW = chartW / groupCount;
-  const barGap = 3;
-  const barW = Math.min(14, (groupW - 20) / keys.length - barGap);
+  const barGap = 4;
+  const barW = Math.min(22, Math.max(10, (groupW - 24) / keys.length - barGap));
   const clusterW = keys.length * (barW + barGap) - barGap;
 
   const yAt = (v) => pad.top + chartH - (Math.min(v, maxY) / maxY) * chartH;
@@ -1024,12 +1228,12 @@ function IndustryBars({ series }) {
       aria-label="Compliance by industry"
     >
       <text
-        x={14}
+        x={12}
         y={pad.top + chartH / 2}
         textAnchor="middle"
         fontSize="10"
         fill="#9ca3af"
-        transform={`rotate(-90 14 ${pad.top + chartH / 2})`}
+        transform={`rotate(-90 12 ${pad.top + chartH / 2})`}
       >
         No. of Compliances
       </text>
@@ -1048,7 +1252,7 @@ function IndustryBars({ series }) {
           </text>
         </g>
       ))}
-      {series.map((row, gi) => {
+      {rows.map((row, gi) => {
         const groupX = pad.left + gi * groupW + (groupW - clusterW) / 2;
         return (
           <g key={row.industry}>
@@ -1083,7 +1287,7 @@ function IndustryBars({ series }) {
             })}
             <text
               x={pad.left + gi * groupW + groupW / 2}
-              y={height - 10}
+              y={height - 12}
               textAnchor="middle"
               fontSize="11"
               fill="#6b7280"
@@ -1095,6 +1299,74 @@ function IndustryBars({ series }) {
         );
       })}
     </svg>
+  );
+}
+
+/** Site-login horizontal stacked bars (Compliance by Act image model). */
+function ActStackedBars({ series }) {
+  const keys = ACT_CHART_STATUS_ORDER;
+  const maxTotal = Math.max(1, ...(series || []).map((row) => Number(row.total) || 0));
+  // Nice X-axis upper bound (10 / 20 / 30 …)
+  const axisMax = Math.max(10, Math.ceil(maxTotal / 10) * 10);
+  const ticks = [];
+  const step = axisMax <= 20 ? 5 : 10;
+  for (let v = 0; v <= axisMax; v += step) ticks.push(v);
+
+  if (!series || series.length === 0) {
+    return <div className="chd-empty">No act compliance data yet.</div>;
+  }
+
+  return (
+    <div className="chd-act-chart" role="img" aria-label="Compliance by act">
+      <div className="chd-act-rows">
+        {series.map((row) => (
+          <div key={row.act} className="chd-act-row">
+            <div className="chd-act-name" title={row.act}>
+              {row.act}
+            </div>
+            <div className="chd-act-bar-wrap">
+              <div className="chd-act-bar" style={{ width: `${(row.total / axisMax) * 100}%` }}>
+                {keys.map((key) => {
+                  const value = Number(row[key]) || 0;
+                  if (value <= 0) return null;
+                  const pctW = row.total ? (value / row.total) * 100 : 0;
+                  return (
+                    <span
+                      key={key}
+                      className="chd-act-seg"
+                      style={{
+                        width: `${pctW}%`,
+                        background: STATUS_COLORS[key],
+                      }}
+                      title={`${ACT_CHART_LABELS[key]}: ${value}`}
+                    >
+                      {value >= 1 ? value : ''}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="chd-act-total">{row.total}</div>
+          </div>
+        ))}
+      </div>
+      <div className="chd-act-axis" aria-hidden>
+        <span className="chd-act-axis-spacer" />
+        <div className="chd-act-axis-track">
+          {ticks.map((v) => (
+            <span
+              key={v}
+              className="chd-act-tick"
+              style={{ left: `${(v / axisMax) * 100}%` }}
+            >
+              {v}
+            </span>
+          ))}
+        </div>
+        <span className="chd-act-axis-end" />
+      </div>
+      <div className="chd-act-axis-label">No. of Compliances</div>
+    </div>
   );
 }
 
@@ -1171,9 +1443,12 @@ function describeArc(cx, cy, r, startAngle, endAngle) {
   return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArc} ${sweepFlag} ${end.x} ${end.y}`;
 }
 
-/** Image-1 line model: open inventory series, hollow markers, 0–200 scale. */
+/** Image-1 line model: open inventory series. Click a month to pin its counts (local only). */
 function TrendChart({ series }) {
+  const wrapRef = useRef(null);
   const [hover, setHover] = useState(null);
+  // Clicked month stays local — Health / Location / Industry keep current-month data.
+  const [selectedIndex, setSelectedIndex] = useState(null);
   const width = 560;
   const height = 240;
   const pad = { top: 12, right: 18, bottom: 30, left: 40 };
@@ -1208,15 +1483,35 @@ function TrendChart({ series }) {
     return { key, d };
   });
 
-  const setHoverFromEvent = (index, focusKey, event) => {
+  const scaleTip = (index, focusKey) => {
     const row = series[index];
-    if (!row) return;
-    const svg = event.currentTarget.ownerSVGElement || event.currentTarget;
-    const rect = svg.getBoundingClientRect?.() || event.currentTarget.getBoundingClientRect();
-    const scaleX = rect.width / width;
-    const scaleY = rect.height / height;
-    const focusValue = Number(row[focusKey]) || 0;
-    setHover({
+    if (!row) return null;
+    const rect = wrapRef.current?.getBoundingClientRect();
+    const scaleX = rect ? rect.width / width : 1;
+    const scaleY = rect ? rect.height / height : 1;
+    const wrapW = rect?.width ?? width;
+    const tipHalf = 84; // ~half of tooltip min-width + padding
+    const edgePad = 8;
+    const focusValue =
+      focusKey != null
+        ? Number(row[focusKey]) || 0
+        : Math.max(
+            Number(row.approved) || 0,
+            Number(row.pending) || 0,
+            Number(row.yetToSubmit) || 0,
+            Number(row.returned) || 0
+          );
+    let x = xAt(index) * scaleX;
+    let xAlign = 'center';
+    // Keep tooltip inside the chart when hovering edge months (e.g. Aug).
+    if (x + tipHalf > wrapW - edgePad) {
+      xAlign = 'end';
+      x = Math.min(x, wrapW - edgePad);
+    } else if (x - tipHalf < edgePad) {
+      xAlign = 'start';
+      x = Math.max(x, edgePad);
+    }
+    return {
       index,
       focusKey,
       label: row.label,
@@ -1226,9 +1521,10 @@ function TrendChart({ series }) {
         yetToSubmit: Number(row.yetToSubmit) || 0,
         returned: Number(row.returned) || 0,
       },
-      x: xAt(index) * scaleX,
+      x,
       y: yAt(focusValue) * scaleY,
-    });
+      xAlign,
+    };
   };
 
   const nearestKeyAtY = (row, svgY) => {
@@ -1244,8 +1540,38 @@ function TrendChart({ series }) {
     return nearestKey;
   };
 
+  const focusFromEvent = (row, e) => {
+    const svg = e.currentTarget.ownerSVGElement || e.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const svgY = ((e.clientY - rect.top) / rect.height) * height;
+    return nearestKeyAtY(row, svgY);
+  };
+
+  const selectMonth = (index, focusKey) => {
+    if (selectedIndex === index) {
+      setSelectedIndex(null);
+      setHover(null);
+      return;
+    }
+    setSelectedIndex(index);
+    setHover(scaleTip(index, focusKey));
+  };
+
+  const tipIndex = hover?.index ?? selectedIndex;
+  const activeTip =
+    tipIndex == null
+      ? null
+      : hover?.index === tipIndex
+        ? hover
+        : scaleTip(tipIndex, null);
+  const guideIndex = tipIndex;
+
   return (
-    <div className="chd-trend-wrap" onMouseLeave={() => setHover(null)}>
+    <div
+      ref={wrapRef}
+      className="chd-trend-wrap"
+      onMouseLeave={() => setHover(null)}
+    >
       <svg className="chd-trend-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Compliance trend">
         {ticks.map((v) => (
           <g key={v}>
@@ -1262,14 +1588,14 @@ function TrendChart({ series }) {
             </text>
           </g>
         ))}
-        {hover != null && (
+        {guideIndex != null && (
           <line
-            x1={xAt(hover.index)}
+            x1={xAt(guideIndex)}
             y1={pad.top}
-            x2={xAt(hover.index)}
+            x2={xAt(guideIndex)}
             y2={pad.top + chartH}
-            stroke="#cbd5e1"
-            strokeWidth="1"
+            stroke={selectedIndex === guideIndex ? '#94a3b8' : '#cbd5e1'}
+            strokeWidth={selectedIndex === guideIndex ? 1.5 : 1}
             strokeDasharray="4 3"
             pointerEvents="none"
           />
@@ -1290,7 +1616,8 @@ function TrendChart({ series }) {
         {keys.map((key) =>
           series.map((row, i) => {
             const value = Number(row[key]) || 0;
-            const active = hover?.focusKey === key && hover?.index === i;
+            const active =
+              (hover?.focusKey === key && hover?.index === i) || selectedIndex === i;
             return (
               <circle
                 key={`${key}-${i}`}
@@ -1306,6 +1633,30 @@ function TrendChart({ series }) {
             );
           })
         )}
+        {/* Count labels for the clicked month only */}
+        {selectedIndex != null &&
+          series[selectedIndex] &&
+          TREND_STATUS_ORDER.map((key, ki) => {
+            const row = series[selectedIndex];
+            const value = Number(row[key]) || 0;
+            const x = xAt(selectedIndex);
+            const y = yAt(value);
+            const offsetX = (ki - 1.5) * 18;
+            return (
+              <text
+                key={`count-${key}`}
+                x={x + offsetX}
+                y={y - 10}
+                textAnchor="middle"
+                fontSize="10"
+                fontWeight="700"
+                fill={STATUS_COLORS[key]}
+                pointerEvents="none"
+              >
+                {value}
+              </text>
+            );
+          })}
         {series.map((row, i) => (
           <text
             key={row.label}
@@ -1313,12 +1664,18 @@ function TrendChart({ series }) {
             y={height - 8}
             textAnchor="middle"
             fontSize="11"
-            fill="#6b7280"
+            fontWeight={selectedIndex === i ? 700 : 400}
+            fill={selectedIndex === i ? '#111827' : '#6b7280'}
+            style={{ cursor: 'pointer' }}
+            onClick={(e) => {
+              e.stopPropagation();
+              selectMonth(i, 'approved');
+            }}
           >
             {row.label}
           </text>
         ))}
-        {/* Hit bands: hover near a month / line to show counts */}
+        {/* Hit bands: click a month to pin counts; hover still previews */}
         {series.map((row, i) => (
           <rect
             key={`band-${row.label}`}
@@ -1328,36 +1685,33 @@ function TrendChart({ series }) {
             height={chartH}
             fill="transparent"
             style={{ cursor: 'pointer' }}
-            onMouseEnter={(e) => {
-              const svg = e.currentTarget.ownerSVGElement;
-              const rect = svg.getBoundingClientRect();
-              const svgY = ((e.clientY - rect.top) / rect.height) * height;
-              setHoverFromEvent(i, nearestKeyAtY(row, svgY), e);
-            }}
-            onMouseMove={(e) => {
-              const svg = e.currentTarget.ownerSVGElement;
-              const rect = svg.getBoundingClientRect();
-              const svgY = ((e.clientY - rect.top) / rect.height) * height;
-              setHoverFromEvent(i, nearestKeyAtY(row, svgY), e);
-            }}
+            onMouseEnter={(e) => setHover(scaleTip(i, focusFromEvent(row, e)))}
+            onMouseMove={(e) => setHover(scaleTip(i, focusFromEvent(row, e)))}
+            onClick={(e) => selectMonth(i, focusFromEvent(row, e))}
           />
         ))}
       </svg>
-      {hover && (
+      {activeTip && (
         <div
-          className={`chd-trend-tooltip${hover.y < 72 ? ' chd-trend-tooltip--below' : ''}`}
-          style={{ left: hover.x, top: hover.y }}
+          className={`chd-trend-tooltip${activeTip.y < 72 ? ' chd-trend-tooltip--below' : ''}${
+            activeTip.xAlign === 'start' ? ' chd-trend-tooltip--align-start' : ''
+          }${activeTip.xAlign === 'end' ? ' chd-trend-tooltip--align-end' : ''}${
+            selectedIndex === activeTip.index ? ' chd-trend-tooltip--pinned' : ''
+          }`}
+          style={{ left: activeTip.x, top: activeTip.y }}
           role="tooltip"
         >
-          <div className="chd-trend-tooltip-month">{hover.label}</div>
+          <div className="chd-trend-tooltip-month">{activeTip.label}</div>
           {TREND_STATUS_ORDER.map((key) => (
             <div
               key={key}
-              className={`chd-trend-tooltip-row${hover.focusKey === key ? ' is-active' : ''}`}
+              className={`chd-trend-tooltip-row${
+                activeTip.focusKey === key ? ' is-active' : ''
+              }`}
             >
               <span className="chd-dot" style={{ background: STATUS_COLORS[key] }} />
               <span>{STATUS_LABELS[key]}</span>
-              <strong>{hover.counts[key]}</strong>
+              <strong>{activeTip.counts[key]}</strong>
             </div>
           ))}
         </div>
@@ -1366,7 +1720,7 @@ function TrendChart({ series }) {
   );
 }
 
-export default function ComplianceHealthDashboard({ userRole, userEmail }) {
+export default function ComplianceHealthDashboard({ userRole, userEmail, onCountsChange }) {
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState('thisMonth');
   const [selectedSite, setSelectedSite] = useState('all');
@@ -1522,17 +1876,24 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userEmail, userRole, refreshAt]);
 
+  const siteScopedItems = useMemo(() => {
+    return rawItems.filter((item) =>
+      rowMatchesSelectedSite(item, selectedSite, siteRecords)
+    );
+  }, [rawItems, selectedSite, siteRecords]);
+
+  // Health / Location / Industry: same model as top KPI cards — count every
+  // statutory row (no form+site month dedupe). Trend uses buildTrendSeries.
   const items = useMemo(() => {
-    return rawItems
-      .filter((item) => rowMatchesSelectedSite(item, selectedSite, siteRecords))
-      .filter((item) => itemInPeriod(item, period));
-  }, [rawItems, selectedSite, period, siteRecords]);
+    if (period === 'thisMonth' || period === 'last6Months') {
+      return siteScopedItems;
+    }
+    return siteScopedItems.filter((item) => itemInPeriod(item, period));
+  }, [siteScopedItems, period]);
 
   const lastMonthItems = useMemo(() => {
-    return rawItems
-      .filter((item) => rowMatchesSelectedSite(item, selectedSite, siteRecords))
-      .filter((item) => itemInPeriod(item, 'lastMonth'));
-  }, [rawItems, selectedSite, siteRecords]);
+    return siteScopedItems.filter((item) => itemInPeriod(item, 'lastMonth'));
+  }, [siteScopedItems]);
 
   const counts = useMemo(() => countBuckets(items), [items]);
   const total =
@@ -1541,19 +1902,24 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
   const lastMonthScore = scoreFromCounts(countBuckets(lastMonthItems));
   const delta = score - lastMonthScore;
 
-  const trend = useMemo(() => {
-    const siteScoped = rawItems.filter((item) =>
-      rowMatchesSelectedSite(item, selectedSite, siteRecords)
-    );
-    return buildTrendSeries(siteScoped);
-  }, [rawItems, selectedSite, siteRecords]);
+  // Keep top Compliance Status scorecards in sync with Health (same inventory + buckets).
+  useEffect(() => {
+    if (typeof onCountsChange !== 'function') return;
+    onCountsChange(counts);
+  }, [counts, onCountsChange]);
+
+  const trend = useMemo(() => buildTrendSeries(siteScopedItems), [siteScopedItems]);
 
   const locations = useMemo(
-    () => buildLocationSeries(items, siteRecords),
-    [items, siteRecords]
+    () =>
+      isAdmin && !isSiteScopedUser
+        ? buildLocationSeries(items, siteRecords)
+        : [],
+    [isAdmin, isSiteScopedUser, items, siteRecords]
   );
   const industries = useMemo(() => {
-    let cats = isSiteScopedUser ? allowedActCategories : null;
+    if (isSiteScopedUser) return [];
+    let cats = null;
 
     // When a single site is selected, show only that site's industry bar(s).
     if (selectedSite && selectedSite !== 'all') {
@@ -1567,67 +1933,75 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
     }
 
     return buildIndustrySeries(items, cats);
-  }, [items, isSiteScopedUser, allowedActCategories, selectedSite, siteRecords]);
+  }, [items, isSiteScopedUser, selectedSite, siteRecords]);
+
+  const acts = useMemo(
+    () => (isSiteScopedUser ? buildActSeries(items) : []),
+    [isSiteScopedUser, items]
+  );
 
   const showSiteFilter = isSiteScopedUser
     ? siteOptions.length > 1
     : isAdmin || siteOptions.length > 1;
   const siteSelectDisabled = isSiteScopedUser && siteOptions.length <= 1;
+  // Org-wide admin only — hide for site / incharge login (even if role is HR Admin).
+  const showComplianceByLocation = !loading && isAdmin && !isSiteScopedUser;
 
   return (
     <div className="chd-root" aria-busy={loading || undefined}>
+      <div className="chd-filters chd-filters--outside-trend">
+        {showSiteFilter && (
+          <label className="chd-select-wrap">
+            <span className="chd-sr-only">Site</span>
+            <select
+              className="chd-select"
+              value={selectedSite}
+              disabled={siteSelectDisabled}
+              onChange={(e) => setSelectedSite(e.target.value)}
+            >
+              {(isSiteScopedUser
+                ? siteOptions.length > 1
+                : isAdmin || siteOptions.length > 1) && (
+                <option value="all">
+                  {isSiteScopedUser ? 'My Sites' : 'All Sites'}
+                </option>
+              )}
+              {siteOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown size={14} className="chd-select-icon" aria-hidden />
+          </label>
+        )}
+        {!showSiteFilter && isSiteScopedUser && siteOptions[0] && (
+          <span className="chd-site-lock" title="Site-scoped login">
+            {siteOptions[0].label}
+          </span>
+        )}
+        <label className="chd-select-wrap">
+          <span className="chd-sr-only">Period</span>
+          <select
+            className="chd-select"
+            value={period}
+            onChange={(e) => setPeriod(e.target.value)}
+          >
+            {PERIOD_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          <ChevronDown size={14} className="chd-select-icon" aria-hidden />
+        </label>
+      </div>
+
       <div className="chd-grid chd-grid--health-trend">
         <section className="chd-card chd-card--health">
           <div className="chd-card-head">
             <div className="chd-card-head-left">
               <h3>Compliance Health</h3>
-            </div>
-            <div className="chd-filters">
-              {showSiteFilter && (
-                <label className="chd-select-wrap">
-                  <span className="chd-sr-only">Site</span>
-                  <select
-                    className="chd-select"
-                    value={selectedSite}
-                    disabled={siteSelectDisabled}
-                    onChange={(e) => setSelectedSite(e.target.value)}
-                  >
-                    {(isSiteScopedUser
-                      ? siteOptions.length > 1
-                      : isAdmin || siteOptions.length > 1) && (
-                      <option value="all">
-                        {isSiteScopedUser ? 'My Sites' : 'All Sites'}
-                      </option>
-                    )}
-                    {siteOptions.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown size={14} className="chd-select-icon" aria-hidden />
-                </label>
-              )}
-              {!showSiteFilter && isSiteScopedUser && siteOptions[0] && (
-                <span className="chd-site-lock" title="Site-scoped login">
-                  {siteOptions[0].label}
-                </span>
-              )}
-              <label className="chd-select-wrap">
-                <span className="chd-sr-only">Period</span>
-                <select
-                  className="chd-select"
-                  value={period}
-                  onChange={(e) => setPeriod(e.target.value)}
-                >
-                  {PERIOD_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown size={14} className="chd-select-icon" aria-hidden />
-              </label>
             </div>
           </div>
           <div className="chd-health-body">
@@ -1670,39 +2044,64 @@ export default function ComplianceHealthDashboard({ userRole, userEmail }) {
         </section>
       </div>
 
-      <div className="chd-grid chd-grid--location-industry">
-        <section className="chd-card chd-card--location">
-          <div className="chd-card-head">
-            <h3>Compliance by Location</h3>
-          </div>
-          <div className="chd-legend chd-legend--compact">
-            {locations.map((loc) => (
-              <span key={loc.state} className="chd-legend-item">
-                <span
-                  className="chd-dot"
-                  style={{ background: loc.color || mapColorForState(loc.state) }}
-                />
-                {loc.state}
-              </span>
-            ))}
-          </div>
-          <div className="chd-location-body">
-            <div className="chd-map-wrap">
-              <IndiaLocationMap locations={locations} />
+      <div
+        className={`chd-grid ${
+          showComplianceByLocation
+            ? 'chd-grid--location-industry'
+            : 'chd-grid--industry'
+        }`}
+      >
+        {showComplianceByLocation && (
+          <section className="chd-card chd-card--location">
+            <div className="chd-card-head">
+              <h3>Compliance by Location</h3>
             </div>
-            <LocationBars rows={locations} />
-          </div>
-        </section>
+            <div className="chd-legend chd-legend--compact">
+              {locations.map((loc) => (
+                <span key={loc.state} className="chd-legend-item">
+                  <span
+                    className="chd-dot"
+                    style={{ background: loc.color || mapColorForState(loc.state) }}
+                  />
+                  {loc.state}
+                </span>
+              ))}
+            </div>
+            <div className="chd-location-body">
+              <div className="chd-map-wrap">
+                <IndiaLocationMap locations={locations} />
+              </div>
+              <LocationBars rows={locations} />
+            </div>
+          </section>
+        )}
 
-        <section className="chd-card chd-card--industry">
+        <section
+          className={`chd-card chd-card--industry${
+            isSiteScopedUser ? ' chd-card--act' : ''
+          }`}
+        >
           <div className="chd-card-head">
-            <h3>Compliance by Industry</h3>
+            <h3>{isSiteScopedUser ? 'Compliance by Act' : 'Compliance by Industry'}</h3>
             <Link to={TRANSACTION_PAGE} className="chd-link">
               View All
             </Link>
           </div>
-          <StatusLegend order={INDUSTRY_STATUS_ORDER} square />
-          <IndustryBars series={industries} />
+          {isSiteScopedUser ? (
+            <>
+              <StatusLegend
+                order={ACT_CHART_STATUS_ORDER}
+                square
+                labels={ACT_CHART_LABELS}
+              />
+              <ActStackedBars series={acts} />
+            </>
+          ) : (
+            <>
+              <StatusLegend order={INDUSTRY_STATUS_ORDER} square />
+              <IndustryBars series={industries} />
+            </>
+          )}
         </section>
       </div>
     </div>

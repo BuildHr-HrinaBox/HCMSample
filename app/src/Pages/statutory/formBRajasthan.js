@@ -331,9 +331,19 @@ export function isFormBRajasthanContext(
 
 export function resolveFormBRajasthanTableHeaders(tableHeaders) {
   const parsed = Array.isArray(tableHeaders)
-    ? tableHeaders.map((h) => String(h || '').trim()).filter(Boolean)
+    ? tableHeaders.map((h) => String(h ?? '')).filter((h) => String(h).trim() !== '')
     : [];
-  return parsed.length > 0 ? parsed : [];
+  if (parsed.length === 0) return [];
+
+  // Keep duplicate captions addressable as separate object keys.
+  // Example: "Total" + "Total" → "Total" + "Total " so earnings Total (gross_pay)
+  // is not overwritten by deduction Total (gross_pay − net_pay).
+  const seen = new Map();
+  return parsed.map((header) => {
+    const count = seen.get(header) || 0;
+    seen.set(header, count + 1);
+    return count > 0 ? `${header}${' '.repeat(count)}` : header;
+  });
 }
 
 function parsePayrollNumber(value) {
@@ -628,31 +638,24 @@ export function remapFormBRajasthanRowsToHeaders(rows, sourceHeaders, targetHead
   if (!Array.isArray(rows)) return [];
   return rows.map((row, rowIndex) => {
     const out = {};
-    tgt.forEach((targetHeader) => {
+    tgt.forEach((targetHeader, colIdx) => {
       let val = '';
       if (row && typeof row === 'object') {
-        if (row[targetHeader] != null && String(row[targetHeader]).trim() !== '') {
-          val = String(row[targetHeader]).trim();
+        if (Object.prototype.hasOwnProperty.call(row, targetHeader)) {
+          val = row[targetHeader];
+        } else if (src[colIdx] && Object.prototype.hasOwnProperty.call(row, src[colIdx])) {
+          val = row[src[colIdx]];
         } else {
           val = getFormBRajasthanRowValueForHeader(row, targetHeader, rowIndex);
         }
       }
-      if (!val && src.length > 0) {
-        const bucket = formBRJHeaderAliasBucket(formBRajasthanHeaderNorm(targetHeader));
-        for (const [k, v] of Object.entries(row || {})) {
-          if (formBRJHeaderAliasBucket(formBRajasthanHeaderNorm(k)) === bucket) {
-            val = String(v ?? '').trim();
-            break;
-          }
-        }
-      }
       if (
-        !val &&
+        (val == null || String(val).trim() === '') &&
         formBRJHeaderAliasBucket(formBRajasthanHeaderNorm(targetHeader)) === 'sno'
       ) {
         val = String(rowIndex + 1);
       }
-      out[targetHeader] = val;
+      out[targetHeader] = val == null ? '' : val;
     });
     return out;
   });
@@ -834,9 +837,28 @@ export async function buildFormBRajasthanWorkbookWithTemplateStyles({
   rows.forEach((row, idx) => {
     const targetRow = worksheet.getRow(dataStartRow + idx);
     if (targetRow) targetRow.height = 18;
-    templateCols.forEach(({ col, bucket, label }) => {
-      let val = getFormBRajasthanRowValueForHeader(row, label, idx);
-      if ((val == null || val === '') && bucket) {
+    templateCols.forEach(({ col, bucket, label }, colIdx) => {
+      const uniqueLabel = normalizedHeaders[colIdx] || label;
+      let val = '';
+      if (Object.prototype.hasOwnProperty.call(row, uniqueLabel)) {
+        val = row[uniqueLabel];
+      } else if (Object.prototype.hasOwnProperty.call(row, label)) {
+        val = row[label];
+      } else {
+        val = getFormBRajasthanRowValueForHeader(row, uniqueLabel, idx);
+      }
+      if ((val == null || String(val).trim() === '') && bucket === 'deductionTotal') {
+        // Prefer the last plain-Total key (uniquified trailing spaces), not earnings Total.
+        const totalKeys = Object.keys(row || {}).filter((k) =>
+          isFormBRJPlainTotalHeader(k)
+        );
+        if (totalKeys.length >= 2) {
+          const lastKey = totalKeys[totalKeys.length - 1];
+          if (row[lastKey] != null && String(row[lastKey]).trim() !== '') {
+            val = row[lastKey];
+          }
+        }
+      } else if ((val == null || String(val).trim() === '') && bucket) {
         for (const [k, v] of Object.entries(row)) {
           if (
             formBRJHeaderAliasBucket(formBRajasthanHeaderNorm(k)) === bucket &&
@@ -848,9 +870,9 @@ export async function buildFormBRajasthanWorkbookWithTemplateStyles({
           }
         }
       }
-      if ((val == null || val === '') && bucket === 'sno') val = String(idx + 1);
+      if ((val == null || String(val).trim() === '') && bucket === 'sno') val = String(idx + 1);
       const cell = worksheet.getCell(dataStartRow + idx, col);
-      if (val == null || val === '') {
+      if (val == null || String(val).trim() === '') {
         cell.value = '';
         return;
       }

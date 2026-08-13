@@ -17,6 +17,7 @@ import {
   ChevronRight,
   MapPin,
   FileCheck,
+  SlidersHorizontal,
 } from 'lucide-react';
 import '../Pages/NewHome.css';
 import { fetchAllowedActCategoriesFromSites } from '../utils/siteInchargeScope';
@@ -133,6 +134,7 @@ const navigationItems = [
       { label: 'CLRA', path: '/rule-book/clra' },
     ],
   },
+  { type: 'item', icon: <SlidersHorizontal size={20} strokeWidth={2} />, label: 'Setup', path: '/setup', color: 'green' },
   { type: 'item', icon: <BarChart3 size={20} strokeWidth={2} />, label: 'Report', path: '/reports', color: 'blue' },
   { type: 'item', icon: <FileText size={20} strokeWidth={2} />, label: 'Returned Report', path: '/returned-report', color: 'blue' },
 ];

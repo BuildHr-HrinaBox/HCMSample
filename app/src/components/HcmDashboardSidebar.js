@@ -10,6 +10,7 @@ import {
   FileText,
   Download,
   Settings as SettingsIcon,
+  SlidersHorizontal,
 } from 'lucide-react';
 import '../Pages/newdashboard.css';
 import vayonaBrandLogo from './Yanona Logo.png';
@@ -77,6 +78,7 @@ const NAV = [
     children: HCM_FORM_FETCH_CHILDREN,
   },
   { type: 'link', id: 'calendar', label: 'Calendar', icon: Calendar, to: '/calendar-picker' },
+  { type: 'link', id: 'setup', label: 'Setup', icon: SlidersHorizontal, to: '/setup' },
   { type: 'link', id: 'settings', label: 'Settings', icon: SettingsIcon, to: '/settings' },
   { type: 'link', id: 'main-report', label: 'Reports', icon: FileText, to: '/mainreport' },
   { type: 'link', id: 'returned-report', label: 'Returned Report', icon: FileText, to: '/returned-report' },

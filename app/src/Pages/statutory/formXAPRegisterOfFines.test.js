@@ -80,6 +80,17 @@ describe('Form XIII Register of Workmen detection', () => {
     ).toBe(true);
   });
 
+  it('does not classify Rajasthan Form_14_RJ as Form XIII', () => {
+    expect(
+      isFormXIIIRegisterOfWorkmenContext(
+        { title: 'FORM XIII', subtitle: 'Register of Workmen' },
+        { state: 'Rajasthan', formName: 'Form 14_RJ' },
+        'Form_14_RJ_-_Rajasthan.xlsx',
+        'FORM XIII Register of Workmen Rule 22 - sub rule 1'
+      )
+    ).toBe(false);
+  });
+
   it('detects AP Form XIII from Rule 75 / workmen surname headers', () => {
     expect(
       isFormXIIIRegisterOfWorkmenContext(

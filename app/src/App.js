@@ -54,6 +54,7 @@ import Reports from './Pages/Reports';
 import Mainreport from './Pages/Mainreport';
 import ReturnedReport from './Pages/ReturnedReport';
 import Settings from './Pages/Settings';
+import Setup from './Pages/Setup';
 import AuditMasterImport from './Pages/AuditMasterImport';
 import Audit from './Pages/Audit';
 import AuditReport from './Pages/AuditReport';
@@ -415,6 +416,7 @@ function MainApp({ userRole, userEmail, userName }) {
   const isMainReportHcmShell = location.pathname === '/mainreport';
   const isReturnedReportHcmShell = location.pathname === '/returned-report';
   const isSettingsHcmShell = location.pathname === '/settings';
+  const isSetupHcmShell = location.pathname === '/setup';
   const isPeopleHcmShell = location.pathname === '/rule-book/people';
   const isAttendanceHcmShell = location.pathname === '/rule-book/attendance';
   const isLeaveHcmShell = location.pathname === '/rule-book/leave';
@@ -438,6 +440,7 @@ function MainApp({ userRole, userEmail, userName }) {
     isMainReportHcmShell ||
     isReturnedReportHcmShell ||
     isSettingsHcmShell ||
+    isSetupHcmShell ||
     isPeopleHcmShell ||
     isAttendanceHcmShell ||
     isLeaveHcmShell ||
@@ -503,7 +506,7 @@ function MainApp({ userRole, userEmail, userName }) {
               : isAuditOnlyUser
                 ? auditOnlyAllowedPaths
                 : isRestrictedUser 
-                  ? ['/', '/new-dashboard', '/hcm-dashboard', '/rule-book/company-details', '/rule-book/site-management', '/rule-book/se-master', '/rule-book/formmaster', '/rule-book/actsbulk', '/rule-book/act-descriptions', '/rule-book/regulationsbulk', '/rule-book/regulations', '/rule-book/statutory', '/rule-book/checklist', '/rule-book/checklistbulk', '/rule-book/people', '/rule-book/attendance', '/rule-book/leave', '/rule-book/newleave', '/rule-book/approved-leaves', '/rule-book/payroll', '/rule-book/sample-payroll', '/rule-book/clra', '/rule-book/todo-list', '/rule-book/calendarbulk', '/rule-book/statutory-master', '/rule-book/statutorymasterfactory', '/form-builder', '/calendar-picker', '/compliance', '/certificate', '/mainreport', '/returned-report', '/settings', '/assessments/assessment-report', '/assessments/vendor-view', '/assessments/face-sheets', '/assessments/category-score'] 
+                  ? ['/', '/new-dashboard', '/hcm-dashboard', '/rule-book/company-details', '/rule-book/site-management', '/rule-book/se-master', '/rule-book/formmaster', '/rule-book/actsbulk', '/rule-book/act-descriptions', '/rule-book/regulationsbulk', '/rule-book/regulations', '/rule-book/statutory', '/rule-book/checklist', '/rule-book/checklistbulk', '/rule-book/people', '/rule-book/attendance', '/rule-book/leave', '/rule-book/newleave', '/rule-book/approved-leaves', '/rule-book/payroll', '/rule-book/sample-payroll', '/rule-book/clra', '/rule-book/todo-list', '/rule-book/calendarbulk', '/rule-book/statutory-master', '/rule-book/statutorymasterfactory', '/form-builder', '/calendar-picker', '/compliance', '/certificate', '/mainreport', '/returned-report', '/settings', '/setup', '/assessments/assessment-report', '/assessments/vendor-view', '/assessments/face-sheets', '/assessments/category-score'] 
                   : ['*']
           }>
             <Routes>
@@ -828,6 +831,20 @@ function MainApp({ userRole, userEmail, userName }) {
                     userEmail={userEmail}
                   >
                     <Settings />
+                  </HcmDashboardPageShell>
+                }
+              />
+              <Route
+                path="/setup"
+                element={
+                  <HcmDashboardPageShell
+                    userName={userName || 'User'}
+                    userRole={userRole || 'App User'}
+                    userInitials={dashboardInitials}
+                    userEmail={userEmail}
+                    mainExtraClassName="nd-content--viewport-scroll"
+                  >
+                    <Setup userEmail={userEmail} />
                   </HcmDashboardPageShell>
                 }
               />

@@ -51,6 +51,9 @@ describe('Form XVIII MP Combined Register mappings', () => {
         'COMBINED MUSTER ROLL CUM REGISTER OF WAGES'
       )
     ).toBe(false);
+    expect(looksLikeKarnatakaFormTSheet('Form T_KA COMBINED MUSTER ROLL CUM REGISTER OF WAGES Karnataka')).toBe(
+      true
+    );
   });
 
   it('still detects Madhya Pradesh Form XVIII combined register', () => {

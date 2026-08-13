@@ -296,6 +296,7 @@ export function resolveFormXIVVariant(formHeader, rowItem, fileName, sheetText =
   }
   if (headersIndicateFormXIVGJTable(tableHeaders)) return 'gj';
   if (/entry\s+into\s+service/.test(parts) && /employment\s+card/.test(parts)) return 'gj';
+  if (isFormXIVKarnatakaContext(formHeader, rowItem, fileName, sheetText)) return 'ka';
   return 'mp';
 }
 
@@ -1531,6 +1532,40 @@ const FORM_XIV_RJ_HEADER_VALUE_COL = 3;
 /** MP / Karnataka stacked employment card — labels in A–D, values in column E. */
 const FORM_XIV_MP_STACKED_VALUE_COL = 5;
 const FORM_XIV_MP_STACKED_VALUE_COL_TO = 12;
+/** Karnataka Form XIV — official labels + dotted fill-in + value on one line. */
+const FORM_XIV_KA_VALUE_COL = 6;
+const FORM_XIV_KA_LABEL_COL = 2;
+const FORM_XIV_KA_TITLE_COL = 3;
+const FORM_XIV_KA_TITLE_MERGE_END = 5;
+const FORM_XIV_KA_LINE_MERGE_END = 8;
+const FORM_XIV_KA_DOT_LEADER = '.'.repeat(24);
+const FORM_XIV_KA_HEADER_OFFICIAL = [
+  {
+    match: /name\s+and\s+address\s+(?:of|if)\s+(?:the\s+)?contractor/i,
+    text: 'Name and address of contractor',
+  },
+  {
+    match: /establishment/i,
+    text: 'Name and address of Establishment in/under which contract is carried on :',
+  },
+  {
+    match: /nature\s+and\s+location\s+of\s+work|nature\s+of\s+work\s+and\s+location/i,
+    text: 'Nature and location of work:',
+  },
+  {
+    match: /principal\s+employer/i,
+    text: 'Name and address of Principal Employer:',
+  },
+];
+const FORM_XIV_KA_WORKMAN_OFFICIAL = [
+  '1 Name of the Workman',
+  '2 Serial No. in the Register of workmen employed',
+  '3 Nature of employment/Designation',
+  '4 Wage rate (with particulars of unit in case of piece-work)',
+  '5 Wage period',
+  '6 Tenure of employment',
+  '7 Remarks',
+];
 
 const detectFormXRajasthanWorksheetLayout = (worksheet, maxScanRow = 24) => {
   if (!worksheet) return false;
@@ -1959,8 +1994,480 @@ const findFormXIVValueColumnBesideLabel = (worksheet, row, labelCol, fallbackCol
   return Math.max(fallbackCol, skipUntil + 1);
 };
 
+/** Karnataka Form XIV — header labels in B, numbered workman lines in B or C (often with dots). */
+export function detectFormXIVKarnatakaWorksheetLayout(worksheet, maxScanRow = 28) {
+  if (!worksheet) return false;
+  let headerInB = 0;
+  let numberedWorkman = 0;
+  let dottedLeaders = 0;
+  let kaWording = 0;
+  let formXivTitle = false;
+  for (let r = 1; r <= maxScanRow; r += 1) {
+    const colA = formXIVMPExcelCellValueToString(worksheet.getCell(r, 1)?.value).trim();
+    const colB = formXIVMPExcelCellValueToString(worksheet.getCell(r, 2)?.value).trim();
+    const colC = formXIVMPExcelCellValueToString(worksheet.getCell(r, 3)?.value).trim();
+    const colD = formXIVMPExcelCellValueToString(worksheet.getCell(r, 4)?.value).trim();
+    if (/form\s*xiv/i.test(`${colB} ${colC} ${colD}`) || /employment\s+card/i.test(`${colB} ${colC} ${colD}`)) {
+      formXivTitle = true;
+    }
+    if (FORM_XIV_MP_HEADER_SPECS.some((spec) => spec.match.test(colB))) headerInB += 1;
+    if (/^\d+[\.\)]?$/.test(colA) && /\.{4,}/.test(colB)) numberedWorkman += 1;
+    [colB, colC].forEach((cell) => {
+      const ord = cell.match(/^(\d+)[\.\)]?\s+/);
+      if (ord && Number(ord[1]) >= 1 && Number(ord[1]) <= 7) {
+        numberedWorkman += 1;
+      }
+      if (/\.{4,}/.test(cell)) dottedLeaders += 1;
+    });
+    if (
+      /nature\s+and\s+location\s+of\s+work/i.test(colB) ||
+      /name\s+and\s+address\s+if\s+contractor/i.test(colB) ||
+      /serial\s+no\.?\s+in\s+the\s+register\s+of\s+workmen/i.test(`${colB} ${colC}`)
+    ) {
+      kaWording += 1;
+    }
+  }
+  return (
+    numberedWorkman >= 3 &&
+    (headerInB >= 2 || dottedLeaders >= 3 || kaWording >= 1 || formXivTitle)
+  );
+}
+
+const isFormXIVStackedVariant = (variant) => {
+  const v = String(variant || '').toLowerCase();
+  return v === 'mp' || v === 'ka';
+};
+
+export function isFormXIVKarnatakaExport(worksheet, parsedFormHeader = null) {
+  if (String(parsedFormHeader?.formXIVVariant || '').toLowerCase() === 'ka') return true;
+  return detectFormXIVKarnatakaWorksheetLayout(worksheet);
+}
+
+const resolveFormXIVStackedValueCol = (worksheet) =>
+  detectFormXIVKarnatakaWorksheetLayout(worksheet)
+    ? FORM_XIV_KA_VALUE_COL
+    : FORM_XIV_MP_STACKED_VALUE_COL;
+
+const unmergeFormXIVRange = (worksheet, r1, c1, r2, c2) => {
+  if (!worksheet) return;
+  // ExcelJS API is unMergeCells (camel-case M). unmergeCells is not a method.
+  try {
+    if (typeof worksheet.unMergeCells === 'function') {
+      worksheet.unMergeCells(r1, c1, r2, c2);
+    }
+  } catch (_err) {
+    /* ignore already-unmerged */
+  }
+  parseExcelJsMergeRanges(worksheet).forEach((m) => {
+    if (m.bottom < r1 || m.top > r2 || m.right < c1 || m.left > c2) return;
+    try {
+      if (typeof worksheet.unMergeCells === 'function') {
+        worksheet.unMergeCells(m.top, m.left, m.bottom, m.right);
+      } else if (typeof worksheet.unmergeCells === 'function') {
+        worksheet.unmergeCells(m.top, m.left, m.bottom, m.right);
+      }
+    } catch (_err) {
+      /* ignore already-unmerged */
+    }
+  });
+};
+
+const stripFormXIVKALeader = (text) =>
+  String(text || '')
+    .replace(/\s+\.{4,}.*$/u, '')
+    .replace(/[\s.·…_]+$/u, '')
+    .trim();
+
+const stripFormXIVKAOrdinal = (text) =>
+  String(text || '')
+    .replace(/^\d+[\.\)]?\s*/, '')
+    .trim();
+
+const formatFormXIVKAFilledLine = (label, value, withDots = true) => {
+  const clean = stripFormXIVKAOrdinal(stripFormXIVKALeader(label));
+  const val = String(value || '').trim();
+  if (!withDots) return val ? `${clean}  ${val}` : clean;
+  if (!val) return `${clean} ${FORM_XIV_KA_DOT_LEADER}`;
+  return `${clean} ${FORM_XIV_KA_DOT_LEADER} ${val}`;
+};
+
+const FORM_XIV_KA_BODY_FONT = {
+  name: 'Calibri',
+  size: 11,
+  bold: false,
+  italic: false,
+  underline: false,
+};
+
+const FORM_XIV_KA_BODY_ALIGNMENT = {
+  horizontal: 'left',
+  vertical: 'middle',
+  wrapText: false,
+  shrinkToFit: false,
+  indent: 0,
+  readingOrder: 'ltr',
+};
+
+const styleFormXIVKABodyCell = (cell) => {
+  if (!cell) return;
+  // Replace the whole style so ExcelJS does not keep the draft/template xf (bold + center).
+  cell.style = {
+    font: { ...FORM_XIV_KA_BODY_FONT },
+    alignment: { ...FORM_XIV_KA_BODY_ALIGNMENT },
+  };
+  cell.font = { ...FORM_XIV_KA_BODY_FONT };
+  cell.alignment = { ...FORM_XIV_KA_BODY_ALIGNMENT };
+};
+
+const styleFormXIVKABodyRow = (worksheet, row) => {
+  if (!worksheet || row < 1) return;
+  unmergeFormXIVRange(worksheet, row, 1, row, 16);
+  const excelRow = worksheet.getRow(row);
+  excelRow.font = { ...FORM_XIV_KA_BODY_FONT };
+  excelRow.alignment = { ...FORM_XIV_KA_BODY_ALIGNMENT };
+  for (let c = 1; c <= 8; c += 1) {
+    styleFormXIVKABodyCell(worksheet.getCell(row, c));
+  }
+};
+
+const extractFormXIVKAInlineValue = (raw, official = '') => {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const dotted = text.match(/\.{4,}\s+(.+)$/);
+  if (dotted) return String(dotted[1] || '').trim();
+
+  const officialBare = stripFormXIVKAOrdinal(String(official || '').replace(/:+\s*$/, '')).trim();
+  if (officialBare) {
+    const escaped = officialBare.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const afterOfficial = text
+      .replace(new RegExp(`^${escaped}\\s*:?\\s+`, 'i'), '')
+      .replace(/^[.\s]+/, '')
+      .trim();
+    if (afterOfficial && afterOfficial.toLowerCase() !== text.toLowerCase()) {
+      const officialNorm = officialBare.toLowerCase();
+      if (!(officialNorm.startsWith(afterOfficial.toLowerCase()) && afterOfficial.length < officialNorm.length)) {
+        return afterOfficial;
+      }
+    }
+  }
+
+  const twoSpace = text.match(/^.{12,}?\s{2,}(\S.*)$/);
+  if (twoSpace) {
+    const maybe = String(twoSpace[1] || '').replace(/^[.\s]+/, '').trim();
+    if (maybe && !FORM_XIV_KA_HEADER_OFFICIAL.some((spec) => spec.match.test(maybe))) {
+      return maybe;
+    }
+  }
+  return '';
+};
+
+const resolveFormXIVKAOfficialLabel = (raw) => {
+  const text = String(raw || '').trim();
+  if (!text) return { official: '', withDots: false };
+  const headerSpec = FORM_XIV_KA_HEADER_OFFICIAL.find(
+    (spec) => spec.match.test(text) || spec.match.test(formXIVMPHeaderNorm(text))
+  );
+  if (headerSpec) {
+    return { official: headerSpec.text, withDots: false };
+  }
+  const ordMatch = text.match(/^(\d+)[\.\)]?\s*/);
+  const ordinal = ordMatch ? Number(ordMatch[1]) : 0;
+  if (ordinal >= 1 && ordinal <= FORM_XIV_KA_WORKMAN_OFFICIAL.length) {
+    return {
+      official: FORM_XIV_KA_WORKMAN_OFFICIAL[ordinal - 1],
+      withDots: true,
+      ordinal,
+    };
+  }
+  const bare = stripFormXIVKAOrdinal(stripFormXIVKALeader(text)).toLowerCase();
+  const byBare = FORM_XIV_KA_WORKMAN_OFFICIAL.findIndex((label) => {
+    const officialBare = stripFormXIVKAOrdinal(label).toLowerCase();
+    return bare === officialBare || bare.startsWith(officialBare) || officialBare.startsWith(bare);
+  });
+  if (byBare >= 0 && bare.length >= 6) {
+    return {
+      official: FORM_XIV_KA_WORKMAN_OFFICIAL[byBare],
+      withDots: true,
+      ordinal: byBare + 1,
+    };
+  }
+  return { official: '', withDots: false, ordinal: 0 };
+};
+
+const findFormXIVKAHeaderLabelRows = (worksheet) => {
+  const rows = [];
+  if (!worksheet) return rows;
+  for (let r = 1; r <= 20 && rows.length < 4; r += 1) {
+    for (let c = 1; c <= 8; c += 1) {
+      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw || /^\d+[\.\)]?\s*/.test(raw)) continue;
+      if (/form\s*xiv|employment\s+card|see\s+rule\s*76|signature/i.test(raw)) continue;
+      const isHeader =
+        FORM_XIV_KA_HEADER_OFFICIAL.some(
+          (spec) => spec.match.test(raw) || spec.match.test(formXIVMPHeaderNorm(raw))
+        ) || /^(name|nature)\b/i.test(stripFormXIVKALeader(raw));
+      if (!isHeader) continue;
+      rows.push({ row: r, col: c, raw });
+      break;
+    }
+  }
+  return rows;
+};
+
+const isFormXIVMergeSlaveCell = (worksheet, row, col) => {
+  if (!worksheet || row < 1 || col < 1) return false;
+  return parseExcelJsMergeRanges(worksheet).some(
+    (m) =>
+      row >= m.top &&
+      row <= m.bottom &&
+      col >= m.left &&
+      col <= m.right &&
+      (row !== m.top || col !== m.left)
+  );
+};
+
+const mergeFormXIVKALabelLine = (worksheet, row, labelCol = FORM_XIV_KA_LABEL_COL) => {
+  if (!worksheet || row < 1 || labelCol < 1) return;
+  unmergeFormXIVRange(worksheet, row, 1, row, FORM_XIV_KA_LINE_MERGE_END);
+  if (labelCol >= FORM_XIV_KA_LINE_MERGE_END) return;
+  try {
+    worksheet.mergeCells(row, labelCol, row, FORM_XIV_KA_LINE_MERGE_END);
+  } catch (_err) {
+    /* ignore */
+  }
+};
+
+const writeFormXIVKASerialAndLabel = (worksheet, row, official, value, ordinal = 0, withDots = true) => {
+  unmergeFormXIVRange(worksheet, row, 1, row, 16);
+  for (let c = 1; c <= 8; c += 1) {
+    const other = formXIVMPExcelCellValueToString(worksheet.getCell(row, c)?.value).trim();
+    if (
+      /signature/i.test(other) ||
+      /^form\s*xiv/i.test(other) ||
+      /see\s+rule\s*76/i.test(other) ||
+      /^\s*employment\s+card\s*$/i.test(other)
+    ) {
+      continue;
+    }
+    worksheet.getCell(row, c).value = '';
+  }
+  if (ordinal >= 1) {
+    worksheet.getCell(row, 1).value = ordinal;
+  }
+  worksheet.getCell(row, FORM_XIV_KA_LABEL_COL).value = formatFormXIVKAFilledLine(
+    official,
+    value,
+    withDots
+  );
+  styleFormXIVKABodyRow(worksheet, row);
+};
+
+const writeFormXIVKAInlineOnLabelRow = (worksheet, row, labelCol, value, officialFallback = '') => {
+  if (!worksheet || row < 1 || labelCol < 1) return;
+  const raw = formXIVMPExcelCellValueToString(worksheet.getCell(row, labelCol)?.value).trim();
+  const resolved = resolveFormXIVKAOfficialLabel(raw || officialFallback);
+  const official = resolved.official || officialFallback || stripFormXIVKALeader(raw);
+  if (!official) return;
+  const ordinal =
+    resolved.ordinal ||
+    Number(String(officialFallback || official).match(/^(\d+)/)?.[1] || 0);
+  writeFormXIVKASerialAndLabel(worksheet, row, official, value, ordinal, ordinal >= 1);
+};
+
+const applyFormXIVKATitleAlignment = (worksheet) => {
+  const titleSpecs = [
+    { match: /^\s*form\s*xiv\s*$/i, bold: true, italic: false },
+    { match: /see\s+rule\s*76/i, bold: false, italic: true },
+    { match: /^\s*employment\s+card\s*$/i, bold: true, italic: false },
+  ];
+  titleSpecs.forEach((spec) => {
+    for (let r = 1; r <= 8; r += 1) {
+      for (let c = 1; c <= 8; c += 1) {
+        const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+        if (!raw || !spec.match.test(raw)) continue;
+        unmergeFormXIVRange(worksheet, r, 1, r, FORM_XIV_KA_VALUE_COL);
+        for (let clearCol = 1; clearCol <= FORM_XIV_KA_VALUE_COL; clearCol += 1) {
+          if (clearCol === FORM_XIV_KA_TITLE_COL) continue;
+          const other = formXIVMPExcelCellValueToString(
+            worksheet.getCell(r, clearCol)?.value
+          ).trim();
+          if (other && !spec.match.test(other) && clearCol !== c) continue;
+          worksheet.getCell(r, clearCol).value = '';
+        }
+        const titleCell = worksheet.getCell(r, FORM_XIV_KA_TITLE_COL);
+        titleCell.value = raw;
+        if (c !== FORM_XIV_KA_TITLE_COL) worksheet.getCell(r, c).value = '';
+        titleCell.style = {
+          font: {
+            name: 'Calibri',
+            size: 12,
+            bold: spec.bold,
+            italic: spec.italic,
+          },
+          alignment: {
+            horizontal: 'center',
+            vertical: 'middle',
+            wrapText: false,
+          },
+        };
+        titleCell.font = {
+          name: 'Calibri',
+          size: 12,
+          bold: spec.bold,
+          italic: spec.italic,
+        };
+        titleCell.alignment = {
+          horizontal: 'center',
+          vertical: 'middle',
+          wrapText: false,
+        };
+        try {
+          worksheet.mergeCells(r, FORM_XIV_KA_TITLE_COL, r, FORM_XIV_KA_TITLE_MERGE_END);
+        } catch (_err) {
+          /* ignore */
+        }
+        return;
+      }
+    }
+  });
+};
+
+const applyFormXIVKASignatureAlignment = (worksheet) => {
+  for (let r = 16; r <= 32; r += 1) {
+    for (let c = 1; c <= 12; c += 1) {
+      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!/signature\s+of\s+contractor/i.test(raw)) continue;
+      if (c !== FORM_XIV_KA_VALUE_COL) {
+        worksheet.getCell(r, FORM_XIV_KA_VALUE_COL).value = raw;
+        worksheet.getCell(r, c).value = '';
+      }
+      worksheet.getCell(r, FORM_XIV_KA_VALUE_COL).alignment = {
+        horizontal: 'center',
+        vertical: 'top',
+        wrapText: false,
+      };
+      const prevRaw = formXIVMPExcelCellValueToString(
+        worksheet.getCell(r - 1, c)?.value
+      ).trim();
+      const prevIsLeader =
+        isFormXIVPlaceholderCell(prevRaw) || /^\.{5,}/.test(prevRaw) || /^_{5,}/.test(prevRaw);
+      if (prevIsLeader) {
+        if (c !== FORM_XIV_KA_VALUE_COL) {
+          worksheet.getCell(r - 1, FORM_XIV_KA_VALUE_COL).value = prevRaw || '.'.repeat(28);
+          worksheet.getCell(r - 1, c).value = '';
+        }
+        worksheet.getCell(r - 1, FORM_XIV_KA_VALUE_COL).alignment = {
+          horizontal: 'center',
+          vertical: 'bottom',
+          wrapText: false,
+        };
+      }
+      return;
+    }
+  }
+};
+
+const applyFormXIVKAFilledLineToRow = (worksheet, row, labelCol, official, withDots, ordinal = 0) => {
+  if (!worksheet || row < 1 || !official) return;
+  unmergeFormXIVRange(worksheet, row, 1, row, 16);
+  let movedValue = '';
+  for (let c = 1; c <= 8; c += 1) {
+    const raw = formXIVMPExcelCellValueToString(worksheet.getCell(row, c)?.value).trim();
+    if (!raw) continue;
+    if (/^\d+[\.\)]?$/.test(raw)) continue;
+    if (/signature/i.test(raw) || /^form\s*xiv/i.test(raw) || /employment\s+card/i.test(raw)) continue;
+    if (isFormXIVPlaceholderCell(raw)) continue;
+    const extracted = extractFormXIVKAInlineValue(raw, official);
+    if (extracted) {
+      movedValue = extracted;
+      continue;
+    }
+    if (isFormXIVLabelContinuationCell(raw) || resolveFormXIVKAOfficialLabel(raw).official) continue;
+    movedValue = raw;
+  }
+  const resolvedOrdinal =
+    ordinal ||
+    Number(String(official).match(/^(\d+)/)?.[1] || 0);
+  writeFormXIVKASerialAndLabel(
+    worksheet,
+    row,
+    official,
+    movedValue,
+    resolvedOrdinal,
+    resolvedOrdinal >= 1
+  );
+  const excelRow = worksheet.getRow(row);
+  excelRow.height = Math.max(Number(excelRow.height) || 0, 18);
+};
+
+/** Restore official KA labels on one line and place values on the dotted fill-in. */
+const ensureFormXIVKarnatakaColumnAlignment = (worksheet) => {
+  if (!worksheet) return;
+  const minWidths = {
+    1: 4,
+    2: 42,
+    3: 14,
+    4: 14,
+    5: 14,
+    6: 18,
+    7: 10,
+    8: 10,
+  };
+  Object.entries(minWidths).forEach(([col, minW]) => {
+    const column = worksheet.getColumn(Number(col));
+    const current = Number(column.width) || 0;
+    if (current < minW) column.width = minW;
+  });
+
+  const headerRows = findFormXIVKAHeaderLabelRows(worksheet);
+  headerRows.forEach((pos, index) => {
+    const official = FORM_XIV_KA_HEADER_OFFICIAL[index]?.text;
+    if (!official) return;
+    applyFormXIVKAFilledLineToRow(worksheet, pos.row, FORM_XIV_KA_LABEL_COL, official, true, 0);
+  });
+
+  for (let r = 1; r <= 32; r += 1) {
+    if (headerRows.some((pos) => pos.row === r)) continue;
+    let official = '';
+    let ordinal = 0;
+    for (let c = 1; c <= 4; c += 1) {
+      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      const resolved = resolveFormXIVKAOfficialLabel(raw);
+      if (!resolved.official) continue;
+      official = resolved.official;
+      ordinal = resolved.ordinal || Number(String(raw).match(/^(\d+)/)?.[1] || 0);
+      break;
+    }
+    if (!official) continue;
+    applyFormXIVKAFilledLineToRow(worksheet, r, FORM_XIV_KA_LABEL_COL, official, true, ordinal);
+  }
+
+  applyFormXIVKASignatureAlignment(worksheet);
+  for (let r = 5; r <= 20; r += 1) {
+    let skipTitle = false;
+    for (let c = 1; c <= 8; c += 1) {
+      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (/^\s*form\s*xiv\s*$/i.test(raw) || /^\s*employment\s+card\s*$/i.test(raw) || /see\s+rule\s*76/i.test(raw)) {
+        skipTitle = true;
+        break;
+      }
+    }
+    if (skipTitle) continue;
+    const label = formXIVMPExcelCellValueToString(
+      worksheet.getCell(r, FORM_XIV_KA_LABEL_COL)?.value
+    ).trim();
+    const serial = formXIVMPExcelCellValueToString(worksheet.getCell(r, 1)?.value).trim();
+    if (!label && !serial) continue;
+    styleFormXIVKABodyRow(worksheet, r);
+  }
+  // Titles last so body left-align cannot pull FORM XIV / Employment Card back to column B.
+  applyFormXIVKATitleAlignment(worksheet);
+};
+
 export const detectFormXIVStackedWorkmanLayout = (worksheet, maxScanRow = 45) => {
   if (!worksheet) return false;
+  if (detectFormXIVKarnatakaWorksheetLayout(worksheet, maxScanRow)) return true;
   let numberedLabelHits = 0;
   let splitOrdinalHits = 0;
   for (let r = 1; r <= maxScanRow; r += 1) {
@@ -1982,10 +2489,12 @@ export const detectFormXIVStackedWorkmanLayout = (worksheet, maxScanRow = 45) =>
   for (let r = 1; r <= maxScanRow; r += 1) {
     const labelA = formXIVMPExcelCellValueToString(worksheet.getCell(r, 1)?.value).trim();
     const labelB = formXIVMPExcelCellValueToString(worksheet.getCell(r, 2)?.value).trim();
+    const labelC = formXIVMPExcelCellValueToString(worksheet.getCell(r, 3)?.value).trim();
     const combinedInA = /^1[\.\)]\s*/.test(labelA) && /workman/i.test(labelA);
     const splitRow1 = /^1[\.\)]?$/.test(labelA) && /workman/i.test(labelB);
     const combinedInB = /^1[\.\)]\s*/.test(labelB) && /workman/i.test(labelB);
-    if (!combinedInA && !splitRow1 && !combinedInB) continue;
+    const combinedInC = /^1[\.\)]\s*/.test(labelC) && /workman/i.test(labelC);
+    if (!combinedInA && !splitRow1 && !combinedInB && !combinedInC) continue;
 
     const colE = formXIVMPExcelCellValueToString(
       worksheet.getCell(r, FORM_XIV_MP_STACKED_VALUE_COL)?.value
@@ -2004,8 +2513,13 @@ export const detectFormXIVStackedWorkmanLayout = (worksheet, maxScanRow = 45) =>
 };
 
 /** Keep stacked Employment Card label/value columns readable after ExcelJS rewrite. */
-const ensureFormXIVStackedColumnAlignment = (worksheet) => {
-  if (!worksheet || !detectFormXIVStackedWorkmanLayout(worksheet)) return;
+const ensureFormXIVStackedColumnAlignment = (worksheet, parsedFormHeader = null) => {
+  if (!worksheet) return;
+  if (isFormXIVKarnatakaExport(worksheet, parsedFormHeader)) {
+    ensureFormXIVKarnatakaColumnAlignment(worksheet);
+    return;
+  }
+  if (!detectFormXIVStackedWorkmanLayout(worksheet)) return;
   const minWidths = {
     1: 5,
     2: 28,
@@ -2026,9 +2540,13 @@ const ensureFormXIVStackedColumnAlignment = (worksheet) => {
       const cell = worksheet.getCell(r, c);
       const text = formXIVMPExcelCellValueToString(cell.value).trim();
       if (!text) continue;
+      const isLabel =
+        isFormXIVLabelContinuationCell(text) ||
+        /^\d+[\.\)]\s*/.test(text) ||
+        FORM_XIV_MP_HEADER_SPECS.some((spec) => spec.match.test(text));
       const nextAlign = {
         ...(cell.alignment || {}),
-        wrapText: true,
+        wrapText: !isLabel,
         vertical: 'top',
         shrinkToFit: false,
       };
@@ -2089,7 +2607,7 @@ const resolveFormXIVMPWorkmanValueColumn = (worksheet, maxScanRow = 45, workmanS
   }
 
   if (detectFormXIVStackedWorkmanLayout(worksheet, maxScanRow)) {
-    return FORM_XIV_MP_STACKED_VALUE_COL;
+    return resolveFormXIVStackedValueCol(worksheet);
   }
 
   for (let r = 1; r <= maxScanRow; r += 1) {
@@ -2149,9 +2667,10 @@ const clearFormXIVMPStackedWorkmanValueBand = (
   workmanSpecs = FORM_XIV_MP_WORKMAN_FIELD_SPECS
 ) => {
   if (!worksheet) return;
+  const valueFrom = resolveFormXIVStackedValueCol(worksheet);
   for (let r = fromRow; r <= toRow; r += 1) {
     for (let c = FORM_XIV_GJ_DEFAULT_VALUE_COL; c <= FORM_XIV_MP_STACKED_VALUE_COL_TO; c += 1) {
-      if (c >= FORM_XIV_MP_STACKED_VALUE_COL) {
+      if (c >= valueFrom) {
         worksheet.getCell(r, c).value = '';
         continue;
       }
@@ -2504,9 +3023,15 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
     variant === 'gj' ? FORM_XIV_GJ_WORKMAN_FIELD_SPECS : FORM_XIV_MP_WORKMAN_FIELD_SPECS;
   const gjBoxedLayout = variant === 'gj';
   const rjBoxedLayout = variant === 'rj' || detectFormXRajasthanWorksheetLayout(worksheet);
-  const stackedLayout = !gjBoxedLayout && !rjBoxedLayout && detectFormXIVStackedWorkmanLayout(worksheet);
+  // MP/KA Employment Card is always stacked label|value (KA values in F, MP in E).
+  const stackedLayout =
+    !gjBoxedLayout &&
+    !rjBoxedLayout &&
+    (isFormXIVStackedVariant(variant) || detectFormXIVStackedWorkmanLayout(worksheet));
+  const kaLayout = isFormXIVKarnatakaExport(worksheet, parsedFormHeader);
+  const stackedValueCol = resolveFormXIVStackedValueCol(worksheet);
   const defaultValueCol = stackedLayout
-    ? FORM_XIV_MP_STACKED_VALUE_COL
+    ? stackedValueCol
     : rjBoxedLayout
       ? FORM_XIV_RJ_HEADER_VALUE_COL
       : resolveFormXIVMPWorkmanValueColumn(worksheet, 45, workmanSpecs);
@@ -2555,9 +3080,14 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
       writeFormXIVRJBoxedHeaderValue(worksheet, excelRow, labelCol, value);
       return;
     }
-    // Stacked MP/KA cards: labels occupy A–D (often merged); values must stay in column E.
+    // Karnataka: keep label + dotted fill-in + value on the same line.
+    if (kaLayout) {
+      writeFormXIVKAInlineOnLabelRow(worksheet, excelRow, labelCol, value);
+      return;
+    }
+    // Stacked MP cards: labels occupy A–D; values stay in column E.
     if (stackedLayout) {
-      writeAt(excelRow, FORM_XIV_MP_STACKED_VALUE_COL, value);
+      writeAt(excelRow, stackedValueCol, value);
       return;
     }
     const targetCol =
@@ -2587,9 +3117,13 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
         writeFormXIVRJBoxedHeaderValue(worksheet, labelExcelRow, labelExcelCol, val);
         return;
       }
+      if (kaLayout) {
+        writeFormXIVKAInlineOnLabelRow(worksheet, labelExcelRow, labelExcelCol, val);
+        return;
+      }
       if (stackedLayout) {
         const targetRow = (parsedField?.valueRow ?? parsedField?.labelRow ?? labelExcelRow - 1) + 1;
-        writeAt(targetRow, FORM_XIV_MP_STACKED_VALUE_COL, val);
+        writeAt(targetRow, stackedValueCol, val);
         return;
       }
       const targetRow = (parsedField.valueRow ?? parsedField.labelRow) + 1;
@@ -2615,12 +3149,26 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
         return;
       }
     }
+    if (kaLayout) {
+      const specIndex = FORM_XIV_MP_HEADER_SPECS.findIndex((item) => item.key === spec.key);
+      const headerRows = findFormXIVKAHeaderLabelRows(worksheet);
+      const pos = specIndex >= 0 ? headerRows[specIndex] : null;
+      if (pos) {
+        writeFormXIVKAInlineOnLabelRow(
+          worksheet,
+          pos.row,
+          pos.col,
+          val,
+          FORM_XIV_KA_HEADER_OFFICIAL[specIndex]?.text || ''
+        );
+      }
+    }
   });
   if (gjBoxedLayout) {
     restoreFormXIVGJHeaderLabels(worksheet, gjHeaderLabelSnapshots, parsedFields);
   }
-  if (stackedLayout) {
-    ensureFormXIVStackedColumnAlignment(worksheet);
+  if (stackedLayout || kaLayout) {
+    ensureFormXIVStackedColumnAlignment(worksheet, parsedFormHeader);
   }
 }
 
@@ -2628,13 +3176,21 @@ export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers) {
   const hdrs = resolveFormXIVMPTableHeaders(headers);
   const workmanSpecs = resolveFormXIVWorkmanFieldSpecsFromHeaders(hdrs);
   const variant = resolveFormXIVMPWorkmanVariantFromSpecs(workmanSpecs);
-  const stackedLayout = variant === 'mp' && detectFormXIVStackedWorkmanLayout(worksheet);
-  const valueCol = resolveFormXIVMPWorkmanValueColumn(worksheet, 45, workmanSpecs);
+  // MP/KA cards always use stacked value columns (E for MP, F for Karnataka).
+  const stackedLayout =
+    isFormXIVStackedVariant(variant) &&
+    (detectFormXIVStackedWorkmanLayout(worksheet) || !detectFormXRajasthanWorksheetLayout(worksheet));
+  const kaInline = isFormXIVKarnatakaExport(worksheet);
+  const stackedValueCol = resolveFormXIVStackedValueCol(worksheet);
+  const valueCol = stackedLayout
+    ? stackedValueCol
+    : resolveFormXIVMPWorkmanValueColumn(worksheet, 45, workmanSpecs);
   const positions = [];
   const filled = new Set();
 
   const resolveTargetCol = (r, c) => {
-    if (stackedLayout) return FORM_XIV_MP_STACKED_VALUE_COL;
+    if (kaInline) return c;
+    if (stackedLayout) return stackedValueCol;
     if (variant === 'gj') {
       return findGJWorkmanValueMergeOnRow(worksheet, r, c).col;
     }
@@ -2659,6 +3215,7 @@ export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers) {
 
   for (let r = 1; r <= 45; r += 1) {
     for (let c = 1; c <= 12; c += 1) {
+      if (isFormXIVMergeSlaveCell(worksheet, r, c)) continue;
       const cellStr = readFormXIVMPLabelWithContinuation(worksheet, r, c);
       if (!cellStr) continue;
       const ordinalMatch = cellStr.match(/^(\d+)[\.\)]?\s*/);
@@ -2666,6 +3223,7 @@ export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers) {
       for (let si = 0; si < workmanSpecs.length; si += 1) {
         const spec = workmanSpecs[si];
         if (filled.has(si)) continue;
+        if (ordinal && ordinal !== si + 1) continue;
         if (!looksLikeFormXIVMPWorkmanLabelCell(cellStr, spec, ordinal || si + 1)) continue;
         const headerKey = hdrs.find((h) => spec.rowTest(h)) || hdrs[si];
         let targetRow = r;
@@ -2682,7 +3240,13 @@ export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers) {
             targetCol = thisRowCol;
           }
         }
-        positions.push({ headerKey, row: targetRow, col: targetCol, labelCol: c });
+        positions.push({
+          headerKey,
+          row: targetRow,
+          col: targetCol,
+          labelCol: c,
+          officialLabel: FORM_XIV_KA_WORKMAN_OFFICIAL[(ordinal || si + 1) - 1] || '',
+        });
         filled.add(si);
         break;
       }
@@ -2696,6 +3260,7 @@ export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers) {
     for (let r = 1; r <= 45; r += 1) {
       let matched = false;
       for (let c = 1; c <= 12; c += 1) {
+        if (isFormXIVMergeSlaveCell(worksheet, r, c)) continue;
         const cellStr = readFormXIVMPLabelWithContinuation(worksheet, r, c);
         if (!cellStr || !new RegExp(`^${ordinal}[\\.\\)\\s]`, 'i').test(cellStr)) continue;
         if (!looksLikeFormXIVMPWorkmanLabelCell(cellStr, spec, ordinal) && !spec.rowTest(cellStr)) continue;
@@ -2708,16 +3273,21 @@ export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers) {
       if (matched) break;
     }
   }
-  return { valueCol, positions, workmanSpecs, stackedLayout, variant };
+  return { valueCol, positions, workmanSpecs, stackedLayout, variant, kaInline };
 }
 
 export function clearFormXIVMPWorkmanFieldPositions(worksheet, positions, options = {}) {
   if (!worksheet || !Array.isArray(positions)) return;
   const variant = options.variant || 'mp';
+  const kaInline = options.kaInline || detectFormXIVKarnatakaWorksheetLayout(worksheet);
   positions.forEach(({ row, col, labelCol }) => {
     if (row < 1 || col < 1) return;
     if (variant === 'gj') {
       clearFormXIVGJWorkmanValueBand(worksheet, row, labelCol ?? 1);
+      return;
+    }
+    if (kaInline) {
+      // Label + dotted value share one merged line; clearing slaves would wipe the label.
       return;
     }
     worksheet.getCell(row, col).value = '';
@@ -2727,7 +3297,8 @@ export function clearFormXIVMPWorkmanFieldPositions(worksheet, positions, option
 export function writeFormXIVMPWorkmanFieldsViaPositions(worksheet, row, positions, options = {}) {
   if (!worksheet || !row || typeof row !== 'object' || !Array.isArray(positions)) return;
   const variant = options.variant || 'mp';
-  positions.forEach(({ headerKey, row: targetRow, col, labelCol }) => {
+  const kaInline = options.kaInline || detectFormXIVKarnatakaWorksheetLayout(worksheet);
+  positions.forEach(({ headerKey, row: targetRow, col, labelCol, officialLabel }) => {
     const value = getFormXIVMPRowValueForHeader(row, headerKey);
     let writeRow = targetRow;
     let writeCol = col;
@@ -2738,6 +3309,16 @@ export function writeFormXIVMPWorkmanFieldsViaPositions(worksheet, row, position
       const merged = resolveGJMergeTopLeft(worksheet, targetRow, col);
       writeRow = merged.row;
       writeCol = merged.col;
+    }
+    if (kaInline) {
+      writeFormXIVKAInlineOnLabelRow(
+        worksheet,
+        writeRow,
+        labelCol || writeCol,
+        value,
+        officialLabel
+      );
+      return;
     }
     if (value === '') {
       worksheet.getCell(writeRow, writeCol).value = '';
@@ -2765,6 +3346,8 @@ export function writeFormXIVMPWorkmanFieldsToWorksheet(worksheet, row, headers, 
       layout.positions.forEach(({ row, labelCol }) => {
         if (row >= 1) clearFormXIVGJWorkmanValueBand(worksheet, row, labelCol ?? 1);
       });
+    } else if (layout.kaInline) {
+      // Label + dotted value stay in the same cell; do not wipe the merged line.
     } else if (layout.stackedLayout) {
       clearFormXIVMPStackedWorkmanValueBand(worksheet, 12, 45, workmanSpecs);
     } else {
@@ -2773,12 +3356,14 @@ export function writeFormXIVMPWorkmanFieldsToWorksheet(worksheet, row, headers, 
   } else {
     clearFormXIVMPWorkmanFieldPositions(worksheet, layout.positions, {
       variant: layout.variant || 'mp',
+      kaInline: layout.kaInline,
     });
   }
   writeFormXIVMPWorkmanFieldsViaPositions(worksheet, row, layout.positions, {
     variant: layout.variant || 'mp',
+    kaInline: layout.kaInline,
   });
-  if (layout.stackedLayout) {
+  if (layout.stackedLayout || layout.kaInline) {
     ensureFormXIVStackedColumnAlignment(worksheet);
   }
 }
@@ -2865,7 +3450,11 @@ export async function buildFormXIVMPWorkbookWithTemplateStyles({
     isFormXRajasthanEmploymentCardContext(parsedFormHeader, rowItem, formFileName, sheetText);
   const parsedFormHeaderWithVariant = {
     ...(parsedFormHeader || {}),
-    formXIVVariant: isRajasthanTableLayout ? 'rj' : parsedFormHeader?.formXIVVariant || resolvedVariant,
+    formXIVVariant: isRajasthanTableLayout
+      ? 'rj'
+      : resolvedVariant === 'ka'
+        ? 'ka'
+        : parsedFormHeader?.formXIVVariant || resolvedVariant,
   };
 
   const isolatedBuffer = await isolateFormXIVEmploymentCardTemplateBuffer(templateArrayBuffer, {
@@ -2905,7 +3494,7 @@ export async function buildFormXIVMPWorkbookWithTemplateStyles({
       writeFormXIVMPWorkmanFieldsToWorksheet(worksheet, employeeRow, hdrs);
     }
   }
-  ensureFormXIVStackedColumnAlignment(worksheet);
+  ensureFormXIVStackedColumnAlignment(worksheet, parsedFormHeaderWithVariant);
 
   const out = await workbook.xlsx.writeBuffer();
   const fileName =
@@ -2992,7 +3581,11 @@ async function prepareFormXIVMPFastZipTemplate({
     isFormXRajasthanEmploymentCardContext(parsedFormHeader, rowItem, formFileName, sheetText);
   const parsedFormHeaderWithVariant = {
     ...(parsedFormHeader || {}),
-    formXIVVariant: isRajasthanTableLayout ? 'rj' : parsedFormHeader?.formXIVVariant || resolvedVariant,
+    formXIVVariant: isRajasthanTableLayout
+      ? 'rj'
+      : resolvedVariant === 'ka'
+        ? 'ka'
+        : parsedFormHeader?.formXIVVariant || resolvedVariant,
   };
 
   const isolatedBuffer = await isolateFormXIVEmploymentCardTemplateBuffer(templateArrayBuffer, {
@@ -3041,15 +3634,22 @@ async function prepareFormXIVMPFastZipTemplate({
         workmanLayout.variant === 'gj'
           ? resolveGJMergeTopLeft(worksheet, pos.row, pos.col)
           : { row: pos.row, col: pos.col };
+      const labelCol = pos.labelCol || writePos.col;
+      const labelRaw = formXIVMPExcelCellValueToString(
+        worksheet.getCell(writePos.row, labelCol)?.value
+      );
+      const resolved = resolveFormXIVKAOfficialLabel(labelRaw);
       return {
         ...pos,
         row: writePos.row,
         col: writePos.col,
         cellRef: formXIVMPToCellRef(writePos.row, writePos.col),
+        kaInline: !!workmanLayout.kaInline,
+        inlineLabel: resolved.official || stripFormXIVKALeader(labelRaw),
       };
     });
   }
-  ensureFormXIVStackedColumnAlignment(worksheet);
+  ensureFormXIVStackedColumnAlignment(worksheet, parsedFormHeaderWithVariant);
   const preparedBuffer = await workbook.xlsx.writeBuffer();
   const templateZip = await JSZip.loadAsync(preparedBuffer);
   const sheetEntry = resolveFormXIVMPWorksheetEntry(templateZip.files);
@@ -3115,7 +3715,11 @@ export async function buildFormXIVMPPerEmployeeDownload({
     isFormXRajasthanEmploymentCardContext(parsedFormHeader, rowItem, formFileName, sheetText);
   const parsedFormHeaderWithVariant = {
     ...(parsedFormHeader || {}),
-    formXIVVariant: isRajasthanTableLayout ? 'rj' : parsedFormHeader?.formXIVVariant || resolvedVariant,
+    formXIVVariant: isRajasthanTableLayout
+      ? 'rj'
+      : resolvedVariant === 'ka'
+        ? 'ka'
+        : parsedFormHeader?.formXIVVariant || resolvedVariant,
   };
   const exportRows = (Array.isArray(mappedData) ? mappedData : []).filter((row) =>
     rowHasMeaningfulFormXIVMPExportData(row, hdrs)
@@ -3197,10 +3801,14 @@ export async function buildFormXIVMPPerEmployeeDownload({
           let sheetXml = baseSheetXml;
           for (let pi = 0; pi < positions.length; pi += 1) {
             const pos = positions[pi];
+            const rawValue = getFormXIVMPRowValueForHeader(exportRow, pos.headerKey);
+            const injectValue = pos.kaInline
+              ? formatFormXIVKAFilledLine(pos.inlineLabel || '', rawValue, true)
+              : rawValue;
             sheetXml = formXIVMPUpsertInlineStrCell(
               sheetXml,
               pos.cellRef,
-              getFormXIVMPRowValueForHeader(exportRow, pos.headerKey),
+              injectValue,
               { preserveStyle: true }
             );
           }

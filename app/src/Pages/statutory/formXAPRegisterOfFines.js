@@ -319,12 +319,22 @@ export function isFormXIIIRegisterOfWorkmenContext(
   sheetText = '',
   tableHeaders = null
 ) {
-  const parts = [
+  // Row identity (form name / file) wins over sheet body — Form_14_RJ must not open as XIII.
+  const identityBlob = [
     rowItem?.formName,
     rowItem?.FormName,
     rowItem?.description,
     rowItem?.Description,
+    rowItem?.formFileName,
+    rowItem?.FormFileName,
     fileName,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+
+  const parts = [
+    identityBlob,
     formHeader?.title,
     formHeader?.subtitle,
     formHeader?.reference,
@@ -341,6 +351,13 @@ export function isFormXIIIRegisterOfWorkmenContext(
     /tamil\s*nadu|tamilnadu/i.test(parts) &&
     (/form[\s._-]*(?:i|1)(?:[\s._-]|$)/i.test(parts) ||
       /conferment\s+of\s+permanent\s+status/i.test(parts))
+  ) {
+    return false;
+  }
+  // Rajasthan Shops Forms 11/12/14/15 — never CLRA Form XIII (even if sheet text is wrong).
+  if (
+    /form[\s._-]*1[1245][\s._-]*rj|\bform_1[1245]_rj\b|\b1[1245]_rj\b/.test(identityBlob) ||
+    /record\s+of\s+(?:the\s+)?hours\s+of\s+work/.test(identityBlob)
   ) {
     return false;
   }

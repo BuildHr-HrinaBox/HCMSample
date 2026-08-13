@@ -4,6 +4,7 @@ import {
   clearExcelJSTrailingTableCells,
   countExcelJSTemplateBodyRows,
   ensureExcelJSDataRowsWithBorders,
+  resetExcelJsWorkbookActiveSheet,
 } from '../../utils/excelTableBorders';
 import { yieldToMain } from '../../utils/statutoryAutofillCache';
 import {
@@ -119,10 +120,39 @@ export function isFormTSEKarnatakaDeductionTotalHeader(header, allHeaders = []) 
   return false;
 }
 
-/** Earned-wages Total (col 25) — never the Deductions-band "Total" before Net Amount Payable. */
+/**
+ * Component leaves under "Earned wages and other allowances" — never the band Total / gross_pay cell.
+ */
+export function isFormTSEKarnatakaEarnedWageComponentHeader(header) {
+  const s = formTSEEmployeeHeaderKeyNorm(header);
+  if (!s) return false;
+  if (s.includes('payable') && s.includes('day')) return true;
+  if (s === 'basic' || (/\bbasic\b/.test(s) && !s.includes('total'))) return true;
+  if (/\bda\b/.test(s) || s.includes('vda') || s.includes('dearness')) return true;
+  if (/\bhra\b/.test(s)) return true;
+  if (s.includes('conveyance') || s.includes('conv')) return true;
+  if (s.includes('medical') && s.includes('allow')) return true;
+  if (s.includes('attendance') && s.includes('bonus')) return true;
+  if (s.includes('special') && s.includes('allow')) return true;
+  if (s === 'ot' || (/\bot\b/.test(s) && !s.includes('total') && !s.includes('hour'))) return true;
+  if (s.includes('nfh')) return true;
+  if (s.includes('maternity')) return true;
+  if (s.includes('subsist')) return true;
+  if (
+    (s === 'others' || s === 'other' || (s.includes('other') && s.includes('earn'))) &&
+    !s.includes('deduction') &&
+    !s.includes('allowance')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Earned-wages Total (col 25) ← gross_pay — never the Deductions-band "Total" before Net Amount Payable. */
 export function isFormTSEKarnatakaEarningsTotalHeader(header, allHeaders = []) {
   if (isFormTSEKarnatakaDeductionTotalHeader(header, allHeaders)) return false;
   if (isFormTSEKarnatakaNetAmountPayableHeader(header)) return false;
+  if (isFormTSEKarnatakaEarnedWageComponentHeader(header)) return false;
   const s = formTSEEmployeeHeaderKeyNorm(header);
   if (!s) return false;
   // Do not use s.includes('ot') — "total" contains the letters "ot".
@@ -138,6 +168,15 @@ export function isFormTSEKarnatakaEarningsTotalHeader(header, allHeaders = []) {
   const raw = String(header || '');
   // Statutory column 25 is the earned-wages total band.
   if (/\(\s*25\s*\)/i.test(raw)) return true;
+  // Parent banner leaked as a leaf, or "Earned wages / Earnings Total" label.
+  if (
+    s === 'earned wages and other allowances' ||
+    (s.includes('earned') && s.includes('allowance')) ||
+    (s.includes('earned') && s.includes('total')) ||
+    (s.includes('earning') && s.includes('total'))
+  ) {
+    return true;
+  }
   // Bare "Total" only when it is not the deductions Total (checked above).
   return s === 'total';
 }
@@ -538,14 +577,14 @@ export function formTSEDownloadHasSubstantiveRows(rows, headers = []) {
     if (nameHeaders.length > 0) {
       const hasName = nameHeaders.some((h) => {
         const v = String(getFormTSEKarnatakaRowValueForHeader(row, h) ?? '').trim();
-        return v && /[a-zA-Z]{2,}/.test(v) && !/^\d+$/.test(v);
+        return looksLikeFormTSEEmployeeNameCell(v);
       });
       if (hasName) return true;
     } else {
       const vals = Object.values(row)
         .map((v) => String(v ?? '').trim())
         .filter(Boolean);
-      if (vals.some((v) => /[a-zA-Z]{3,}/.test(v) && !/^\d+$/.test(v))) return true;
+      if (vals.some((v) => looksLikeFormTSEEmployeeNameCell(v))) return true;
     }
   }
   return false;
@@ -1033,7 +1072,8 @@ export function expandFormTSEHeaderValueBoxes(
     };
     const wsRow = worksheet.getRow(row);
     if (wsRow) {
-      const needed = text.length > 100 ? 40 : text.length > 50 ? 30 : 20;
+      // Long establishment / employer addresses need taller header boxes.
+      const needed = text.length > 160 ? 55 : text.length > 100 ? 42 : text.length > 50 ? 32 : 22;
       wsRow.height = Math.max(Number(wsRow.height) || 0, needed);
     }
   });
@@ -1213,6 +1253,7 @@ function columnHasAttendanceBanner(mainRow, endRow, col, getMergedAwareCellText)
 function pickEmployeeColumnHeader(mainRow, col, getMergedAwareCellText, readRaw) {
   const t = normCell(readRaw(mainRow, col) || getMergedAwareCellText(mainRow, col));
   if (!t || /^\d+$/.test(t)) return '';
+  if (isFormTWageParentBannerText(t)) return '';
   if (/attendance/i.test(t) && t.length > 10) return '';
   return t;
 }
@@ -1241,18 +1282,21 @@ function pickFormTWageColumnHeader(topRow, leafRow, col, getMergedAwareCellText,
 }
 
 function findFormTWageLeafRow(mainRow, scanEnd, startCol, maxCol, getMergedAwareCellText, readRaw, indexRow) {
+  const leafHitRe =
+    /basic|hra|payable|conveyance|medical|allowance|overtime|\bot\b|da\/vda|\bvda\b|special|nfh|maternity|subsist|attendance\s*bonus|net\s*amount|mode\s*of\s*payment|\bfines?\b|damage|salary\s*adv/;
+  const scoreLeafRow = (r) => {
+    let hits = 0;
+    for (let c = startCol; c < maxCol; c += 1) {
+      const raw = normCell(readRaw(r, c) || getMergedAwareCellText(r, c));
+      if (!raw || isFormTWageParentBannerText(raw)) continue;
+      if (leafHitRe.test(raw.toLowerCase())) hits += 1;
+    }
+    return hits;
+  };
   if (indexRow > mainRow) {
     const aboveIndex = indexRow - 1;
     if (aboveIndex >= mainRow) {
-      let hits = 0;
-      for (let c = startCol; c < maxCol; c += 1) {
-        const t = normCell(readRaw(aboveIndex, c) || getMergedAwareCellText(aboveIndex, c)).toLowerCase();
-        if (
-          /basic|hra|payable|conveyance|medical|allowance|overtime|\bot\b|da\/vda|\bvda\b/.test(t)
-        ) {
-          hits += 1;
-        }
-      }
+      const hits = scoreLeafRow(aboveIndex);
       if (hits >= 2) return aboveIndex;
     }
   }
@@ -1260,15 +1304,7 @@ function findFormTWageLeafRow(mainRow, scanEnd, startCol, maxCol, getMergedAware
   let bestHits = 0;
   for (let r = mainRow; r <= scanEnd; r += 1) {
     if (r === indexRow) continue;
-    let hits = 0;
-    for (let c = startCol; c < maxCol; c += 1) {
-      const t = normCell(readRaw(r, c) || getMergedAwareCellText(r, c)).toLowerCase();
-      if (
-        /basic|hra|payable|conveyance|medical|allowance|overtime|\bot\b|da\/vda|\bvda\b/.test(t)
-      ) {
-        hits += 1;
-      }
-    }
+    const hits = scoreLeafRow(r);
     if (hits > bestHits) {
       bestHits = hits;
       bestRow = r;
@@ -1582,7 +1618,7 @@ export function inferFormTSEWageGroupLabelFromHeader(header) {
     return 'Deductions';
   }
   if (
-    /^basic$|da\/vda|\bhra\b|conveyance|medical allowance|attendance bonus|special allowance|^ot$/.test(
+    /^basic$|da\/vda|\bhra\b|conveyance|medical allowance|attendance bonus|special allowance|^ot$|\bnfh\b|maternity|subsistence|^others?$|^total$|earned wages|earnings?\s*total/.test(
       h
     )
   ) {
@@ -1619,7 +1655,8 @@ export function rebuildFormTSETableHeadersFromSheet({
       mainRow + 12
     )
   );
-  const maxCol = Math.max(Number(effectiveSheetCols) || 0, tableStartCol + 55);
+  // Form T: A–I identity + 31 attendance days + wage/deduction cols (~11–38) ≈ 70+ columns.
+  const maxCol = Math.max(Number(effectiveSheetCols) || 0, tableStartCol + 80, 80);
 
   let startCol = Math.max(0, Number(tableStartCol) || 0);
   for (let c = 0; c < Math.min(maxCol, 14); c += 1) {
@@ -1652,6 +1689,21 @@ export function rebuildFormTSETableHeadersFromSheet({
 
   const dataStartRow = Math.max(mainRow, indexRow, bestDayRow) + 1;
 
+  const columnHasHeaderSignal = (col) => {
+    if (columnHasAttendanceBanner(mainRow, scanEnd, col, getMergedAwareCellText)) return true;
+    if (pickFormTWageColumnHeader(mainRow, wageLeafRow, col, getMergedAwareCellText, readRaw)) {
+      return true;
+    }
+    if (pickEmployeeColumnHeader(mainRow, col, getMergedAwareCellText, readRaw)) return true;
+    if (indexRow >= 0) {
+      const statCol = parseStatutoryColumnNumber(
+        readRaw(indexRow, col) || getMergedAwareCellText(indexRow, col)
+      );
+      if (statCol > 0) return true;
+    }
+    return false;
+  };
+
   const headers = [];
   for (let c = startCol; c < maxCol; c += 1) {
     let header = '';
@@ -1671,17 +1723,23 @@ export function rebuildFormTSETableHeadersFromSheet({
     if (!header) {
       header = pickEmployeeColumnHeader(mainRow, c, getMergedAwareCellText, readRaw);
     }
-    if (header && indexRow >= 0 && !/^ATTENDANCE_\d{1,2}$/i.test(header)) {
-      const statCol = parseStatutoryColumnNumber(
+    let statCol = 0;
+    if (indexRow >= 0 && !/^ATTENDANCE_\d{1,2}$/i.test(header)) {
+      statCol = parseStatutoryColumnNumber(
         readRaw(indexRow, c) || getMergedAwareCellText(indexRow, c)
       );
-      if (statCol > 0) header = appendFormTStatutoryColumnSuffix(header, statCol);
+      if (header && statCol > 0) header = appendFormTStatutoryColumnSuffix(header, statCol);
+    }
+    // Keep wage/deduction columns even when the leaf label cell is empty under a merge —
+    // statutory index row (11…38) is enough to reserve the column.
+    if (!header && statCol > 0) {
+      header = `Column ${statCol} (${statCol})`;
     }
     const hasSample = rowHasSampleData(jsonData, c, dataStartRow, dataStartRow + 15);
     if (!header && !hasSample && headers.length > 0) {
       let anyMore = false;
-      for (let cc = c; cc < Math.min(c + 10, maxCol); cc += 1) {
-        if (rowHasSampleData(jsonData, cc, dataStartRow, dataStartRow + 10)) {
+      for (let cc = c; cc < Math.min(c + 16, maxCol); cc += 1) {
+        if (rowHasSampleData(jsonData, cc, dataStartRow, dataStartRow + 10) || columnHasHeaderSignal(cc)) {
           anyMore = true;
           break;
         }
@@ -1698,7 +1756,7 @@ export function rebuildFormTSETableHeadersFromSheet({
     (h) => normCell(h) && !isFormTSEAttendanceDayHeader(h)
   ).length;
   const hasWageColumnMarkers = headers.some((h) =>
-    /\(\s*1[1-9]\s*\)/.test(String(h || ''))
+    /\(\s*1[1-9]\s*\)|\(\s*2[0-9]\s*\)|\(\s*3[0-8]\s*\)/.test(String(h || ''))
   );
   if (headers.length < 4 || employeeCols < 2) return null;
   if (attendanceCols < 3 && bestDayHits < 3 && !hasWageColumnMarkers) return null;
@@ -1910,9 +1968,25 @@ export function repairFormTSETableHeadersFromWorkbook(workbook, parsed = {}) {
   };
 
   const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  let mergeMaxCol = 0;
+  merges.forEach((m) => {
+    if (m?.e?.c != null) mergeMaxCol = Math.max(mergeMaxCol, Number(m.e.c) + 1);
+  });
+  const ref = ws['!ref'];
+  let refCols = 0;
+  if (ref) {
+    try {
+      const range = XLSX.utils.decode_range(ref);
+      refCols = (range.e.c || 0) + 1;
+    } catch (_) {
+      refCols = 0;
+    }
+  }
   const effectiveSheetCols = Math.max(
     ...(jsonData || []).map((row) => (Array.isArray(row) ? row.length : 0)),
-    32
+    mergeMaxCol,
+    refCols,
+    80
   );
   const headerRowIndex =
     parsed.originalHeaderRowIndex ?? parsed.headerRowIndex ?? -1;
@@ -1950,15 +2024,41 @@ export const FORM_T_KA_IDENTITY_START_COL0 = 0;
 export const FORM_T_KA_ATTENDANCE_START_COL0 = 9; // column J
 
 function formTSEExcelJsCellText(worksheet, r, c) {
-  const v = worksheet?.getCell(r, c)?.value;
-  if (v == null) return '';
-  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v).trim();
-  if (typeof v === 'object') {
-    if (Array.isArray(v.richText)) return v.richText.map((rt) => rt?.text || '').join('').trim();
-    if (v.text != null) return String(v.text).trim();
-    if (v.result != null) return String(v.result).trim();
+  const cell = worksheet?.getCell(r, c);
+  if (!cell) return '';
+  const v = cell.value;
+  if (v != null) {
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v).trim();
+    if (typeof v === 'object') {
+      if (Array.isArray(v.richText)) return v.richText.map((rt) => rt?.text || '').join('').trim();
+      if (v.text != null) return String(v.text).trim();
+      if (v.result != null) return String(v.result).trim();
+    }
   }
-  return String(v).trim();
+  if (typeof cell.text === 'string' && cell.text.trim() && cell.text !== '[object Object]') {
+    return cell.text.trim();
+  }
+  return '';
+}
+
+function formTSERowLooksLikeConsecutiveNumberStrip(worksheet, r, startCol, count = 8) {
+  let ok = 0;
+  for (let i = 0; i < count; i += 1) {
+    const v = formTSEExcelJsCellText(worksheet, r, startCol + i);
+    if (String(v).trim() === String(i + 1)) ok += 1;
+  }
+  return ok >= 6;
+}
+
+/** Last Save auto-download workbook. Survives Statutory remounts in the same page session. */
+let rememberedFormTSELastExport = null;
+
+export function rememberFormTSELastExport(snapshot) {
+  if (snapshot) rememberedFormTSELastExport = snapshot;
+}
+
+export function getRememberedFormTSELastExport() {
+  return rememberedFormTSELastExport;
 }
 
 /** True for a real employee name — not header labels that can bleed into data rows via merges. */
@@ -1966,7 +2066,7 @@ export function looksLikeFormTSEEmployeeNameCell(text) {
   const t = String(text || '').trim();
   if (t.length < 2 || !/[a-zA-Z]{2,}/.test(t)) return false;
   if (
-    /name\s+of\s+employee|employee\s*name|father|husband|designation|department|date\s+of\s+joining|wages\s+fixed|attendance|s\.?\s*no|sl\.?\s*no|serial|gender|male\s*\/\s*female|esi\s*no|uan\s*no|minimum\s+wages|contract\s+labour|migrant\s+workmen/i.test(
+    /name\s+of\s+employee|employee\s*name|father|husband|designation|department|date\s+of\s+joining|wages\s+fixed|attendance|s\.?\s*no|sl\.?\s*no|serial|gender|male\s*\/\s*female|esi\s*no|uan\s*no|minimum\s+wages|contract\s+labour|migrant\s+workmen|establishment|employer|address\s+of|month\s*\/?\s*year|karnataka|payment\s+of\s+wages|see\s+rule|combined\s+muster|name\s+of\s+the/i.test(
       t
     )
   ) {
@@ -1977,6 +2077,13 @@ export function looksLikeFormTSEEmployeeNameCell(text) {
 
 function formTSERowLooksIdentityShiftedToJ(worksheet, r) {
   const shift = FORM_T_KA_ATTENDANCE_START_COL0;
+  // Day-number / column-index strips (1,2,3…) are not employee rows.
+  if (
+    formTSERowLooksLikeConsecutiveNumberStrip(worksheet, r, shift + 1) ||
+    formTSERowLooksLikeConsecutiveNumberStrip(worksheet, r, 1)
+  ) {
+    return false;
+  }
   const nameB = formTSEExcelJsCellText(worksheet, r, 2);
   const nameK = formTSEExcelJsCellText(worksheet, r, shift + 2);
   const serialJ = formTSEExcelJsCellText(worksheet, r, shift + 1);
@@ -1987,7 +2094,6 @@ function formTSERowLooksIdentityShiftedToJ(worksheet, r) {
   const personAtK = looksLikeFormTSEEmployeeNameCell(nameK);
   const personAtB = looksLikeFormTSEEmployeeNameCell(nameB);
   if (personAtK && !personAtB) return true;
-  // Serial + Male/Female under J–M while A–D empty/header-only.
   if (
     /^\d{1,4}$/.test(serialJ) &&
     !/^\d{1,4}$/.test(serialA) &&
@@ -1999,7 +2105,7 @@ function formTSERowLooksIdentityShiftedToJ(worksheet, r) {
   if (
     /^\d{1,4}$/.test(serialJ) &&
     !personAtB &&
-    (personAtK || /^(male|female)$/i.test(genderM) || (fatherL && fatherL.length <= 40))
+    (personAtK || /^(male|female)$/i.test(genderM) || looksLikeFormTSEEmployeeNameCell(fatherL))
   ) {
     return true;
   }
@@ -2042,22 +2148,96 @@ function clearFormTSEExcelJsDataRowBand(worksheet, rowFrom, rowTo, colThrough = 
 function unmergeFormTSEWorksheetRows(worksheet, rowFrom, rowTo) {
   const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
   if (merges.length === 0) return;
+  const keep = [];
   for (let mi = 0; mi < merges.length; mi += 1) {
     const ref = String(merges[mi] || '');
     const parts = ref.split(':');
-    if (parts.length !== 2) continue;
+    if (parts.length !== 2) {
+      keep.push(merges[mi]);
+      continue;
+    }
     try {
       const tl = worksheet.getCell(parts[0]);
       const br = worksheet.getCell(parts[1]);
-      if (!tl || !br) continue;
-      if (br.row < rowFrom || tl.row > rowTo) continue;
-      // Keep title/header merges above the employee block; only break merges that touch data rows.
-      if (tl.row < rowFrom && br.row < rowFrom) continue;
-      worksheet.unMergeCells(ref);
+      if (!tl || !br) {
+        keep.push(merges[mi]);
+        continue;
+      }
+      if (br.row < rowFrom || tl.row > rowTo) {
+        keep.push(merges[mi]);
+        continue;
+      }
+      if (tl.row < rowFrom && br.row < rowFrom) {
+        keep.push(merges[mi]);
+        continue;
+      }
+      try {
+        worksheet.unMergeCells(ref);
+      } catch (_) {
+        /* drop the merge from the model below */
+      }
     } catch (_) {
-      /* ignore bad merge refs */
+      keep.push(merges[mi]);
     }
   }
+  if (worksheet.model) worksheet.model.merges = keep;
+}
+
+/** Move S.NO/Name from J–R onto A–I when a write dumped identity under attendance. */
+export function shiftFormTSEWorksheetIdentityFromJToA(worksheet) {
+  if (!worksheet) return 0;
+  const shift = FORM_T_KA_ATTENDANCE_START_COL0;
+  const maxCol = Math.max(worksheet.columnCount || 0, 80);
+  let headerRow = 0;
+  const rowTo = Math.max(120, Number(worksheet.rowCount) || 0);
+  for (let r = 1; r <= Math.min(40, rowTo); r += 1) {
+    const b = formTSEExcelJsCellText(worksheet, r, 2);
+    const a = formTSEExcelJsCellText(worksheet, r, 1);
+    if (/name\s+of\s+employee/i.test(b) || (/s\.?\s*no/i.test(a) && /name/i.test(b))) {
+      headerRow = r;
+      break;
+    }
+  }
+  const dataRowFrom = headerRow > 0 ? Math.max(headerRow + 2, 14) : 14;
+  unmergeFormTSEWorksheetRows(worksheet, dataRowFrom, rowTo);
+  let shiftedRows = 0;
+  for (let r = dataRowFrom; r <= rowTo; r += 1) {
+    if (formTSERowHasDuplicateIdentityUnderJ(worksheet, r)) {
+      for (let c = shift + 1; c <= shift + 9; c += 1) {
+        const v = formTSEExcelJsCellText(worksheet, r, c);
+        if (/^(P|A|WO|H|L|CL|EL|SL|OD|WOP)$/i.test(v)) continue;
+        worksheet.getCell(r, c).value = null;
+      }
+      shiftedRows += 1;
+      continue;
+    }
+    if (!formTSERowLooksIdentityShiftedToJ(worksheet, r)) {
+      if (shiftedRows > 0) {
+        const serialA = formTSEExcelJsCellText(worksheet, r, 1);
+        const nameB = formTSEExcelJsCellText(worksheet, r, 2);
+        const serialJ = formTSEExcelJsCellText(worksheet, r, shift + 1);
+        const nameK = formTSEExcelJsCellText(worksheet, r, shift + 2);
+        if (!serialA && !nameB && !serialJ && !nameK) break;
+      }
+      continue;
+    }
+    const snapshot = [];
+    for (let c = 1; c <= maxCol + shift; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      snapshot[c] = { value: cell.value, numFmt: cell.numFmt };
+    }
+    for (let c = 1; c <= maxCol; c += 1) {
+      const src = snapshot[c + shift];
+      const cell = worksheet.getCell(r, c);
+      cell.value = src && src.value !== undefined ? src.value : null;
+      if (src?.numFmt) cell.numFmt = src.numFmt;
+    }
+    for (let c = maxCol + 1; c <= maxCol + shift; c += 1) {
+      worksheet.getCell(r, c).value = null;
+    }
+    shiftedRows += 1;
+  }
+  return shiftedRows;
 }
 
 /**
@@ -2073,14 +2253,34 @@ export async function formTSEWorkbookHasIdentityInColumnA(arrayBuffer) {
     if (!worksheet) return false;
     let sawAligned = false;
     let sawShifted = false;
-    for (let r = 15; r <= 60; r += 1) {
-      if (formTSERowLooksIdentityShiftedToJ(worksheet, r)) {
-        sawShifted = true;
+    const rowTo = Math.max(120, Number(worksheet.rowCount) || 0);
+    // Ignore Month/Year / Establishment header boxes. Only count names under the table header.
+    let headerRow = 0;
+    for (let r = 1; r <= Math.min(40, rowTo); r += 1) {
+      const a = formTSEExcelJsCellText(worksheet, r, 1);
+      const b = formTSEExcelJsCellText(worksheet, r, 2);
+      if (
+        /name\s+of\s+employee/i.test(b) ||
+        (/s\.?\s*no/i.test(a) && /name/i.test(b))
+      ) {
+        headerRow = r;
         break;
+      }
+    }
+    const scanFrom = headerRow > 0 ? headerRow + 1 : 4;
+    for (let r = scanFrom; r <= rowTo; r += 1) {
+      if (formTSERowLooksIdentityShiftedToJ(worksheet, r)) {
+        if (!sawAligned) {
+          sawShifted = true;
+          break;
+        }
+        continue;
       }
       const nameB = formTSEExcelJsCellText(worksheet, r, 2);
       const serialA = formTSEExcelJsCellText(worksheet, r, 1);
-      if (looksLikeFormTSEEmployeeNameCell(nameB) || (/^\d{1,4}$/.test(serialA) && looksLikeFormTSEEmployeeNameCell(nameB))) {
+      if (looksLikeFormTSEEmployeeNameCell(nameB)) {
+        sawAligned = true;
+      } else if (/^\d{1,4}$/.test(serialA) && looksLikeFormTSEEmployeeNameCell(nameB)) {
         sawAligned = true;
       }
     }
@@ -2089,6 +2289,59 @@ export async function formTSEWorkbookHasIdentityInColumnA(arrayBuffer) {
   } catch (_) {
     return false;
   }
+}
+
+/**
+ * Form T_KA templates often freeze at column J (attendance) with topLeftCell J15,
+ * so Excel opens scrolled to day 1 instead of S.NO. Always open at column A.
+ */
+export function resetFormTSEWorksheetOpenAtColumnA(worksheet) {
+  if (!worksheet) return;
+  for (let c = 1; c <= 9; c += 1) {
+    const col = worksheet.getColumn(c);
+    col.hidden = false;
+    const width = Number(col.width);
+    if (!Number.isFinite(width) || width < 4) {
+      col.width = c === 2 ? 24 : 14;
+    }
+  }
+  worksheet.views = [
+    {
+      state: 'normal',
+      xSplit: 0,
+      ySplit: 0,
+      topLeftCell: 'A1',
+      activeCell: 'A1',
+      showGridLines: true,
+      zoomScale: 100,
+      zoomScaleNormal: 100,
+      workbookViewId: 0,
+    },
+  ];
+}
+
+/** Load a Form T workbook, open the view at A1, and return new bytes. */
+export async function applyFormTSEWorkbookOpenAtColumnA(arrayBuffer) {
+  if (!arrayBuffer || arrayBuffer.byteLength < 32) return arrayBuffer;
+  try {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(arrayBuffer);
+    (workbook.worksheets || []).forEach((ws) => resetFormTSEWorksheetOpenAtColumnA(ws));
+    resetExcelJsWorkbookActiveSheet(workbook);
+    return workbook.xlsx.writeBuffer();
+  } catch (_) {
+    return arrayBuffer;
+  }
+}
+
+/**
+ * Shift J-dumped identity back to A–I when needed, then open the sheet at column A.
+ */
+export async function prepareFormTSEWorkbookForDownload(arrayBuffer) {
+  if (!arrayBuffer || arrayBuffer.byteLength < 32) return arrayBuffer;
+  // Always run J→A repair. A false "already aligned" check was leaving names under J.
+  const repaired = await repairFormTSEWorkbookColumnAlignment(arrayBuffer);
+  return applyFormTSEWorkbookOpenAtColumnA(repaired);
 }
 
 /**
@@ -2101,63 +2354,19 @@ export async function repairFormTSEWorkbookColumnAlignment(arrayBuffer) {
   try {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(arrayBuffer);
-    const worksheet = workbook.worksheets[0];
-    if (!worksheet) return arrayBuffer;
-
-    const shift = FORM_T_KA_ATTENDANCE_START_COL0; // 9
-    const maxCol = Math.max(worksheet.columnCount || 0, 80);
+    const sheets = workbook.worksheets || [];
+    if (sheets.length === 0) return arrayBuffer;
     let shiftedRows = 0;
-    const dataRowFrom = 15;
-    const dataRowTo = 250;
-
-    // Merges across A–I / J+ hide shifted values after copy — break them on data rows first.
-    unmergeFormTSEWorksheetRows(worksheet, dataRowFrom, dataRowTo);
-
-    for (let r = dataRowFrom; r <= dataRowTo; r += 1) {
-      const nameB = formTSEExcelJsCellText(worksheet, r, 2);
-      const nameK = formTSEExcelJsCellText(worksheet, r, shift + 2);
-      const serialJ = formTSEExcelJsCellText(worksheet, r, shift + 1);
-      const serialA = formTSEExcelJsCellText(worksheet, r, 1);
-
-      // Already correct in A–I but leftover identity dump under attendance — clear J–R only.
-      if (formTSERowHasDuplicateIdentityUnderJ(worksheet, r)) {
-        for (let c = shift + 1; c <= shift + 9; c += 1) {
-          const v = formTSEExcelJsCellText(worksheet, r, c);
-          if (/^(P|A|WO|H|L|CL|EL|SL|OD|WOP)$/i.test(v)) continue;
-          worksheet.getCell(r, c).value = null;
-        }
-        shiftedRows += 1;
-        continue;
-      }
-
-      if (!formTSERowLooksIdentityShiftedToJ(worksheet, r)) {
-        if (shiftedRows > 0 && !serialA && !nameB && !serialJ && !nameK) break;
-        continue;
-      }
-
-      const snapshot = [];
-      for (let c = 1; c <= maxCol + shift; c += 1) {
-        const cell = worksheet.getCell(r, c);
-        snapshot[c] = {
-          value: cell.value,
-          numFmt: cell.numFmt,
-        };
-      }
-      for (let c = 1; c <= maxCol; c += 1) {
-        const src = snapshot[c + shift];
-        const cell = worksheet.getCell(r, c);
-        cell.value = src && src.value !== undefined ? src.value : null;
-        if (src?.numFmt) cell.numFmt = src.numFmt;
-      }
-      for (let c = maxCol + 1; c <= maxCol + shift; c += 1) {
-        worksheet.getCell(r, c).value = null;
-      }
-      shiftedRows += 1;
+    sheets.forEach((worksheet) => {
+      shiftedRows += shiftFormTSEWorksheetIdentityFromJToA(worksheet);
+      resetFormTSEWorksheetOpenAtColumnA(worksheet);
+    });
+    resetExcelJsWorkbookActiveSheet(workbook);
+    if (shiftedRows === 0) {
+      // Still rewrite so view/unhide changes persist even when rows were already aligned.
+      return workbook.xlsx.writeBuffer();
     }
-
-    if (shiftedRows === 0) return arrayBuffer;
-    const out = await workbook.xlsx.writeBuffer();
-    return out;
+    return workbook.xlsx.writeBuffer();
   } catch (err) {
     console.warn('Form T column alignment repair failed:', err);
     return arrayBuffer;
@@ -2267,6 +2476,85 @@ export function resolveFormTSEWriteExcelCols0(writeHeaders, options = {}) {
   });
 }
 
+/**
+ * Prefer the ORIGINAL template header order for download column positions.
+ * Modal headers (possibly truncated) supply values; template headers supply layout.
+ */
+export function resolveFormTSEDownloadWriteHeaders(inputHeaders, templateHeaders) {
+  const input = (Array.isArray(inputHeaders) ? inputHeaders : []).filter((h) => String(h || '').trim());
+  const template = (Array.isArray(templateHeaders) ? templateHeaders : []).filter((h) =>
+    String(h || '').trim()
+  );
+  const hasIdentity = (hdrs) =>
+    (Array.isArray(hdrs) ? hdrs : []).some(
+      (h) => isFormTSESerialNumberHeader(h) || isFormTSEEmployeeNameHeader(h)
+    );
+  const attCount = (hdrs) => listFormTSEAttendanceDayHeaders(hdrs).length;
+  // Use the fuller original template layout when it has identity + a real attendance band.
+  if (
+    template.length >= 4 &&
+    hasIdentity(template) &&
+    attCount(template) >= 3 &&
+    (template.length >= input.length || !hasIdentity(input) || attCount(input) < 3)
+  ) {
+    return template;
+  }
+  if (hasIdentity(input)) return input;
+  if (hasIdentity(template)) return template;
+  return input.length >= 4 ? input : template;
+}
+
+/** Keep UAN / ESI as plain text so Excel does not show 1.01E+11. */
+export function formatFormTSERegistrationIdForExcel(value) {
+  if (value == null || value === '') return '';
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.round(value).toLocaleString('en-US', {
+      useGrouping: false,
+      maximumFractionDigits: 0,
+    });
+  }
+  let s = String(value).trim();
+  if (!s) return '';
+  if (/^\d+(\.\d+)?e[+\-]?\d+$/i.test(s)) {
+    const n = Number(s);
+    if (Number.isFinite(n)) {
+      return Math.round(n).toLocaleString('en-US', {
+        useGrouping: false,
+        maximumFractionDigits: 0,
+      });
+    }
+  }
+  return s.replace(/\.0+$/, '');
+}
+
+/**
+ * Map modal/autofill row values onto original template headers by label (never by
+ * column index — attendance-first modal order must not dump "P" into S.NO).
+ */
+export function alignFormTSERowsToTemplateHeaders(rows, fromHeaders, toHeaders) {
+  const from = Array.isArray(fromHeaders) ? fromHeaders : [];
+  const to = Array.isArray(toHeaders) ? toHeaders : [];
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    const out = { ...row };
+    to.forEach((toH) => {
+      if (!toH) return;
+      const existing = getFormTSEKarnatakaRowValueForHeader(row, toH);
+      if (existing != null && String(existing).trim() !== '') {
+        out[toH] = existing;
+        return;
+      }
+      const target = formTSEEmployeeHeaderKeyNorm(toH);
+      if (!target) return;
+      const fromH = from.find((h) => formTSEEmployeeHeaderKeyNorm(h) === target);
+      if (!fromH) return;
+      const v = row[fromH];
+      if (v != null && String(v).trim() !== '') out[toH] = v;
+    });
+    return out;
+  });
+}
+
 /** Write Form T grid rows into the template at exact column positions (ExcelJS, 1-based). */
 export async function buildFormTSEWorkbookWithTemplateStyles({
   templateArrayBuffer,
@@ -2281,6 +2569,7 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   formFileName,
   currentItem = null,
   sheetNameHint = '',
+  employees = [],
 }) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateArrayBuffer);
@@ -2335,7 +2624,8 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
     50,
     worksheet.rowCount + 5
   );
-  const maxScanCols = Math.max(worksheet.columnCount + 5, 55);
+  // Full Form T (identity + 31 days + wage/deduction band) needs ~70+ columns.
+  const maxScanCols = Math.max(worksheet.columnCount + 5, 80);
   const jsonData = [];
   for (let r = 1; r <= maxScanRows; r += 1) {
     const row = [];
@@ -2395,15 +2685,13 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
       (h) => isFormTSESerialNumberHeader(h) || isFormTSEEmployeeNameHeader(h)
     );
 
-  // Prefer modal headers when they include S.NO/Name. Rebuilt sheet headers can
-  // accidentally start at the ATTENDANCE band — that mapped employee values into col J+.
-  const writeHeaders = headersHaveIdentity(inputHeaders)
-    ? inputHeaders
-    : headersHaveIdentity(effectiveHeaders)
-      ? effectiveHeaders
-      : inputHeaders.length >= 4
-        ? inputHeaders
-        : effectiveHeaders;
+  // Prefer ORIGINAL template column layout so download values fit the sheet
+  // (modal headers can be truncated after Medical Allowance).
+  let writeHeaders = resolveFormTSEDownloadWriteHeaders(inputHeaders, effectiveHeaders);
+  if (!headersHaveIdentity(writeHeaders) && headersHaveIdentity(inputHeaders)) {
+    // Fallback: keep modal identity headers if template rebuild lost them.
+    writeHeaders = [...inputHeaders];
+  }
 
   const excelCols0 = resolveFormTSEWriteExcelCols0(writeHeaders, {
     identityStartCol0: FORM_T_KA_IDENTITY_START_COL0,
@@ -2474,6 +2762,35 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   for (let guard = 0; guard < 5 && sheetLooksLikeIndexRow(startRow); guard += 1) {
     startRow += 1;
   }
+  // Form T body is immediately under the 1,2,3… strip (Excel row 15 on the KA template).
+  // A stale parsedDataStartIndex / "Date:" footer must not push names below the grid.
+  const stripEndExcel = Math.max(
+    rebuilt?.columnIndexRow != null && rebuilt.columnIndexRow >= 0 ? rebuilt.columnIndexRow + 2 : 0,
+    rebuilt?.attendanceDayRow != null && rebuilt.attendanceDayRow >= 0
+      ? rebuilt.attendanceDayRow + 2
+      : 0,
+    headerRowIndex >= 0 ? headerRowIndex + 3 : 0,
+    14
+  );
+  if (startRow < stripEndExcel) startRow = stripEndExcel;
+  let dateFooterRow = 0;
+  for (let r = stripEndExcel; r <= Math.min(stripEndExcel + 16, maxScanRows); r += 1) {
+    const t = String(getMergedAwareCellText(r, 1) || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    if (/^date\s*:?$/.test(t) || /^date\s*:/.test(t)) {
+      dateFooterRow = r;
+      break;
+    }
+  }
+  if (dateFooterRow > stripEndExcel && startRow >= dateFooterRow) {
+    startRow = dateFooterRow - 1;
+  }
+  if (startRow > stripEndExcel + 2) {
+    startRow = stripEndExcel;
+  }
+  if (sheetLooksLikeIndexRow(startRow)) startRow += 1;
 
   const normalize = (txt) =>
     String(txt || '')
@@ -2520,11 +2837,16 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   };
 
   const sourceHeaders =
-    inputHeaders.length === writeHeaders.length ? inputHeaders : writeHeaders;
+    inputHeaders.length > 0 ? inputHeaders : writeHeaders;
   let sourcePrimary = prepareFormTSEExportRows(
-    Array.isArray(mappedData) ? mappedData : [],
+    // Align modal/autofill rows onto the original template header keys by label.
+    alignFormTSERowsToTemplateHeaders(
+      Array.isArray(mappedData) ? mappedData : [],
+      sourceHeaders,
+      writeHeaders
+    ),
     writeHeaders,
-    sourceHeaders
+    writeHeaders
   ).filter((row) => rowLooksMeaningful(row));
 
   if (
@@ -2536,6 +2858,19 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
     sourcePrimary = prepareFormTSEExportRows(mappedData, writeHeaders, writeHeaders).filter((row) =>
       rowLooksMeaningful(row)
     );
+  }
+
+  if (
+    sourcePrimary.length === 0 &&
+    Array.isArray(mappedData) &&
+    mappedData.length > 0 &&
+    formTSEDownloadHasSubstantiveRows(mappedData, sourceHeaders)
+  ) {
+    sourcePrimary = prepareFormTSEExportRows(
+      alignFormTSERowsToTemplateHeaders(mappedData, sourceHeaders, writeHeaders),
+      writeHeaders,
+      writeHeaders
+    ).filter((row) => rowLooksMeaningful(row));
   }
 
   // Last resort: modal/export headers may not match rebuilt sheet headers — still pull names by Form T key-norm.
@@ -2570,6 +2905,19 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
       .filter((row) => rowLooksMeaningful(row));
   }
 
+  if (
+    !formTSEDownloadHasSubstantiveRows(sourcePrimary, writeHeaders) &&
+    Array.isArray(employees) &&
+    employees.length > 0 &&
+    writeHeaders.length > 0
+  ) {
+    sourcePrimary = resolveFormTSERowsForExport({
+      liveRows: sourcePrimary,
+      headers: writeHeaders,
+      employees,
+    }).filter((row) => rowLooksMeaningful(row));
+  }
+
   const tableColMin = fieldCols.length > 0 ? Math.min(...fieldCols) : 1;
   const tableColMax = fieldCols.length > 0 ? Math.max(...fieldCols) : writeHeaders.length;
   const templateBodyRows = countExcelJSTemplateBodyRows(worksheet, startRow, tableColMin, tableColMax);
@@ -2577,10 +2925,18 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   // Wipe A…wage band on body rows first. Dirty Draft templates keep a prior J-shifted
   // write; without this, names stay under ATTENDANCE even after a correct A–I rewrite.
   const clearThroughCol = Math.max(tableColMax + 40, FORM_T_KA_ATTENDANCE_START_COL0 + 50, 80);
+  const clearFromRow = Math.min(startRow, 14);
+  let clearToRow = Math.max(
+    startRow + Math.max(bodyRowsToPaint, sourcePrimary.length, 1) - 1,
+    19
+  );
+  if (dateFooterRow > 14) {
+    clearToRow = Math.min(clearToRow, dateFooterRow - 1);
+  }
   clearFormTSEExcelJsDataRowBand(
     worksheet,
-    startRow,
-    startRow + Math.max(bodyRowsToPaint, sourcePrimary.length, 1) - 1,
+    clearFromRow,
+    clearToRow,
     clearThroughCol
   );
 
@@ -2608,6 +2964,15 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
       }
       let targetCol = cols1Based[j];
       if (!targetCol || targetCol < 1) continue;
+      if (isFormTSESerialNumberHeader(header)) targetCol = 1;
+      else if (isFormTSEEmployeeNameHeader(header)) targetCol = 2;
+      else if (isFormTSEFatherHusbandHeader(header)) targetCol = 3;
+      else if (isFormTSEGenderHeader(header)) targetCol = 4;
+      else if (isFormTSEDesignationHeader(header)) targetCol = 5;
+      else if (isFormTSEDateOfJoiningHeader(header)) targetCol = 6;
+      else if (isFormTSEEsicRegistrationHeader(header)) targetCol = 7;
+      else if (isFormTSEUanRegistrationHeader(header)) targetCol = 8;
+      else if (isFormTSEWagesFixedIncludingVDAHeader(header)) targetCol = 9;
       // Identity band must stay on A–I. Merged-cell top-left can otherwise redirect into J+.
       const isIdentityWrite =
         isFormTSESerialNumberHeader(header) ||
@@ -2620,8 +2985,8 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
         isFormTSEUanRegistrationHeader(header) ||
         isFormTSEWagesFixedIncludingVDAHeader(header) ||
         (j < FORM_T_KA_ATTENDANCE_START_COL0 && !isFormTSEAttendanceDayHeader(header));
-      if (isIdentityWrite && targetCol > FORM_T_KA_ATTENDANCE_START_COL0) {
-        targetCol = Math.min(j + 1, FORM_T_KA_ATTENDANCE_START_COL0);
+      if (isIdentityWrite && targetCol > 9) {
+        targetCol = Math.min(j + 1, 9);
       }
       let cell;
       if (isIdentityWrite) {
@@ -2640,22 +3005,24 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
         cell.value = '';
         continue;
       }
-      const asText = String(value).trim();
+      const asTextRaw = String(value).trim();
       // Keep long registration numbers as text (avoid Excel 1.01E+11 scientific notation).
       const forceText =
         isFormTSEUanRegistrationHeader(header) ||
         isFormTSEEsicRegistrationHeader(header) ||
-        /^\d{10,}$/.test(asText);
+        /^\d{10,}$/.test(asTextRaw) ||
+        /^\d+(\.\d+)?e[+\-]?\d+$/i.test(asTextRaw);
       if (forceText) {
+        const asText = formatFormTSERegistrationIdForExcel(value);
         cell.numFmt = '@';
         cell.value = asText;
       } else if (
         typeof value === 'number' ||
-        (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(asText))
+        (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(asTextRaw))
       ) {
         cell.value = Number(value);
       } else {
-        cell.value = asText;
+        cell.value = asTextRaw;
       }
       cell.font = { ...(cell.font || {}), bold: false };
     }
@@ -2669,7 +3036,7 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   }
 
   // Final hard pass: copy identity values into A–I and clear mistaken identity dumps from J–R.
-  if (sourcePrimary.length > 0 && formTSEDownloadHasSubstantiveRows(sourcePrimary, writeHeaders)) {
+  if (sourcePrimary.length > 0) {
     const identityHeaders = [
       writeHeaders.find((h) => isFormTSESerialNumberHeader(h)),
       writeHeaders.find((h) => isFormTSEEmployeeNameHeader(h)),
@@ -2703,18 +3070,20 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
         if (value == null || String(value).trim() === '') {
           // keep blank
         } else {
-          const asText = String(value).trim();
+          const asTextRaw = String(value).trim();
           const forceText =
             slot === 6 ||
             slot === 7 ||
-            /^\d{10,}$/.test(asText);
+            /^\d{10,}$/.test(asTextRaw) ||
+            /^\d+(\.\d+)?e[+\-]?\d+$/i.test(asTextRaw);
           if (forceText) {
+            const asText = formatFormTSERegistrationIdForExcel(value);
             cell.numFmt = '@';
             cell.value = asText;
-          } else if (/^-?\d+(\.\d+)?$/.test(asText) && slot === 0) {
-            cell.value = Number(asText);
+          } else if (/^-?\d+(\.\d+)?$/.test(asTextRaw) && slot === 0) {
+            cell.value = Number(asTextRaw);
           } else {
-            cell.value = asText;
+            cell.value = asTextRaw;
           }
           cell.font = { ...(cell.font || {}), bold: false };
         }
@@ -2792,11 +3161,14 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   });
   writeFormTSEHeaderFieldsToWorksheet(worksheet, headerValues, parsedFormHeader);
   expandFormTSEHeaderValueBoxes(worksheet, FORM_T_KARNATAKA_HEADER_BOX_END_COL);
+  shiftFormTSEWorksheetIdentityFromJToA(worksheet);
 
   await yieldToMain();
+  resetFormTSEWorksheetOpenAtColumnA(worksheet);
+  resetExcelJsWorkbookActiveSheet(workbook);
   let out = await workbook.xlsx.writeBuffer();
-  // Belt-and-suspenders: if anything still dumped identity under J, shift back to A–I.
-  out = await repairFormTSEWorkbookColumnAlignment(out);
+  // Shift any leftover J-dumped identity back to A–I, then open at column A.
+  out = await prepareFormTSEWorkbookForDownload(out);
   const outName =
     formFileName ||
     currentItem?.formName?.replace(/[^a-zA-Z0-9]/g, '_') ||

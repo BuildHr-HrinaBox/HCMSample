@@ -407,6 +407,7 @@ export function isStatutoryNumericCellValue(value) {
 /**
  * Form Number / See Rule / Form Name title band (Form XXIII model).
  * These stay center-aligned on draft download — never forced left.
+ * Exception: Rajasthan Form 14 table data is left-aligned (see applyStatutoryDownloadContentAlignment).
  */
 export function isStatutoryFormTitleBandText(text) {
   const t = String(text || '')
@@ -483,15 +484,48 @@ function worksheetLooksLikeFormXVServiceCertificate(worksheet) {
   return hasFormXv && hasServiceCert;
 }
 
+/** Rajasthan Form 14 — Record of Hours of Work (table values left-aligned like template model). */
+export function worksheetLooksLikeForm14Rajasthan(worksheet) {
+  if (!worksheet || typeof worksheet.getCell !== 'function') return false;
+  let hasForm14 = false;
+  let hasHoursOfWork = false;
+  let hasNameOfPersons = false;
+  let hasYoungPerson = false;
+  const maxR = Math.min(40, Number(worksheet.rowCount) || 40);
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= 12; c += 1) {
+      let value;
+      try {
+        value = worksheet.getCell(r, c)?.value;
+      } catch (_) {
+        continue;
+      }
+      const text = statutoryCellValueToPlainText(value);
+      if (!text) continue;
+      const lower = text.toLowerCase();
+      if (/^form\s*14\b/i.test(text) && !/xiv/i.test(text)) hasForm14 = true;
+      if (/record\s+of\s+(?:the\s+)?hours\s+of\s+work/i.test(lower)) hasHoursOfWork = true;
+      if (/name\s+of\s+persons?\s+employ/i.test(lower)) hasNameOfPersons = true;
+      if (/whether\s+young\s+person/i.test(lower)) hasYoungPerson = true;
+      if ((hasForm14 && hasHoursOfWork) || (hasNameOfPersons && hasYoungPerson && hasForm14)) {
+        return true;
+      }
+    }
+  }
+  return (hasNameOfPersons && hasYoungPerson) || (hasForm14 && hasHoursOfWork);
+}
+
 /**
  * Download alignment:
  * - Form Number / Rule / Form Name → center
  * - Numeric values → right (except Form XV service-certificate table → center)
- * - No left-align override for text (keeps template centering)
+ * - Rajasthan Form 14 table / month-year → left (matches official template model)
+ * - No left-align override for other text (keeps template centering)
  */
 export function applyStatutoryDownloadContentAlignment(worksheet) {
   if (!worksheet) return;
   const formXvServiceCertificate = worksheetLooksLikeFormXVServiceCertificate(worksheet);
+  const form14Rajasthan = worksheetLooksLikeForm14Rajasthan(worksheet);
   worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
     row.eachCell({ includeEmpty: false }, (cell) => {
       const text = statutoryCellValueToPlainText(cell?.value);
@@ -508,9 +542,34 @@ export function applyStatutoryDownloadContentAlignment(worksheet) {
       // Keep wrapText false on title band so a narrow column cannot stack the title vertically.
       // Long Gujarat "Vide rule 77 … Gujarat Rules" line may need wrap inside its merge.
       if (rowNumber <= 20 && isStatutoryFormTitleBandText(text)) {
+        // Form 14 RJ model: center the title band across the sheet.
         next.horizontal = 'center';
         next.wrapText = /vide\s+rule/i.test(text) && text.length > 60 ? true : false;
         next.textRotation = 0;
+        cell.alignment = next;
+        return;
+      }
+
+      // Form 14 RJ — table values (names, Young, hours, Nil) stay left like the template model.
+      // Do not left-align title lines (already handled above).
+      if (form14Rajasthan) {
+        const lower = text.toLowerCase();
+        if (
+          /rajasthan\s+shops/.test(lower) ||
+          /^form\s*14\b/.test(lower) ||
+          /rule\s*22/.test(lower) ||
+          /hours\s+of\s+work/.test(lower) ||
+          /notice\s+in\s+form\s*13/.test(lower)
+        ) {
+          next.horizontal = 'center';
+          cell.alignment = next;
+          return;
+        }
+        next.horizontal = 'left';
+        // Long header labels / footnotes may wrap; short data cells stay single-line.
+        if (text.length < 40 && !/name of persons|young person|total hours|extent of overtime|days on which overtime/i.test(text)) {
+          next.wrapText = false;
+        }
         cell.alignment = next;
         return;
       }

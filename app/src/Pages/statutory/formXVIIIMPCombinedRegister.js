@@ -203,7 +203,8 @@ export function looksLikeKarnatakaFormTSheet(blob) {
   const namedFormT =
     /\bform[\s._-]*t\b/.test(s) ||
     /form[_-]{1,}t(?:[_-]|$)/.test(s) ||
-    /form_{2,}t/.test(s);
+    /form_{2,}t/.test(s) ||
+    /form[\s._-]*t[\s._-]*ka\b/.test(s);
   if (!namedFormT) return false;
   return (
     /karnataka/.test(s) ||

@@ -375,6 +375,8 @@ export const FORM_XIX_KA_RATE_DEFAULT = 'Monthly Wages';
 function resolveKarnatakaExportCellValue(row, header) {
   const value = getKarnatakaRowValueForHeader(row, header);
   if (value !== '') return value;
+  // Units column must stay blank — header text contains "piece rate" and must not inherit Monthly Wages.
+  if (isFormXIXKAUnitsHeader(header)) return '';
   if (isFormXIXKARateHeader(header)) return FORM_XIX_KA_RATE_DEFAULT;
   return '';
 }
@@ -545,14 +547,16 @@ export function isFormXIXKAIdentityTableHeader(h) {
   );
 }
 
-export function isFormXIXKARateHeader(h) {
-  const s = normHeader(h);
-  if (isFormXIXKAGrossHeader(h) || isFormXIXKADeductionsHeader(h) || isFormXIXKANetHeader(h)) return false;
-  return s.includes('rate') && (s.includes('wage') || s.includes('piece'));
-}
-
 export function isFormXIXKAUnitsHeader(h) {
   return /units\s+worked/.test(normHeader(h));
+}
+
+export function isFormXIXKARateHeader(h) {
+  const s = normHeader(h);
+  // "No. of units worked in case of piece rate" also contains "piece"+"rate" — exclude it.
+  if (isFormXIXKAUnitsHeader(h)) return false;
+  if (isFormXIXKAGrossHeader(h) || isFormXIXKADeductionsHeader(h) || isFormXIXKANetHeader(h)) return false;
+  return s.includes('rate') && (s.includes('wage') || s.includes('piece'));
 }
 
 export function isFormXIXKAOvertimeDatesHeader(h) {
@@ -940,7 +944,27 @@ const sumPayrollDeductionLines = (payrollRow) => {
   return any ? String(Math.round(sum * 100) / 100) : '';
 };
 
+/** Karnataka Form XIX — Deductions, any = gross_pay − net_pay. */
+const computeFormXIXKADeductionsFromGrossNet = (grossRaw, netRaw) => {
+  const gross = Number(String(grossRaw ?? '').replace(/,/g, '').trim());
+  const net = Number(String(netRaw ?? '').replace(/,/g, '').trim());
+  if (!Number.isFinite(gross) || !Number.isFinite(net)) return '';
+  const diff = Math.round((gross - net) * 100) / 100;
+  return String(diff >= 0 ? diff : 0);
+};
+
 const pickDeductionsFromPayrollRow = (flat, payrollRow) => {
+  const gross = pickGrossPayFromPayrollRow(flat, payrollRow);
+  const net = pickKarnatakaPayrollValue(
+    flat,
+    payrollRow,
+    ['net_pay', 'Net Pay', 'netPay', 'net_wages', 'Net Wages', 'monthly_salary'],
+    [/^net_pay$/, /^net_wages$/]
+  );
+  // Prefer gross − net (matches AP Form XIX / CLRA wage-slip practice).
+  const fromGrossNet = computeFormXIXKADeductionsFromGrossNet(gross, net);
+  if (fromGrossNet !== '') return fromGrossNet;
+
   let deductions = pickKarnatakaPayrollValue(
     flat,
     payrollRow,
@@ -948,21 +972,30 @@ const pickDeductionsFromPayrollRow = (flat, payrollRow) => {
     [/^total_deductions?$/, /^total_employee_deductions$/]
   );
   if (deductions === '') deductions = sumPayrollDeductionLines(payrollRow);
-  if (deductions === '') {
-    const gross = pickGrossPayFromPayrollRow(flat, payrollRow);
-    const net = pickKarnatakaPayrollValue(
-      flat,
-      payrollRow,
-      ['net_pay', 'Net Pay', 'netPay', 'net_wages'],
-      [/^net_pay$/]
-    );
-    if (gross !== '' && net !== '') {
-      const diff = Number(gross) - Number(net);
-      if (Number.isFinite(diff) && diff >= 0) deductions = String(Math.round(diff * 100) / 100);
-    }
-  }
   return deductions !== '' ? String(deductions) : '';
 };
+
+/** Recompute "Deductions, any" on a grid/export row from Gross − Actual wages paid. */
+export function syncFormXIXKarnatakaDeductionsFromGrossNet(row, headers) {
+  if (!row || typeof row !== 'object') return row;
+  const hdrs = resolveFormXIXKarnatakaWageTableHeaders(headers);
+  const grossHdr = hdrs.find(isFormXIXKAGrossHeader);
+  const netHdr = hdrs.find(isFormXIXKANetHeader);
+  if (!grossHdr || !netHdr) return row;
+  const deductions = computeFormXIXKADeductionsFromGrossNet(
+    getKarnatakaRowValueForHeader(row, grossHdr),
+    getKarnatakaRowValueForHeader(row, netHdr)
+  );
+  if (deductions === '') return row;
+  hdrs.forEach((header) => {
+    if (isFormXIXKADeductionsHeader(header)) setKarnatakaRowValueForHeader(row, header, deductions);
+  });
+  Object.keys(row).forEach((key) => {
+    if (String(key).startsWith('__')) return;
+    if (isFormXIXKADeductionsHeader(key)) row[key] = deductions;
+  });
+  return row;
+}
 
 const pickNetPayFromPayrollRow = (flat, payrollRow) => {
   let net = pickKarnatakaPayrollValue(
@@ -1437,6 +1470,7 @@ export function applyFormXIXKarnatakaEmployeeToRow(row, emp, headers, helpers = 
     if (isFormXIXKARateHeader(key)) out[key] = sanitizeValue(FORM_XIX_KA_RATE_DEFAULT);
     if (isFormXIXKAUnitsHeader(key)) out[key] = '';
   });
+  syncFormXIXKarnatakaDeductionsFromGrossNet(out, headerList);
   out.__employeeLookupName = sanitizeValue(formatWorkmanNameAndGuardian(emp).split(/\r?\n/)[0]);
   return out;
 }
@@ -1698,7 +1732,7 @@ function resolveFooterColumns(parsedFormHeader) {
   }));
 }
 
-/** Resolve where footer amounts are written in the Excel template (beside or below labels). */
+/** Resolve where footer amounts are written — directly below each label (same column). */
 function buildKarnatakaFooterValuePositions(parsedFormHeader, worksheet, tableColumns, dataRow) {
   const footerColumns =
     Array.isArray(parsedFormHeader?.footerColumns) && parsedFormHeader.footerColumns.length >= 2
@@ -1729,12 +1763,13 @@ function buildKarnatakaFooterValuePositions(parsedFormHeader, worksheet, tableCo
   footerColumns.forEach(({ header, col, labelRow }) => {
     const col0 = Number(col);
     const labelRow0 = labelRow != null ? Number(labelRow) : Number(parsedFormHeader?.footerRowIndex ?? 18);
-    const labelExcelRow = labelRow0 + 1;
-    const belowExcelRow = footerValueRow0 + 1;
+    const belowExcelRow =
+      Number.isFinite(footerValueRow0) && footerValueRow0 >= 0
+        ? footerValueRow0 + 1
+        : labelRow0 + 2;
 
-    // Karnataka template: amount typically in the cell to the right of the label (same row).
-    pushPos(header, labelExcelRow, col0 + 2);
-    // Fallback: amount below the label in the same column.
+    // Official Form XIX KA layout: Gross / Deductions / Actual amounts sit under their labels.
+    // Do not also write beside the label — that duplicated net pay and broke PDF column alignment.
     pushPos(header, belowExcelRow, col0 + 1);
   });
 
@@ -1776,6 +1811,7 @@ export function applyFormXIXKarnatakaFooterFieldsToRow(row, payrollRow, headers,
       }
     });
   });
+  syncFormXIXKarnatakaDeductionsFromGrossNet(out, hdrs);
   return out;
 }
 
@@ -1865,6 +1901,7 @@ export async function buildFormXIXKarnatakaWorkbookWithTemplateStyles({
       monthCandidates
     );
   }
+  if (rowToWrite) syncFormXIXKarnatakaDeductionsFromGrossNet(rowToWrite, hdrs);
   const mergedHeader = buildEmployeeHeaderFormData(headerFormData, rowToWrite, emp);
 
   writeFormXIXKarnatakaHeaderFieldsToWorksheet(worksheet, mergedHeader, parsedFormHeader);
@@ -1875,6 +1912,22 @@ export async function buildFormXIXKarnatakaWorkbookWithTemplateStyles({
       { ...parsedFormHeader, dataStartIndex: parsedFormHeader?.dataStartIndex },
       parsedFormHeader?.dataStartIndex
     );
+  }
+
+  // Match Excel print / Download PDF to the on-screen Form XIX A4 portrait layout.
+  worksheet.pageSetup = {
+    ...(worksheet.pageSetup || {}),
+    paperSize: 9,
+    orientation: 'portrait',
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 1,
+    horizontalCentered: true,
+  };
+  try {
+    worksheet.pageSetup.printArea = 'A1:K28';
+  } catch (_) {
+    /* template may already define print area */
   }
 
   const out = await workbook.xlsx.writeBuffer();
@@ -2093,6 +2146,16 @@ async function prepareFormXIXKarnatakaFastZipTemplate({
   });
   writeFormXIXKarnatakaHeaderFieldsToWorksheet(worksheet, staticHeaderData, parsedFormHeader);
 
+  worksheet.pageSetup = {
+    ...(worksheet.pageSetup || {}),
+    paperSize: 9,
+    orientation: 'portrait',
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 1,
+    horizontalCentered: true,
+  };
+
   const positions = resolveFormXIXKarnatakaFastExportPositions(worksheet, parsedFormHeader);
   clearFormXIXKarnatakaPerEmployeeValueCells(worksheet, positions);
 
@@ -2250,6 +2313,9 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
   }
   enrichFormXIXKarnatakaStaticFieldRows(exportRows, hdrs);
 
+  // Keep Deductions, any = Gross − Actual even when the modal already has payroll values (often "0").
+  exportRows.forEach((row) => syncFormXIXKarnatakaDeductionsFromGrossNet(row, hdrs));
+
   const gridHasPayrollValues =
     fromTable.length > 0 &&
     fromTable.some((row) => {
@@ -2309,15 +2375,22 @@ export async function buildFormXIXKarnatakaPerEmployeeDownload({
   if (exportRows.length > 0 && employees.length > 0) {
     exportRows = exportRows.map((exportRow, index) => {
       const emp = employees[index]?.Employee || employees[index]?.employee || employees[index] || null;
-      if (!emp) return exportRow;
+      if (!emp) {
+        syncFormXIXKarnatakaDeductionsFromGrossNet(exportRow, hdrs);
+        return exportRow;
+      }
       const payrollRow =
         typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp) : null;
-      return finalizeFormXIXKarnatakaExportRowForEmployee(exportRow, emp, hdrs, {
+      const finalized = finalizeFormXIXKarnatakaExportRowForEmployee(exportRow, emp, hdrs, {
         sanitizeValue: exportHelpers.sanitizeValue,
         payrollRow,
         monthCandidates,
       });
+      syncFormXIXKarnatakaDeductionsFromGrossNet(finalized, hdrs);
+      return finalized;
     });
+  } else {
+    exportRows.forEach((row) => syncFormXIXKarnatakaDeductionsFromGrossNet(row, hdrs));
   }
 
   const baseHeaderData = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};

@@ -10,6 +10,8 @@ import {
   repairFormTSEWorkbookColumnAlignment,
   formTSEWorkbookHasIdentityInColumnA,
   looksLikeFormTSEEmployeeNameCell,
+  applyFormTSEWorkbookOpenAtColumnA,
+  prepareFormTSEWorkbookForDownload,
   computeFormTSEKarnatakaTotalDeductions,
   FORM_T_KA_DEFAULT_PAYMENT_MODE,
   FORM_T_KA_OT_HOURS_NIL,
@@ -18,6 +20,9 @@ import {
   resolveFormTSEKarnatakaDeductionTotalHeader,
   resolveFormTSEKarnatakaEarningsTotalHeader,
   resolveFormTSEKarnatakaNetAmountPayableHeader,
+  isFormTSEKarnatakaEarningsTotalHeader,
+  formatFormTSERegistrationIdForExcel,
+  resolveFormTSEDownloadWriteHeaders,
   FORM_T_KA_ATTENDANCE_START_COL0,
   FORM_T_KARNATAKA_HEADER_BOX_END_COL,
 } from './formTSEKarnataka';
@@ -66,6 +71,7 @@ async function buildMinimalFormTTemplateBuffer() {
   for (let c = 1; c <= 9; c += 1) {
     ws.getCell(15, c).value = '';
   }
+  ws.getCell(20, 1).value = 'Date:';
 
   return wb.xlsx.writeBuffer();
 }
@@ -151,6 +157,39 @@ describe('Form T Karnataka workbook write', () => {
     expect(String(ws.getCell(10, 1).value ?? '')).toMatch(/Karjol/i);
     expect(String(ws.getCell(11, 1).value ?? '')).toMatch(/Clean Wind/i);
     expect(ws.getCell(10, 1).alignment?.wrapText).toBe(true);
+  });
+
+  it('fills employee names from People when mappedData is an empty template grid', async () => {
+    const templateArrayBuffer = await buildMinimalFormTTemplateBuffer();
+    const { blob } = await buildFormTSEWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [{ 'S.NO': '', 'Name of Employee': '', Gender: '' }],
+      headersToUse: modalHeaders,
+      employees: [
+        { FirstName: 'Issac', LastName: 'Kanagaraj', Sex: 'Male', Designation: 'Assistant Manager' },
+        { FirstName: 'Saravanan', Sex: 'Male', Designation: 'Engineer' },
+      ],
+      parsedHeaderRowIndex: 11,
+      parsedDataStartIndex: 19, // stale hint at/after Date: footer
+      parsedTableStartCol: 0,
+      parsedFormHeader: { title: 'Form T' },
+      headerFormData: {
+        form_t_month_year: 'March 2026',
+        form_t_establishment_name_address:
+          '33/220KV Substation, Survey No: 132, Karjol Village, Bijapur Dist – 586113 Karnataka',
+        form_t_employer: 'M/s Clean Wind Power Bableshwar Pvt Ltd',
+      },
+      formFileName: 'Form_T_KA.xlsx',
+      sheetNameHint: 'Form T',
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const ws = outWb.getWorksheet('Form T');
+    expect(String(ws.getCell(15, 1).value ?? '').trim()).toBe('1');
+    expect(String(ws.getCell(15, 2).value ?? '')).toMatch(/Issac/i);
+    expect(String(ws.getCell(16, 2).value ?? '')).toMatch(/Saravanan/i);
+    expect(String(ws.getCell(15, 2).value ?? '')).not.toMatch(/Date/i);
   });
 
   it('expands narrow A:D header boxes to A:I for long address/employer text', () => {
@@ -358,6 +397,134 @@ describe('Form T Karnataka workbook write', () => {
     expect(String(out.getCell(16, 2).value ?? '')).toMatch(/Saravanan/i);
   });
 
+  it('opens the sheet at column A instead of frozen attendance column J', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(12, 1).value = 'S.NO';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    ws.getCell(15, 1).value = 1;
+    ws.getCell(15, 2).value = 'Kanagaraj';
+    ws.views = [
+      {
+        state: 'frozen',
+        xSplit: 9,
+        ySplit: 14,
+        topLeftCell: 'J15',
+        activeCell: 'J15',
+      },
+    ];
+    const frozenBuf = await wb.xlsx.writeBuffer();
+    const opened = await applyFormTSEWorkbookOpenAtColumnA(frozenBuf);
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(opened);
+    const out = outWb.getWorksheet('Form T');
+    const view = (out.views && out.views[0]) || {};
+    expect(String(view.topLeftCell || 'A1').toUpperCase()).toBe('A1');
+    expect(String(view.activeCell || 'A1').toUpperCase()).toBe('A1');
+    expect(Number(view.xSplit || 0)).toBe(0);
+    expect(view.state === 'frozen' ? Number(view.xSplit || 0) : 0).toBe(0);
+  });
+
+  it('prepareFormTSEWorkbookForDownload shifts J identity and opens at A', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(12, 1).value = 'S.NO';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    ws.getCell(15, 10).value = 1;
+    ws.getCell(15, 11).value = 'Kanagaraj';
+    ws.views = [{ state: 'frozen', xSplit: 9, ySplit: 14, topLeftCell: 'J15', activeCell: 'J15' }];
+    const buf = await wb.xlsx.writeBuffer();
+    const ready = await prepareFormTSEWorkbookForDownload(buf);
+    expect(await formTSEWorkbookHasIdentityInColumnA(ready)).toBe(true);
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(ready);
+    const out = outWb.getWorksheet('Form T');
+    expect(String(out.getCell(15, 2).value ?? '')).toMatch(/Kanagaraj/i);
+    const view = (out.views && out.views[0]) || {};
+    expect(String(view.topLeftCell || 'A1').toUpperCase()).toBe('A1');
+  });
+
+  it('moves screenshot-style J-grid (serial in J, name in K, Male in M) onto A–D', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(12, 1).value = 'S.NO';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    ws.getCell(12, 9).value = 'Wages fixed including VDA';
+    ws.getCell(12, 20).value = 'ATTENDANCE';
+    for (let d = 1; d <= 21; d += 1) {
+      ws.getCell(13, 9 + d).value = d;
+    }
+    const people = [
+      { name: 'nagaraj', desig: 'Manager' },
+      { name: 'avanan', desig: 'engineer' },
+      { name: 'erkhan', desig: 'engineer' },
+    ];
+    people.forEach((p, i) => {
+      const r = 15 + i;
+      ws.getCell(r, 10).value = i + 1;
+      ws.getCell(r, 11).value = p.name;
+      ws.getCell(r, 12).value = 'abc';
+      ws.getCell(r, 13).value = 'Male';
+      ws.getCell(r, 14).value = p.desig;
+      ws.getCell(r, 20).value = 'P';
+    });
+    const buf = await wb.xlsx.writeBuffer();
+    const ready = await prepareFormTSEWorkbookForDownload(buf);
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(ready);
+    const out = outWb.getWorksheet('Form T');
+    expect(String(out.getCell(15, 1).value ?? '').trim()).toBe('1');
+    expect(String(out.getCell(15, 2).value ?? '')).toMatch(/nagaraj/i);
+    expect(String(out.getCell(15, 4).value ?? '')).toMatch(/Male/i);
+    expect(String(out.getCell(16, 2).value ?? '')).toMatch(/avanan/i);
+    expect(String(out.getCell(15, 11).value ?? '')).not.toMatch(/nagaraj/i);
+  });
+
+  it('treats Save auto-download names in row 6 as aligned identity (not only row 15)', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'Month / Year : April 2026';
+    ws.getCell(4, 1).value = 'S.NO';
+    ws.getCell(4, 2).value = 'Name of Employee';
+    ws.getCell(6, 1).value = 1;
+    ws.getCell(6, 2).value = 'Kanagaraj';
+    ws.getCell(7, 1).value = 2;
+    ws.getCell(7, 2).value = 'Saravanan';
+    const buf = await wb.xlsx.writeBuffer();
+    expect(await formTSEWorkbookHasIdentityInColumnA(buf)).toBe(true);
+  });
+
+  it('does not treat a header-only Form T_KA template as having employee rows', async () => {
+    expect(looksLikeFormTSEEmployeeNameCell('Address of the Establishment : Karjol Village')).toBe(
+      false
+    );
+    expect(looksLikeFormTSEEmployeeNameCell('Name and Address of the Employer')).toBe(false);
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(6, 1).value = 'Karnataka Payment of Wages Rules, 1963';
+    ws.getCell(9, 1).value = 'Month / Year : March 2026';
+    ws.getCell(10, 1).value = 'Address of the Establishment : 33/220KV Substation Karjol Village';
+    ws.mergeCells(10, 1, 10, 9);
+    ws.getCell(11, 1).value = 'Name and Address of the Employer : M/s Clean Wind Power';
+    ws.mergeCells(11, 1, 11, 9);
+    [
+      'S.NO',
+      'Name of Employee',
+      "Father / Husband's Name",
+      'Gender',
+      'Designation / Department',
+      'Date of Joining',
+      'ESI No.',
+      'UAN No.',
+    ].forEach((h, i) => {
+      ws.getCell(12, i + 1).value = h;
+    });
+    for (let c = 1; c <= 8; c += 1) ws.getCell(13, c).value = c;
+    ws.getCell(20, 1).value = 'Date:';
+    const buf = await wb.xlsx.writeBuffer();
+    expect(await formTSEWorkbookHasIdentityInColumnA(buf)).toBe(false);
+  });
+
   it('clears prior J-shifted Draft leftovers when rewriting onto a dirty template', async () => {
     // Simulate saved Draft that already has identity under ATTENDANCE (user screenshot).
     const dirtyWb = new ExcelJS.Workbook();
@@ -468,10 +635,60 @@ describe('Form T Karnataka payroll column mapping', () => {
     expect(resolveFormTSEKarnatakaNetAmountPayableHeader(wageHeaders)).toBe('Net Amount Payable');
   });
 
+  test('Earned wages and other allowances / Earnings Total ← gross_pay column', () => {
+    expect(
+      resolveFormTSEKarnatakaEarningsTotalHeader([
+        'Medical Allowance',
+        'Special allowance',
+        'Earned wages and other allowances',
+        'ESI',
+      ])
+    ).toBe('Earned wages and other allowances');
+    expect(
+      resolveFormTSEKarnatakaEarningsTotalHeader([
+        'Basic',
+        'HRA',
+        'Earnings Total',
+        'Net Amount Payable',
+      ])
+    ).toBe('Earnings Total');
+    expect(isFormTSEKarnatakaEarningsTotalHeader('Medical Allowance')).toBe(false);
+    expect(isFormTSEKarnatakaEarningsTotalHeader('Special allowance')).toBe(false);
+    expect(isFormTSEKarnatakaEarningsTotalHeader('Earned wages and other allowances')).toBe(true);
+  });
+
   test('bare Total before Net Amount Payable is Deductions Total', () => {
     const headers = ['Others', 'Total', 'Net Amount Payable', 'Mode of Payment Cash/ Cheque No.'];
     expect(resolveFormTSEKarnatakaDeductionTotalHeader(headers)).toBe('Total');
     expect(resolveFormTSEKarnatakaEarningsTotalHeader(headers)).toBeNull();
     expect(resolveFormTSEKarnatakaNetAmountPayableHeader(headers)).toBe('Net Amount Payable');
+  });
+
+  test('UAN / ESI stay as plain text (no 1.01E+11)', () => {
+    expect(formatFormTSERegistrationIdForExcel(1.01e11)).toBe('101000000000');
+    expect(formatFormTSERegistrationIdForExcel('1.01E+11')).toBe('101000000000');
+    expect(formatFormTSERegistrationIdForExcel('100123456789')).toBe('100123456789');
+  });
+
+  test('download prefers fuller original template headers over truncated modal headers', () => {
+    const modalTruncated = [
+      'S.NO',
+      'Name of Employee',
+      'ATTENDANCE_1',
+      'ATTENDANCE_2',
+      'ATTENDANCE_3',
+      'Basic',
+      'Medical Allowance',
+    ];
+    const templateFull = [
+      ...modalTruncated,
+      'Special allowance',
+      'OT',
+      'NFH',
+      'Total (25)',
+      'Net Amount Payable',
+      'Mode of Payment Cash/ Cheque No.',
+    ];
+    expect(resolveFormTSEDownloadWriteHeaders(modalTruncated, templateFull)).toEqual(templateFull);
   });
 });

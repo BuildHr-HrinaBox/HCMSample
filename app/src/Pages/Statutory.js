@@ -746,9 +746,12 @@ import {
 } from './statutory/formQKarnataka';
 import {
   FORM_XXIII_MP_OT_NIL,
+  applyFormXXIIIMPNormalRateToMappedRows,
   applyFormXXIIIMPOtNilToMappedRows,
   applyFormXXIIIMPOtNilToRow,
+  copyFormXXIIIMPNormalRateAliasesToRow,
   isFormXXIIIMPContext,
+  isFormXXIIIMPNormalRateHeader,
   isFormXXIIIMPOtNilHeader,
   resolveFormXXIIIMPAprilDefaultNormalRate,
   resolveFormXXIIIMPNormalRateForEmployee,
@@ -57990,6 +57993,7 @@ const Statutory = ({ userEmail, userRole }) => {
       skipStatutoryOverlayForFormBTamilNadu = true;
     }
     const formMGJAutofillState = { active: false, employees: [] };
+    const formXXIIIMPMergeState = { active: false };
     let formNGJEmployerAutofillText = '';
 
     let enrichPaintScheduled = false;
@@ -58146,6 +58150,13 @@ const Statutory = ({ userEmail, userRole }) => {
             pageEmployees,
             { rowIndexOffset: 0 }
           );
+        }
+        if (formXXIIIMPMergeState.active && Array.isArray(merged) && merged.length > 0) {
+          const hdrs =
+            (Array.isArray(statutoryOverlayState.headers) && statutoryOverlayState.headers.length
+              ? statutoryOverlayState.headers
+              : tableHeaders) || [];
+          merged = merged.map((row) => copyFormXXIIIMPNormalRateAliasesToRow(row, hdrs));
         }
         return merged;
       })();
@@ -61104,6 +61115,25 @@ const Statutory = ({ userEmail, userRole }) => {
                 ''
             )
           ));
+      formXXIIIMPMergeState.active = !!formXXIIIMPAutofillContext;
+      const syncFormXXIIIMPNormalRateGrid = (rows, payrollRowsByIndex = []) => {
+        if (!formXXIIIMPAutofillContext || !Array.isArray(rows)) return rows;
+        const monthCandidates = resolvePayrollMonthIsoCandidates(
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        return applyFormXXIIIMPNormalRateToMappedRows(
+          rows,
+          currentHeaders,
+          employeesForMapping,
+          payrollRowsByIndex,
+          monthCandidates,
+          { overwrite: true, sanitizeValue }
+        );
+      };
       const formXXIIITamilNaduAutofillContext =
         formXXIIIAutofillContext &&
         (isFormXXIIITamilNaduContext(
@@ -64907,7 +64937,13 @@ const Statutory = ({ userEmail, userRole }) => {
         } else if (payrollRow && !payrollRow.fetch_error) {
           normalRate = resolveFormXXIIINetPayAmount(payrollRow);
         }
-        if (normalRate !== '') setCellsForHeaderPredicate(isFormXXIIINormalRateOfWagesHeader, normalRate);
+        if (normalRate !== '') {
+          setCellsForHeaderPredicate(isFormXXIIINormalRateOfWagesHeader, normalRate);
+          if (mpXxiii) {
+            setCellsForHeaderPredicate(isFormXXIIIMPNormalRateHeader, normalRate);
+            Object.assign(row, copyFormXXIIIMPNormalRateAliasesToRow(row, headers));
+          }
+        }
         // Form XXIII MP/GJ/KA: OT total / rate / earnings / paid date always NIL.
         // Form XXIII TN: OT date / total / earnings / paid date → NIL; OT rate ← (Basic/26/8)*2.
         if (mpXxiii || tnXxiii || gjXxiii || kaXxiii) {
@@ -74167,7 +74203,14 @@ const Statutory = ({ userEmail, userRole }) => {
             } else {
               normalRate = readPayrollNetPayForStatutory(xxiiiPayrollRow);
             }
-            if (normalRate !== '') row[normalRateHeader] = sanitizeValue(normalRate);
+            if (normalRate !== '') {
+              currentHeaders.forEach((header) => {
+                if (!isFormXXIIINormalRateOfWagesHeader(header) && !isFormXXIIIMPNormalRateHeader(header)) {
+                  return;
+                }
+                row[header] = sanitizeValue(normalRate);
+              });
+            }
           }
           if (formXXIIITamilNaduAutofillContext) {
             const otRateHeader = currentHeaders.find(isFormXXIIITamilNaduOvertimeRateHeader);
@@ -74375,6 +74418,10 @@ const Statutory = ({ userEmail, userRole }) => {
 
         return row;
       });
+      }
+
+      if (formXXIIIMPAutofillContext && Array.isArray(mappedData) && mappedData.length > 0) {
+        mappedData = syncFormXXIIIMPNormalRateGrid(mappedData);
       }
 
       // Form B TN LWF Register of Wages: one monthly summary row (not one row per employee).
@@ -75671,7 +75718,12 @@ const Statutory = ({ userEmail, userRole }) => {
               normalRate = readPayrollNetPayForStatutory(payrollRow);
             }
             if (normalRate !== '') {
-              row[normalRateHeader] = sanitizeValue(normalRate);
+              currentHeaders.forEach((header) => {
+                if (!isFormXXIIINormalRateOfWagesHeader(header) && !isFormXXIIIMPNormalRateHeader(header)) {
+                  return;
+                }
+                row[header] = sanitizeValue(normalRate);
+              });
               xxiiiEarlyHits += 1;
             }
             if (formXXIIITamilNaduAutofillContext) {
@@ -75690,6 +75742,7 @@ const Statutory = ({ userEmail, userRole }) => {
           mappedData = applyFormXXIIIMPOtNilToMappedRows(mappedData, currentHeaders, FORM_XXIII_MP_OT_NIL, {
             overwrite: true,
           });
+          mappedData = syncFormXXIIIMPNormalRateGrid(mappedData);
         } else if (formXXIIITamilNaduAutofillContext) {
           mappedData = applyFormXXIIITamilNaduOtNilToMappedRows(
             mappedData,
@@ -75742,6 +75795,7 @@ const Statutory = ({ userEmail, userRole }) => {
               FORM_XXIII_MP_OT_NIL,
               { overwrite: true }
             );
+            mappedData = syncFormXXIIIMPNormalRateGrid(mappedData);
           } else if (formXXIIITamilNaduAutofillContext) {
             mappedData = applyFormXXIIITamilNaduOtNilToMappedRows(
               mappedData,
@@ -77733,6 +77787,7 @@ const Statutory = ({ userEmail, userRole }) => {
               FORM_XXIII_MP_OT_NIL,
               { overwrite: true }
             );
+            mappedData = syncFormXXIIIMPNormalRateGrid(mappedData);
           } else if (formXXIIITamilNaduAutofillContext) {
             mappedData = applyFormXXIIITamilNaduOtNilToMappedRows(
               mappedData,
@@ -81147,6 +81202,7 @@ const Statutory = ({ userEmail, userRole }) => {
         mappedData = applyFormXXIIIMPOtNilToMappedRows(mappedData, currentHeaders, FORM_XXIII_MP_OT_NIL, {
           overwrite: true,
         });
+        mappedData = syncFormXXIIIMPNormalRateGrid(mappedData);
         console.log('Applied NIL to Form XXIII MP overtime columns');
       }
       if (formXXIIITamilNaduAutofillContext && Array.isArray(mappedData)) {
@@ -82429,6 +82485,7 @@ const Statutory = ({ userEmail, userRole }) => {
               FORM_XXIII_MP_OT_NIL,
               { overwrite: true }
             );
+            mappedData = syncFormXXIIIMPNormalRateGrid(mappedData);
           } else if (formXXIIITamilNaduAutofillContext) {
             mappedData = applyFormXXIIITamilNaduOtNilToMappedRows(
               mappedData,
@@ -100762,9 +100819,21 @@ const Statutory = ({ userEmail, userRole }) => {
                                       ? getFormDRajasthanRowValueForHeader(row, header, actualRowIndex)
                                     : isXixRjGrid
                                       ? readFormXIXRJRowCell(row, header, colIndex, actualRowIndex)
-                                      : row[header] === false || row[header] === 'false' || !row[header]
+                                      : row[header] === false || row[header] === 'false' || row[header] == null || row[header] === ''
                                         ? ''
                                         : row[header];
+                                  if (
+                                    (raw === '' || raw == null) &&
+                                    (isFormXXIIINormalRateOfWagesHeader(header) || isFormXXIIIMPNormalRateHeader(header))
+                                  ) {
+                                    const picked = pickRowValueByHeaderPredicate(
+                                      row,
+                                      isFormXXIIINormalRateOfWagesHeader
+                                    );
+                                    if (picked !== '' && picked !== false && picked !== 'false') {
+                                      return picked;
+                                    }
+                                  }
                                   if (
                                     form15Part1ModalContext &&
                                     isLeaveRegisterMetricHeader(header) &&

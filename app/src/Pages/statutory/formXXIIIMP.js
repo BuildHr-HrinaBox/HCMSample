@@ -165,6 +165,88 @@ const normFormXXIIIMPHeader = (h) =>
     .trim()
     .toLowerCase();
 
+export function isFormXXIIIMPNormalRateHeader(h) {
+  const s = normFormXXIIIMPHeader(h);
+  if (!s || /overtime\s+rate/.test(s)) return false;
+  return s.includes('normal') && s.includes('rate') && (s.includes('wage') || s.includes('pay'));
+}
+
+const isFormXXIIIMPEmptyRateCell = (value) => {
+  const s = String(value ?? '').trim();
+  if (!s) return true;
+  return /^enter\b/i.test(s) || s.toLowerCase().includes('enter ');
+};
+
+/**
+ * Copy a Normal rate stored under an Excel alias key (newlines / extra spaces)
+ * onto the visible header the autofill grid reads.
+ */
+export function copyFormXXIIIMPNormalRateAliasesToRow(row, headers) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const out = row && typeof row === 'object' ? { ...row } : {};
+  const canonical = hdrs.filter(isFormXXIIIMPNormalRateHeader);
+  if (!canonical.length) return out;
+  let found = '';
+  Object.entries(out).forEach(([key, val]) => {
+    if (found) return;
+    const s = String(val ?? '').trim();
+    if (!s || isFormXXIIIMPEmptyRateCell(s)) return;
+    if (isFormXXIIIMPNormalRateHeader(key)) found = s;
+  });
+  if (!found) return out;
+  canonical.forEach((header) => {
+    if (isFormXXIIIMPEmptyRateCell(out[header])) out[header] = found;
+  });
+  return out;
+}
+
+/** Write Normal rate onto every matching table header (including template newline variants). */
+export function applyFormXXIIIMPNormalRateToRow(
+  row,
+  headers,
+  emp,
+  payrollRow = null,
+  monthCandidates = null,
+  helpers = {}
+) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const out = copyFormXXIIIMPNormalRateAliasesToRow(row, hdrs);
+  const { overwrite = true, sanitizeValue = (v) => v } = helpers;
+  const rate = resolveFormXXIIIMPNormalRateForEmployee(emp, payrollRow, monthCandidates);
+  if (!rate) return out;
+  hdrs.forEach((header) => {
+    if (!isFormXXIIIMPNormalRateHeader(header)) return;
+    const existing = String(out[header] ?? '').trim();
+    if (!overwrite && existing && !isFormXXIIIMPEmptyRateCell(existing)) return;
+    out[header] = sanitizeValue(rate);
+  });
+  return out;
+}
+
+export function applyFormXXIIIMPNormalRateToMappedRows(
+  mappedData,
+  headers,
+  employeesForMapping = [],
+  payrollRowsByIndex = [],
+  monthCandidates = null,
+  helpers = {}
+) {
+  if (!Array.isArray(mappedData)) return [];
+  return mappedData.map((row, index) => {
+    const empItem = employeesForMapping[index];
+    const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+    const payrollRow = Array.isArray(payrollRowsByIndex) ? payrollRowsByIndex[index] : null;
+    return applyFormXXIIIMPNormalRateToRow(
+      row,
+      headers,
+      emp,
+      payrollRow,
+      monthCandidates,
+      helpers
+    );
+  });
+}
+
 /** Dates on which overtime worked */
 export function isFormXXIIIMPOtWorkedDatesHeader(h) {
   const s = normFormXXIIIMPHeader(h);

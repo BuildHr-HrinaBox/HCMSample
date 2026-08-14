@@ -1,6 +1,9 @@
 import {
   FORM_XXIII_MP_OT_NIL,
+  applyFormXXIIIMPNormalRateToMappedRows,
   applyFormXXIIIMPOtNilToMappedRows,
+  copyFormXXIIIMPNormalRateAliasesToRow,
+  isFormXXIIIMPNormalRateHeader,
   isFormXXIIIMPOtNilHeader,
   isFormXXIIIMPOtWorkedDatesHeader,
   isFormXXIIIMPTotalOvertimeWorkedHeader,
@@ -32,6 +35,35 @@ describe('Form XXIII MP Normal rate of wages', () => {
     const emp = { FirstName: 'Prem', LastName: 'Singh Bhati' };
     expect(resolveFormXXIIIMPNormalRateForEmployee(emp, null, ['2026-04'])).toBe('122603');
     expect(resolveFormXXIIIMPNormalRateForEmployee(emp, null, ['2026-05'])).toBe('');
+  });
+
+  it('copies alias-key Normal rate onto the visible header used by the autofill grid', () => {
+    expect(isFormXXIIIMPNormalRateHeader('Normal rate of wages')).toBe(true);
+    const row = copyFormXXIIIMPNormalRateAliasesToRow(
+      { 'Normal rate\nof wages': '65303', 'Normal rate of wages': '' },
+      ['Normal rate of wages', 'Overtime rate of wages']
+    );
+    expect(row['Normal rate of wages']).toBe('65303');
+    expect(row['Overtime rate of wages']).toBeUndefined();
+  });
+
+  it('fills empty autofill cells from payroll so the grid matches Excel download', () => {
+    const headers = ['Name of workman', 'Normal rate of wages'];
+    const rows = applyFormXXIIIMPNormalRateToMappedRows(
+      [
+        { 'Name of workman': 'Tejpal Singh', 'Normal rate of wages': '' },
+        { 'Name of workman': 'Jeevan Parmar', 'Normal rate\nof wages': '62218' },
+      ],
+      headers,
+      [
+        { FirstName: 'Tejpal', LastName: 'Singh' },
+        { FirstName: 'Jeevan', LastName: 'Parmar' },
+      ],
+      [{ net_pay: 65303 }, null],
+      ['2026-05']
+    );
+    expect(rows[0]['Normal rate of wages']).toBe('65303');
+    expect(rows[1]['Normal rate of wages']).toBe('62218');
   });
 });
 

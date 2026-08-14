@@ -153,6 +153,25 @@ describe('Form F Karnataka identity header fields', () => {
     expect(String(outWs.getCell(8, 9).value || '')).toBe('Ramasamy');
   });
 
+  test('resolveFormFKarnatakaEmployeeIdentityValues maps dateOfJoining and fathersName aliases', () => {
+    const values = resolveFormFKarnatakaEmployeeIdentityValues(
+      {
+        FirstName: 'Vijeesh',
+        LastName: 'Vijayan',
+        EmployeeID: '00578050',
+        fathersName: 'Vijayan',
+        dateOfJoining: { display_value: '2020-01-12' },
+      },
+      {
+        formatStatutoryDateDisplay: (v) =>
+          String(v).startsWith('2020') ? '12-Jan-2020' : String(v),
+      }
+    );
+    expect(values.slNo).toBe('00578050');
+    expect(values.fatherName).toBe('Vijayan');
+    expect(values.dateOfEntry).toBe('12-Jan-2020');
+  });
+
   test('writeFormFKarnatakaIdentityFieldsToWorksheet does not confuse Name with Father Name', () => {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Form F');
@@ -167,6 +186,33 @@ describe('Form F Karnataka identity header fields', () => {
     expect(written).toBe(2);
     expect(String(ws.getCell(3, 3).value || '')).toBe('A B');
     expect(String(ws.getCell(3, 9).value || '')).toBe('C D');
+  });
+
+  test('merged Date of entry / Father Name labels write into visible value boxes', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form F');
+    ws.getCell(4, 1).value = 'REGISTER OF LEAVE WITH WAGES';
+    ws.getCell(6, 2).value = '1 SI No in the Register of Adult/young person';
+    ws.mergeCells(6, 8, 6, 11);
+    ws.getCell(6, 8).value = '2 Date of entry into service:';
+    ws.getCell(8, 2).value = '3 Name of the person';
+    ws.mergeCells(8, 8, 8, 11);
+    ws.getCell(8, 8).value = "4 Father's Name :";
+    const written = writeFormFKarnatakaIdentityFieldsToWorksheet(ws, {
+      slNo: '00578050',
+      dateOfEntry: '12-Jan-2020',
+      personName: 'Vijeesh Vijayan',
+      fatherName: 'Vijayan',
+    });
+    expect(written).toBe(4);
+    expect(String(ws.getCell(6, 3).value || '')).toBe('00578050');
+    expect(String(ws.getCell(5, 8).value || '')).toBe('12-Jan-2020');
+    expect(String(ws.getCell(8, 3).value || '')).toBe('Vijeesh Vijayan');
+    expect(String(ws.getCell(7, 8).value || '')).toBe('Vijayan');
+    expect(String(ws.getCell(6, 8).value || '')).toContain('Date of entry into service');
+    expect(String(ws.getCell(8, 8).value || '')).toContain("Father's Name");
+    expect(String(ws.getCell(6, 8).value || '')).not.toContain('12-Jan-2020');
+    expect(String(ws.getCell(8, 8).value || '')).not.toContain('Vijayan');
   });
 });
 

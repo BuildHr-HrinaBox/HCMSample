@@ -1896,11 +1896,64 @@ function formFSanitizeFolderName(name) {
   return s || 'Unknown_Location';
 }
 
+function formFScalarText(value) {
+  if (value == null || value === '') return '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+  if (typeof value === 'object') {
+    const nested =
+      value.display_value ??
+      value.displayValue ??
+      value.zc_display_value ??
+      value.name ??
+      value.Name ??
+      value.value ??
+      value.label ??
+      '';
+    if (nested instanceof Date && !Number.isNaN(nested.getTime())) {
+      return nested.toISOString().slice(0, 10);
+    }
+    const text = String(nested ?? '').trim();
+    if (text && text !== '[object Object]') return text;
+    return '';
+  }
+  const text = String(value).trim();
+  return text === '[object Object]' ? '' : text;
+}
+
 const pickFormFEmployeeValue = (emp, keys) => {
   if (!emp || typeof emp !== 'object') return '';
-  for (const key of keys) {
-    const v = emp[key];
-    if (v != null && String(v).trim() !== '') return String(v).trim();
+  const src = emp.Employee && typeof emp.Employee === 'object' ? emp.Employee : emp.employee || emp;
+  const bags = src !== emp ? [src, emp] : [src];
+  for (const bag of bags) {
+    if (!bag || typeof bag !== 'object') continue;
+    for (const key of keys) {
+      const text = formFScalarText(bag[key]);
+      if (text) return text;
+    }
+  }
+  const normalizeKey = (k) => String(k || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const wanted = new Set((keys || []).map(normalizeKey).filter(Boolean));
+  for (const bag of bags) {
+    if (!bag || typeof bag !== 'object') continue;
+    const found = Object.keys(bag).find((k) => wanted.has(normalizeKey(k)) && formFScalarText(bag[k]));
+    if (found) return formFScalarText(bag[found]);
+  }
+  return '';
+};
+
+const pickFormFEmployeeValueByKeyPattern = (emp, patterns) => {
+  if (!emp || typeof emp !== 'object' || !Array.isArray(patterns)) return '';
+  const src = emp.Employee && typeof emp.Employee === 'object' ? emp.Employee : emp.employee || emp;
+  const bags = src !== emp ? [src, emp] : [src];
+  for (const bag of bags) {
+    if (!bag || typeof bag !== 'object') continue;
+    const keys = Object.keys(bag);
+    for (const re of patterns) {
+      const hit = keys.find((k) => re.test(String(k || '')));
+      if (!hit) continue;
+      const text = formFScalarText(bag[hit]);
+      if (text) return text;
+    }
   }
   return '';
 };
@@ -1929,22 +1982,27 @@ export const FORM_F_KARNATAKA_IDENTITY_FIELD_SPECS = [
   {
     key: 'slNo',
     label: 'Sl No in the Register of Adult/young person',
-    match: (n) => /sl\s*no/.test(n) && /register/.test(n) && /(adult|young)/.test(n),
+    match: (n) =>
+      (/s[li]\s*no/.test(n) && /register/.test(n) && /(adult|young)/.test(n)) ||
+      /^\d+\.?\s*s[li]\s*no\s+in\s+the/.test(n),
   },
   {
     key: 'dateOfEntry',
     label: 'Date of entry into service',
-    match: (n) => /date\s+of\s+entry\s+into\s+service/.test(n),
+    match: (n) => /date(?:\s+of)?\s+entry\s+into\s+service/.test(n) || /entry\s+into\s+service/.test(n),
   },
   {
     key: 'personName',
     label: 'Name of the person',
-    match: (n) => /name\s+of\s+the\s+person/.test(n),
+    match: (n) => {
+      if (/father/.test(n) || /husband/.test(n) || /establishment/.test(n)) return false;
+      return /name\s+of\s+the\s+person/.test(n) || /^\d+\.?\s*name\s+of\s+the/.test(n);
+    },
   },
   {
     key: 'fatherName',
     label: "Father's Name",
-    match: (n) => /father/.test(n) && /name/.test(n),
+    match: (n) => (/father/.test(n) && /name/.test(n)) || /husband'?s\s+name/.test(n),
   },
 ];
 
@@ -1976,12 +2034,18 @@ export function resolveFormFKarnatakaEmployeeIdentityValues(empItem, options = {
       "Father's_Name",
       "Father's Name",
       'Father_s Name',
+      'Father_Name',
       'FatherName',
       'Father Name',
+      'FathersName',
+      'fathersName',
       'Father',
+      'Spouse_Name',
       'SpouseName',
       'Spouse Name',
-    ]) || String(row?.["Father's Name"] || row?.FatherName || '').trim();
+    ]) ||
+    pickFormFEmployeeValueByKeyPattern(emp, [/^father/i, /father.*name/i, /spouse.*name/i]) ||
+    String(row?.["Father's Name"] || row?.FatherName || row?.Father_s_Name || '').trim();
 
   const dojRaw =
     pickFormFEmployeeValue(emp, [
@@ -1989,11 +2053,22 @@ export function resolveFormFKarnatakaEmployeeIdentityValues(empItem, options = {
       'DateofJoining',
       'Date_of_Joining',
       'Date of Joining',
+      'dateOfJoining',
       'DateofEntryintoService',
       'Date of entry into service',
+      'JoiningDate',
+      'joiningDate',
       'DOJ',
       'doj',
-    ]) || String(row?.['Date of entry into service'] || '').trim();
+    ]) ||
+    pickFormFEmployeeValueByKeyPattern(emp, [
+      /dateofjoining/i,
+      /date_of_joining/i,
+      /joiningdate/i,
+      /entry.*service/i,
+      /^doj$/i,
+    ]) ||
+    String(row?.['Date of entry into service'] || '').trim();
 
   const slNo =
     pickFormFEmployeeValue(emp, [
@@ -2027,8 +2102,46 @@ function formFIdentityLabelLooksLikeOtherField(text, currentKey) {
   );
 }
 
+function formFKarnatakaListedMerges(worksheet) {
+  const labels = Array.isArray(worksheet?.model?.merges) ? worksheet.model.merges : [];
+  return labels.map(parseFormFMergeLabel).filter(Boolean);
+}
+
+function formFKarnatakaMergeAt(merges, row, col) {
+  return merges.find((m) => row >= m.r1 && row <= m.r2 && col >= m.c1 && col <= m.c2) || null;
+}
+
+function formFKarnatakaMergeMaster(merges, row, col) {
+  const m = formFKarnatakaMergeAt(merges, row, col);
+  if (!m) return { row, col };
+  return { row: m.r1, col: m.c1 };
+}
+
+function formFIdentityCellLooksEmpty(text) {
+  const t = String(text || '').trim();
+  return !t || t === ':' || /^_+$/.test(t);
+}
+
+function formFIdentityRowLooksLikeBanner(worksheet, row, maxCols) {
+  if (!worksheet || row < 1) return false;
+  for (let c = 1; c <= maxCols; c += 1) {
+    const t = formFExcelJsCellText(worksheet.getCell(row, c)?.value);
+    if (
+      looksLikeFormFKarnatakaMainTitle(t) ||
+      looksLikeFormFKarnatakaReference(t) ||
+      looksLikeFormFKarnatakaSubtitle(t) ||
+      looksLikeFormFKarnatakaPartBanner(t) ||
+      looksLikeFormFKarnatakaPartIiBanner(t)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Write Sl No / Date of entry / Name / Father's Name beside their template labels.
+ * Right-side labels are often merged across H–K; never write into that merge (Excel hides it).
  */
 export function writeFormFKarnatakaIdentityFieldsToWorksheet(worksheet, identityValues, options = {}) {
   if (!worksheet || !identityValues || typeof identityValues !== 'object') return 0;
@@ -2037,6 +2150,8 @@ export function writeFormFKarnatakaIdentityFieldsToWorksheet(worksheet, identity
     Math.max(20, Number(worksheet.rowCount) || 20)
   );
   const maxScanCols = Math.min(20, Number(options.maxScanCols) || 16);
+  const merges = formFKarnatakaListedMerges(worksheet);
+  const formRightEdge = 11;
   let written = 0;
 
   const writeAt = (row, col, value) => {
@@ -2053,6 +2168,24 @@ export function writeFormFKarnatakaIdentityFieldsToWorksheet(worksheet, identity
     return true;
   };
 
+  const isInsideLabelMerge = (row, col, labelRow, labelCol) => {
+    const labelMerge = formFKarnatakaMergeAt(merges, labelRow, labelCol);
+    if (!labelMerge) return false;
+    return row >= labelMerge.r1 && row <= labelMerge.r2 && col >= labelMerge.c1 && col <= labelMerge.c2;
+  };
+
+  const tryWriteValueCell = (row, col, spec, labelRow, labelCol, value) => {
+    if (row < 1 || col < 1) return false;
+    if (isInsideLabelMerge(row, col, labelRow, labelCol)) return false;
+    if (formFIdentityRowLooksLikeBanner(worksheet, row, maxScanCols)) return false;
+    const master = formFKarnatakaMergeMaster(merges, row, col);
+    if (isInsideLabelMerge(master.row, master.col, labelRow, labelCol)) return false;
+    const existing = formFExcelJsCellText(worksheet.getCell(master.row, master.col)?.value);
+    if (formFIdentityLabelLooksLikeOtherField(existing, spec.key)) return false;
+    if (!formFIdentityCellLooksEmpty(existing)) return false;
+    return writeAt(master.row, master.col, value);
+  };
+
   FORM_F_KARNATAKA_IDENTITY_FIELD_SPECS.forEach((spec) => {
     const value = String(identityValues[spec.key] ?? '').trim();
     if (!value) return;
@@ -2062,6 +2195,8 @@ export function writeFormFKarnatakaIdentityFieldsToWorksheet(worksheet, identity
     let bestLen = Infinity;
     for (let r = 1; r <= maxScanRows; r += 1) {
       for (let c = 1; c <= maxScanCols; c += 1) {
+        const mergeAt = formFKarnatakaMergeAt(merges, r, c);
+        if (mergeAt && (r !== mergeAt.r1 || c !== mergeAt.c1)) continue;
         const raw = formFExcelJsCellText(worksheet.getCell(r, c)?.value);
         if (!raw) continue;
         const n = formFKarnatakaHeaderNorm(raw);
@@ -2076,14 +2211,25 @@ export function writeFormFKarnatakaIdentityFieldsToWorksheet(worksheet, identity
     }
     if (bestRow < 1 || bestCol < 1) return;
 
-    // Prefer empty cell to the right of the label (skip other identity labels).
-    for (let nc = bestCol + 1; nc <= Math.min(bestCol + 6, maxScanCols + 2); nc += 1) {
-      const nt = formFExcelJsCellText(worksheet.getCell(bestRow, nc)?.value);
+    const labelMerge = formFKarnatakaMergeAt(merges, bestRow, bestCol);
+    const rightStart = labelMerge ? labelMerge.c2 + 1 : bestCol + 1;
+    const rightEnd = Math.min(bestCol + 6, formRightEdge, maxScanCols + 2);
+
+    // Prefer empty cell to the right of the label (skip the label's own merge).
+    for (let nc = rightStart; nc <= rightEnd; nc += 1) {
+      const master = formFKarnatakaMergeMaster(merges, bestRow, nc);
+      const nt = formFExcelJsCellText(worksheet.getCell(master.row, master.col)?.value);
       if (formFIdentityLabelLooksLikeOtherField(nt, spec.key)) break;
-      if (!nt || nt === ':') {
-        if (writeAt(bestRow, nc, value)) written += 1;
+      if (tryWriteValueCell(bestRow, nc, spec, bestRow, bestCol, value)) {
+        written += 1;
         return;
       }
+    }
+
+    // Karnataka template: value boxes sit above numbered labels (H5 above "Date of entry").
+    if (tryWriteValueCell(bestRow - 1, bestCol, spec, bestRow, bestCol, value)) {
+      written += 1;
+      return;
     }
 
     // Fallback: append after the label in the same cell (keeps "Label : Value").

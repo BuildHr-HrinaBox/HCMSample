@@ -888,8 +888,15 @@ export function flattenPayrollEarningColumns(row) {
     ),
     professional_tax: coalesceAmount(
       componentColumns.professional_tax,
-      pickScalarAmount(row, ['professional_tax', 'Professional Tax', 'pt', 'PT']),
-      pickAmountByPatterns(row, [/^professional_tax$/, /^pt$/]),
+      pickScalarAmount(row, [
+        'professional_tax',
+        'Professional Tax',
+        'ProfessionalTax',
+        'professionalTax',
+        'pt',
+        'PT',
+      ]),
+      pickAmountByPatterns(row, [/^professional_tax$/, /^professionaltax$/, /^pt$/]),
       findPayrollComponentAmount(
         taxes,
         (type, name) => type === 'professional_tax' || type === 'pt' || name.includes('professional tax')

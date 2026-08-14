@@ -18,7 +18,12 @@ import {
   parseLeaveCellObject,
   sanitizeLeaveMetricDisplayValue,
 } from '../../utils/leaveMetrics';
-import { getCachedForm15PayrollTableRows, getLatestCachedPayrollTableRows, yieldToMain } from '../../utils/statutoryAutofillCache';
+import {
+  getCachedForm15PayrollTableRows,
+  getLatestCachedPayrollTableRows,
+  getPayrollBulkRowsForAutofill,
+  yieldToMain,
+} from '../../utils/statutoryAutofillCache';
 import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
 import {
   buildFormXIXMPPayrollRowResolver,
@@ -50,10 +55,15 @@ export function formXVIIIMPPayrollRowHasSamplePf(payrollRow) {
 }
 
 /**
- * Prefer Sample Payroll rows that carry PF (Form XVIII MP col 22).
- * Zoho-only pay-run rows often have Professional Tax / gross but empty PF scalars.
+ * Prefer Sample Payroll rows that carry PF / Professional Tax (Form XVIII MP col 22).
+ * Zoho-only pay-run rows often have gross/net but empty PF / PT scalars —
+ * never early-return those when a Sample Payroll snapshot with deductions exists.
  */
-export function resolveFormXVIIIMPPayrollRowsForAutofill(statutoryPayrollRows, monthCandidates = []) {
+export function resolveFormXVIIIMPPayrollRowsForAutofill(
+  statutoryPayrollRows,
+  monthCandidates = [],
+  helpers = {}
+) {
   const flattenRows = (rows) =>
     (Array.isArray(rows) ? rows : [])
       .filter((row) => row && typeof row === 'object' && row.fetch_error !== true)
@@ -68,25 +78,53 @@ export function resolveFormXVIIIMPPayrollRowsForAutofill(statutoryPayrollRows, m
     return withDed.length > 0 ? withDed : list;
   };
 
-  const cached = getCachedForm15PayrollTableRows(monthCandidates);
-  if (cached?.rows?.length > 0) {
-    const fromCache = preferPfRows(cached.rows);
-    if (fromCache.some((row) => formXVIIIMPPayrollRowHasSamplePf(row))) {
-      return fromCache;
+  const takeIfHasPf = (rows) => {
+    const preferred = preferPfRows(rows);
+    if (preferred.length > 0 && preferred.some((row) => formXVIIIMPPayrollRowHasSamplePf(row))) {
+      return preferred;
     }
-    if (fromCache.some((row) => formXVIIIMPPayrollRowHasSampleDeductionFields(row))) {
-      return fromCache;
+    return null;
+  };
+  const takeIfHasDed = (rows) => {
+    const preferred = preferPfRows(rows);
+    if (
+      preferred.length > 0 &&
+      preferred.some((row) => formXVIIIMPPayrollRowHasSampleDeductionFields(row))
+    ) {
+      return preferred;
     }
-    if (fromCache.length > 0) return fromCache;
-  }
+    return null;
+  };
 
-  const fromStatutory = preferPfRows(statutoryPayrollRows);
-  if (fromStatutory.some((row) => formXVIIIMPPayrollRowHasSamplePf(row))) {
-    return fromStatutory;
-  }
+  const cached =
+    helpers.cachedSampleRows || getCachedForm15PayrollTableRows(monthCandidates)?.rows || null;
+  const bulk = helpers.bulkSampleRows || getPayrollBulkRowsForAutofill() || null;
+  const latest = getLatestCachedPayrollTableRows()?.rows || null;
+
+  const pfHit =
+    takeIfHasPf(cached) ||
+    takeIfHasPf(bulk) ||
+    takeIfHasPf(latest) ||
+    takeIfHasPf(statutoryPayrollRows);
+  if (pfHit) return pfHit;
+
+  const dedHit =
+    takeIfHasDed(cached) ||
+    takeIfHasDed(bulk) ||
+    takeIfHasDed(latest) ||
+    takeIfHasDed(statutoryPayrollRows);
+  if (dedHit) return dedHit;
 
   const base = resolveFormXIXMPPayrollRowsForAutofill(statutoryPayrollRows, monthCandidates);
-  return preferPfRows(base);
+  const fromBase = takeIfHasPf(base) || takeIfHasDed(base);
+  if (fromBase) return fromBase;
+
+  const fallbackCandidates = [cached, bulk, latest, statutoryPayrollRows, base];
+  for (let i = 0; i < fallbackCandidates.length; i += 1) {
+    const fallback = preferPfRows(fallbackCandidates[i]);
+    if (fallback.length > 0) return fallback;
+  }
+  return [];
 }
 
 export function buildFormXVIIIMPPayrollRowResolver(payrollRows) {
@@ -490,7 +528,11 @@ export function isFormXVIIIMPEsicHeader(header) {
 }
 
 export function isFormXVIIIMPPtHeader(header) {
+  const raw = String(header || '').trim();
   const s = mpCombinedRegisterHeaderNorm(header).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+  // "Other Deductions…_PT (22)" composite keys from grouped Excel models.
+  if (/_pt(?:\s*\(?\s*\d+\s*\)?)?\s*$/i.test(raw)) return true;
+  if (/\bpt\b/.test(s) && (s.includes('other') || s.includes('deduction'))) return true;
   return (
     s === 'pt' ||
     /^pt\s*\d*$/.test(s) ||
@@ -847,6 +889,17 @@ function parseFormXVIIIMPMoney(value) {
   if (value === '' || value == null) return NaN;
   const n = Number(String(value).replace(/,/g, '').trim());
   return Number.isFinite(n) ? n : NaN;
+}
+
+/** First finite money amount — same pattern as Form P / Form B Sample Payroll deductions. */
+function pickFormXVIIIMPAmount(...values) {
+  for (let i = 0; i < values.length; i += 1) {
+    const value = values[i];
+    if (value === '' || value == null) continue;
+    const n = parseFormXVIIIMPMoney(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return '';
 }
 
 /** Other allowances = gross_pay − basic − hra (requires positive basic/hra so it never dumps full gross). */
@@ -1420,7 +1473,16 @@ export function resolveFormXVIIIMPSamplePayrollPf(flat = {}, p = {}, payrollPayl
     /^employer_epf/,
   ];
   for (const src of sources) {
-    const val = readPayrollScalar(src, keys, patterns);
+    const val = pickFormXVIIIMPAmount(
+      src.epf_contribution,
+      src.pf,
+      src.PF,
+      src.provident_fund,
+      src.employee_pf,
+      src.employer_pf,
+      src.employer_epf,
+      readPayrollScalar(src, keys, patterns)
+    );
     if (val !== '' && val != null) return val;
   }
   return '';
@@ -1429,18 +1491,24 @@ export function resolveFormXVIIIMPSamplePayrollPf(flat = {}, p = {}, payrollPayl
 /** Prefer Sample Payroll table Professional Tax column. */
 export function resolveFormXVIIIMPSamplePayrollPt(flat = {}, p = {}, payrollPayload = null) {
   const sources = [flat, p, payrollPayload].filter((src) => src && typeof src === 'object');
+  const keys = [
+    'Professional Tax',
+    'professional_tax',
+    'ProfessionalTax',
+    'professionalTax',
+    'pt',
+    'PT',
+  ];
+  const patterns = [/^professional_tax$/, /^professionaltax$/, /^pt$/];
   for (const src of sources) {
-    const val = readPayrollScalar(
-      src,
-      [
-        'Professional Tax',
-        'professional_tax',
-        'ProfessionalTax',
-        'professionalTax',
-        'pt',
-        'PT',
-      ],
-      [/^professional_tax$/, /^pt$/]
+    const val = pickFormXVIIIMPAmount(
+      src.professional_tax,
+      src.professionalTax,
+      src.ProfessionalTax,
+      src['Professional Tax'],
+      src.pt,
+      src.PT,
+      readPayrollScalar(src, keys, patterns)
     );
     if (val !== '' && val != null) return val;
   }
@@ -1787,11 +1855,18 @@ export function applyFormXVIIIMPPayrollToRow(row, payrollPayload, mpHeaders, hel
     if (isFormXVIIIMPLwfHeader(h)) writeAmount(h, lwf);
   });
 
-  // Also write PF onto any leftover merged "Other Deductions…" key still present on the row.
+  // Also write PF/PT onto leftover merged "Other Deductions…" / composite keys still present on the row.
   if (pf !== '' && pf != null) {
     Object.keys(row || {}).forEach((key) => {
       if (isFormXVIIIMPOtherDeductionsGroupParentHeader(key) || isFormXVIIIMPPfHeader(key)) {
         writeAmount(key, pf);
+      }
+    });
+  }
+  if (pt !== '' && pt != null) {
+    Object.keys(row || {}).forEach((key) => {
+      if (isFormXVIIIMPPtHeader(key)) {
+        writeAmount(key, pt);
       }
     });
   }
@@ -1925,10 +2000,19 @@ export function formXVIIIMPDownloadHasSubstantiveRows(mappedData, headers) {
   });
 }
 
-/** True when any row is missing gross/net/wage-rate, or other-allowance equals gross (bad formula). */
+/** True when any row is missing gross/net/wage-rate/PF/PT, or other-allowance equals gross (bad formula). */
 export function formXVIIIMPRowsNeedPayrollEnrich(mappedData, headers) {
   if (!Array.isArray(mappedData) || mappedData.length === 0) return false;
   const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+  const deductionTargets = [mpHeaders.pf, mpHeaders.pt].filter(Boolean);
+  if (
+    deductionTargets.length > 0 &&
+    mappedData.some((row) =>
+      deductionTargets.some((header) => !String(row?.[header] ?? '').trim())
+    )
+  ) {
+    return true;
+  }
   const targets = [
     mpHeaders.grossWages,
     mpHeaders.netPayable,

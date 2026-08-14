@@ -16,6 +16,11 @@ import {
   statesFieldMatchesInchargeSiteStates
 } from '../utils/siteInchargeScope';
 import { resolveLoginEmailString } from '../utils/resolveLoginEmail';
+import {
+  fetchSetupFormAssignments,
+  getSetupAssignmentsForEmail,
+  statutoryRowAllowedBySetup,
+} from '../utils/setupFormAccess';
 import { fetchPayrollTableRowsForMonths, loadPayrollTableRowsForStatutoryAutofill, getPayrollTableRowsForStatutoryAutofillSync, prefetchPayrollTableRowsForMonths } from '../utils/payrollTable';
 import { fetchSamplePayrollEmployeeRow, fetchSamplePayrollRowsForMonth, fetchSamplePayrollRowsForMonthCandidates, samplePayrollRowMatchesEmployeeId } from '../utils/samplePayrollApi';
 import {
@@ -27006,6 +27011,7 @@ const Statutory = ({ userEmail, userRole }) => {
   const [form, setForm] = useState(initialForm);
   const [statutoryData, setStatutoryData] = useState(() => initialStatutoryData);
   const [formmasterTemplates, setFormmasterTemplates] = useState([]); // Formmaster file list for Form File column lookup by form name
+  const [setupFormRows, setSetupFormRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -27134,6 +27140,19 @@ const Statutory = ({ userEmail, userRole }) => {
   const pendingCalendarFormFilterRef = useRef('');
   const appliedCalendarStateKeyRef = useRef('');
   const PAGE_SIZE = 10;
+  useEffect(() => {
+    let cancelled = false;
+    fetchSetupFormAssignments()
+      .then((rows) => {
+        if (!cancelled) setSetupFormRows(Array.isArray(rows) ? rows : []);
+      })
+      .catch(() => {
+        if (!cancelled) setSetupFormRows([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   useEffect(() => {
     formTableDataRef.current = Array.isArray(formTableData) ? formTableData : [];
   }, [formTableData]);
@@ -84461,8 +84480,8 @@ const Statutory = ({ userEmail, userRole }) => {
               key: isFormHLeaveBookContext(formHHeaderProbe, null, '') ? 'form_h_si_no_register_of_adult' : 'form_f_si_no_register_of_adult'
             },
             {
-              match: /2\.?\s*date\s+entry\s+into\s+service/i,
-              label: '2. Date entry into service',
+              match: /2\.?\s*date(?:\s+of)?\s+entry\s+into\s+service/i,
+              label: '2. Date of entry into service',
               key: isFormHLeaveBookContext(formHHeaderProbe, null, '') ? 'form_h_date_entry_into_service' : 'form_f_date_entry_into_service'
             },
             {
@@ -84471,8 +84490,8 @@ const Statutory = ({ userEmail, userRole }) => {
               key: isFormHLeaveBookContext(formHHeaderProbe, null, '') ? 'form_h_name_of_the_person' : 'form_f_name_of_the_person'
             },
             {
-              match: /4\.?\s*father'?s\s*\/\s*husband'?s\s+name/i,
-              label: "4. Father's / Husband's Name",
+              match: /4\.?\s*father'?s(?:\s*\/\s*husband'?s)?\s+name/i,
+              label: "4. Father's Name",
               key: isFormHLeaveBookContext(formHHeaderProbe, null, '') ? 'form_h_father_or_husband_name' : 'form_f_father_or_husband_name'
             }
           ];
@@ -93151,6 +93170,13 @@ const Statutory = ({ userEmail, userRole }) => {
       );
     }
 
+    const setupAssignments = getSetupAssignmentsForEmail(setupFormRows, effectiveUserEmail);
+    if (setupAssignments.length > 0 && data && data.length > 0) {
+      data = data.filter((item) =>
+        statutoryRowAllowedBySetup(item, setupAssignments, { siteHint: urlSite })
+      );
+    }
+
     // Show all form names in every month: for selected month show matching record or placeholder (so "10 of 13" becomes 13 rows).
     // But when Statutory is already aligned 1:1 to ChecklistBulk, do not collapse by form/month.
     const effectiveSelectedMonth = resolveToFullMonthName(selectedMonth) || getCurrentMonth();
@@ -93258,7 +93284,7 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     return data;
-  }, [statutoryDataWithPinnedDrafts, selectedMonth, getActCategoryWithFormFallback, hasComplianceFiles, resolveSiteDisplayName, resolveSiteForDisplay, siteWiseCategory, siteFromUrl, allowedSiteNameList, allowedInchargeStateLabels, hasSiteBasedActScope, allowedActCategoryList, siteLoginScope, siteScopeMetaReady, isSiteWiseStatutoryUser]);
+  }, [statutoryDataWithPinnedDrafts, selectedMonth, getActCategoryWithFormFallback, hasComplianceFiles, resolveSiteDisplayName, resolveSiteForDisplay, siteWiseCategory, siteFromUrl, allowedSiteNameList, allowedInchargeStateLabels, hasSiteBasedActScope, allowedActCategoryList, siteLoginScope, siteScopeMetaReady, isSiteWiseStatutoryUser, setupFormRows, effectiveUserEmail]);
 
   const tableFormOptions = useMemo(() => {
     return Array.from(

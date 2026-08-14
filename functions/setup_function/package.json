@@ -4,6 +4,8 @@
 	"main": "index.js",
 	"author": "zohoadmin@vayonaenergy.com",
 	"dependencies": {
+		"express": "^5.2.1",
+		"xlsx": "^0.18.5",
 		"zcatalyst-sdk-node": "latest"
 	}
 }

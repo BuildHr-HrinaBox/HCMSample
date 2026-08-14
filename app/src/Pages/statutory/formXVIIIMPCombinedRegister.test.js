@@ -13,9 +13,12 @@ import {
   isFormXVIIIMPOtherDeductionsGroupParentHeader,
   isFormXVIIIMPOvertimeHoursHeader,
   isFormXVIIIMPOvertimeWagesHeader,
+  formXVIIIMPRowsNeedPayrollEnrich,
   isFormXVIIIMPPayrollDeductionHeader,
   isFormXVIIIMPPfHeader,
+  isFormXVIIIMPPtHeader,
   isFormXVIIIMPWageRateHeader,
+  resolveFormXVIIIMPPayrollRowsForAutofill,
   looksLikeKarnatakaFormTSheet,
   looksLikeMPCombinedRegisterSheet,
   looksLikeTamilNaduFormXVIIISheet,
@@ -32,6 +35,7 @@ import {
   snapshotFormXVIIIMPDistinctOtherAllowances,
   sumFormXVIIIMPLeaveBookedAndBalance,
 } from './formXVIIIMPCombinedRegister';
+import { flattenPayrollEarningColumns } from '../../utils/payrollEarnings';
 
 describe('Form XVIII MP Combined Register mappings', () => {
   it('does not treat Karnataka Form T as MP Form XVIII combined register', () => {
@@ -266,6 +270,60 @@ describe('Form XVIII MP Combined Register mappings', () => {
     );
     expect(row['PF (22)']).toBe('1800');
     expect(row['PT (22)']).toBe('200');
+  });
+
+  it('maps PF (22) / PT (22) from Sample Payroll UI keys through flatten', () => {
+    expect(resolveFormXVIIIMPSamplePayrollPf({ pf: 3562, professionalTax: 208 })).toBe(3562);
+    expect(resolveFormXVIIIMPSamplePayrollPt({ pf: 3562, professionalTax: 208 })).toBe(208);
+    expect(isFormXVIIIMPPtHeader('PT (22)')).toBe(true);
+    expect(
+      isFormXVIIIMPPtHeader('Other Deductions Like EPF/ ESI/ Welfare Fund etc. (if any)_PT (22)')
+    ).toBe(true);
+
+    const headers = ['PF (22)', 'PT (22)'];
+    const mpHeaders = resolveFormXVIIIMPTableHeaders(headers);
+    const row = {};
+    headers.forEach((h) => {
+      row[h] = '';
+    });
+    applyFormXVIIIMPPayrollToRow(
+      row,
+      {
+        employee_name: 'Test Worker',
+        gross_pay: 50000,
+        net_pay: 45000,
+        pf: 3562,
+        professionalTax: 208,
+      },
+      mpHeaders,
+      {
+        headers,
+        sanitizeValue: (v) => String(v ?? '').trim(),
+        flattenPayrollEarningColumns,
+      }
+    );
+    expect(row['PF (22)']).toBe('3562');
+    expect(row['PT (22)']).toBe('208');
+  });
+
+  it('prefers Sample Payroll rows that carry PF over gross-only pay-run rows', () => {
+    const rows = resolveFormXVIIIMPPayrollRowsForAutofill(
+      [
+        { employee_name: 'A', gross_pay: 50000, net_pay: 45000 },
+        { employee_name: 'B', gross_pay: 50000, net_pay: 45000, pf: 1800, professionalTax: 200 },
+      ],
+      ['2026-07'],
+      { cachedSampleRows: [{ employee_name: 'A', gross_pay: 50000, net_pay: 45000 }] }
+    );
+    expect(
+      rows.some((row) => Number(row.epf_contribution ?? row.pf ?? row.PF) === 1800)
+    ).toBe(true);
+    expect(
+      formXVIIIMPRowsNeedPayrollEnrich(
+        [{ 'PF (22)': '', 'PT (22)': '', 'Total/ gross Wages/ Earnings': '50000' }],
+        ['PF (22)', 'PT (22)', 'Total/ gross Wages/ Earnings']
+      )
+    ).toBe(true);
   });
 
   it('fills PF when merged Other Deductions parent is the column key', () => {

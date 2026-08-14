@@ -3,6 +3,7 @@ import './Setup.css';
 import './CompanyDetails.css';
 import {
   checklistStateMatchesSiteState,
+  normalizeStateCompareKey,
   siteInchargeEmail,
   siteNameFromSiteRecord,
   siteStateFromRecord,
@@ -68,6 +69,23 @@ function mapSetupRowsToEmails(rows) {
     map[key] = parseStoredEmails(row.email ?? row.Email);
   });
   return map;
+}
+
+function getSavedEmailsForForm(emailsMap, formName, { state = '', site = '' } = {}) {
+  const formKey = String(formName || '').trim().toLowerCase();
+  const stateFilter = normalizeStateCompareKey(state);
+  const siteFilter = String(site || '').trim().toLowerCase();
+  const bucket = [];
+  Object.entries(emailsMap || {}).forEach(([key, value]) => {
+    const parts = key.split('|');
+    if (parts.length < 3) return;
+    const [keyState, keySite, keyForm] = parts;
+    if (keyForm !== formKey) return;
+    if (stateFilter && normalizeStateCompareKey(keyState) !== stateFilter) return;
+    if (siteFilter && keySite !== siteFilter) return;
+    parseStoredEmails(value).forEach((email) => bucket.push(email));
+  });
+  return uniqueSorted(bucket);
 }
 
 function EmailMultiSelect({ options, value, onChange }) {
@@ -238,21 +256,28 @@ export default function Setup({ userEmail = '' }) {
   const adminEmail = String(userEmail || '').trim();
 
   const allEmailOptions = useMemo(() => {
+    const bucket = [];
+    const admin = isValidEmail(adminEmail) ? adminEmail : '';
+
     const sitesForEmails = selectedSite
       ? sitesForState.filter((site) => siteNameFromSiteRecord(site) === selectedSite)
       : selectedState
         ? sitesForState
-        : [];
+        : sites;
 
-    const siteEmails = uniqueSorted(
-      sitesForEmails.map((site) => siteInchargeEmail(site)).filter(isValidEmail)
-    );
-    const admin = isValidEmail(adminEmail) ? adminEmail : '';
-    const siteEmailsWithoutAdmin = siteEmails.filter(
-      (email) => email.toLowerCase() !== admin.toLowerCase()
-    );
-    return admin ? [admin, ...siteEmailsWithoutAdmin] : siteEmailsWithoutAdmin;
-  }, [adminEmail, selectedState, selectedSite, sitesForState]);
+    sitesForEmails.forEach((site) => {
+      const siteEmail = siteInchargeEmail(site);
+      if (isValidEmail(siteEmail)) bucket.push(siteEmail);
+    });
+
+    Object.values(emails).forEach((value) => {
+      parseStoredEmails(value).forEach((email) => bucket.push(email));
+    });
+
+    const merged = uniqueSorted(bucket);
+    const withoutAdmin = merged.filter((email) => email.toLowerCase() !== admin.toLowerCase());
+    return admin ? [admin, ...withoutAdmin] : withoutAdmin;
+  }, [adminEmail, selectedState, selectedSite, sitesForState, sites, emails]);
 
   const filteredForms = useMemo(() => {
     const rows = selectedState
@@ -277,10 +302,18 @@ export default function Setup({ userEmail = '' }) {
 
   const getEmailValue = useCallback(
     (formName) => {
-      const key = emailStorageKey(selectedState, selectedSite, formName);
-      if (Object.prototype.hasOwnProperty.call(emails, key)) {
-        return parseStoredEmails(emails[key]).filter((email) => allEmailOptions.includes(email));
+      const exactKey = emailStorageKey(selectedState, selectedSite, formName);
+      if (Object.prototype.hasOwnProperty.call(emails, exactKey)) {
+        const exactSaved = parseStoredEmails(emails[exactKey]);
+        if (exactSaved.length) return exactSaved;
       }
+
+      const scopedSaved = getSavedEmailsForForm(emails, formName, {
+        state: selectedState,
+        site: selectedSite,
+      });
+      if (scopedSaved.length) return scopedSaved;
+
       return allEmailOptions;
     },
     [emails, selectedState, selectedSite, allEmailOptions]
@@ -297,7 +330,7 @@ export default function Setup({ userEmail = '' }) {
 
   const handleSave = async () => {
     if (!selectedState) {
-      setMessage('Select a state first.');
+      setMessage('Select a state before saving.');
       return;
     }
     if (!filteredForms.length) {
@@ -360,7 +393,7 @@ export default function Setup({ userEmail = '' }) {
                   setMessage('');
                 }}
               >
-                <option value="">Select state</option>
+                <option value="">All states</option>
                 {stateOptions.map((state) => (
                   <option key={state} value={state}>
                     {state}

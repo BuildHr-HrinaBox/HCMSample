@@ -45,6 +45,9 @@ function toAppRow(row) {
     site: trimText(data.Site ?? data.site),
     formName: trimText(data.FormName ?? data.formName),
     email: trimText(data.Email ?? data.email),
+    act: trimText(data.Act ?? data.act),
+    description: trimText(data.Description ?? data.description),
+    role: trimText(data.Role ?? data.role),
   };
 }
 
@@ -101,24 +104,28 @@ app.put('/setup', async (req, res) => {
       const formName = trimText(item?.formName || item?.FormName);
       if (!formName) continue;
       const email = emailsToStore(item?.emails ?? item?.email ?? item?.Email);
+      const act = trimText(item?.act ?? item?.Act);
+      const description = trimText(item?.description ?? item?.Description);
+      const role = trimText(item?.role ?? item?.Role);
       const key = matchKey(state, site, formName);
       const current = byKey.get(key);
+      const rowPayload = {
+        State: state,
+        Site: site,
+        FormName: formName,
+        Email: email,
+        Act: act,
+        Description: description,
+        Role: role,
+      };
       let stored;
       if (current?.id) {
         stored = await table.updateRow({
           ROWID: current.id,
-          State: state,
-          Site: site,
-          FormName: formName,
-          Email: email,
+          ...rowPayload,
         });
       } else {
-        stored = await table.insertRow({
-          State: state,
-          Site: site,
-          FormName: formName,
-          Email: email,
-        });
+        stored = await table.insertRow(rowPayload);
       }
       const appRow = toAppRow(stored);
       saved.push({
@@ -127,6 +134,9 @@ app.put('/setup', async (req, res) => {
         site,
         formName,
         email,
+        act: appRow.act || act,
+        description: appRow.description || description,
+        role: appRow.role || role,
       });
     }
 

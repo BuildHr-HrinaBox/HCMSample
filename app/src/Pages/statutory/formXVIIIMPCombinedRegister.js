@@ -314,6 +314,59 @@ export function isFormXVIIIMPCombinedRegisterContext(formHeader, rowItem, fileNa
   );
 }
 
+/** Strip numbering / punctuation so "2. Nature and location of work" matches the unnumbered label. */
+export function normalizeFormXVIIIMPHeaderFieldLabel(label) {
+  return String(label || '')
+    .toLowerCase()
+    .replace(/^\d+[\.)]\s*/, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formXVIIIMPHeaderFieldAlias(norm) {
+  if (!norm) return '';
+  if (norm.includes('registration') && norm.includes('certificate')) return 'registration';
+  if (norm === 'month' || norm.includes('month year') || norm === 'month year') return 'month';
+  if (norm.includes('nature') && norm.includes('location')) return 'nature';
+  if (norm.includes('contractor')) return 'contractor';
+  if (norm.includes('principal employer') || (norm.includes('employer') && !norm.includes('contractor'))) {
+    return 'employer';
+  }
+  if (norm.includes('manager') || norm.includes('incharge')) return 'manager';
+  if (norm.includes('establishment')) return 'establishment';
+  return `label:${norm}`;
+}
+
+function formXVIIIMPHeaderFieldHasValue(field) {
+  return String(field?.value ?? '').trim() !== '';
+}
+
+/**
+ * Form XVIII MP templates repeat contractor / establishment labels (sheet + TN-style numbered copies).
+ * Keep one field per alias, preferring a filled value, so the modal header stays short and scrollable.
+ */
+export function dedupeFormXVIIIMPHeaderFields(fields) {
+  const list = Array.isArray(fields) ? fields : [];
+  const byAlias = new Map();
+  for (let i = 0; i < list.length; i += 1) {
+    const field = list[i];
+    if (!field || typeof field !== 'object') continue;
+    const norm = normalizeFormXVIIIMPHeaderFieldLabel(field.label || field.key);
+    const alias = formXVIIIMPHeaderFieldAlias(norm);
+    if (!alias) continue;
+    const prev = byAlias.get(alias);
+    if (!prev) {
+      byAlias.set(alias, field);
+      continue;
+    }
+    if (!formXVIIIMPHeaderFieldHasValue(prev) && formXVIIIMPHeaderFieldHasValue(field)) {
+      byAlias.set(alias, field);
+    }
+  }
+  return Array.from(byAlias.values());
+}
+
 function excelCellLooksLikeSerialHeader(rawText) {
   const t = mpCombinedRegisterHeaderNorm(rawText);
   return !!(
@@ -1901,6 +1954,7 @@ export function mapFormXVIIIMPRowsFromEmployees(employees, headers, helpers = {}
     formatStatutoryDateDisplay = (v) => String(v ?? '').trim(),
     resolvePayrollRow = null,
     rowIndexOffset = 0,
+    peopleOnly = false,
     ...payrollHelpers
   } = helpers;
 
@@ -1922,6 +1976,7 @@ export function mapFormXVIIIMPRowsFromEmployees(employees, headers, helpers = {}
     });
     applyFormXVIIIMPLeaveCategoryToRow(row, headerList, { sanitizeValue });
     applyFormXVIIIMPNilDefaultsToRow(row, headerList, { nilText: FORM_XVIII_MP_NIL, overwrite: true });
+    if (peopleOnly) return row;
     const emp = unwrapFormXVIIIMPEmployee(empItem);
     const payrollRow =
       typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, rowIndex) : null;

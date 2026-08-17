@@ -8,6 +8,8 @@ import {
   finalizeFormXVIIIMPOtherAllowancesForDownload,
   isFormXVIIIMPAnyOtherAmountHeader,
   isFormXVIIIMPCombinedRegisterContext,
+  dedupeFormXVIIIMPHeaderFields,
+  normalizeFormXVIIIMPHeaderFieldLabel,
   isFormXVIIIMPMaternityBenefitHeader,
   isFormXVIIIMPNilDefaultHeader,
   isFormXVIIIMPOtherDeductionsGroupParentHeader,
@@ -19,6 +21,7 @@ import {
   isFormXVIIIMPPtHeader,
   isFormXVIIIMPWageRateHeader,
   resolveFormXVIIIMPPayrollRowsForAutofill,
+  mapFormXVIIIMPRowsFromEmployees,
   looksLikeKarnatakaFormTSheet,
   looksLikeMPCombinedRegisterSheet,
   looksLikeTamilNaduFormXVIIISheet,
@@ -74,6 +77,42 @@ describe('Form XVIII MP Combined Register mappings', () => {
         'Name of the establishment and address Location of work'
       )
     ).toBe(true);
+  });
+
+  it('peopleOnly mapping fills worker name without waiting on payroll', () => {
+    const headers = ['Sr No', 'EMP Id', 'Full name of the Worker (ID/ Tocken No. If any)', 'PF (22)'];
+    const rows = mapFormXVIIIMPRowsFromEmployees(
+      [{ EmployeeID: 'VE1257', FirstName: 'Tejpal', LastName: 'Singh' }],
+      headers,
+      { peopleOnly: true }
+    );
+    expect(rows[0]['EMP Id']).toBe('VE1257');
+    expect(String(rows[0]['Full name of the Worker (ID/ Tocken No. If any)'])).toMatch(/Tejpal/i);
+    expect(rows[0]['PF (22)']).toBe('');
+  });
+
+  it('dedupes repeated Form XVIII MP header labels so the modal stays short', () => {
+    expect(normalizeFormXVIIIMPHeaderFieldLabel('2. Nature and location of work.')).toBe(
+      'nature and location of work'
+    );
+    const fields = dedupeFormXVIIIMPHeaderFields([
+      { key: 'form_xviii_est', label: 'Name and Address of the Establishment', value: 'Site A' },
+      { key: 'form_xviii_est_addr', label: 'Address of the Establishment', value: '' },
+      { key: 'form_xviii_contractor', label: 'Name and Address of Contractor', value: 'Vayona' },
+      { key: 'form_xviii_nature', label: 'Nature and location of work', value: 'MP-Dhar' },
+      { key: 'form_xviii_nature_dup', label: '2. Nature and location of work.', value: '' },
+      { key: 'form_xviii_pe', label: 'Name and address of Principal Employer', value: 'PE' },
+      { key: 'form_xviii_pe_mgr', label: 'Name and address of Principal Employer/ Manager', value: '' },
+      { key: 'form_xviii_month_year', label: 'Month / Year', value: '' },
+      { key: 'form_xviii_month', label: 'Month', value: '' },
+    ]);
+    expect(fields.map((f) => f.key)).toEqual([
+      'form_xviii_est',
+      'form_xviii_contractor',
+      'form_xviii_nature',
+      'form_xviii_pe',
+      'form_xviii_month_year',
+    ]);
   });
 
   it('does not treat Form_XVIII_-_TamilNadu.xlsx as MP Form XVIII combined register', () => {

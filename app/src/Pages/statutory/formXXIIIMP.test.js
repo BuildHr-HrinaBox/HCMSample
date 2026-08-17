@@ -11,6 +11,7 @@ import {
   isFormXXIIIMPOvertimeEarningsHeader,
   isFormXXIIIMPOtWagesPaidDateHeader,
   resolveFormXXIIIMPNormalRateForEmployee,
+  resolveFormXXIIIMPPayrollRowForEmployee,
   resolveFormXXIIIMPPeopleSalary,
 } from './formXXIIIMP';
 
@@ -61,6 +62,31 @@ describe('Form XXIII MP Normal rate of wages', () => {
       ],
       [{ net_pay: 65303 }, null],
       ['2026-05']
+    );
+    expect(rows[0]['Normal rate of wages']).toBe('65303');
+    expect(rows[1]['Normal rate of wages']).toBe('62218');
+  });
+
+  it('matches payroll by name so GID-blocked workmen still get Normal rate', () => {
+    const tejpal = { FirstName: 'Tejpal', LastName: 'Singh', Zoho_ID: 'gid-tejpal' };
+    const jeevan = { FirstName: 'Jeevan', LastName: 'Parmar', Zoho_ID: 'gid-jeevan' };
+    const payrollRows = [
+      { first_name: 'Tejpal', last_name: 'Singh', employee_id: 'VE1', net_pay: 65303 },
+      { first_name: 'Jeevan', last_name: 'Parmar', employee_id: 'VE2', net_pay: 62218 },
+      { first_name: 'Chinmaya', last_name: 'Kumar Swain', employee_id: 'VE3', net_pay: 72590 },
+    ];
+    expect(resolveFormXXIIIMPPayrollRowForEmployee(tejpal, payrollRows).net_pay).toBe(65303);
+    expect(resolveFormXXIIIMPPayrollRowForEmployee(jeevan, payrollRows).net_pay).toBe(62218);
+    const rows = applyFormXXIIIMPNormalRateToMappedRows(
+      [
+        { 'Name of workman': 'Tejpal Singh', 'Normal rate of wages': '' },
+        { 'Name of workman': 'Jeevan Parmar', 'Normal rate of wages': '' },
+      ],
+      ['Name of workman', 'Normal rate of wages'],
+      [tejpal, jeevan],
+      [],
+      ['2026-05'],
+      { payrollRows }
     );
     expect(rows[0]['Normal rate of wages']).toBe('65303');
     expect(rows[1]['Normal rate of wages']).toBe('62218');

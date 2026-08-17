@@ -603,6 +603,15 @@ export function yieldToMain() {
   });
 }
 
+/** Extra idle turn after paint so the form modal can scroll while autofill continues. */
+export async function yieldForModalScroll(isUiBusy) {
+  await yieldToMain();
+  await new Promise((resolve) => setTimeout(resolve, 48));
+  if (typeof isUiBusy === 'function') {
+    await waitWhileUiBusy(isUiBusy);
+  }
+}
+
 /** Wait while the UI is busy (e.g. user scrolling the autofill modal). */
 export async function waitWhileUiBusy(isUiBusy, idleMs = 80) {
   if (typeof isUiBusy !== 'function') return;

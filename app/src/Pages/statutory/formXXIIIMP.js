@@ -155,6 +155,80 @@ export function resolveFormXXIIIMPNormalRateForEmployee(emp, payrollRow = null, 
   return '';
 }
 
+function formXXIIIMPPayrollRowHasNetPay(row) {
+  if (!row || row.fetch_error) return false;
+  return String(readPayrollNetPayForStatutory(row) ?? '').trim() !== '';
+}
+
+function formXXIIIMPPayrollRowPersonName(row) {
+  if (!row || typeof row !== 'object') return '';
+  const fn = String(row.first_name || row.firstName || row['First Name'] || '').trim();
+  const ln = String(row.last_name || row.lastName || row['Last Name'] || '').trim();
+  if (fn && ln) return `${fn} ${ln}`;
+  return String(
+    row.employee_name || row.EmployeeName || row['Employee Name'] || row.employeeName || ''
+  ).trim();
+}
+
+/**
+ * Find Sample Payroll for Form XXIII MP without the GID hard-stop used by Form XIX.
+ * First two workmen (e.g. Tejpal Singh / Jeevan Parmar) often have a People GID that
+ * does not match payroll employee_id, so name / email / employee-id matching is required.
+ */
+export function resolveFormXXIIIMPPayrollRowForEmployee(emp, payrollRows) {
+  if (!emp || !Array.isArray(payrollRows) || payrollRows.length === 0) return null;
+  const rows = payrollRows.filter(formXXIIIMPPayrollRowHasNetPay);
+  if (!rows.length) return null;
+
+  const empName = formatFormXXIIIMPEmployeeName(emp);
+  if (empName) {
+    const byName = rows.find((row) => personNamesMatch(empName, formXXIIIMPPayrollRowPersonName(row)));
+    if (byName) return byName;
+  }
+
+  const email = String(emp.EmailID || emp.Email || emp.email || emp['Email ID'] || '')
+    .trim()
+    .toLowerCase();
+  if (email) {
+    const byEmail = rows.find((row) => {
+      const re = String(row.work_mail || row.email || row.work_email || row.EmailID || '')
+        .trim()
+        .toLowerCase();
+      return re && re === email;
+    });
+    if (byEmail) return byEmail;
+  }
+
+  const ids = [
+    emp.EmployeeID,
+    emp['EmployeeID'],
+    emp['Employee ID'],
+    emp.Zoho_ID,
+    emp['Zoho_ID'],
+    emp.ZohoID,
+    emp.employee_number,
+    emp['employee_number'],
+  ]
+    .map((v) => String(v || '').trim())
+    .filter(Boolean);
+  if (ids.length) {
+    const idSet = new Set(ids.map((v) => v.toLowerCase()));
+    const byId = rows.find((row) => {
+      const candidates = [
+        row.employee_id,
+        row.EmployeeID,
+        row.employee_number,
+        row.Employee_Number,
+        row.zoho_id,
+      ].map((v) => String(v || '').trim().toLowerCase());
+      return candidates.some((id) => id && idSet.has(id));
+    });
+    if (byId) return byId;
+  }
+
+  return null;
+}
+
 /** Form XXIII MP overtime columns that always default to NIL (no attendance/payroll OT). */
 export const FORM_XXIII_MP_OT_NIL = 'NIL';
 
@@ -232,10 +306,19 @@ export function applyFormXXIIIMPNormalRateToMappedRows(
   helpers = {}
 ) {
   if (!Array.isArray(mappedData)) return [];
+  const payrollRows = Array.isArray(helpers.payrollRows) ? helpers.payrollRows : null;
+  const resolvePayrollRow =
+    typeof helpers.resolvePayrollRow === 'function' ? helpers.resolvePayrollRow : null;
   return mappedData.map((row, index) => {
     const empItem = employeesForMapping[index];
     const emp = empItem && (empItem.Employee || empItem.employee || empItem);
-    const payrollRow = Array.isArray(payrollRowsByIndex) ? payrollRowsByIndex[index] : null;
+    const payrollRow = payrollRows
+      ? resolveFormXXIIIMPPayrollRowForEmployee(emp, payrollRows)
+      : resolvePayrollRow
+        ? resolvePayrollRow(emp, row, index)
+        : Array.isArray(payrollRowsByIndex)
+          ? payrollRowsByIndex[index]
+          : null;
     return applyFormXXIIIMPNormalRateToRow(
       row,
       headers,

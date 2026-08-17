@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Download, RotateCcw, Search } from 'lucide-react';
 import './Setup.css';
-import './CompanyDetails.css';
 import {
   checklistStateMatchesSiteState,
   normalizeStateCompareKey,
@@ -71,6 +71,21 @@ function mapSetupRowsToEmails(rows) {
   return map;
 }
 
+function mapSetupRowsToMeta(rows) {
+  const map = {};
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const formName = row?.formName || row?.FormName;
+    if (!formName) return;
+    const key = emailStorageKey(row.state || row.State, row.site || row.Site, formName);
+    map[key] = {
+      act: String(row.act ?? row.Act ?? '').trim(),
+      description: String(row.description ?? row.Description ?? '').trim(),
+      role: String(row.role ?? row.Role ?? '').trim(),
+    };
+  });
+  return map;
+}
+
 function getSavedEmailsForForm(emailsMap, formName, { state = '', site = '' } = {}) {
   const formKey = String(formName || '').trim().toLowerCase();
   const stateFilter = normalizeStateCompareKey(state);
@@ -86,6 +101,26 @@ function getSavedEmailsForForm(emailsMap, formName, { state = '', site = '' } = 
     parseStoredEmails(value).forEach((email) => bucket.push(email));
   });
   return uniqueSorted(bucket);
+}
+
+function exportAccessRowsCsv(rows) {
+  const headers = ['Role Name', 'Act', 'Description', 'Form Name', 'Email ID', 'Status'];
+  const escape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const lines = [headers.map(escape).join(',')];
+  rows.forEach((row) => {
+    lines.push(
+      [row.roleName, row.act, row.description, row.formName, row.email, row.status]
+        .map(escape)
+        .join(',')
+    );
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'role-based-access.csv';
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function EmailMultiSelect({ options, value, onChange }) {
@@ -116,11 +151,12 @@ function EmailMultiSelect({ options, value, onChange }) {
     onChange(uniqueSorted(next));
   };
 
-  const summary = selected.length === 0
-    ? 'Select email'
-    : selected.length === 1
-      ? selected[0]
-      : `${selected.length} emails selected`;
+  const summary =
+    selected.length === 0
+      ? 'Select email'
+      : selected.length === 1
+        ? selected[0]
+        : `${selected.length} emails selected`;
 
   return (
     <div className={`setup-multi-select${open ? ' setup-multi-select--open' : ''}`} ref={rootRef}>
@@ -133,7 +169,9 @@ function EmailMultiSelect({ options, value, onChange }) {
         title={selected.join(', ')}
       >
         <span className={selected.length ? '' : 'setup-multi-select-placeholder'}>{summary}</span>
-        <span className="setup-multi-select-caret" aria-hidden>▾</span>
+        <span className="setup-multi-select-caret" aria-hidden>
+          ▾
+        </span>
       </button>
       {open ? (
         <div className="setup-multi-select-menu" role="listbox" aria-multiselectable="true">
@@ -144,11 +182,7 @@ function EmailMultiSelect({ options, value, onChange }) {
               const checked = selectedSet.has(email.toLowerCase());
               return (
                 <label key={email} className="setup-multi-select-option">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleEmail(email)}
-                  />
+                  <input type="checkbox" checked={checked} onChange={() => toggleEmail(email)} />
                   <span>{email}</span>
                 </label>
               );
@@ -167,7 +201,10 @@ export default function Setup({ userEmail = '' }) {
   const [message, setMessage] = useState('');
   const [selectedState, setSelectedState] = useState('');
   const [selectedSite, setSelectedSite] = useState('');
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('All');
   const [emails, setEmails] = useState(() => readStoredEmails());
+  const [setupMeta, setSetupMeta] = useState({});
   const [saving, setSaving] = useState(false);
 
   const loadData = useCallback(async () => {
@@ -208,11 +245,13 @@ export default function Setup({ userEmail = '' }) {
 
       if (setupData?.status === 'success' && Array.isArray(setupData.data)) {
         const fromBackend = mapSetupRowsToEmails(setupData.data);
+        const metaFromBackend = mapSetupRowsToMeta(setupData.data);
         setEmails((prev) => {
           const next = { ...prev, ...fromBackend };
           writeStoredEmails(next);
           return next;
         });
+        setSetupMeta((prev) => ({ ...prev, ...metaFromBackend }));
       }
     } catch (err) {
       setMessage(err?.message || 'Failed to load Setup data.');
@@ -286,19 +325,36 @@ export default function Setup({ userEmail = '' }) {
     const seen = new Set();
     const unique = [];
     rows.forEach((row) => {
-      const formName = String(row.formName || row.FormName || row.act || '').trim();
+      const formName = String(row.formName || row.FormName || '').trim();
       if (!formName) return;
       const key = formName.toLowerCase();
-      if (seen.has(key)) return;
+      const act = String(row.act || row.Act || '').trim();
+      const description = String(row.description || row.Description || '').trim();
+      const metaKey = emailStorageKey(selectedState, selectedSite, formName);
+      const savedMeta = setupMeta[metaKey] || {};
+
+      if (seen.has(key)) {
+        const existing = unique.find((item) => item.formName.toLowerCase() === key);
+        if (existing) {
+          if (!existing.act && act) existing.act = act;
+          if (!existing.description && description) existing.description = description;
+          if (!existing.act && savedMeta.act) existing.act = savedMeta.act;
+          if (!existing.description && savedMeta.description) existing.description = savedMeta.description;
+        }
+        return;
+      }
       seen.add(key);
       unique.push({
         id: row.id || key,
         formName,
+        act: act || savedMeta.act || '',
+        description: description || savedMeta.description || '',
+        role: String(savedMeta.role || '').trim(),
       });
     });
     unique.sort((a, b) => a.formName.localeCompare(b.formName));
     return unique;
-  }, [formRecords, selectedState]);
+  }, [formRecords, selectedState, selectedSite, setupMeta]);
 
   const getEmailValue = useCallback(
     (formName) => {
@@ -319,6 +375,42 @@ export default function Setup({ userEmail = '' }) {
     [emails, selectedState, selectedSite, allEmailOptions]
   );
 
+  const accessRows = useMemo(() => {
+    const rows = [];
+    filteredForms.forEach((form) => {
+      const assignedEmails = getEmailValue(form.formName);
+      const emailList = assignedEmails.length ? assignedEmails : [''];
+      emailList.forEach((email, index) => {
+        rows.push({
+          id: `${form.id}-${index}-${email || 'empty'}`,
+          formName: form.formName,
+          roleName: form.role,
+          act: form.act,
+          description: form.description,
+          email,
+          status: email ? 'Active' : 'Inactive',
+        });
+      });
+    });
+    return rows;
+  }, [filteredForms, getEmailValue]);
+
+  const displayedRows = useMemo(() => {
+    let rows = accessRows;
+    if (statusFilter !== 'All') {
+      rows = rows.filter((row) => row.status === statusFilter);
+    }
+    const query = search.trim().toLowerCase();
+    if (query) {
+      rows = rows.filter((row) =>
+        [row.roleName, row.act, row.description, row.formName, row.email, row.status].some((value) =>
+          String(value || '').toLowerCase().includes(query)
+        )
+      );
+    }
+    return rows;
+  }, [accessRows, statusFilter, search]);
+
   const handleEmailChange = (formName, nextEmails) => {
     const key = emailStorageKey(selectedState, selectedSite, formName);
     setEmails((prev) => {
@@ -326,6 +418,25 @@ export default function Setup({ userEmail = '' }) {
       writeStoredEmails(next);
       return next;
     });
+  };
+
+  const handleRoleChange = (formName, role) => {
+    const key = emailStorageKey(selectedState, selectedSite, formName);
+    setSetupMeta((prev) => ({
+      ...prev,
+      [key]: {
+        ...(prev[key] || {}),
+        role: String(role || '').trim(),
+      },
+    }));
+  };
+
+  const handleReset = () => {
+    setSearch('');
+    setStatusFilter('All');
+    setSelectedState('');
+    setSelectedSite('');
+    setMessage('');
   };
 
   const handleSave = async () => {
@@ -340,13 +451,24 @@ export default function Setup({ userEmail = '' }) {
 
     const rows = filteredForms.map((row) => ({
       formName: row.formName,
+      act: row.act,
+      description: row.description,
+      role: row.role,
       emails: getEmailValue(row.formName),
     }));
     const next = { ...emails };
+    const nextMeta = { ...setupMeta };
     rows.forEach((row) => {
-      next[emailStorageKey(selectedState, selectedSite, row.formName)] = row.emails;
+      const key = emailStorageKey(selectedState, selectedSite, row.formName);
+      next[key] = row.emails;
+      nextMeta[key] = {
+        act: row.act,
+        description: row.description,
+        role: row.role,
+      };
     });
     setEmails(next);
+    setSetupMeta(nextMeta);
     writeStoredEmails(next);
 
     setSaving(true);
@@ -366,7 +488,7 @@ export default function Setup({ userEmail = '' }) {
       if (!res.ok || data?.status !== 'success') {
         throw new Error(data?.message || 'Failed to save Setup data.');
       }
-      setMessage(data.message || 'Saved form emails to Setup.');
+      setMessage(data.message || 'Saved role based access settings.');
     } catch (err) {
       setMessage(err?.message || 'Failed to save Setup data.');
     } finally {
@@ -374,102 +496,184 @@ export default function Setup({ userEmail = '' }) {
     }
   };
 
-  return (
-    <div className="setup-page company-details-page">
-      <div className="setup-shell">
-        <div className="setup-card company-details-shell-box">
-          <div className="setup-heading">
-            <h1 className="setup-title">Setup</h1>
-          </div>
+  const totalRows = displayedRows.length;
+  const footerStart = totalRows === 0 ? 0 : 1;
+  const footerEnd = totalRows;
 
-          <div className="setup-filter-row">
-            <label className="setup-filter">
-              <span>State</span>
-              <select
-                value={selectedState}
-                onChange={(e) => {
-                  setSelectedState(e.target.value);
-                  setSelectedSite('');
-                  setMessage('');
-                }}
-              >
-                <option value="">All states</option>
-                {stateOptions.map((state) => (
-                  <option key={state} value={state}>
-                    {state}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="setup-filter">
-              <span>Site</span>
-              <select
-                value={selectedSite}
-                onChange={(e) => {
-                  setSelectedSite(e.target.value);
-                  setMessage('');
-                }}
-              >
-                <option value="">All sites</option>
-                {siteOptions.map((site) => (
-                  <option key={site} value={site}>
-                    {site}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="button" className="setup-save-btn" onClick={handleSave} disabled={saving}>
-              {saving ? 'Saving...' : 'Save'}
+  return (
+    <div className="setup-rba-page">
+      <div className="setup-rba-card">
+        <div className="setup-rba-header">
+          <div className="setup-rba-header-text">
+            <h1 className="setup-rba-title">Role Based Access</h1>
+            <p className="setup-rba-subtitle">Manage roles, forms and user access for HCM.</p>
+          </div>
+          <div className="setup-rba-header-actions">
+            <button
+              type="button"
+              className="setup-rba-btn setup-rba-btn--save"
+              onClick={handleSave}
+              disabled={saving}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              className="setup-rba-btn setup-rba-btn--export"
+              onClick={() => exportAccessRowsCsv(displayedRows)}
+              disabled={!displayedRows.length}
+            >
+              <Download size={16} strokeWidth={2} aria-hidden />
+              Export
             </button>
           </div>
+        </div>
 
-          {message ? (
-            <p
-              className={`setup-message${/fail|required|select a state/i.test(message) ? ' setup-message-error' : ''}`}
-              role="status"
+        <div className="setup-rba-toolbar">
+          <div className="setup-rba-field setup-rba-search-wrap">
+            <span className="setup-rba-field-label">Search</span>
+            <Search className="setup-rba-search-icon" size={16} strokeWidth={2} aria-hidden />
+            <input
+              type="search"
+              className="setup-rba-search-input"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by role name, form name, act..."
+              aria-label="Search role based access rows"
+            />
+          </div>
+
+          <label className="setup-rba-field">
+            <span className="setup-rba-field-label">Status</span>
+            <select
+              className="setup-rba-select"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
             >
-              {message}
-            </p>
-          ) : null}
+              <option value="All">All</option>
+              <option value="Active">Active</option>
+              <option value="Inactive">Inactive</option>
+            </select>
+          </label>
 
-          <div className="setup-table-wrap company-details-table-wrap">
-            {loading && !formRecords.length ? (
-              <p className="setup-empty">Loading…</p>
-            ) : (
-              <table className="company-details-data-table setup-data-table">
-                <thead>
+          <label className="setup-rba-field">
+            <span className="setup-rba-field-label">State</span>
+            <select
+              className="setup-rba-select"
+              value={selectedState}
+              onChange={(e) => {
+                setSelectedState(e.target.value);
+                setSelectedSite('');
+                setMessage('');
+              }}
+            >
+              <option value="">All states</option>
+              {stateOptions.map((state) => (
+                <option key={state} value={state}>
+                  {state}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="setup-rba-field">
+            <span className="setup-rba-field-label">Site</span>
+            <select
+              className="setup-rba-select"
+              value={selectedSite}
+              onChange={(e) => {
+                setSelectedSite(e.target.value);
+                setMessage('');
+              }}
+            >
+              <option value="">All sites</option>
+              {siteOptions.map((site) => (
+                <option key={site} value={site}>
+                  {site}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <button type="button" className="setup-rba-btn setup-rba-btn--reset" onClick={handleReset}>
+            <RotateCcw size={16} strokeWidth={2} aria-hidden />
+            Reset
+          </button>
+        </div>
+
+        {message ? (
+          <p
+            className={`setup-rba-message${/fail|required|select a state/i.test(message) ? ' setup-rba-message--error' : ''}`}
+            role="status"
+          >
+            {message}
+          </p>
+        ) : null}
+
+        <div className="setup-rba-table-wrap">
+          {loading && !formRecords.length ? (
+            <p className="setup-rba-empty">Loading…</p>
+          ) : (
+            <table className="setup-rba-table">
+              <thead>
+                <tr>
+                  <th>Role Name</th>
+                  <th>Act</th>
+                  <th>Description</th>
+                  <th>Form Name</th>
+                  <th>Email ID</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayedRows.length === 0 ? (
                   <tr>
-                    <th>Forms</th>
-                    <th>Email</th>
+                    <td colSpan={6} className="setup-rba-empty">
+                      {selectedState
+                        ? 'No access rows found for the selected filters.'
+                        : 'No forms found. Import Form Master records first.'}
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {filteredForms.length === 0 ? (
-                    <tr>
-                      <td colSpan={2} className="company-details-table-empty-cell">
-                        {selectedState
-                          ? 'No forms found for the selected state.'
-                          : 'No forms found. Import Form Master records first.'}
+                ) : (
+                  displayedRows.map((row) => (
+                    <tr key={row.id}>
+                      <td>
+                        <input
+                          type="text"
+                          className="setup-rba-cell-input"
+                          value={row.roleName}
+                          onChange={(e) => handleRoleChange(row.formName, e.target.value)}
+                          placeholder="Enter role name"
+                          aria-label={`Role name for ${row.formName}`}
+                        />
+                      </td>
+                      <td>{row.act || '—'}</td>
+                      <td>{row.description || '—'}</td>
+                      <td>{row.formName}</td>
+                      <td>
+                        <EmailMultiSelect
+                          options={allEmailOptions}
+                          value={getEmailValue(row.formName)}
+                          onChange={(nextEmails) => handleEmailChange(row.formName, nextEmails)}
+                        />
+                      </td>
+                      <td>
+                        <span
+                          className={`setup-rba-status setup-rba-status--${row.status === 'Active' ? 'active' : 'inactive'}`}
+                        >
+                          {row.status}
+                        </span>
                       </td>
                     </tr>
-                  ) : (
-                    filteredForms.map((row) => (
-                      <tr key={row.id} className="company-details-data-row">
-                        <td>{row.formName}</td>
-                        <td>
-                          <EmailMultiSelect
-                            options={allEmailOptions}
-                            value={getEmailValue(row.formName)}
-                            onChange={(nextEmails) => handleEmailChange(row.formName, nextEmails)}
-                          />
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            )}
-          </div>
+                  ))
+                )}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="setup-rba-footer">
+          Showing {footerStart} to {footerEnd} of {totalRows} entries
         </div>
       </div>
     </div>

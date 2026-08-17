@@ -58,6 +58,7 @@ import {
   getPayrollBulkRowsForAutofill,
   startPeopleDataBackgroundRefresh,
   yieldToMain,
+  yieldForModalScroll,
   processInChunks,
   waitWhileUiBusy,
   readPeopleCacheEmployeeCount,
@@ -364,6 +365,7 @@ import {
   isFormXVIIIMPEducationSkillHeader,
   isFormXVIIIMPPeopleAutofillHeader,
   isFormXVIIIMPCombinedRegisterContext,
+  dedupeFormXVIIIMPHeaderFields,
   isFormXVIIIMPPayrollDeductionHeader,
   loadFormXVIIIMPPayrollRowsForAutofill,
   mapFormXVIIIMPRowsFromEmployees,
@@ -755,6 +757,7 @@ import {
   isFormXXIIIMPOtNilHeader,
   resolveFormXXIIIMPAprilDefaultNormalRate,
   resolveFormXXIIIMPNormalRateForEmployee,
+  resolveFormXXIIIMPPayrollRowForEmployee,
 } from './statutory/formXXIIIMP';
 import {
   FORM_XXIII_TN_OT_NIL,
@@ -27097,6 +27100,8 @@ const Statutory = ({ userEmail, userRole }) => {
   const formModalImportInputRef = useRef(null);
   const formTableDataRef = useRef([]);
   const formFileModalTableWrapRef = useRef(null);
+  const formFileModalBodyRef = useRef(null);
+  const formFileModalContentRef = useRef(null);
   const statutoryAutofillExportCacheRef = useRef(null);
   /** Survives modal close — Form T Download Draft File regenerates from this when the stored draft is blank. */
   const formTSELastExportRef = useRef(null);
@@ -27171,6 +27176,27 @@ const Statutory = ({ userEmail, userRole }) => {
     formFileModalData?.fileName,
     formFileModalData?.parsedTableHeaders
   ]);
+
+  // Wide tables use overflow-x:auto, which creates a scrollport that swallows vertical wheel.
+  // Forward vertical wheel to the modal scroller so header + grid stay scrollable during load.
+  useEffect(() => {
+    if (!isFormFileModalOpen) return undefined;
+    const scroller = formFileModalContentRef.current;
+    if (!scroller) return undefined;
+    const onWheel = (e) => {
+      markFormModalScrolling();
+      if (!e || !e.deltaY) return;
+      const tag = String(e.target?.tagName || '').toUpperCase();
+      if (tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const wrap = e.target?.closest?.('.form-file-modal-table-wrap');
+      if (!wrap) return;
+      if (wrap.scrollHeight <= wrap.clientHeight + 1) {
+        scroller.scrollTop += e.deltaY;
+      }
+    };
+    scroller.addEventListener('wheel', onWheel, { passive: true });
+    return () => scroller.removeEventListener('wheel', onWheel);
+  }, [isFormFileModalOpen, markFormModalScrolling]);
   const persistMonthFilter = (month) => {
     try {
       if (typeof localStorage !== 'undefined' && month) localStorage.setItem(STATUTORY_MONTH_FILTER_KEY, month);
@@ -57884,6 +57910,173 @@ const Statutory = ({ userEmail, userRole }) => {
   // When options.returnMappedData is true, returns the mapped rows (for use by View Draft File generate-and-download)
   const fetchAndPopulateEmployeeData = async (headersToUse = null, options = {}) => {
     const returnMappedData = options.returnMappedData === true;
+    if (!returnMappedData && options.enrichOnly !== true) {
+      await yieldForModalScroll(isFormModalScrollBusy);
+    }
+    // Form XVIII MP: paint People names on the first page before the heavy context/enrich pass.
+    // Otherwise Chrome hits "Page Unresponsive" while the tab stays on "Loading employees…".
+    if (!returnMappedData && options.enrichOnly !== true && options.formXVIIIMPEarlyPaint !== false) {
+      const earlyModal = options.formFileModalData || formFileModalData;
+      const earlyFile = String(
+        earlyModal?.fileName || earlyModal?.formFileName || options?.fileName || ''
+      );
+      const earlyHeaders = Array.isArray(headersToUse) && headersToUse.length
+        ? headersToUse
+        : earlyModal?.parsedTableHeaders || tableHeaders || [];
+      if (
+        earlyHeaders.length > 0 &&
+        isFormXVIIIMPCombinedRegisterContext(
+          earlyModal?.parsedFormHeader,
+          earlyModal?.item,
+          earlyFile,
+          earlyModal?.sheetText || ''
+        )
+      ) {
+        let people = flattenZohoPeopleEmployees(getCachedPeopleData());
+        if (!people.length) {
+          setTableAutofillProgress('Loading employees…');
+          try {
+            people = flattenZohoPeopleEmployees(await fetchPeopleDataForAutofillDisplay());
+          } catch (earlyPeopleErr) {
+            console.warn('Form XVIII MP early People load skipped:', earlyPeopleErr?.message || earlyPeopleErr);
+            people = [];
+          }
+        }
+        const resolvedSiteForEarlyFilter = resolveStatutorySiteNameForContractorAutofill(
+          earlyModal?.item,
+          {
+            siteFromUrl,
+            allowedSiteNameList,
+            resolveSiteFn: resolveSiteDisplayName,
+            allRows: statutoryData,
+          }
+        );
+        const sitesForEarlyFilter =
+          Array.isArray(siteDetailsList) && siteDetailsList.length > 0
+            ? siteDetailsList
+            : readSiteDetailsCache() || [];
+        const earlyLocationTargets = resolveSiteLocationsForAutofill(
+          resolvedSiteForEarlyFilter,
+          sitesForEarlyFilter
+        );
+        const earlySiteRecords = resolveSitesForEmployeeLocationFilter(
+          resolvedSiteForEarlyFilter,
+          sitesForEarlyFilter
+        );
+        const canFilterBySite = earlyLocationTargets.length > 0 || earlySiteRecords.length > 0;
+        if (people.length > 0 && canFilterBySite) {
+          const beforeCount = people.length;
+          let filtered = filterEmployeesBySiteLocation(
+            people,
+            resolvedSiteForEarlyFilter,
+            sitesForEarlyFilter
+          );
+          if (
+            filtered.length === 0 &&
+            (isPartialPeopleCache(getCachedPeopleData()) || beforeCount <= 80)
+          ) {
+            try {
+              setTableAutofillProgress(
+                `Loading employees for ${earlyLocationTargets.join(', ') || resolvedSiteForEarlyFilter}…`
+              );
+              const fullPeople = flattenZohoPeopleEmployees(
+                await ensureCompletePeopleData({ force: true })
+              );
+              if (fullPeople.length > 0) {
+                people = fullPeople;
+                filtered = filterEmployeesBySiteLocation(
+                  fullPeople,
+                  resolvedSiteForEarlyFilter,
+                  sitesForEarlyFilter
+                );
+              }
+            } catch (upgradeErr) {
+              console.warn(
+                'Form XVIII MP early location filter upgrade skipped:',
+                upgradeErr?.message || upgradeErr
+              );
+            }
+          }
+          people = filtered;
+          console.log(
+            `Form XVIII MP early location filter (${earlyLocationTargets.join(', ') || resolvedSiteForEarlyFilter}): ${beforeCount} → ${people.length} employees`
+          );
+        }
+        if (canFilterBySite && people.length === 0) {
+          autofillEmployeesRef.current = [];
+          setAutofillTotalEmployees(0);
+          setFormTableData([]);
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('');
+          setError(
+            `No employees found for location ${earlyLocationTargets.join(', ') || resolvedSiteForEarlyFilter}. Check LocationName in Zoho People matches Site Management Location.`
+          );
+          return;
+        }
+        if (people.length > 0) {
+          autofillEmployeesRef.current = people;
+          setAutofillTotalEmployees(people.length);
+          const page = people.slice(0, FORM_TABLE_PAGE_SIZE);
+          const quickRows = mapFormXVIIIMPRowsFromEmployees(page, earlyHeaders, {
+            sanitizeValue: (value) => (value == null ? '' : String(value)),
+            formatStatutoryDateDisplay,
+            peopleOnly: true,
+          });
+          formTableDataRef.current = quickRows;
+          setFormTableData(quickRows);
+          setTableAutofillLoading(false);
+          setTableAutofillProgress('Updating payroll, attendance & leave…');
+          await yieldForModalScroll(isFormModalScrollBusy);
+          window.setTimeout(async () => {
+            if (!isFormFileModalOpenRef.current) return;
+            const monthCandidates = resolvePayrollMonthIsoCandidates(
+              selectedMonth,
+              earlyModal?.item,
+              earlyModal?.parsedFormHeader?.wagePeriodText || ''
+            );
+            let payrollRows = resolveFormXVIIIMPPayrollRowsForAutofill(
+              getCachedForm15PayrollTableRows(monthCandidates)?.rows ||
+                getPayrollBulkRowsForAutofill() ||
+                [],
+              monthCandidates
+            );
+            if (!payrollRows.length) {
+              const syncMp = getPayrollTableRowsForStatutoryAutofillSync(monthCandidates);
+              if (syncMp?.rows?.length) {
+                payrollRows = resolveFormXVIIIMPPayrollRowsForAutofill(
+                  syncMp.rows.map((row) => flattenPayrollEarningColumns(row)),
+                  monthCandidates
+                );
+              }
+            }
+            if (payrollRows.length) {
+              const pageEmps = people.slice(0, FORM_TABLE_PAGE_SIZE);
+              const rows = (formTableDataRef.current || []).map((row) => ({ ...row }));
+              enrichFormXVIIIMPPayrollRows(rows, pageEmps, earlyHeaders, {
+                payrollRows,
+                sanitizeValue: (value) => (value == null ? '' : String(value)),
+              });
+              formTableDataRef.current = rows;
+              setFormTableData(rows);
+            }
+            setTableAutofillProgress('');
+            await yieldForModalScroll(isFormModalScrollBusy);
+            if (!isFormFileModalOpenRef.current) return;
+            fetchAndPopulateEmployeeData(earlyHeaders, {
+              ...options,
+              enrichOnly: true,
+              skipPeopleFetch: true,
+              employeesOverride: people,
+              formFileModalData: earlyModal,
+              paginateEmployees: true,
+              employeePage: 0,
+              formXVIIIMPEarlyPaint: false,
+            });
+          }, 120);
+          return;
+        }
+      }
+    }
     const form10DownloadEnrich = options.form10DownloadEnrich === true;
     const form10SkipAttendanceFetch =
       options.form10SkipAttendanceFetch === true || form10DownloadEnrich;
@@ -58132,6 +58325,18 @@ const Statutory = ({ userEmail, userRole }) => {
         );
       }
       const rowsToMerge = (() => {
+        if (formXXIIIMPMergeState.active && Array.isArray(overlayRecords) && overlayRecords.length > 0) {
+          overlayRecords = overlayRecords.filter((rec) => {
+            const columnName = String(rec?.ColumnName ?? rec?.columnName ?? '').trim();
+            if (!columnName) return true;
+            const headerKey = findBaseHeaderForStatutoryColumnName(
+              columnName,
+              statutoryOverlayState.headers
+            );
+            const h = headerKey || columnName;
+            return !isFormXXIIINormalRateOfWagesHeader(h) && !isFormXXIIIMPNormalRateHeader(h);
+          });
+        }
         let merged = applyStatutoryDataOverlayToRows(
           rows,
           statutoryOverlayState.headers,
@@ -58156,7 +58361,21 @@ const Statutory = ({ userEmail, userRole }) => {
             (Array.isArray(statutoryOverlayState.headers) && statutoryOverlayState.headers.length
               ? statutoryOverlayState.headers
               : tableHeaders) || [];
-          merged = merged.map((row) => copyFormXXIIIMPNormalRateAliasesToRow(row, hdrs));
+          merged = merged.map((row, idx) => {
+            let next = copyFormXXIIIMPNormalRateAliasesToRow(row, hdrs);
+            const live = rows[idx];
+            hdrs.forEach((header) => {
+              if (!isFormXXIIIMPNormalRateHeader(header) && !isFormXXIIINormalRateOfWagesHeader(header)) {
+                return;
+              }
+              const current = String(next[header] ?? '').trim();
+              const fromLive = live ? String(live[header] ?? '').trim() : '';
+              if ((!current || /^enter\b/i.test(current)) && fromLive && !/^enter\b/i.test(fromLive)) {
+                next[header] = live[header];
+              }
+            });
+            return next;
+          });
         }
         return merged;
       })();
@@ -60322,6 +60541,10 @@ const Statutory = ({ userEmail, userRole }) => {
         ? employees.slice(employeePageOffset, employeePageOffset + employeePageSize)
         : employees;
       formMGJAutofillState.employees = employeesForMapping;
+      if (!returnMappedData) {
+        await yieldToMain();
+        await waitWhileUiBusy(isFormModalScrollBusy);
+      }
 
       statutoryOverlayState.employeeOrder = buildStatutoryDataEmployeeOrder(employees, employees.length);
 
@@ -61116,6 +61339,22 @@ const Statutory = ({ userEmail, userRole }) => {
             )
           ));
       formXXIIIMPMergeState.active = !!formXXIIIMPAutofillContext;
+      const collectFormXXIIIMPPayrollRows = () => {
+        const monthCandidates = resolvePayrollMonthIsoCandidates(
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+        if (Array.isArray(statutoryPayrollRows) && statutoryPayrollRows.length > 0) {
+          return statutoryPayrollRows;
+        }
+        const cached = getCachedForm15PayrollTableRows(monthCandidates);
+        if (Array.isArray(cached?.rows) && cached.rows.length > 0) return cached.rows;
+        const bulk = getPayrollBulkRowsForAutofill();
+        return Array.isArray(bulk) ? bulk : [];
+      };
       const syncFormXXIIIMPNormalRateGrid = (rows, payrollRowsByIndex = []) => {
         if (!formXXIIIMPAutofillContext || !Array.isArray(rows)) return rows;
         const monthCandidates = resolvePayrollMonthIsoCandidates(
@@ -61131,7 +61370,11 @@ const Statutory = ({ userEmail, userRole }) => {
           employeesForMapping,
           payrollRowsByIndex,
           monthCandidates,
-          { overwrite: true, sanitizeValue }
+          {
+            overwrite: true,
+            sanitizeValue,
+            payrollRows: collectFormXXIIIMPPayrollRows(),
+          }
         );
       };
       const formXXIIITamilNaduAutofillContext =
@@ -62386,6 +62629,7 @@ const Statutory = ({ userEmail, userRole }) => {
       const formXVIIIAutofillContext =
         !formXVIIAutofillContext &&
         !formTSEContextProbe &&
+        !formXVIIMPAutofillContext &&
         (looksLikeFormXVIIITable() ||
         isRegisterOfWagesCumMusterRollContext(
           modalData?.parsedFormHeader || {},
@@ -65088,7 +65332,11 @@ const Statutory = ({ userEmail, userRole }) => {
             ? payrollRows
             : payRunRows;
         const resolveXxiiiPayrollRow =
-          payrollSource.length > 0 ? buildFormXIXMPPayrollRowResolver(payrollSource) : null;
+          payrollSource.length > 0
+            ? formXXIIIMPAutofillContext
+              ? (emp) => resolveFormXXIIIMPPayrollRowForEmployee(emp, payrollSource)
+              : buildFormXIXMPPayrollRowResolver(payrollSource)
+            : null;
 
         const wagePeriodLine =
           modalData?.parsedFormHeader?.wagePeriodText ||
@@ -65305,6 +65553,16 @@ const Statutory = ({ userEmail, userRole }) => {
           }
           if (!matchedPayrollRow && payRunRows.length > 0) {
             matchedPayrollRow = resolvePayrollRowForPeople(emp, payRunRows);
+          }
+          if (
+            formXXIIIMPAutofillContext &&
+            emp &&
+            (!matchedPayrollRow ||
+              matchedPayrollRow.fetch_error ||
+              readPayrollNetPayForStatutory(matchedPayrollRow) === '')
+          ) {
+            const mpHit = resolveFormXXIIIMPPayrollRowForEmployee(emp, payrollSource);
+            if (mpHit) matchedPayrollRow = mpHit;
           }
 
           const rowMissingPayroll =
@@ -68886,6 +69144,7 @@ const Statutory = ({ userEmail, userRole }) => {
           sanitizeValue,
           formatStatutoryDateDisplay,
           rowIndexOffset: employeePageOffset,
+          peopleOnly: !resolveInstantMpPayroll,
           resolvePayrollRow: resolveInstantMpPayroll
             ? (em) => {
                 const hit = resolveInstantMpPayroll(em);
@@ -69358,7 +69617,7 @@ const Statutory = ({ userEmail, userRole }) => {
         );
       }
 
-      if (fastPaginatedAutofill && !enrichOnlyPhase && !returnMappedData && !formXIVMPAutofillContext && !formXIXKarnatakaAutofillContext && !formBGJGujaratAutofillContext && !formBRajasthanAutofillContext && !formMGJGujaratAutofillContext && !formPGJAutofillContext && !formQAutofillContext && !formTSEAutofillContext && !formDRajasthanAutofillContext) {
+      if (fastPaginatedAutofill && !enrichOnlyPhase && !returnMappedData && !formXIVMPAutofillContext && !formXIXKarnatakaAutofillContext && !formBGJGujaratAutofillContext && !formBRajasthanAutofillContext && !formMGJGujaratAutofillContext && !formPGJAutofillContext && !formQAutofillContext && !formTSEAutofillContext && !formDRajasthanAutofillContext && !formXVIIMPAutofillContext) {
         const quickMapped = buildFastPaginatedStatutoryGridRows(
           employeesForMapping,
           currentHeaders,
@@ -69495,21 +69754,37 @@ const Statutory = ({ userEmail, userRole }) => {
               formFileModalData?.parsedFormHeader?.wagePeriodText ||
               ''
           );
-          if (!returnMappedData && !fastModalAutofill && !enrichOnlyPhase) {
+          const skipBlockingMpTableLoad = fastPaginatedAutofill || enrichOnlyPhase;
+          if (!returnMappedData && !fastModalAutofill && !enrichOnlyPhase && !skipBlockingMpTableLoad) {
             setTableAutofillProgress('Loading payroll from Payroll table for Form XVIII MP…');
           }
-          try {
-            const mpTableRows = await loadFormXVIIIMPPayrollRowsForAutofill(mpPayrollMonthCandidates, {
-              timeoutMs: fastModalAutofill ? 20000 : 45000,
-            });
-            if (mpTableRows.length > 0) {
-              statutoryPayrollRows = mpTableRows;
-              formWPayrollLookup = buildPayrollLookupFromRows(mpTableRows);
-              autofillPayrollLookupRef.current = formWPayrollLookup;
-              console.log(`Form XVIII MP payroll table: ${mpTableRows.length} row(s)`);
+          const applyMpTablePayrollRows = (mpTableRows, sourceLabel) => {
+            if (!Array.isArray(mpTableRows) || mpTableRows.length === 0) return;
+            statutoryPayrollRows = mpTableRows;
+            formWPayrollLookup = buildPayrollLookupFromRows(mpTableRows);
+            autofillPayrollLookupRef.current = formWPayrollLookup;
+            console.log(`${sourceLabel}: ${mpTableRows.length} row(s)`);
+          };
+          if (skipBlockingMpTableLoad) {
+            const syncMpTable = getPayrollTableRowsForStatutoryAutofillSync(mpPayrollMonthCandidates);
+            if (syncMpTable?.rows?.length > 0) {
+              applyMpTablePayrollRows(
+                resolveFormXVIIIMPPayrollRowsForAutofill(
+                  syncMpTable.rows.map((row) => flattenPayrollEarningColumns(row)),
+                  mpPayrollMonthCandidates
+                ),
+                `Form XVIII MP payroll sync cache (${syncMpTable.payrollMonth || mpPayrollMonthCandidates[0] || 'month'})`
+              );
             }
-          } catch (mpTableErr) {
-            console.warn('Form XVIII MP payroll table load skipped:', mpTableErr?.message || mpTableErr);
+          } else {
+            try {
+              const mpTableRows = await loadFormXVIIIMPPayrollRowsForAutofill(mpPayrollMonthCandidates, {
+                timeoutMs: fastModalAutofill ? 20000 : 45000,
+              });
+              applyMpTablePayrollRows(mpTableRows, 'Form XVIII MP payroll table');
+            } catch (mpTableErr) {
+              console.warn('Form XVIII MP payroll table load skipped:', mpTableErr?.message || mpTableErr);
+            }
           }
         }
         if (!returnMappedData && !fastModalAutofill && !enrichOnlyPhase) {
@@ -70453,7 +70728,10 @@ const Statutory = ({ userEmail, userRole }) => {
             xxiiiMonthCandidates
           );
         }
-        if (payrollRowsForXxiiiGrid.length > 0) {
+        if (formXXIIIMPAutofillContext) {
+          resolveXxiiiPayrollRowForGrid = (emp) =>
+            resolveFormXXIIIMPPayrollRowForEmployee(emp, collectFormXXIIIMPPayrollRows());
+        } else if (payrollRowsForXxiiiGrid.length > 0) {
           resolveXxiiiPayrollRowForGrid = buildFormXIXMPPayrollRowResolver(payrollRowsForXxiiiGrid);
         }
       }
@@ -75651,7 +75929,9 @@ const Statutory = ({ userEmail, userRole }) => {
         );
         const resolveXxiiiPayrollRowEarly =
           Array.isArray(xxiiiPayrollRowsEarly) && xxiiiPayrollRowsEarly.length > 0
-            ? buildFormXIXMPPayrollRowResolver(xxiiiPayrollRowsEarly)
+            ? formXXIIIMPAutofillContext
+              ? (emp) => resolveFormXXIIIMPPayrollRowForEmployee(emp, xxiiiPayrollRowsEarly)
+              : buildFormXIXMPPayrollRowResolver(xxiiiPayrollRowsEarly)
             : null;
         const normalRateHeader = currentHeaders.find(isFormXXIIINormalRateOfWagesHeader);
         let xxiiiEarlyHits = 0;
@@ -76589,6 +76869,7 @@ const Statutory = ({ userEmail, userRole }) => {
       // Form 10 OT/hours are static Nil / 08:00 — never wait on attendance during download or autofill.
       if (
         !formXIVMPAutofillContext &&
+        !formXVIIMPAutofillContext &&
         !formQKarnatakaAutofillContext &&
         !(isLikelyForm10 || form10SkipAttendanceFetch) &&
         // Rajasthan S&E 11/12/14: Total hours from Paid_days×8; rest/OT are static — skip slow attendance.
@@ -78561,7 +78842,7 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
 
-      if (formXVIAutofillContext || formXVIIIAutofillContext) {
+      if ((formXVIAutofillContext || formXVIIIAutofillContext) && !formXVIIMPAutofillContext) {
         try {
           const form25Res = await fetch('/server/form25_function/form25?perPage=200');
           const form25Json = await form25Res.json();
@@ -80148,16 +80429,79 @@ const Statutory = ({ userEmail, userRole }) => {
               : 30000;
         let leaveResult = getCachedLeaveData(fromDate, toDate, unit);
         if (!leaveResult) {
-          leaveResult = await fetchLeaveData({
-            fromDate,
-            toDate,
-            unit,
-            force: false,
-            timeoutMs: leaveFetchTimeoutMs,
-          }).catch((err) => {
-            console.warn('Leave autofill fetch failed:', err?.message || err);
-            return leaveResult || null;
-          });
+          const skipBlockingMpLeave =
+            formXVIIMPAutofillContext && !returnMappedData;
+          if (skipBlockingMpLeave) {
+            void fetchLeaveData({
+              fromDate,
+              toDate,
+              unit,
+              force: false,
+              timeoutMs: 8000,
+            })
+              .then((result) => {
+                if (!result || isStaleAutofillRun() || !isFormFileModalOpenRef.current) return;
+                const extracted = extractLeaveRecordsFromApiResult(result);
+                const records = extracted.records || [];
+                if (!records.length) return;
+                const rows = Array.isArray(formTableDataRef.current)
+                  ? formTableDataRef.current.map((row) => ({ ...row }))
+                  : [];
+                if (!rows.length) return;
+                const mpLeaveHeaders = resolveFormXVIIIMPTableHeaders(currentHeaders);
+                const mpLeaveLookup = buildLeaveRecordLookupMap(records);
+                const { employeeNameHeader: mpEmpNameHdr, employeeIdHeader: mpEmpIdHdr } =
+                  resolveFormEmployeeMatchHeaders(currentHeaders);
+                let mpLeaveHits = 0;
+                rows.forEach((row) => {
+                  const leaveRec = findLeaveRecordForFormRow(
+                    mpLeaveLookup,
+                    row,
+                    mpEmpIdHdr,
+                    mpEmpNameHdr
+                  );
+                  if (
+                    applyFormXVIIIMPLeaveToRow(row, leaveRec, mpLeaveHeaders, {
+                      leaveTypeLabels:
+                        result.leaveTypeLabels || extracted.leaveTypeLabels || {},
+                      sanitizeValue,
+                      headers: currentHeaders,
+                    })
+                  ) {
+                    mpLeaveHits += 1;
+                  }
+                });
+                if (mpLeaveHits === 0) return;
+                applyFormXVIIIMPNilDefaultsToMappedRows(
+                  rows,
+                  currentHeaders,
+                  FORM_XVIII_MP_NIL,
+                  { overwrite: true }
+                );
+                formTableDataRef.current = rows;
+                setFormTableData(rows);
+                console.log(
+                  `Form XVIII MP background leave enrich: ${mpLeaveHits}/${rows.length} row(s)`
+                );
+              })
+              .catch((err) => {
+                console.warn(
+                  'Form XVIII MP background leave fetch failed:',
+                  err?.message || err
+                );
+              });
+          } else {
+            leaveResult = await fetchLeaveData({
+              fromDate,
+              toDate,
+              unit,
+              force: false,
+              timeoutMs: leaveFetchTimeoutMs,
+            }).catch((err) => {
+              console.warn('Leave autofill fetch failed:', err?.message || err);
+              return leaveResult || null;
+            });
+          }
         }
         let leaveTypeLabels =
           (leaveResult && leaveResult.leaveTypeLabels) || {};
@@ -84667,7 +85011,11 @@ const Statutory = ({ userEmail, userRole }) => {
         }
 
         const formXVIIIHeaderProbe = { title: formTitle, subtitle: formSubtitle, reference: formReference };
-        if (isRegisterOfWagesCumMusterRollContext(formXVIIIHeaderProbe, null, '')) {
+        const formXviiiParseHint = hints.fileName || hints.formFileName || firstSheetName || '';
+        if (
+          isRegisterOfWagesCumMusterRollContext(formXVIIIHeaderProbe, hints.item, formXviiiParseHint) &&
+          !isFormXVIIIMPCombinedRegisterContext(formXVIIIHeaderProbe, hints.item, formXviiiParseHint)
+        ) {
           const normalizeHeaderFieldLabel = (value) =>
             String(value || '')
               .toLowerCase()
@@ -85236,6 +85584,15 @@ const Statutory = ({ userEmail, userRole }) => {
               effectiveSheetCols,
               getMergedAwareCellText
             );
+          }
+          if (
+            isFormXVIIIMPCombinedRegisterContext(
+              { title: formTitle, subtitle: formSubtitle, reference: formReference },
+              hints.item,
+              hints.fileName || hints.formFileName || firstSheetName || ''
+            )
+          ) {
+            headerFields = dedupeFormXVIIIMPHeaderFields(headerFields);
           }
           formHeaderInfo = {
             title: formTitle,
@@ -89538,6 +89895,12 @@ const Statutory = ({ userEmail, userRole }) => {
             parsed.sheetName || resolvedSheetName,
             parsed
           );
+          if (parsed.formHeader) {
+            parsed.formHeader = {
+              ...parsed.formHeader,
+              fields: dedupeFormXVIIIMPHeaderFields(parsed.formHeader.fields),
+            };
+          }
         } else if (isRegisterOfWagesCumMusterRollContext(parsed.formHeader, item, displayFileName)) {
           repairFormXVIIIRegisterHeadersFromWorkbook(
             workbook,
@@ -92016,6 +92379,21 @@ const Statutory = ({ userEmail, userRole }) => {
         if (item?.formFile != null) modalSourceItem.formFile = item.formFile;
         if (resolvedFormFileName) modalSourceItem.formFileName = resolvedFormFileName;
 
+        if (
+          formHeaderForModal &&
+          isFormXVIIIMPCombinedRegisterContext(
+            formHeaderForModal,
+            item,
+            displayFileName,
+            sheetTextForVariant
+          )
+        ) {
+          formHeaderForModal = {
+            ...formHeaderForModal,
+            fields: dedupeFormXVIIIMPHeaderFields(formHeaderForModal.fields),
+          };
+        }
+
         const modalPayloadForAutofill = {
           fileName: displayFileName,
           formFileName: resolvedFormFileName,
@@ -92044,6 +92422,10 @@ const Statutory = ({ userEmail, userRole }) => {
         setIsFormFileModalOpen(true);
         isFormFileModalOpenRef.current = true;
         setFormFileLoading(false);
+        if (forceAutofill || isAutofillMode) {
+          setTableAutofillProgress('Loading employees…');
+        }
+        await yieldForModalScroll(isFormModalScrollBusy);
 
         const formXIXKarnatakaModalOpen =
           isFormXIXKarnatakaTableLayoutFormHeader(formHeaderForModal) ||
@@ -92145,6 +92527,12 @@ const Statutory = ({ userEmail, userRole }) => {
             !isFormXIXMPTableLayoutFormHeader(formHeaderForModal) &&
             !isFormXIXKarnatakaTableLayoutFormHeader(formHeaderForModal) &&
             !isFormXIXAPTableLayoutFormHeader(formHeaderForModal);
+          const formXVIIIMPModalOpen = isFormXVIIIMPCombinedRegisterContext(
+            formHeaderForModal,
+            item,
+            displayFileName,
+            sheetTextForVariant
+          );
           const shouldPreferSavedDraftData = !!options?.preferSavedDraftData;
           const parsedForDraftResolve = {
             ...parsed,
@@ -92160,7 +92548,7 @@ const Statutory = ({ userEmail, userRole }) => {
               })
             : [];
           // Show the selected form file immediately on first click, then replace rows with saved draft / autofill data.
-          const initialModalRows = formAHeaderOnlyModal || form18APHeaderOnlyModal || form2APHeaderOnlyModal || formXXVIAPHeaderOnlyModal || formVIIAPHeaderOnlyModal || formXIXAPHeaderOnlyModal
+          const initialModalRows = formAHeaderOnlyModal || form18APHeaderOnlyModal || form2APHeaderOnlyModal || formXXVIAPHeaderOnlyModal || formVIIAPHeaderOnlyModal || formXIXAPHeaderOnlyModal || formXVIIIMPModalOpen
             ? []
             : formIIModalOpen
             ? remapFormIIRowsToHeaders(parsed.tableData || [], parsed.headers || [], tableHeadersForModal)
@@ -92318,7 +92706,7 @@ const Statutory = ({ userEmail, userRole }) => {
                 })
               : null;
           setFormTableData(
-            formAHeaderOnlyModal || form18APHeaderOnlyModal || form2APHeaderOnlyModal || formXXVIAPHeaderOnlyModal || formVIIAPHeaderOnlyModal || formXIXAPHeaderOnlyModal
+            formAHeaderOnlyModal || form18APHeaderOnlyModal || form2APHeaderOnlyModal || formXXVIAPHeaderOnlyModal || formVIIAPHeaderOnlyModal || formXIXAPHeaderOnlyModal || formXVIIIMPModalOpen
               ? []
               : formAOrXxviBlankRows
               ? formAOrXxviBlankRows
@@ -92722,26 +93110,29 @@ const Statutory = ({ userEmail, userRole }) => {
               } else {
               prefetchPeopleDataFast();
               setTableAutofillLoading(true);
-              fetchAndPopulateEmployeeData(tableHeadersForModal, {
-                columnGroupLabels: parsed.columnGroupLabels ?? null,
-                formFileModalData: {
-                  fileName: displayFileName,
-                  formFileName: resolvedFormFileName,
-                  fileType: 'excel-form',
-                  sheetHtml: excelSheetHtml,
-                  rawData: workbook,
-                  item: modalSourceItem,
-                  parsedFormHeader: formHeaderForModal,
-                  parsedTableHeaders: tableHeadersForModal,
-                  parsedSubColumns: parsed.subColumns,
-                  parsedHeaderFormData: initialHeaderFormData,
-                  headerRowIndex: parsed.headerRowIndex,
-                  dataStartIndex: parsed.dataStartIndex,
-                  parsedColumnGroupLabels: parsed.columnGroupLabels ?? null,
-                  originalHeaderRowIndex: parsed.originalHeaderRowIndex ?? parsed.headerRowIndex,
-                  sheetText: sheetTextForVariant
-                }
-              });
+              window.setTimeout(() => {
+                if (!isFormFileModalOpenRef.current) return;
+                fetchAndPopulateEmployeeData(tableHeadersForModal, {
+                  columnGroupLabels: parsed.columnGroupLabels ?? null,
+                  formFileModalData: {
+                    fileName: displayFileName,
+                    formFileName: resolvedFormFileName,
+                    fileType: 'excel-form',
+                    sheetHtml: excelSheetHtml,
+                    rawData: workbook,
+                    item: modalSourceItem,
+                    parsedFormHeader: formHeaderForModal,
+                    parsedTableHeaders: tableHeadersForModal,
+                    parsedSubColumns: parsed.subColumns,
+                    parsedHeaderFormData: initialHeaderFormData,
+                    headerRowIndex: parsed.headerRowIndex,
+                    dataStartIndex: parsed.dataStartIndex,
+                    parsedColumnGroupLabels: parsed.columnGroupLabels ?? null,
+                    originalHeaderRowIndex: parsed.originalHeaderRowIndex ?? parsed.headerRowIndex,
+                    sheetText: sheetTextForVariant
+                  }
+                });
+              }, 80);
               }
             }
           } else if (form11POWModalOpen || form6APModalOpen || form26ModalOpen || form26AModalOpen || formXXVIIQuarterlyModalOpen || formITamilNaduSuspensionModalOpen || formXXIXTamilNaduModalOpen) {
@@ -92750,10 +93141,13 @@ const Statutory = ({ userEmail, userRole }) => {
           } else {
             prefetchPeopleDataFast();
             setTableAutofillLoading(true);
-            fetchAndPopulateEmployeeData(tableHeadersForModal, {
-              columnGroupLabels: parsed.columnGroupLabels ?? null,
-              formFileModalData: modalPayloadForAutofill
-            });
+            window.setTimeout(() => {
+              if (!isFormFileModalOpenRef.current) return;
+              fetchAndPopulateEmployeeData(tableHeadersForModal, {
+                columnGroupLabels: parsed.columnGroupLabels ?? null,
+                formFileModalData: modalPayloadForAutofill
+              });
+            }, 80);
           }
         } else {
           console.log('📄 View File mode – using parsed Excel data');
@@ -98708,8 +99102,10 @@ const Statutory = ({ userEmail, userRole }) => {
           }}
         >
           <div
+            ref={formFileModalContentRef}
             className="form-file-modal-content"
             onClick={(e) => e.stopPropagation()}
+            onScroll={markFormModalScrolling}
             style={{
               backgroundColor: 'white',
               borderRadius: '12px',
@@ -98719,12 +99115,15 @@ const Statutory = ({ userEmail, userRole }) => {
               minHeight: 0,
               display: 'flex',
               flexDirection: 'column',
-              overflow: 'hidden',
+              overflowX: 'hidden',
+              overflowY: 'auto',
               boxShadow: '0 10px 40px rgba(0, 0, 0, 0.3)'
             }}
           >
             {/* Modal Header */}
-            <div style={{
+            <div
+              className="form-file-modal-titlebar"
+              style={{
               padding: '20px 24px',
               borderBottom: '1px solid #e5e7eb',
               display: 'flex',
@@ -98767,14 +99166,13 @@ const Statutory = ({ userEmail, userRole }) => {
 
             {/* Modal Body */}
             <div
+              ref={formFileModalBodyRef}
               className="form-file-modal-body"
-              onScroll={markFormModalScrolling}
               style={{
                 padding: '24px',
-                flex: 1,
+                flex: '0 0 auto',
                 minHeight: 0,
-                overflowX: 'hidden',
-                overflowY: 'auto',
+                overflow: 'visible',
                 WebkitOverflowScrolling: 'touch',
                 backgroundColor: '#f9fafb'
               }}
@@ -100381,6 +100779,9 @@ const Statutory = ({ userEmail, userRole }) => {
                       onScroll={markFormModalScrolling}
                       style={{
                       overflowX: 'auto',
+                      overflowY: 'hidden',
+                      maxWidth: '100%',
+                      minWidth: 0,
                       border: '1px solid #e5e7eb',
                       borderRadius: '8px'
                     }}>
@@ -100893,6 +101294,7 @@ const Statutory = ({ userEmail, userRole }) => {
                                     : {})
                                 }}>
                                   <StatutoryModalEditableCell
+                                    key={`${actualRowIndex}-${colIndex}`}
                                     value={cellDisplayValue}
                                     readOnly={isFormFileReadOnly}
                                     textAlign={cellTextAlign}

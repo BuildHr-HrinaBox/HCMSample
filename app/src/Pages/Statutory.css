@@ -2141,24 +2141,38 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
     min-height: 0;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-    animation: slideUp 0.3s ease-out;
-  }
-
-  .form-file-modal-body {
-    flex: 1;
-    min-height: 0;
     overflow-x: hidden;
     overflow-y: auto !important;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    animation: none;
+    transform: none;
+  }
+
+  .form-file-modal-content > .form-file-modal-titlebar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: #fff;
+  }
+
+  .form-file-modal-body {
+    flex: 0 0 auto;
+    min-height: 0;
+    overflow: visible !important;
+    max-height: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
     overflow-anchor: none;
+    touch-action: auto;
   }
 
   .form-file-modal-body .form-file-modal-excel-panel {
     overflow: visible;
     max-height: none;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .form-file-modal-pagination {
@@ -2231,7 +2245,10 @@ main.nd-content.nd-content--embedded-page > .statutory-page .statutory-table-con
   /* Excel table styling in modal - ensure columns wide enough to show autofill data */
   .form-file-modal-content .form-file-modal-table-wrap {
     overflow-x: auto;
-    overflow-y: visible;
+    overflow-y: hidden;
+    max-width: 100%;
+    min-width: 0;
+    touch-action: pan-x pan-y;
     -webkit-overflow-scrolling: touch;
   }
   

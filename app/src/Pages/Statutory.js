@@ -18,8 +18,7 @@ import {
 import { resolveLoginEmailString } from '../utils/resolveLoginEmail';
 import {
   fetchSetupFormAssignments,
-  getSetupAssignmentsForEmail,
-  statutoryRowAllowedBySetup,
+  statutoryRowVisibleForLogin,
 } from '../utils/setupFormAccess';
 import { fetchPayrollTableRowsForMonths, loadPayrollTableRowsForStatutoryAutofill, getPayrollTableRowsForStatutoryAutofillSync, prefetchPayrollTableRowsForMonths } from '../utils/payrollTable';
 import { fetchSamplePayrollEmployeeRow, fetchSamplePayrollRowsForMonth, fetchSamplePayrollRowsForMonthCandidates, samplePayrollRowMatchesEmployeeId } from '../utils/samplePayrollApi';
@@ -93621,10 +93620,26 @@ const Statutory = ({ userEmail, userRole }) => {
       );
     }
 
-    const setupAssignments = getSetupAssignmentsForEmail(setupFormRows, effectiveUserEmail);
-    if (setupAssignments.length > 0 && data && data.length > 0) {
+    const setupSiteHint =
+      urlSite ||
+      (Array.isArray(allowedSiteNameList) && allowedSiteNameList.length === 1
+        ? String(allowedSiteNameList[0] || '').trim()
+        : '');
+    const setupControlledRowsList = (Array.isArray(setupFormRows) ? setupFormRows : []).filter((row) =>
+      String(row?.role ?? row?.Role ?? '').trim()
+    );
+    const roleLower = String(userRole || '').trim().toLowerCase();
+    const isSetupAdminBypass =
+      roleLower === 'app administrator' &&
+      !siteLoginScope &&
+      !hasSiteBasedActScope &&
+      !setupSiteHint &&
+      !isSiteWiseStatutoryUser;
+    if (setupControlledRowsList.length > 0 && data && data.length > 0 && !isSetupAdminBypass) {
       data = data.filter((item) =>
-        statutoryRowAllowedBySetup(item, setupAssignments, { siteHint: urlSite })
+        statutoryRowVisibleForLogin(item, setupControlledRowsList, effectiveUserEmail, {
+          siteHint: setupSiteHint || resolveSiteForDisplay(item, data),
+        })
       );
     }
 
@@ -93735,7 +93750,7 @@ const Statutory = ({ userEmail, userRole }) => {
     }
 
     return data;
-  }, [statutoryDataWithPinnedDrafts, selectedMonth, getActCategoryWithFormFallback, hasComplianceFiles, resolveSiteDisplayName, resolveSiteForDisplay, siteWiseCategory, siteFromUrl, allowedSiteNameList, allowedInchargeStateLabels, hasSiteBasedActScope, allowedActCategoryList, siteLoginScope, siteScopeMetaReady, isSiteWiseStatutoryUser, setupFormRows, effectiveUserEmail]);
+  }, [statutoryDataWithPinnedDrafts, selectedMonth, getActCategoryWithFormFallback, hasComplianceFiles, resolveSiteDisplayName, resolveSiteForDisplay, siteWiseCategory, siteFromUrl, allowedSiteNameList, allowedInchargeStateLabels, hasSiteBasedActScope, allowedActCategoryList, siteLoginScope, siteScopeMetaReady, isSiteWiseStatutoryUser, setupFormRows, effectiveUserEmail, userRole]);
 
   const tableFormOptions = useMemo(() => {
     return Array.from(

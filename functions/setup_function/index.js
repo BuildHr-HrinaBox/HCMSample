@@ -69,11 +69,18 @@ app.get('/setup', async (req, res) => {
     let data = await fetchAllSetupRows(catalyst);
     if (stateFilter) {
       const want = stateFilter.toLowerCase();
-      data = data.filter((row) => row.state.toLowerCase() === want);
+      data = data.filter((row) => {
+        const state = String(row.state || '').trim().toLowerCase();
+        return state === want || state.includes(want) || want.includes(state);
+      });
     }
     if (siteFilter) {
       const want = siteFilter.toLowerCase();
-      data = data.filter((row) => row.site.toLowerCase() === want);
+      data = data.filter((row) => {
+        const site = String(row.site || '').trim().toLowerCase();
+        if (!site) return false;
+        return site === want || site.includes(want) || want.includes(site);
+      });
     }
     res.status(200).json({ status: 'success', data });
   } catch (err) {

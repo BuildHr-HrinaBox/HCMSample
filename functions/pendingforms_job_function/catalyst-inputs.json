@@ -1,0 +1,6 @@
+{
+  "test_cron_input": {
+    "force": "true",
+    "dryRun": "true"
+  }
+}

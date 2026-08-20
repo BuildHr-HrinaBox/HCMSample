@@ -1,7 +1,10 @@
 'use strict';
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const catalystSDK = require('zcatalyst-sdk-node');
+const { sendPendingFormsDigest } = require('./pendingFormsMailer');
 
 const app = express();
 
@@ -21,6 +24,24 @@ app.use((req, res, next) => {
 // Health check
 app.get('/', (req, res) => {
   res.status(200).json({ status: 'success', message: 'sitemanagement_function ready' });
+});
+
+/** Public VAYONA logo for pending-forms email header (Gmail requires hosted images). */
+app.get('/sitemanagement/email-logo', (req, res) => {
+  const assetsDir = path.join(__dirname, 'assets');
+  const candidates = [
+    path.join(assetsDir, 'vayona-energy-logo.png'),
+    path.join(assetsDir, 'vayona-logo-email.png')
+  ];
+  const logoPath = candidates.find((p) => fs.existsSync(p));
+  if (!logoPath) {
+    return res.status(404).json({ status: 'failure', message: 'Email logo not found.' });
+  }
+  res.set({
+    'Content-Type': 'image/png',
+    'Cache-Control': 'public, max-age=86400'
+  });
+  fs.createReadStream(logoPath).pipe(res);
 });
 
 function isMissingColumnError(err) {
@@ -683,6 +704,80 @@ app.get('/sitemanagement', async (req, res) => {
   } catch (err) {
     console.error('Error fetching site details:', err);
     res.status(500).send({ status: 'failure', message: err.message || 'Failed to fetch site details.' });
+  }
+});
+
+function parseTruthyFlag(value) {
+  return /^(1|true|yes|y)$/i.test(String(value ?? '').trim());
+}
+
+/**
+ * Compile pending statutory forms site-wise and email each Site In-Charge.
+ * Manual trigger (the monthly send also runs from pendingforms_job_function on the 20th).
+ * Query/body: force=true (send even if not the 20th), dryRun=true (preview only).
+ */
+app.post('/sitemanagement/pending-forms-email', async (req, res) => {
+  try {
+    const { catalyst } = res.locals;
+    const force = parseTruthyFlag(req.body?.force ?? req.query?.force ?? true);
+    const dryRun = parseTruthyFlag(req.body?.dryRun ?? req.query?.dryRun);
+    const result = await sendPendingFormsDigest(catalyst, {
+      force,
+      dryRun,
+      requireMonthlySendDay: false
+    });
+    res.status(200).json({
+      status: 'success',
+      message: result.dryRun
+        ? `Preview ready for ${result.emailsSent} site(s) with pending forms.`
+        : `Sent pending-form details to ${result.emailsSent} Site In-Charge mailbox(es).`,
+      data: result
+    });
+  } catch (err) {
+    console.error('pending-forms-email:', err);
+    res.status(500).json({
+      status: 'failure',
+      message: err.message || 'Failed to send pending form emails.'
+    });
+  }
+});
+
+app.get('/sitemanagement/pending-forms-email', async (req, res) => {
+  try {
+    const { catalyst } = res.locals;
+    if (parseTruthyFlag(req.query?.previewHtml)) {
+      const { buildEmailHtml } = require('./pendingFormsMailer');
+      const html = buildEmailHtml({
+        siteName: 'Guruvepalli',
+        inchargeName: 'Nilakantan Govindan',
+        periodLabel: 'August 2026',
+        asOfLabel: '20 August 2026',
+        forms: [
+          {
+            formName: 'Form XII',
+            act: 'The Contract Labour (Regulation and Abolition) Act, 1970 and Rules of 1972',
+            description: 'REGISTER OF WORKMEN EMPLOYED BY CONTRACTOR',
+            month: 'August',
+            dueDate: '20',
+            status: 'Yet to Complete'
+          }
+        ]
+      });
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      return res.status(200).send(html);
+    }
+    const result = await sendPendingFormsDigest(catalyst, {
+      force: true,
+      dryRun: true,
+      requireMonthlySendDay: false
+    });
+    res.status(200).json({ status: 'success', data: result });
+  } catch (err) {
+    console.error('pending-forms-email preview:', err);
+    res.status(500).json({
+      status: 'failure',
+      message: err.message || 'Failed to preview pending form emails.'
+    });
   }
 });
 

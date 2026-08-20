@@ -3,7 +3,11 @@
 		"name": "sitemanagement_function",
 		"stack": "node20",
 		"type": "advancedio",
-		"env_variables": {}
+		"env_variables": {
+			"MAIL_FROM": "afrindinusha.j@buildhr.co.in",
+			"LOGO_URL": "https://hcm-60066164950.development.catalystserverless.in/server/sitemanagement_function/sitemanagement/email-logo",
+			"APP_BASE_URL": "https://hcm-60066164950.development.catalystserverless.in"
+		}
 	},
 	"execution": {
 		"main": "index.js"

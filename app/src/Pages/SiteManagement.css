@@ -128,6 +128,51 @@
   max-width: 120px;
 }
 
+.site-management-email-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.site-management-email-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.site-management-email-row input {
+  min-width: 0;
+  width: 100%;
+}
+
+.site-management-email-action {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  cursor: pointer;
+}
+
+.site-management-email-add {
+  background: #22c978;
+  color: #fff;
+}
+
+.site-management-email-remove {
+  background: #f1f3f5;
+  color: #6b7280;
+}
+
+.site-management-email-action:disabled {
+  cursor: default;
+}
+
 .company-details-table-wrap:has(.site-management-data-table) {
   scrollbar-width: thin;
   -ms-overflow-style: auto;

@@ -13,6 +13,13 @@ export function siteInchargeEmail(s) {
   return String(s.inchargeEmail ?? s.InchargeEmail ?? s.incharge_email ?? '').trim();
 }
 
+export function siteInchargeEmails(s) {
+  return siteInchargeEmail(s)
+    .split(',')
+    .map((email) => normalizeEmail(email))
+    .filter(Boolean);
+}
+
 export function siteIndustry(s) {
   if (!s || typeof s !== 'object') return '';
   return String(s.industry ?? s.Industry ?? '').trim();
@@ -112,7 +119,7 @@ export async function fetchInchargeDisplayScopeFromSites(userEmailProp) {
     const json = await res.json();
     const details = json?.data?.siteDetails;
     if (!Array.isArray(details)) return empty;
-    const mine = details.filter((s) => normalizeEmail(siteInchargeEmail(s)) === loginNorm);
+    const mine = details.filter((s) => siteInchargeEmails(s).includes(loginNorm));
     if (mine.length === 0) return empty;
     const cats = new Set();
     const siteNames = new Set();
@@ -213,7 +220,7 @@ export function buildInchargeSiteScopeFromList(sites, loginEmail) {
   const loginNorm = normalizeEmail(loginEmail);
   if (!loginNorm) return null;
   const list = Array.isArray(sites) ? sites : [];
-  const mine = list.filter((s) => normalizeEmail(siteInchargeEmail(s)) === loginNorm);
+  const mine = list.filter((s) => siteInchargeEmails(s).includes(loginNorm));
   if (!mine.length) return null;
   const stateLabels = [...new Set(mine.map(siteStateFromRecord).filter(Boolean))];
   const industryLabels = [...new Set(mine.map(siteIndustry).filter(Boolean))];

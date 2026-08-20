@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { CheckCircle2, Trash2 } from 'lucide-react';
+import { CheckCircle2, Mail, Plus, Trash2 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import './SiteManagement.css';
 import './CompanyDetails.css';
@@ -8,6 +8,7 @@ import { resolveLoginEmailString, stringifyUserEmail } from '../utils/resolveLog
 import {
   filterSitesForLoginUser,
   hasInchargeSiteScope,
+  isOrgWideSiteViewer,
   siteIndustry,
   siteInchargeEmail,
   siteStateFromRecord,
@@ -472,6 +473,11 @@ function digitsOnly(s) {
 
 const SITE_FORM_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
 
+function splitInchargeEmails(value) {
+  const emails = String(value || '').split(',').map((email) => email.trim());
+  return emails.length ? emails : [''];
+}
+
 /** Constrain input while typing (PIN / phone length, email length, reasonable text caps). */
 function sanitizeSiteFormField(name, raw) {
   const v = raw == null ? '' : String(raw);
@@ -534,8 +540,10 @@ function validateSiteFormValues(form) {
   } else if (digitsOnly(form.inchargePhone).length !== 10) {
     errors.inchargePhone = 'Enter a valid 10-digit phone number';
   }
-  const em = String(form.inchargeEmail || '').trim();
-  if (em && !SITE_FORM_EMAIL_REGEX.test(em)) {
+  const invalidInchargeEmail = splitInchargeEmails(form.inchargeEmail).find(
+    (email) => email && !SITE_FORM_EMAIL_REGEX.test(email)
+  );
+  if (invalidInchargeEmail) {
     errors.inchargeEmail = 'Enter a valid email address (e.g., name@company.com)';
   }
   const contractorEmail = String(form.contractorEmail || '').trim();
@@ -599,6 +607,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
   const [toast, setToast] = useState('');
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [sendingPendingEmail, setSendingPendingEmail] = useState(false);
   const toastTimerRef = useRef(null);
   const importFileRef = useRef(null);
   /** Companies from company_function for Site → Company link */
@@ -812,6 +821,41 @@ const SiteManagement = ({ userEmail, userRole }) => {
     a.download = `site-management-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const canSendPendingEmail = isOrgWideSiteViewer(userRole);
+
+  const handleSendPendingFormsEmail = async () => {
+    if (!canSendPendingEmail || sendingPendingEmail) return;
+    const confirmed = window.confirm(
+      'Email Yet to Complete, Pending, and Returned report forms to each site’s In-Charge now?\n\nEach site with outstanding forms gets its own email. Approved forms are not included.'
+    );
+    if (!confirmed) return;
+    setSendingPendingEmail(true);
+    setMessage('');
+    try {
+      const res = await fetch(`${API_BASE}/sitemanagement/pending-forms-email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ force: true })
+      });
+      const data = await readJsonFromResponse(res);
+      if (!res.ok || data.status !== 'success') {
+        throw new Error(data.message || 'Failed to send yet-to-complete form emails.');
+      }
+      const sent = Number(data?.data?.emailsSent) || 0;
+      const failed = Number(data?.data?.emailsFailed) || 0;
+      const skippedEmpty = Number(data?.data?.sitesSkippedNoPending) || 0;
+      setToast(
+        failed
+          ? `Sent ${sent} site email(s); ${failed} failed. ${skippedEmpty} site(s) had no Yet to Complete / pending / returned forms.`
+          : `Sent Yet to Complete / pending / returned form details to ${sent} Site In-Charge mailbox(es). ${skippedEmpty} site(s) had none.`
+      );
+    } catch (err) {
+      setMessage(err.message || 'Failed to send yet-to-complete form emails.');
+    } finally {
+      setSendingPendingEmail(false);
+    }
   };
 
   const emptyListMessage = hasInchargeIndustryScope
@@ -1304,6 +1348,35 @@ const SiteManagement = ({ userEmail, userRole }) => {
       if (!prev[name]) return prev;
       const next = { ...prev };
       delete next[name];
+      return next;
+    });
+  };
+
+  const handleInchargeEmailChange = (index, value) => {
+    const emails = splitInchargeEmails(formRef.current.inchargeEmail);
+    emails[index] = sanitizeSiteFormField('inchargeEmail', value);
+    setForm((prev) => ({ ...prev, inchargeEmail: emails.join(', ') }));
+    setFormErrors((prev) => {
+      if (!prev.inchargeEmail) return prev;
+      const next = { ...prev };
+      delete next.inchargeEmail;
+      return next;
+    });
+  };
+
+  const addInchargeEmail = () => {
+    const emails = splitInchargeEmails(formRef.current.inchargeEmail);
+    setForm((prev) => ({ ...prev, inchargeEmail: `${emails.join(', ')}, ` }));
+  };
+
+  const removeInchargeEmail = (index) => {
+    const emails = splitInchargeEmails(formRef.current.inchargeEmail);
+    emails.splice(index, 1);
+    setForm((prev) => ({ ...prev, inchargeEmail: emails.join(', ') }));
+    setFormErrors((prev) => {
+      if (!prev.inchargeEmail) return prev;
+      const next = { ...prev };
+      delete next.inchargeEmail;
       return next;
     });
   };
@@ -1841,17 +1914,45 @@ const SiteManagement = ({ userEmail, userRole }) => {
                         </div>
                         <div className="company-details-field">
                           <label htmlFor="sm-inchargeEmail">Mail Id</label>
-                          <input
-                            id="sm-inchargeEmail"
-                            name="inchargeEmail"
-                            type="email"
-                            value={form.inchargeEmail}
-                            onChange={handleChange}
-                            onBlur={handleSiteFieldBlur}
-                            placeholder="Enter mail id"
-                            disabled={viewOnly}
-                            maxLength={254}
-                          />
+                          <div className="site-management-email-list">
+                            {splitInchargeEmails(form.inchargeEmail).map((email, index) => (
+                              <div className="site-management-email-row" key={`incharge-email-${index}`}>
+                                <input
+                                  id={index === 0 ? 'sm-inchargeEmail' : `sm-inchargeEmail-${index}`}
+                                  name="inchargeEmail"
+                                  type="email"
+                                  value={email}
+                                  onChange={(e) => handleInchargeEmailChange(index, e.target.value)}
+                                  onBlur={handleSiteFieldBlur}
+                                  placeholder="Enter mail id"
+                                  disabled={viewOnly}
+                                  maxLength={254}
+                                />
+                                {!viewOnly && index > 0 && (
+                                  <button
+                                    type="button"
+                                    className="site-management-email-action site-management-email-remove"
+                                    onClick={() => removeInchargeEmail(index)}
+                                    aria-label="Remove mail id"
+                                    title="Remove mail id"
+                                  >
+                                    <Trash2 size={16} aria-hidden="true" />
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                            {!viewOnly && (
+                              <button
+                                type="button"
+                                className="site-management-email-action site-management-email-add"
+                                onClick={addInchargeEmail}
+                                aria-label="Add another mail id"
+                                title="Add another mail id"
+                              >
+                                <Plus size={18} aria-hidden="true" />
+                              </button>
+                            )}
+                          </div>
                           {formErrors.inchargeEmail && (
                             <div style={{ color: 'red', fontSize: '0.95em', marginTop: 2 }}>{formErrors.inchargeEmail}</div>
                           )}
@@ -2063,6 +2164,18 @@ const SiteManagement = ({ userEmail, userRole }) => {
                     </svg>
                     {importing ? 'Importing…' : 'Import CSV'}
                   </button>
+                  {canSendPendingEmail ? (
+                    <button
+                      type="button"
+                      className="company-details-btn company-details-btn-export"
+                      onClick={handleSendPendingFormsEmail}
+                      disabled={sendingPendingEmail}
+                      title="Email Yet to Complete, Pending, and Returned report forms to each site In-Charge"
+                    >
+                      <Mail size={16} strokeWidth={2} aria-hidden />
+                      {sendingPendingEmail ? 'Sending…' : 'Email outstanding forms'}
+                    </button>
+                  ) : null}
                   <button type="button" className="company-details-btn company-details-btn-add" onClick={openAdd}>
                     <span className="company-details-btn-add-icon">+</span> Add Site
                   </button>
@@ -2109,6 +2222,18 @@ const SiteManagement = ({ userEmail, userRole }) => {
                       </svg>
                       Export CSV
                     </button>
+                    {canSendPendingEmail ? (
+                      <button
+                        type="button"
+                        className="company-details-btn company-details-btn-export"
+                        onClick={handleSendPendingFormsEmail}
+                        disabled={sendingPendingEmail}
+                        title="Email Yet to Complete, Pending, and Returned report forms to each site In-Charge"
+                      >
+                        <Mail size={16} strokeWidth={2} aria-hidden />
+                        {sendingPendingEmail ? 'Sending…' : 'Email outstanding forms'}
+                      </button>
+                    ) : null}
                     <button type="button" className="company-details-btn company-details-btn-add" onClick={openAdd}>
                       <span className="company-details-btn-add-icon">+</span> Add Site
                     </button>

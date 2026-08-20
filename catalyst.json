@@ -56,7 +56,8 @@
       "samplepayroll_function",
       "leave_job_function",
       "leaveapi_function",
-      "leavescheduler_job_function"
+      "leavescheduler_job_function",
+      "pendingforms_job_function"
     ],
     "ignore": [],
     "source": "functions"

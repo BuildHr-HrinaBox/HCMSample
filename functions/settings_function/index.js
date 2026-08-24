@@ -31,7 +31,7 @@ function pickSettingsRow(rowObj) {
 async function fetchLatestSettingsRow(catalyst) {
   const zcql = catalyst.zcql();
   const rows = await zcql.executeZCQLQuery(
-    `SELECT ROWID, CompanyName, Logo FROM ${SETTINGS_TABLE} ORDER BY ROWID DESC LIMIT 1`
+    `SELECT ROWID, CompanyName, Logo, DueDate FROM ${SETTINGS_TABLE} ORDER BY ROWID DESC LIMIT 1`
   );
   if (!Array.isArray(rows) || rows.length === 0) return null;
   return pickSettingsRow(rows[0]);
@@ -50,6 +50,20 @@ async function resolveLogoName(catalyst, fileId) {
   }
 }
 
+async function updateChecklistBulkDueDates(catalyst, dueDate) {
+  const table = catalyst.datastore().table('checklistbulk');
+  const rows = await table.getAllRows();
+  let updatedCount = 0;
+
+  for (const row of rows) {
+    if (!row?.ROWID) continue;
+    await table.updateRow({ ROWID: row.ROWID, DueDate: dueDate });
+    updatedCount += 1;
+  }
+
+  return updatedCount;
+}
+
 app.get('/', (req, res) => {
   res.status(200).json({ status: 'success', message: 'settings_function ready' });
 });
@@ -60,6 +74,7 @@ app.get('/settings', async (req, res) => {
     const row = await fetchLatestSettingsRow(catalyst);
     const companyName = String(row?.CompanyName || '').trim();
     const logo = row?.Logo || null;
+    const dueDate = String(row?.DueDate || '').trim();
     const logoName = await resolveLogoName(catalyst, logo);
     res.status(200).json({
       status: 'success',
@@ -68,6 +83,7 @@ app.get('/settings', async (req, res) => {
         companyName,
         logo,
         logoName,
+        dueDate,
       },
     });
   } catch (err) {
@@ -110,13 +126,11 @@ app.get('/settings/logo', async (req, res) => {
 app.put('/settings', async (req, res) => {
   try {
     const { catalyst } = res.locals;
-    const companyName = String(req.body?.companyName || '').trim();
-    if (!companyName) {
-      return res.status(400).json({ status: 'failure', message: 'Company name is required.' });
-    }
+    const existing = await fetchLatestSettingsRow(catalyst);
+    const companyName = String(req.body?.companyName || existing?.CompanyName || '').trim();
+    const dueDate = String(req.body?.dueDate || '').trim();
 
     const table = catalyst.datastore().table(SETTINGS_TABLE);
-    const existing = await fetchLatestSettingsRow(catalyst);
     let logoFileId = existing?.Logo || null;
 
     if (req.files?.logo) {
@@ -142,16 +156,19 @@ app.put('/settings', async (req, res) => {
         ROWID: existing.ROWID,
         CompanyName: companyName,
         Logo: logoFileId || null,
+        DueDate: dueDate,
       });
     } else {
       savedRow = await table.insertRow({
         CompanyName: companyName,
         Logo: logoFileId || null,
+        DueDate: dueDate,
       });
     }
 
     const rowId = savedRow?.ROWID || existing?.ROWID || null;
     const logoName = await resolveLogoName(catalyst, logoFileId);
+    const checklistBulkUpdatedCount = await updateChecklistBulkDueDates(catalyst, dueDate);
     res.status(200).json({
       status: 'success',
       data: {
@@ -159,6 +176,8 @@ app.put('/settings', async (req, res) => {
         companyName,
         logo: logoFileId || null,
         logoName,
+        dueDate,
+        checklistBulkUpdatedCount,
       },
     });
   } catch (err) {

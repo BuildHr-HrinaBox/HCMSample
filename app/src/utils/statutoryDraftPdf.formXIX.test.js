@@ -6,9 +6,26 @@ const {
   isFormXIXWageSlipColHeaderBlob,
   normalizeFormXIXWageSlipPdfMatrix,
   sheetToDenseMatrix,
+  looksLikeFormXIXRajasthanOvertimePdfContext,
+  trimFormXIXRajasthanLeadingBlankPdfColumns,
 } = statutoryDraftPdfTestUtils;
 
 describe('Form XIX Wage Slip PDF layout', () => {
+  test('removes the leading blank column from Rajasthan overtime registers', () => {
+    const rows = [
+      ['FORM XIX', '', ''],
+      ['Register of Overtime', '', ''],
+      ['', 'Serial No.', 'Name of workman'],
+      ['', '1', 'Suryakanta Jana']
+    ];
+    expect(looksLikeFormXIXRajasthanOvertimePdfContext([], rows, 'Form_XIX_RJ_-_Rajasthan.xlsx')).toBe(true);
+
+    const out = trimFormXIXRajasthanLeadingBlankPdfColumns(rows, 3, 2);
+    expect(out.colCount).toBe(2);
+    expect(out.rows[2]).toEqual(['Serial No.', 'Name of workman']);
+    expect(out.rows[3]).toEqual(['1', 'Suryakanta Jana']);
+  });
+
   test('detects Form XIX wage-slip column headers', () => {
     expect(
       isFormXIXWageSlipColHeaderBlob(

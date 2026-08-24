@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import './Checklistbulk.css';
+import { fetchSettings } from '../utils/settingsCache';
 
 const API_BASE = '/server/checklistbulk_function';
 
@@ -135,6 +136,7 @@ const Checklistbulk = ({ userRole, userEmail }) => {
   const [dragOver, setDragOver] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [lastImportAt, setLastImportAt] = useState('');
+  const [defaultDueDate, setDefaultDueDate] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const rowsPerPage = 10;
 
@@ -163,6 +165,12 @@ const Checklistbulk = ({ userRole, userEmail }) => {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    fetchSettings()
+      .then((settings) => setDefaultDueDate(String(settings?.dueDate || '').trim()))
+      .catch(() => setDefaultDueDate(''));
+  }, []);
 
   const handleFile = (selectedFile) => {
     if (!selectedFile) return;
@@ -206,7 +214,10 @@ const Checklistbulk = ({ userRole, userEmail }) => {
         setLoading(false);
         return;
       }
-      const records = rows.map(mapRowToRecord);
+      const records = rows.map((row) => {
+        const record = mapRowToRecord(row);
+        return record.dueDate ? record : { ...record, dueDate: defaultDueDate };
+      });
       const res = await fetch(`${API_BASE}/checklistbulk?action=bulkImport`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -269,7 +280,7 @@ const Checklistbulk = ({ userRole, userEmail }) => {
 
   const filteredData = importedData.filter((row) => {
     const term = searchTerm.trim().toLowerCase();
-    return !term || [row.act, row.formName, row.concernedGovtDepartment, row.state, row.sector, row.description, row.nameOfTheCode, row.frequency, row.nameOfTheRule]
+    return !term || [row.act, row.formName, row.concernedGovtDepartment, row.state, row.sector, row.description, row.nameOfTheCode, row.frequency, row.nameOfTheRule, row.dueDate]
       .some((value) => String(value || '').toLowerCase().includes(term));
   });
 
@@ -456,7 +467,7 @@ const Checklistbulk = ({ userRole, userEmail }) => {
                       <td>{row.description}</td>
                       <td>{row.concernedGovtDepartment}</td>
                       <td>{row.frequency || '-'}</td>
-                      <td>{formatChecklistDueDate(row.dueDate, row.frequency)}</td>
+                      <td>{formatChecklistDueDate(row.dueDate || defaultDueDate, row.frequency)}</td>
                       <td title={row.formFile ? `File id: ${row.formFile}` : 'Upload matching row in Form Master, then Link Form Files'}>
                         {row.formFileName || (row.formFile ? 'Linked' : '—')}
                       </td>

@@ -769,6 +769,17 @@ import {
   resolveFormXXIIITamilNaduOvertimeRate,
 } from './statutory/formXXIIITamilNadu';
 import {
+  applyForm10UnmatchedPayrollAmountsNil,
+  buildForm10EmployeeDisplayName,
+  collectForm10RowNameParts,
+  findForm10PayrollRowByFirstAndLastName,
+  form10HasFirstAndLastName,
+  form10PayrollRowAgreesWithEmployeeNames,
+  isForm10FirstNameHeader,
+  isForm10LastNameHeader,
+  readForm10PersonNameParts,
+} from './statutory/form10TamilNadu';
+import {
   FORM_XXIII_GJ_OT_NIL,
   applyFormXXIIIGJOtNilToMappedRows,
   applyFormXXIIIGJOtNilToRow,
@@ -48037,6 +48048,7 @@ const Statutory = ({ userEmail, userRole }) => {
           ),
           {
             establishmentText: siteForCRJ ? buildSiteEstablishmentNameAndAddress(siteForCRJ) : '',
+            periodText: `${resolveToFullMonthName(selectedMonth) || MONTH_NAMES[new Date().getMonth()]} ${new Date().getFullYear()}`,
           }
         );
       }
@@ -52214,6 +52226,7 @@ const Statutory = ({ userEmail, userRole }) => {
                           parsed.sheetName ||
                           '',
                         headerWriteMode: isFormCRajasthanDownload ? 'adjacent' : 'combined',
+                        formCRajasthanTitleAnchorCol: isFormCRajasthanDownload ? 6 : null,
                       })
                   : isFormXXIAPFinesDownload
                     ? await buildFormXXIAPWorkbookWithTemplateStyles({
@@ -65082,8 +65095,22 @@ const Statutory = ({ userEmail, userRole }) => {
         return `${year}-${String(mon).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
       };
 
-      const applyForm10PayrollToRow = (row, payrollRow, headers, { payDate = '', overwrite = false } = {}) => {
+      const applyForm10PayrollToRow = (
+        row,
+        payrollRow,
+        headers,
+        { payDate = '', overwrite = false, emp = null } = {}
+      ) => {
         if (!row || !payrollRow || payrollRow.fetch_error) return;
+        const extraParts = collectForm10RowNameParts(row, headers);
+        if (
+          form10HasFirstAndLastName(emp) &&
+          !form10PayrollRowAgreesWithEmployeeNames(emp, payrollRow, extraParts)
+        ) {
+          applyForm10UnmatchedPayrollAmountsNil(row, headers, FORM_10_NIL_DEFAULT);
+          applyForm10StaticColumnDefaults(row, headers);
+          return;
+        }
         const map = buildForm10PayrollMap(payrollRow);
         const cellIsEmpty = (header) => {
           const v = String(row[header] || '').trim();
@@ -68602,72 +68629,40 @@ const Statutory = ({ userEmail, userRole }) => {
       };
 
       const resolveForm10PayrollRow = (em, row, headers, byPayrollPayload, payrollRows) => {
+        const extraParts = collectForm10RowNameParts(row, headers);
+        const allRows = Array.isArray(payrollRows)
+          ? payrollRows.filter((r) => r && !r.fetch_error)
+          : byPayrollPayload && byPayrollPayload.size > 0
+            ? Array.from(new Set(byPayrollPayload.values())).filter((r) => r && !r.fetch_error)
+            : [];
+        const namesAgree = (hit) =>
+          Boolean(hit && !hit.fetch_error && form10PayrollRowAgreesWithEmployeeNames(em, hit, extraParts));
+
+        // FirstName + LastName only — never first-name-only / register serial.
+        const namedHit = findForm10PayrollRowByFirstAndLastName(em, allRows, extraParts);
+        if (namedHit && !namedHit.fetch_error) return namedHit;
+
         const emailHit = lookupPayrollRowByEmailMap(
           byPayrollPayload,
           getEmployeeEmailCandidatesForPayroll(em || {})
         );
-        if (emailHit && !emailHit.fetch_error) return emailHit;
-        if (Array.isArray(payrollRows) && payrollRows.length > 0) {
-          const emailRowHit = matchPayrollRowByEmail(
-            payrollRows,
-            getEmployeeEmailCandidatesForPayroll(em || {})
-          );
-          if (emailRowHit && !emailRowHit.fetch_error) return emailRowHit;
-        }
-        const registerHeader = (Array.isArray(headers) ? headers : []).find((h) =>
-          /number\s+in\s+register|register\s+number/i.test(String(h || ''))
+        if (namesAgree(emailHit)) return emailHit;
+        const emailRowHit = matchPayrollRowByEmail(
+          allRows,
+          getEmployeeEmailCandidatesForPayroll(em || {})
         );
-        const registerNo = registerHeader ? String(row?.[registerHeader] || '').trim() : '';
-        const rowNameCandidates = [];
-        (Array.isArray(headers) ? headers : []).forEach((h) => {
-          const s = normalizeLooseHeaderText(h);
-          const v = String(row?.[h] || '').trim();
-          if (!v) return;
-          if (
-            isFormXXIIIWorkmenNameHeader(h) ||
-            (s.includes('name') &&
-              (s.includes('employee') ||
-                s.includes('workmen') ||
-                s.includes('workman') ||
-                s.includes('worker'))) ||
-            s === 'name'
-          ) {
-            rowNameCandidates.push(v.toLowerCase());
-          }
-        });
-        if (row?.__employeeLookupName) {
-          rowNameCandidates.push(String(row.__employeeLookupName).trim().toLowerCase());
-        }
+        if (namesAgree(emailRowHit)) return emailRowHit;
+
         const rowIdCandidates = [
           ...getEmployeeLookupIdCandidates(em, row),
-          registerNo,
           row?.__employeeLookupId,
         ]
           .map((value) => String(value || '').trim())
           .filter(Boolean);
-
-        if (Array.isArray(payrollRows) && payrollRows.length > 0) {
-          const hit = resolveForm15Part2PayrollRow(
-            em,
-            row,
-            rowNameCandidates,
-            byPayrollPayload,
-            payrollRows
-          );
-          if (hit && !hit.fetch_error) return hit;
-        }
-
-        if (byPayrollPayload && byPayrollPayload.size > 0) {
-          const lookupHit = lookupPayrollRowByIds(byPayrollPayload, rowIdCandidates);
-          if (lookupHit && !lookupHit.fetch_error) return lookupHit;
-          const genericHit = resolvePayrollRowForEmployee(
-            byPayrollPayload,
-            em,
-            row,
-            rowNameCandidates
-          );
-          if (genericHit && !genericHit.fetch_error) return genericHit;
-        }
+        const idHit = lookupPayrollRowByIds(byPayrollPayload, rowIdCandidates);
+        if (namesAgree(idHit)) return idHit;
+        const idRowHit = matchPayrollRowByEmployeeIds(allRows, rowIdCandidates);
+        if (namesAgree(idRowHit)) return idRowHit;
 
         return null;
       };
@@ -68783,9 +68778,16 @@ const Statutory = ({ userEmail, userRole }) => {
               applyForm10PayrollToRow(row, matchedPayrollRow, currentHeaders, {
                 payDate: form10PayDate,
                 overwrite,
+                emp,
               });
               filled += 1;
+            } else {
+              applyForm10UnmatchedPayrollAmountsNil(row, currentHeaders, FORM_10_NIL_DEFAULT);
+              applyForm10StaticColumnDefaults(row, currentHeaders);
             }
+          } else {
+            applyForm10UnmatchedPayrollAmountsNil(row, currentHeaders, FORM_10_NIL_DEFAULT);
+            applyForm10StaticColumnDefaults(row, currentHeaders);
           }
         }
         return filled;
@@ -72659,6 +72661,10 @@ const Statutory = ({ userEmail, userRole }) => {
             );
           } else if (formAAutofillContext && classifyFormATableColumn(header) === 'age') {
             row[header] = sanitizeValue(computeAgeFromDobForStatutory(emp) || '');
+          } else if (isLikelyForm10 && isForm10FirstNameHeader(header)) {
+            row[header] = sanitizeValue(readForm10PersonNameParts(emp).firstName);
+          } else if (isLikelyForm10 && isForm10LastNameHeader(header)) {
+            row[header] = sanitizeValue(readForm10PersonNameParts(emp).lastName);
           }
           // Name of the employee/worker - try multiple field name variations
           else if (
@@ -72749,7 +72755,10 @@ const Statutory = ({ userEmail, userRole }) => {
                          '';
            
             let displayName = nameValue;
-            if (
+            if (isLikelyForm10) {
+              const full = buildForm10EmployeeDisplayName(emp);
+              if (full) displayName = full;
+            } else if (
               formXXIIIAutofillContext &&
               (headerLower.includes('workmen') || headerLower.includes('workman') || headerLower.includes('surname'))
             ) {
@@ -74306,8 +74315,12 @@ const Statutory = ({ userEmail, userRole }) => {
               if (isLikelyForm10) {
                 applyForm10PayrollToRow(row, matchedPayrollRow, currentHeaders, {
                   payDate: form10PayDate,
+                  emp,
                 });
               }
+            } else if (isLikelyForm10) {
+              applyForm10UnmatchedPayrollAmountsNil(row, currentHeaders, FORM_10_NIL_DEFAULT);
+              applyForm10StaticColumnDefaults(row, currentHeaders);
             }
           } catch (payErr) {
             console.warn(`Payroll mapping skipped for employee row ${index + 1}:`, payErr?.message || payErr);
@@ -75083,9 +75096,15 @@ const Statutory = ({ userEmail, userRole }) => {
                 });
               }
               if (isLikelyForm10) {
-                applyForm10PayrollToRow(row, matchedPayrollRow, currentHeaders, {
-                  payDate: form10PayDate,
-                });
+                if (matchedPayrollRow && !matchedPayrollRow.fetch_error) {
+                  applyForm10PayrollToRow(row, matchedPayrollRow, currentHeaders, {
+                    payDate: form10PayDate,
+                    emp,
+                  });
+                } else {
+                  applyForm10UnmatchedPayrollAmountsNil(row, currentHeaders, FORM_10_NIL_DEFAULT);
+                  applyForm10StaticColumnDefaults(row, currentHeaders);
+                }
               }
               if (formDAutofillContext) {
                 applyFormDPayrollToRow(row, matchedPayrollRow, currentHeaders, {
@@ -76711,10 +76730,16 @@ const Statutory = ({ userEmail, userRole }) => {
                 });
               }
 
-              if (isLikelyForm10 && matchedPayrollRow) {
-                applyForm10PayrollToRow(row, matchedPayrollRow, currentHeaders, {
-                  payDate: form10PayDate,
-                });
+              if (isLikelyForm10) {
+                if (matchedPayrollRow && !matchedPayrollRow.fetch_error) {
+                  applyForm10PayrollToRow(row, matchedPayrollRow, currentHeaders, {
+                    payDate: form10PayDate,
+                    emp,
+                  });
+                } else {
+                  applyForm10UnmatchedPayrollAmountsNil(row, currentHeaders, FORM_10_NIL_DEFAULT);
+                  applyForm10StaticColumnDefaults(row, currentHeaders);
+                }
               }
             });
             if (!returnMappedData) mergeMappedIntoFormTable(mappedData, true);

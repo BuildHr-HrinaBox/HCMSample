@@ -41,6 +41,68 @@
   padding: 16px 20px 20px;
 }
 
+.settings-due-date-list {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-due-date-card {
+  display: flex;
+  align-items: center;
+  min-height: 78px;
+  padding: 14px 16px;
+  border: 1px solid #e6ddff;
+  border-left: 4px solid #8b5cf6;
+  border-radius: 12px;
+  background: linear-gradient(105deg, #fff 0%, #fff 58%, #fbfaff 100%);
+  box-shadow: 0 5px 16px rgba(139, 92, 246, 0.08);
+}
+
+.settings-due-date-icon {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  margin-right: 24px;
+  border-radius: 9px;
+  background: #f0eaff;
+  color: #7c3aed;
+}
+
+.settings-due-date-info {
+  display: grid;
+  gap: 8px;
+  min-width: 250px;
+  color: #172033;
+}
+
+.settings-due-date-info strong {
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.settings-due-date-info span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #718096;
+  font-size: 0.72rem;
+}
+
+.settings-due-date-actions {
+  display: flex;
+  gap: 12px;
+  margin-left: auto;
+  padding-left: 26px;
+  border-left: 1px solid #edf0f5;
+}
+
+.settings-due-date-actions .company-details-table-action {
+  width: 44px;
+  height: 44px;
+  border-radius: 9px;
+}
+
 .settings-list-empty {
   margin: 0;
   color: #64748b;
@@ -76,22 +138,17 @@
 
 .settings-data-table th:nth-child(3),
 .settings-data-table td:nth-child(3) {
-  width: 38%;
+  width: auto;
 }
 
 .settings-data-table th:nth-child(4),
 .settings-data-table td:nth-child(4) {
-  width: 34%;
-}
-
-.settings-data-table th:nth-child(5),
-.settings-data-table td:nth-child(5) {
   width: 140px;
   min-width: 140px;
   text-align: left;
 }
 
-.settings-data-table td:nth-child(5) .company-details-table-action {
+.settings-data-table td:nth-child(4) .company-details-table-action {
   white-space: nowrap;
 }
 
@@ -144,6 +201,23 @@
 }
 
 @media (max-width: 720px) {
+  .settings-due-date-card {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 14px;
+  }
+
+  .settings-due-date-info {
+    min-width: 0;
+  }
+
+  .settings-due-date-actions {
+    width: 100%;
+    margin-left: 70px;
+    padding-left: 0;
+    border-left: 0;
+  }
+
   .settings-modal.company-details-modal {
     width: 100%;
   }

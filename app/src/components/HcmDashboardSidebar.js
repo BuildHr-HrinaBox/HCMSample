@@ -10,7 +10,6 @@ import {
   FileText,
   Download,
   Settings as SettingsIcon,
-  SlidersHorizontal,
 } from 'lucide-react';
 import '../Pages/newdashboard.css';
 import vayonaBrandLogo from './Yanona Logo.png';
@@ -78,8 +77,16 @@ const NAV = [
     children: HCM_FORM_FETCH_CHILDREN,
   },
   { type: 'link', id: 'calendar', label: 'Calendar', icon: Calendar, to: '/calendar-picker' },
-  { type: 'link', id: 'setup', label: 'Setup', icon: SlidersHorizontal, to: '/setup' },
-  { type: 'link', id: 'settings', label: 'Settings', icon: SettingsIcon, to: '/settings' },
+  {
+    type: 'group',
+    id: 'settings',
+    label: 'Settings',
+    icon: SettingsIcon,
+    children: [
+      { label: 'Setup', to: '/setup' },
+      { label: 'Notification', to: '/settings' },
+    ],
+  },
   { type: 'link', id: 'main-report', label: 'Reports', icon: FileText, to: '/mainreport' },
   { type: 'link', id: 'returned-report', label: 'Returned Report', icon: FileText, to: '/returned-report' },
 ];
@@ -132,11 +139,13 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
   const formFetchSectionActive = filteredNav.some(
     (i) => i.type === 'group' && i.id === 'formFetch' && (i.children || []).some((c) => location.pathname === c.to)
   );
+  const settingsSectionActive = location.pathname === '/setup' || location.pathname === '/settings';
   const [openGroups, setOpenGroups] = useState({
     org: orgSectionActive,
     library: librarySectionActive,
     transaction: transactionSectionActive,
     formFetch: formFetchSectionActive,
+    settings: settingsSectionActive,
   });
   const userCollapsedGroupsRef = useRef({});
 
@@ -153,8 +162,9 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
         ? { transaction: true }
         : {}),
       ...(formFetchSectionActive && !userCollapsedGroupsRef.current.formFetch ? { formFetch: true } : {}),
+      ...(settingsSectionActive && !userCollapsedGroupsRef.current.settings ? { settings: true } : {}),
     }));
-  }, [orgSectionActive, librarySectionActive, transactionSectionActive, formFetchSectionActive]);
+  }, [orgSectionActive, librarySectionActive, transactionSectionActive, formFetchSectionActive, settingsSectionActive]);
 
   const toggleGroup = (groupId) => {
     setOpenGroups((prev) => {
@@ -217,6 +227,8 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
                       ? transactionSectionActive
                       : item.id === 'formFetch'
                         ? formFetchSectionActive
+                        : item.id === 'settings'
+                          ? settingsSectionActive
                         : false;
               return (
                 <div key={item.id} className="nd-nav-group">
@@ -245,7 +257,10 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
                               key={child.to}
                               to={child.to}
                               className={`nd-nav-subitem${subActive ? ' nd-nav-subitem--active' : ''}`}
+                              onMouseEnter={child.to === '/settings' ? prefetchSettings : undefined}
+                              onFocus={child.to === '/settings' ? prefetchSettings : undefined}
                               onClick={() => {
+                                if (child.to === '/settings') prefetchSettings();
                                 if (child.to === '/rule-book/company-details' && location.pathname === child.to) {
                                   window.dispatchEvent(new CustomEvent(COMPANY_DETAILS_CLOSE_MODAL_EVENT));
                                 }

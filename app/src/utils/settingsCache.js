@@ -7,7 +7,8 @@ let inflightRequest = null;
 function normalizeSettingsPayload(data) {
   return {
     companyName: String(data?.companyName || ''),
-    logoName: String(data?.logoName || '')
+    logoName: String(data?.logoName || ''),
+    dueDate: String(data?.dueDate || '')
   };
 }
 

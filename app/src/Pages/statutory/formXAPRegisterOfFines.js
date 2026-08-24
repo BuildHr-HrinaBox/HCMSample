@@ -1827,6 +1827,7 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
   formFileName,
   sheetNameHint = '',
   headerWriteMode = 'combined',
+  formCRajasthanTitleAnchorCol = null,
 }) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateArrayBuffer);
@@ -1850,6 +1851,78 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
     }
     return '';
   };
+
+  if (Number(formCRajasthanTitleAnchorCol) > 0) {
+    const establishment = String(
+      headerFormData?.statutory_establishment_name ||
+        headerFormData?.form_c_rj_establishment ||
+        ''
+    ).trim();
+    const monthYear = String(headerFormData?.form_c_rj_month_year || '').trim();
+    if (establishment || monthYear) {
+      for (let row = 1; row <= 25; row += 1) {
+        for (let col = 1; col <= 12; col += 1) {
+          const cell = worksheet.getCell(row, col);
+          const raw = excelCellValueToString(cell.value).replace(/\r\n/g, '\n');
+          if (!/name\s+of\s+establishment/i.test(raw) || !/month\s*\/\s*year/i.test(raw)) continue;
+          cell.value = [
+            `Name of Establishment:- ${establishment}`.trimEnd(),
+            `Month/Year: ${monthYear}`.trimEnd(),
+          ].join('\n');
+          cell.alignment = {
+            ...(cell.alignment || {}),
+            wrapText: true,
+            vertical: 'middle',
+            horizontal: 'left',
+          };
+          break;
+        }
+      }
+    }
+  }
+
+  if (Number(formCRajasthanTitleAnchorCol) > 0) {
+    const targetCol = Math.max(1, Number(formCRajasthanTitleAnchorCol));
+    for (let row = 1; row <= 3; row += 1) {
+      let sourceCol = 0;
+      for (let col = 1; col <= 12; col += 1) {
+        const value = excelCellValueToString(worksheet.getCell(row, col)?.value).trim();
+        if (/^form\s*c$/i.test(value)) {
+          sourceCol = col;
+          break;
+        }
+      }
+      if (!sourceCol || sourceCol === targetCol) continue;
+      const source = worksheet.getCell(row, sourceCol);
+      const target = worksheet.getCell(row, targetCol);
+      if (target.isMerged) {
+        const merges = Array.isArray(worksheet?.model?.merges) ? worksheet.model.merges : [];
+        merges.forEach((range) => {
+          const match = String(range || '').match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+          if (!match || Number(match[2]) !== row || Number(match[4]) !== row) return;
+          const toNumber = (letters) =>
+            String(letters)
+              .toUpperCase()
+              .split('')
+              .reduce((total, letter) => total * 26 + letter.charCodeAt(0) - 64, 0);
+          const start = toNumber(match[1]);
+          const end = toNumber(match[3]);
+          if (sourceCol >= start && sourceCol <= end || targetCol >= start && targetCol <= end) {
+            try {
+              worksheet.unMergeCells(range);
+            } catch (_) {
+              // Keep the template merge when ExcelJS cannot remove it.
+            }
+          }
+        });
+      }
+      const moved = worksheet.getCell(row, targetCol);
+      moved.value = source.value;
+      moved.style = { ...source.style };
+      source.value = '';
+      break;
+    }
+  }
 
   if (parsedHeaderRowIndex == null || parsedHeaderRowIndex < 0) {
     let autoHeaderRow = 0;
@@ -2062,6 +2135,18 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
         cell.value = String(value);
       }
     }
+  }
+
+  // Rajasthan Form C keeps the legal note in the template body; it belongs only in PDF.
+  if (Number(formCRajasthanTitleAnchorCol) > 0) {
+    worksheet.eachRow({ includeEmpty: false }, (row) => {
+      row.eachCell({ includeEmpty: false }, (cell) => {
+        const text = excelCellValueToString(cell.value);
+        if (/\*?\s*applicable\s+only\s+in\s+case\s+of\s+damage\s*\/\s*loss\s*\/\s*fine/i.test(text)) {
+          cell.value = '';
+        }
+      });
+    });
   }
 
   const out = await workbook.xlsx.writeBuffer();

@@ -1,0 +1,131 @@
+import {
+  applyForm10UnmatchedPayrollAmountsNil,
+  buildForm10EmployeeDisplayName,
+  collectForm10RowNameParts,
+  findForm10PayrollRowByFirstAndLastName,
+  form10FirstAndLastNamesMatch,
+  form10HasFirstAndLastName,
+  form10PayrollRowAgreesWithEmployeeNames,
+  isForm10CombinedNameHeader,
+  isForm10FirstNameHeader,
+  isForm10LastNameHeader,
+  readForm10PersonNameParts,
+} from './form10TamilNadu';
+
+describe('Form 10 Tamil Nadu firstname + lastname payroll mapping', () => {
+  const selvaP = { FirstName: 'Selva', LastName: 'P', EmailID: 'selva.p@example.com' };
+  const julyPayroll = [
+    {
+      first_name: 'Selva',
+      last_name: 'Kumar',
+      employee_name: 'Selva Kumar',
+      gross_pay: 76140,
+      net_pay: 72808,
+    },
+    {
+      first_name: 'Ravi',
+      last_name: 'S',
+      employee_name: 'Ravi S',
+      gross_pay: 49124,
+      net_pay: 47053,
+    },
+  ];
+
+  test('reads firstname and lastname from People and payroll rows', () => {
+    expect(readForm10PersonNameParts(selvaP)).toEqual({
+      firstName: 'Selva',
+      lastName: 'P',
+      fullName: 'Selva P',
+    });
+    expect(
+      readForm10PersonNameParts({
+        first_name: 'Selva',
+        last_name: 'P',
+        employee_name: 'Selva P',
+      })
+    ).toEqual({
+      firstName: 'Selva',
+      lastName: 'P',
+      fullName: 'Selva P',
+    });
+    expect(form10HasFirstAndLastName(selvaP)).toBe(true);
+    expect(form10HasFirstAndLastName({ FirstName: 'Selva' })).toBe(false);
+  });
+
+  test('Selva P does not match another Selva in July payroll', () => {
+    expect(form10FirstAndLastNamesMatch(selvaP, julyPayroll[0])).toBe(false);
+    expect(form10FirstAndLastNamesMatch(selvaP, { first_name: 'Selva', employee_name: 'Selva' })).toBe(
+      false
+    );
+    expect(findForm10PayrollRowByFirstAndLastName(selvaP, julyPayroll)).toBeNull();
+  });
+
+  test('Selva P matches only the payroll row with the same firstname and lastname', () => {
+    const augustRow = {
+      first_name: 'Selva',
+      last_name: 'P',
+      employee_name: 'Selva P',
+      gross_pay: 50000,
+      net_pay: 45000,
+    };
+    expect(form10FirstAndLastNamesMatch(selvaP, augustRow)).toBe(true);
+    expect(findForm10PayrollRowByFirstAndLastName(selvaP, [...julyPayroll, augustRow])).toEqual(
+      augustRow
+    );
+  });
+
+  test('matches payroll employee_name when first/last columns are missing', () => {
+    const pay = { employee_name: 'Selva P', gross_pay: 12000 };
+    expect(form10FirstAndLastNamesMatch(selvaP, pay)).toBe(true);
+    expect(form10FirstAndLastNamesMatch(selvaP, { employee_name: 'Selva Kumar' })).toBe(false);
+  });
+
+  test('email/id hit is rejected when payroll firstname+lastname disagree', () => {
+    expect(form10PayrollRowAgreesWithEmployeeNames(selvaP, julyPayroll[0])).toBe(false);
+    expect(
+      form10PayrollRowAgreesWithEmployeeNames(selvaP, {
+        first_name: 'Selva',
+        last_name: 'P',
+      })
+    ).toBe(true);
+    expect(form10PayrollRowAgreesWithEmployeeNames(selvaP, { employee_id: 'VE0099' })).toBe(true);
+  });
+
+  test('display name uses firstname and lastname together', () => {
+    expect(buildForm10EmployeeDisplayName(selvaP)).toBe('Selva P');
+    expect(buildForm10EmployeeDisplayName({ FirstName: 'Ravi' })).toBe('Ravi');
+  });
+
+  test('collects first/last from Form 10 name columns', () => {
+    const headers = ['First Name', 'Last Name', 'Normal rate of pay'];
+    const parts = collectForm10RowNameParts(
+      { 'First Name': 'Selva', 'Last Name': 'P', 'Normal rate of pay': '76140' },
+      headers
+    );
+    expect(parts).toEqual({ firstName: 'Selva', lastName: 'P', fullName: 'Selva P' });
+    expect(isForm10FirstNameHeader('First Name')).toBe(true);
+    expect(isForm10LastNameHeader('Last Name')).toBe(true);
+    expect(isForm10CombinedNameHeader('Name of the person employed')).toBe(true);
+    expect(isForm10CombinedNameHeader('First Name')).toBe(false);
+  });
+
+  test('unmatched payroll amount columns become Nil', () => {
+    const headers = [
+      'Normal rate of pay',
+      'Normal earnings',
+      'Total earnings',
+      'Overtime earnings',
+    ];
+    const row = {
+      'Normal rate of pay': '76140',
+      'Normal earnings': '76140',
+      'Total earnings': '72808',
+      'Overtime earnings': 'Nil',
+    };
+    applyForm10UnmatchedPayrollAmountsNil(row, headers, 'Nil');
+    expect(row['Normal rate of pay']).toBe('Nil');
+    expect(row['Normal earnings']).toBe('Nil');
+    expect(row['Total earnings']).toBe('Nil');
+    expect(row['Overtime earnings']).toBe('Nil');
+  });
+});

@@ -123,6 +123,10 @@ export function enrichFormCRajasthanDisplayHeader(formHeader, fileName, item, ta
       { label: 'Name of Establishment:-', value: '', key: 'statutory_establishment_name' },
     ];
   }
+  const hasMonthYear = fields.some((field) => /month\s*\/\s*year/i.test(String(field?.label || '')));
+  if (!hasMonthYear) {
+    fields = [...fields, { label: 'Month/Year:', value: '', key: 'form_c_rj_month_year' }];
+  }
   return { ...base, fields };
 }
 
@@ -132,17 +136,21 @@ export function prepareFormCRajasthanDownloadHeaderData(
   siteContext = {}
 ) {
   const out = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
-  const { establishmentText = '' } = siteContext;
+  const { establishmentText = '', periodText = '' } = siteContext;
   if (establishmentText) {
     out.statutory_establishment_name = establishmentText;
     out.form_c_rj_establishment = establishmentText;
   }
+  if (periodText) out.form_c_rj_month_year = periodText;
   const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
   fields.forEach((field) => {
     const key = field?.key;
     if (!key || String(out[key] ?? '').trim()) return;
     if (isFormCRajasthanEstablishmentHeaderLabel(field.label) && establishmentText) {
       out[key] = establishmentText;
+    }
+    if (/month\s*\/\s*year/i.test(String(field.label || '')) && periodText) {
+      out[key] = periodText;
     }
   });
   return out;

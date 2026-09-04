@@ -1,13 +1,20 @@
 import {
   FORM_XVIII_MP_LEAVE_CATEGORY,
   FORM_XVIII_MP_NIL,
+  FORM_XVIII_MP_FOR_THE_MONTH_KEY,
+  FORM_XVIII_MP_FOR_THE_MONTH_LABEL,
+  applyFormXVIIIMPForTheMonthToHeaderData,
   applyFormXVIIIMPLeaveToRow,
   applyFormXVIIIMPNilDefaultsToRow,
   applyFormXVIIIMPPayrollToRow,
   computeFormXVIIIMPOtherAllowances,
+  ensureFormXVIIIMPForTheMonthHeaderField,
+  extractFormXVIIIMPMonthYearFromForTheMonthText,
   finalizeFormXVIIIMPOtherAllowancesForDownload,
+  formatFormXVIIIMPForTheMonthDisplay,
   isFormXVIIIMPAnyOtherAmountHeader,
   isFormXVIIIMPCombinedRegisterContext,
+  isFormXVIIIMPForTheMonthCellText,
   dedupeFormXVIIIMPHeaderFields,
   normalizeFormXVIIIMPHeaderFieldLabel,
   isFormXVIIIMPMaternityBenefitHeader,
@@ -21,6 +28,7 @@ import {
   isFormXVIIIMPPtHeader,
   isFormXVIIIMPWageRateHeader,
   resolveFormXVIIIMPPayrollRowsForAutofill,
+  resolveFormXVIIIMPForTheMonthFromHeaderData,
   mapFormXVIIIMPRowsFromEmployees,
   looksLikeKarnatakaFormTSheet,
   looksLikeMPCombinedRegisterSheet,
@@ -37,6 +45,7 @@ import {
   restoreFormXVIIIMPDistinctOtherAllowances,
   snapshotFormXVIIIMPDistinctOtherAllowances,
   sumFormXVIIIMPLeaveBookedAndBalance,
+  writeFormXVIIIMPForTheMonthToWorksheet,
 } from './formXVIIIMPCombinedRegister';
 import { flattenPayrollEarningColumns } from '../../utils/payrollEarnings';
 
@@ -696,5 +705,74 @@ describe('Form XVIII MP Combined Register mappings', () => {
     expect(row['Category of Leave']).toBe(FORM_XVIII_MP_LEAVE_CATEGORY);
     expect(row['Leaves availed (No. Of days)']).toBe('12');
     expect(row['Total Balance Leaves']).toBe('64');
+  });
+
+  it('formats FOR THE MONTH from selected month/year (replaces template dashes)', () => {
+    expect(isFormXVIIIMPForTheMonthCellText('FOR THE MONTH ------------')).toBe(true);
+    expect(extractFormXVIIIMPMonthYearFromForTheMonthText('FOR THE MONTH ------------')).toBe('');
+    expect(extractFormXVIIIMPMonthYearFromForTheMonthText('FOR THE MONTH August 2026')).toBe(
+      'August 2026'
+    );
+    expect(formatFormXVIIIMPForTheMonthDisplay('August 2026')).toBe('FOR THE MONTH August 2026');
+    expect(formatFormXVIIIMPForTheMonthDisplay('FOR THE MONTH ------------')).toBe(
+      FORM_XVIII_MP_FOR_THE_MONTH_LABEL
+    );
+
+    const fields = ensureFormXVIIIMPForTheMonthHeaderField([]);
+    expect(fields).toEqual([
+      {
+        label: FORM_XVIII_MP_FOR_THE_MONTH_LABEL,
+        value: '',
+        key: FORM_XVIII_MP_FOR_THE_MONTH_KEY,
+      },
+    ]);
+
+    const headerData = applyFormXVIIIMPForTheMonthToHeaderData(
+      { [FORM_XVIII_MP_FOR_THE_MONTH_KEY]: 'FOR THE MONTH ------------' },
+      'August 2026',
+      fields
+    );
+    expect(headerData[FORM_XVIII_MP_FOR_THE_MONTH_KEY]).toBe('August 2026');
+    expect(resolveFormXVIIIMPForTheMonthFromHeaderData(headerData, fields)).toBe('August 2026');
+  });
+
+  it('writes FOR THE MONTH August 2026 onto the worksheet merge cell', () => {
+    const cellStore = new Map();
+    const worksheet = {
+      model: { merges: ['S2:Z2'] },
+      getCell(rOrAddr, c) {
+        let r;
+        let col;
+        if (typeof rOrAddr === 'string') {
+          const m = String(rOrAddr).match(/^([A-Z]+)(\d+)$/i);
+          if (!m) return { value: null, alignment: {} };
+          col = m[1].toUpperCase().charCodeAt(0) - 64;
+          if (m[1].length > 1) {
+            col = 0;
+            for (let i = 0; i < m[1].length; i += 1) {
+              col = col * 26 + (m[1].toUpperCase().charCodeAt(i) - 64);
+            }
+          }
+          r = Number(m[2]);
+        } else {
+          r = rOrAddr;
+          col = c;
+        }
+        const key = `${r}:${col}`;
+        if (!cellStore.has(key)) {
+          cellStore.set(key, {
+            row: r,
+            col,
+            value: r === 2 && col === 19 ? 'FOR THE MONTH ------------' : null,
+            alignment: {},
+          });
+        }
+        return cellStore.get(key);
+      },
+    };
+    expect(writeFormXVIIIMPForTheMonthToWorksheet(worksheet, 'August 2026', { headerRowEnd: 5 })).toBe(
+      true
+    );
+    expect(cellStore.get('2:19').value).toBe('FOR THE MONTH August 2026');
   });
 });

@@ -139,7 +139,12 @@ export default function HcmDashboardSidebar({ userName = 'User', userRole = 'App
   const formFetchSectionActive = filteredNav.some(
     (i) => i.type === 'group' && i.id === 'formFetch' && (i.children || []).some((c) => location.pathname === c.to)
   );
-  const settingsSectionActive = location.pathname === '/setup' || location.pathname === '/settings';
+  const settingsSectionActive =
+    location.pathname === '/setup' ||
+    location.pathname === '/settings' ||
+    location.pathname === '/pending-notification' ||
+    location.pathname === '/reminder-notification' ||
+    location.pathname === '/chro-notification';
   const [openGroups, setOpenGroups] = useState({
     org: orgSectionActive,
     library: librarySectionActive,

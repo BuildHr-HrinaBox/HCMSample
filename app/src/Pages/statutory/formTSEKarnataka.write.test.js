@@ -4,6 +4,10 @@ import {
   prepareFormTSEExportRows,
   formTSEDownloadHasSubstantiveRows,
   expandFormTSEHeaderValueBoxes,
+  ensureFormTSEKarnatakaTitleLayout,
+  ensureFormTSEKarnatakaSystemGeneratedNoteCentered,
+  finalizeFormTSEKarnatakaWorksheetExportBorders,
+  renameFormTSEKarnatakaHeaderLabels,
   writeFormTSEHeaderFieldsToWorksheet,
   findFormTSEIdentityTableStartCol0,
   resolveFormTSEWriteExcelCols0,
@@ -15,6 +19,7 @@ import {
   computeFormTSEKarnatakaTotalDeductions,
   FORM_T_KA_DEFAULT_PAYMENT_MODE,
   FORM_T_KA_OT_HOURS_NIL,
+  FORM_T_KA_RULE_CITATION,
   isFormTSEKarnatakaTotalOtHoursHeader,
   applyFormTSEKarnatakaOtHoursNilToMappedRows,
   resolveFormTSEKarnatakaDeductionTotalHeader,
@@ -26,6 +31,7 @@ import {
   FORM_T_KA_ATTENDANCE_START_COL0,
   FORM_T_KARNATAKA_HEADER_BOX_END_COL,
 } from './formTSEKarnataka';
+import { excelJSCellHasFullBoxBorder, excelJSCellHasBorder } from '../../utils/excelTableBorders';
 
 /** Minimal Form T Karnataka-like sheet: header R12, days R13, index R14, data from R15. */
 async function buildMinimalFormTTemplateBuffer() {
@@ -34,6 +40,13 @@ async function buildMinimalFormTTemplateBuffer() {
 
   ws.getCell(1, 1).value = 'FORM T';
   ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+  ws.getCell(3, 1).value =
+    '[See Rule 24(9-B) of Karnataka Shops & Commercial Establishment Rules, 1963]';
+  ws.getCell(2, 12).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+  ws.getCell(3, 12).value =
+    '[See Rule 24(9-B) of Karnataka Shops & Commercial Establishment Rules, 1963]';
+  ws.mergeCells(2, 5, 2, 14);
+  ws.mergeCells(3, 5, 3, 14);
   ws.getCell(9, 1).value = 'Month / Year';
   ws.getCell(10, 1).value = 'Address of the Establishment';
   ws.getCell(11, 1).value = 'Name and Address of the Employer';
@@ -157,6 +170,88 @@ describe('Form T Karnataka workbook write', () => {
     expect(String(ws.getCell(10, 1).value ?? '')).toMatch(/Karjol/i);
     expect(String(ws.getCell(11, 1).value ?? '')).toMatch(/Clean Wind/i);
     expect(ws.getCell(10, 1).alignment?.wrapText).toBe(true);
+
+    // Table grid borders start at row 12 only — not on Month/Year header boxes (9–11).
+    [9, 10, 11].forEach((row) => {
+      expect(excelJSCellHasFullBoxBorder(ws.getCell(row, 1))).toBe(false);
+    });
+    // Row 12+ table grid uses full thin borders across identity and attendance columns.
+    expect(excelJSCellHasFullBoxBorder(ws.getCell(12, 1))).toBe(true);
+    expect(excelJSCellHasFullBoxBorder(ws.getCell(12, 9))).toBe(true);
+    expect(excelJSCellHasFullBoxBorder(ws.getCell(13, 2))).toBe(true);
+    expect(excelJSCellHasFullBoxBorder(ws.getCell(13, 10))).toBe(true);
+    expect(excelJSCellHasFullBoxBorder(ws.getCell(14, 5))).toBe(true);
+    expect(excelJSCellHasFullBoxBorder(ws.getCell(15, 1))).toBe(true);
+    expect(excelJSCellHasFullBoxBorder(ws.getCell(15, 8))).toBe(true);
+    expect(excelJSCellHasFullBoxBorder(ws.getCell(16, 2))).toBe(true);
+  });
+
+  it('left-aligns title rows 2–3 starting in column A with full text', async () => {
+    const templateArrayBuffer = await buildMinimalFormTTemplateBuffer();
+    const { blob } = await buildFormTSEWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: liveRows.slice(0, 1),
+      headersToUse: modalHeaders,
+      parsedHeaderRowIndex: 11,
+      parsedDataStartIndex: 14,
+      parsedFormHeader: { title: 'Form T' },
+      sheetNameHint: 'Form T',
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const ws = outWb.getWorksheet('Form T');
+    expect(String(ws.getCell(2, 1).value ?? '')).toMatch(/^COMBINED MUSTER ROLL/i);
+    expect(String(ws.getCell(3, 1).value ?? '')).toMatch(/^\[See Rule 24\(9-B\)/i);
+    expect(ws.getCell(2, 1).alignment?.horizontal).toBe('left');
+    expect(ws.getCell(3, 1).alignment?.horizontal).toBe('left');
+    expect(Number(ws.getCell(2, 1).alignment?.indent || 0)).toBe(0);
+    const merges = Array.isArray(ws.model?.merges) ? ws.model.merges : [];
+    expect(merges.some((m) => /^A2:K2$/i.test(String(m)))).toBe(true);
+    expect(merges.some((m) => /^A3:K3$/i.test(String(m)))).toBe(true);
+  });
+
+  it('preserves title text when template rows use wide horizontal merges', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(3, 1).value =
+      '[See Rule 24(9-B) of Karnataka Shops & Commercial Establishment Rules, 1963]';
+    ws.getCell(9, 1).value = 'Month / Year : July 2026';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    ws.mergeCells(2, 5, 2, 14);
+    ws.mergeCells(3, 5, 3, 14);
+
+    ensureFormTSEKarnatakaTitleLayout(ws);
+
+    expect(String(ws.getCell(1, 1).value ?? '')).toMatch(/^FORM T/i);
+    expect(String(ws.getCell(2, 1).value ?? '')).toMatch(/^COMBINED MUSTER ROLL/i);
+    expect(String(ws.getCell(3, 1).value ?? '')).toMatch(/^\[See Rule 24\(9-B\)/i);
+    expect(ws.getCell(2, 1).alignment?.horizontal).toBe('left');
+  });
+
+  it('centers System Generated Document footer across the table width', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(3, 1).value =
+      '[See Rule 24(9-B) of Karnataka Shops & Commercial Establishment Rules, 1963]';
+    ws.getCell(9, 1).value = 'Month / Year : May 2026';
+    ws.getCell(12, 1).value = 'S.NO';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    for (let d = 1; d <= 8; d += 1) {
+      ws.getCell(13, 9 + d).value = d;
+    }
+    ws.getCell(24, 1).value = 'stem Generated Document';
+
+    finalizeFormTSEKarnatakaWorksheetExportBorders(ws, { colTo: 17, tableLastRow: 17 });
+
+    expect(String(ws.getCell(24, 1).value ?? '')).toBe('This is a System Generated Document');
+    expect(ws.getCell(24, 1).alignment?.horizontal).toBe('center');
+    const merges = Array.isArray(ws.model?.merges) ? ws.model.merges : [];
+    expect(merges.some((m) => /^A24:Q24$/i.test(String(m)))).toBe(true);
   });
 
   it('fills employee names from People when mappedData is an empty template grid', async () => {
@@ -201,6 +296,17 @@ describe('Form T Karnataka workbook write', () => {
     ws.mergeCells(9, 1, 9, 4);
     ws.mergeCells(10, 1, 10, 4);
     ws.mergeCells(11, 1, 11, 4);
+    const boxBorder = {
+      top: { style: 'thin' },
+      left: { style: 'thin' },
+      bottom: { style: 'thin' },
+      right: { style: 'thin' },
+    };
+    [9, 10, 11].forEach((row) => {
+      for (let col = 1; col <= 4; col += 1) {
+        ws.getCell(row, col).border = { ...boxBorder };
+      }
+    });
 
     writeFormTSEHeaderFieldsToWorksheet(ws, {
       form_t_month_year: 'May 2026',
@@ -213,8 +319,176 @@ describe('Form T Karnataka workbook write', () => {
 
     const merges = Array.isArray(ws.model?.merges) ? ws.model.merges : [];
     expect(merges).toEqual(expect.arrayContaining(['A9:I9', 'A10:I10', 'A11:I11']));
-    expect(String(ws.getCell(10, 1).value ?? '')).toMatch(/Address of the Establishment\s*:/);
+    expect(String(ws.getCell(10, 1).value ?? '')).toMatch(
+      /Name and address of the Establishment\s*:/
+    );
     expect(String(ws.getCell(10, 1).value ?? '')).toMatch(/Karjol Village/);
+    expect(String(ws.getCell(11, 1).value ?? '')).toMatch(/Name and Address of employer\s*:/);
+    expect(String(ws.getCell(11, 1).value ?? '')).toMatch(/Clean Wind Power/);
+    [9, 10, 11].forEach((row) => {
+      expect(excelJSCellHasFullBoxBorder(ws.getCell(row, 1))).toBe(false);
+      expect(excelJSCellHasFullBoxBorder(ws.getCell(row, FORM_T_KARNATAKA_HEADER_BOX_END_COL))).toBe(
+        false
+      );
+    });
+  });
+
+  it('clears rows 3–8 / L–AN boxes and renames contractor + nature-of-work labels', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    const boxBorder = {
+      top: { style: 'thin' },
+      left: { style: 'thin' },
+      bottom: { style: 'thin' },
+      right: { style: 'thin' },
+    };
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(3, 1).value =
+      'Name and address of establishment in / under which contract is carried on';
+    ws.getCell(4, 1).value = 'in lieu of';
+    ws.getCell(5, 1).value =
+      '1. Form I, II of Rule 22(4); Form IV of Rule 29(2); Forms V & VII of Rule 29(1) & (5) of Karnataka Minimum Wages Rules, 1958';
+    ws.getCell(6, 1).value = '2. Form I of Rules 3(1) of Karnataka Payment of Wages Rules, 1963';
+    ws.getCell(7, 1).value =
+      '3. Form XIII of Rules 75; Form XV, XVII, XX, XXI, XXII, XXIII of 78(1)(a)(i), (ii) & (iii) of Karnataka Contract Labour (Regulation & Abolition) Rules, 1974';
+    ws.getCell(8, 1).value =
+      '4. Form XIII of Rule 43; Forms XVII, XVIII, XIX, XX, XXI, XXII of Rule 46(2)(a),(c) & (d) of Inter-state Migrant Workmen (Regulation of Employment and conditions of service) Karnataka Rules, 1981';
+    ws.getCell(9, 1).value = 'Month / Year';
+    ws.getCell(10, 1).value = 'Name and address of contractor';
+    ws.getCell(11, 1).value = 'Nature of work and location of work';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    // Obsolete bordered boxes on rows 3–8 and L–AN (cols 12–40).
+    for (let r = 3; r <= 8; r += 1) {
+      for (let c = 1; c <= 11; c += 1) {
+        ws.getCell(r, c).border = { ...boxBorder };
+      }
+    }
+    for (let r = 1; r <= 8; r += 1) {
+      for (let c = 12; c <= 40; c += 1) {
+        ws.getCell(r, c).border = { ...boxBorder };
+      }
+    }
+
+    finalizeFormTSEKarnatakaWorksheetExportBorders(ws, { colTo: 40, tableLastRow: 16 });
+    renameFormTSEKarnatakaHeaderLabels(ws);
+    writeFormTSEHeaderFieldsToWorksheet(ws, {
+      form_t_month_year: 'June 2026',
+      form_t_establishment_name_address: 'Karjol Village Establishment, Bijapur Dist',
+      form_t_employer: 'M/s Clean Wind Power Bableshwar Pvt Ltd',
+    });
+
+    expect(String(ws.getCell(3, 1).value ?? '')).toBe(FORM_T_KA_RULE_CITATION);
+    expect(String(ws.getCell(4, 1).value ?? '')).toMatch(/^in lieu of$/i);
+    expect(String(ws.getCell(5, 1).value ?? '')).toMatch(/Minimum Wages Rules, 1958/i);
+    expect(String(ws.getCell(6, 1).value ?? '')).toMatch(/Payment of Wages Rules, 1963/i);
+    expect(String(ws.getCell(7, 1).value ?? '')).toMatch(/Contract Labour/i);
+    expect(String(ws.getCell(8, 1).value ?? '')).toMatch(/Migrant Workmen/i);
+    // CLRA rows 4–8 stay visible (not collapsed); boxes stripped.
+    expect(ws.getRow(4).hidden).toBe(false);
+    expect(ws.getRow(8).hidden).toBe(false);
+    expect(ws.getRow(3).hidden).toBe(false);
+    expect(ws.getRow(9).hidden).toBe(false);
+    expect(excelJSCellHasBorder(ws.getCell(5, 3))).toBe(false);
+    expect(excelJSCellHasBorder(ws.getCell(3, 20))).toBe(false);
+    expect(excelJSCellHasBorder(ws.getCell(1, 12))).toBe(false);
+    expect(excelJSCellHasBorder(ws.getCell(8, 40))).toBe(false);
+    expect(String(ws.getCell(10, 1).value ?? '')).toMatch(
+      /Name and address of the Establishment\s*:/
+    );
+    expect(String(ws.getCell(10, 1).value ?? '')).toMatch(/Karjol Village/);
+    expect(String(ws.getCell(11, 1).value ?? '')).toMatch(/Name and Address of employer\s*:/);
+    expect(String(ws.getCell(11, 1).value ?? '')).toMatch(/Clean Wind Power/);
+    expect(String(ws.getCell(10, 1).value ?? '')).not.toMatch(/contractor/i);
+    expect(String(ws.getCell(11, 1).value ?? '')).not.toMatch(/nature of work/i);
+    // Establishment/employer must not be left only on wiped row 3 (Rule citation).
+    expect(String(ws.getCell(3, 1).value ?? '')).not.toMatch(/Karjol Village|Clean Wind/i);
+  });
+
+  it('force-stamps Establishment and Employer Label : value on rows 10–11', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(3, 1).value = FORM_T_KA_RULE_CITATION;
+    ws.getCell(9, 1).value = 'Month / Year';
+    ws.getCell(10, 1).value = 'Name and address of the Establishment';
+    ws.getCell(11, 1).value = 'Name and Address of employer';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    // No A:I merge — previously left values only in column B (looked blank in A).
+    writeFormTSEHeaderFieldsToWorksheet(ws, {
+      form_t_month_year: 'May 2026',
+      statutory_establishment_name_address: 'Karjol Village Establishment, Bijapur Dist',
+      statutory_employer_name_address: 'M/s Clean Wind Power Bableshwar Pvt Ltd',
+    });
+    expect(String(ws.getCell(10, 1).value ?? '')).toMatch(
+      /Name and address of the Establishment\s*:\s*Karjol Village/
+    );
+    expect(String(ws.getCell(11, 1).value ?? '')).toMatch(
+      /Name and Address of employer\s*:\s*M\/s Clean Wind/
+    );
+  });
+
+  it('prepareFormTSEWorkbookForDownload re-stamps Establishment/Employer on an existing buffer', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(3, 1).value = FORM_T_KA_RULE_CITATION;
+    ws.getCell(9, 1).value = 'Month / Year : June 2026';
+    ws.getCell(10, 1).value = 'Name and address of the Establishment';
+    ws.getCell(11, 1).value = 'Name and Address of employer';
+    ws.getCell(12, 1).value = 'S.NO';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    ws.getCell(15, 1).value = '1';
+    ws.getCell(15, 2).value = 'Vinay Kumar';
+    const buf = await wb.xlsx.writeBuffer();
+
+    const stamped = await prepareFormTSEWorkbookForDownload(buf, {
+      force: true,
+      headerFormData: {
+        form_t_month_year: 'June 2026',
+        form_t_establishment_name_address: 'Karjol Village Establishment, Bijapur Dist',
+        form_t_employer: 'M/s Clean Wind Power Bableshwar Pvt Ltd',
+      },
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(stamped);
+    const out = outWb.getWorksheet('Form T');
+    expect(String(out.getCell(10, 1).value ?? '')).toMatch(/Establishment\s*:\s*Karjol Village/);
+    expect(String(out.getCell(11, 1).value ?? '')).toMatch(/employer\s*:\s*M\/s Clean Wind/i);
+  });
+
+  it('writes Establishment/Employer to rows 10–11 even when row 3 has contract-carried label', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(3, 1).value =
+      'Name and address of establishment in / under which contract is carried on';
+    ws.getCell(9, 1).value = 'Month / Year';
+    ws.getCell(10, 1).value = 'Name and address of contractor';
+    ws.getCell(11, 1).value = 'Nature of work and location of work';
+    ws.getCell(12, 2).value = 'Name of Employee';
+
+    writeFormTSEHeaderFieldsToWorksheet(ws, {
+      form_t_month_year: 'May 2026',
+      form_t_establishment_name_address: 'Karjol Village Establishment, Bijapur Dist',
+      form_t_employer: 'M/s Clean Wind Power Bableshwar Pvt Ltd',
+    });
+    finalizeFormTSEKarnatakaWorksheetExportBorders(ws, { colTo: 20, tableLastRow: 16 });
+    writeFormTSEHeaderFieldsToWorksheet(ws, {
+      form_t_month_year: 'May 2026',
+      form_t_establishment_name_address: 'Karjol Village Establishment, Bijapur Dist',
+      form_t_employer: 'M/s Clean Wind Power Bableshwar Pvt Ltd',
+    });
+
+    expect(String(ws.getCell(3, 1).value ?? '')).toBe(FORM_T_KA_RULE_CITATION);
+    expect(String(ws.getCell(3, 1).value ?? '')).not.toMatch(/Karjol|Clean Wind/i);
+    expect(String(ws.getCell(10, 1).value ?? '')).toMatch(/Establishment\s*:/);
+    expect(String(ws.getCell(10, 1).value ?? '')).toMatch(/Karjol Village/);
+    expect(String(ws.getCell(11, 1).value ?? '')).toMatch(/employer\s*:/i);
     expect(String(ws.getCell(11, 1).value ?? '')).toMatch(/Clean Wind Power/);
   });
 

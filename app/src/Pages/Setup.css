@@ -261,37 +261,43 @@
 
 .setup-rba-table th:nth-child(1),
 .setup-rba-table td:nth-child(1) {
-  width: 12%;
+  width: 11%;
   min-width: 110px;
 }
 
 .setup-rba-table th:nth-child(2),
 .setup-rba-table td:nth-child(2) {
-  width: 16%;
-  min-width: 150px;
+  width: 13%;
+  min-width: 130px;
 }
 
 .setup-rba-table th:nth-child(3),
 .setup-rba-table td:nth-child(3) {
-  width: 22%;
-  min-width: 180px;
+  width: 13%;
+  min-width: 130px;
 }
 
 .setup-rba-table th:nth-child(4),
 .setup-rba-table td:nth-child(4) {
-  width: 14%;
-  min-width: 120px;
+  width: 18%;
+  min-width: 160px;
 }
 
 .setup-rba-table th:nth-child(5),
 .setup-rba-table td:nth-child(5) {
-  width: 22%;
-  min-width: 180px;
+  width: 12%;
+  min-width: 110px;
 }
 
 .setup-rba-table th:nth-child(6),
 .setup-rba-table td:nth-child(6) {
-  width: 10%;
+  width: 20%;
+  min-width: 170px;
+}
+
+.setup-rba-table th:nth-child(7),
+.setup-rba-table td:nth-child(7) {
+  width: 9%;
   min-width: 90px;
 }
 

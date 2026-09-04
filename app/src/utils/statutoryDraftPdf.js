@@ -6,7 +6,44 @@ import {
   FORM_14_RJ_DAY_ENTRIES_NOTE,
   FORM_14_RJ_FOOTER_NOTE
 } from '../Pages/statutory/form14Rajasthan';
-
+import {
+  isFormXXDateOfRecoveryGroupLabel,
+  isFormXXAPAdministrativeRow,
+  getFormXXAPHeaderTitles,
+  isFormXXAPTableHeaderRow,
+  looksLikeFormXXAPPdfContext,
+} from './statutoryDraftPdf.formXX.AP';
+import {
+  getFormXXIAPHeaderTitles,
+  looksLikeFormXXIAPPdfContext
+} from './statutoryDraftPdf.formXXI.AP';
+import {
+  formXVIIAPHeaderTextMetrics,
+  getFormXVIIAPHeaderTitles,
+  isFormXVIIAdministrativeRow,
+  isFormXVIITableHeaderRow,
+  looksLikeFormXVIIAPPdfContext
+} from './statutoryDraftPdf.formXVII.AP';
+import {
+  looksLikeFormXIXMPCLRAPdfContext,
+  normalizeFormXIXMPCLRAWageSlipPdfMatrix
+} from './stautoryDraftPdf.formXIX.MP.CLRA';
+import {
+  getFormXVIAPHeaderTitles,
+  isFormXVIIDateNumberRow,
+  isFormXVIAPTableHeaderRow,
+  looksLikeFormXVIAPPdfContext,
+  sanitizeFormXVIAPMonthValue,
+  sanitizeFormXVIAPNatureValue
+} from './statutoryDraftPdf.formXVI.AP';
+import {
+  extractFormXIIIAPAdministrativeRows,
+  getFormXIIIAPHeaderTitles,
+  isFormXIIIPdfTitleRow,
+  looksLikeFormXIIIAPPdfContext
+} from './statutoryDraftPdf.formXIII.AP';
+import { isApPdfHeadingRow } from './statutoryDraftPdf.apHeaderTitles';
+import { buildFormXVAPServiceCertificatePdfBlob } from './statutoryDraftPdf.formXV.AP';
 const EXCEL_EXT_RE = /\.(xlsx|xls|xlsm|xlsb)$/i;
 /** Form XXVI TN needs ~44 leaf cols (9 identity + 31 days + 4 trailing). */
 const MAX_PDF_COLS = 64;
@@ -500,6 +537,19 @@ const isFormXIXWageSlipColHeaderBlob = (blob) => {
   );
 };
 
+const isFormXIXAPWageSlipPdfContext = (metaLines, rows, sheetName = '') => {
+  const blob = [...(metaLines || []), ...(rows || []).slice(0, 24).flat(), sheetName || '']
+    .join(' ')
+    .toLowerCase();
+  return (
+    /form[\s._-]*xix\b/.test(blob) &&
+    (/andhra\s+pradesh|\bap\b|form[\s._-]*xix[\s._-]*ap\b/.test(blob) ||
+      (/nature\s+and\s+location\s+of\s+work/.test(blob) &&
+        /gross\s+wages\s+payable/.test(blob) &&
+        /net\s+amount\s+of\s+wages/.test(blob)))
+  );
+};
+
 const FORM_XIX_PDF_WAGE_HEADERS = [
   'No. of days worked',
   'Rate of daily wages/piece - rate',
@@ -667,6 +717,155 @@ const normalizeFormXIXWageSlipPdfMatrix = (rows, colCount, tableStartRow = 0) =>
   };
 };
 
+const FORM_XIX_AP_WAGE_LABEL_RE =
+  /^(?:[1-7][.)]?\s*)?(?:no\.?\s+of\s+days\s+worked|no\.?\s+of\s+units\s+worked|rate\s+of\s+daily\s+wages|amount\s+of\s+overtime\s+wages|gross\s+wages\s+payable|deductions?,?\s+if\s+any|net\s+amount\s+of\s+wages)/i;
+
+const isFormXIXAPWageLabel = (text) => FORM_XIX_AP_WAGE_LABEL_RE.test(String(text || '').trim());
+const isFormXIXAPMoneyLabel = (text) =>
+  /amount\s+of\s+overtime\s+wages|gross\s+wages\s+payable|deductions?,?\s+if\s+any|net\s+amount\s+of\s+wages/i.test(
+    String(text || '')
+  );
+
+const formatFormXIXAPMoneyValue = (label, value) => {
+  const raw = String(value || '').trim();
+  if (!raw || !isFormXIXAPMoneyLabel(label)) return raw;
+  const normalized = raw.replace(/,/g, '');
+  if (!/^-?\d+(?:\.\d+)?$/.test(normalized)) return raw;
+  const amount = Number(normalized);
+  return Number.isFinite(amount)
+    ? amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })
+    : raw;
+};
+
+const formXIXAPHeaderFieldLabel = (text) => {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!value) return '';
+  return /^(?:name\s+and\s+address\s+of\s+contractor|nature\s+and\s+location\s+of\s+work|name\s+and\s+father|father.*husband.*name|for\s+the\s+(?:week|fortnight|month))/i.test(
+    value
+  )
+    ? value
+    : '';
+};
+
+const normalizeFormXIXAPWageSlipPdfMatrix = (rows, colCount, tableStartRow = 0, metaLines = []) => {
+  const src = Array.isArray(rows) ? rows : [];
+  const titles = [];
+  const headerPairs = [];
+  const wagePairs = [];
+  const trailingPairs = [];
+  const footerLines = [];
+  const consumed = new Set();
+  const addPair = (target, label, value = '') => {
+    const left = String(label || '').replace(/\s+/g, ' ').trim();
+    const right = String(value || '').trim();
+    if (!left && !right) return;
+    target.push([left, right]);
+  };
+
+  for (let metaIndex = 0; metaIndex < (metaLines || []).length; metaIndex += 1) {
+    const line = metaLines[metaIndex];
+    const text = String(line || '').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    if (/initials\s+of\s+the\s+contractor|signature\s+of\s+the\s+contractor/i.test(text)) {
+      footerLines.push(text);
+      continue;
+    }
+    const colon = text.indexOf(':');
+    const dotted = text.match(
+      /^(name\s+and\s+address\s+of\s+contractor|nature\s+and\s+location\s+of\s+work|name\s+and\s+father[^:.-]*workman|for\s+the\s+(?:week|fortnight|month)[^:.-]*)(?:\s*:\s*|\s*\.{2,}\s*|\s+-\s*)(.*)$/i
+    );
+    const label = formXIXAPHeaderFieldLabel(
+      dotted?.[1] || (colon >= 0 ? text.slice(0, colon) : text)
+    );
+    if (label) {
+      let value = dotted ? dotted[2] : colon >= 0 ? text.slice(colon + 1) : '';
+      const next = String(metaLines[metaIndex + 1] || '').replace(/\s+/g, ' ').trim();
+      if (!value && next && !formXIXAPHeaderFieldLabel(next) && !/^form\s*xix\b|^wage\s+slip\b|^\[?\s*rule\s*78/i.test(next)) {
+        value = next;
+        metaIndex += 1;
+      }
+      addPair(headerPairs, label, value);
+    } else if (/^form\s*xix\b|^wage\s+slip\b|^\[?\s*rule\s*78/i.test(text)) {
+      titles.push(text);
+    } else {
+      addPair(headerPairs, text, '');
+    }
+  }
+
+  const wageStart = Math.max(0, tableStartRow);
+  for (let r = wageStart; r < src.length; r += 1) {
+    const row = src[r] || [];
+    const labelIndex = row.findIndex((cell) => isFormXIXAPWageLabel(cell));
+    if (labelIndex < 0) continue;
+    const label = String(row[labelIndex] || '').replace(/\s+/g, ' ').trim();
+    const sameRowValues = row
+      .slice(labelIndex + 1)
+      .map((cell) => String(cell || '').trim())
+      .filter((cell) => cell && !/^\(?\s*\d{1,2}\s*\)?$/.test(cell));
+    let value = sameRowValues.join(' ');
+    if (!value) {
+      const nextRow = src[r + 1] || [];
+      const nextFilled = nextRow.map((cell) => String(cell || '').trim()).filter(Boolean);
+      if (nextFilled.length && !nextFilled.some(isFormXIXAPWageLabel)) {
+        value = nextFilled.join(' ');
+        consumed.add(r + 1);
+      }
+    }
+    addPair(wagePairs, label, value);
+    consumed.add(r);
+  }
+
+  for (let r = 0; r < src.length; r += 1) {
+    if (consumed.has(r)) continue;
+    if (r < tableStartRow) continue;
+    const filled = (src[r] || []).map((cell) => String(cell || '').trim()).filter(Boolean);
+    if (!filled.length) continue;
+    if (isSystemGeneratedDocumentNoteRow(src[r])) {
+      addPair(trailingPairs, filled.join(' '), '');
+      continue;
+    }
+    const joined = filled.join(' ');
+    if (/initials\s+of\s+the\s+contractor|signature\s+of\s+the\s+contractor/i.test(joined)) {
+      footerLines.push(joined);
+      continue;
+    }
+    if (filled.some(isFormXIXAPWageLabel)) {
+      const labelIndex = filled.findIndex(isFormXIXAPWageLabel);
+      addPair(wagePairs, filled[labelIndex], filled.slice(labelIndex + 1).join(' '));
+      continue;
+    }
+    if (filled.length > 1) addPair(trailingPairs, filled[0], filled.slice(1).join(' '));
+  }
+
+  const workersPair = [...headerPairs, ...trailingPairs].find(
+    (pair) => /^workers?$/i.test(pair[0]) && !pair[1]
+  );
+  if (workersPair) {
+    const unitsPair = wagePairs.find((pair) => /no\.?\s+of\s+units\s+worked/i.test(pair[0]));
+    if (unitsPair && !/\bworkers?$/i.test(unitsPair[0])) unitsPair[0] = `${unitsPair[0]} ${workersPair[0]}`;
+    [headerPairs, trailingPairs].forEach((list) => {
+      const index = list.indexOf(workersPair);
+      if (index >= 0) list.splice(index, 1);
+    });
+  }
+
+  const uniquePairs = [];
+  [...headerPairs, ...wagePairs, ...trailingPairs].forEach((pair) => {
+    if (!pair[0] && !pair[1]) return;
+    if (!uniquePairs.some((existing) => existing[0] === pair[0] && existing[1] === pair[1])) {
+      uniquePairs.push(pair);
+    }
+  });
+  return {
+    rows: uniquePairs,
+    colCount: 2,
+    tableStartRow: 0,
+    metaLines: titles,
+    formXIXAPLayout: true,
+    formXIXAPFooterLines: footerLines
+  };
+};
+
 /** CLRA Form XIV / Employment Card (Rule 76) — stacked label|value card, not a multi-col register. */
 const looksLikeFormXIVEmploymentCardPdfContext = (metaLines, rows, sheetName = '') => {
   const blob = [...(metaLines || []), ...(rows || []).slice(0, 24).flat(), sheetName || '']
@@ -791,6 +990,112 @@ const looksLikeFormXVRajasthanWageSlipPdfContext = (metaLines, rows, sheetName =
     (/see\s+rule\s*77|rajasthan|rule\s*77\s*\(\s*2\s*\)\s*\(\s*b\s*\)/.test(blob)) &&
     !/form\s*xi\b|service\s+certificate/.test(blob)
   );
+};
+
+const looksLikeFormXVAPServiceCertificatePdfContext = (metaLines, rows, sheetName = '') => {
+  const blob = [...(metaLines || []), ...(rows || []).slice(0, 40).flat(), sheetName || '']
+    .join(' ')
+    .toLowerCase();
+  return (
+    /form\s*xv\b|form[\s._-]*xv[\s._-]/.test(blob) &&
+    /service\s+certificate/.test(blob) &&
+    (/central\s*(?:&|and)\s*a\.?\s*p\.?|central\/\s*a\.?\s*p\.?|andhra\s+pradesh|\ba\.?p\.?\s+rules/.test(blob) ||
+      /name\s+and\s+address\s+of\s+the\s+workman/.test(blob))
+  );
+};
+
+const FORM_XV_AP_SERVICE_FIELD_LABELS = [
+  'Name and address of the workman',
+  'Age or date of Birth',
+  'Identification Marks',
+  "Father's / Husband's Name"
+];
+
+const formXVAPServiceFieldIndex = (text) => {
+  const t = String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (/name\s+and\s+address\s+of\s+the\s+workman/.test(t)) return 0;
+  if (/age\s+or\s+date\s+of\s+birth/.test(t)) return 1;
+  if (/identification\s+marks?/.test(t)) return 2;
+  if (/father.*husband.*name|husband.*father.*name/.test(t)) return 3;
+  return -1;
+};
+
+const buildFormXVAPServiceCertificateHeaderModel = (metaLines, rows = [], tableStartRow = 0) => {
+  const lines = [];
+  [...(metaLines || []), ...rows.slice(0, Math.max(0, tableStartRow)).flat()].forEach((raw) => {
+    expandStatutoryMetaSegments(raw).forEach((line) => {
+      const text = String(line || '').replace(/\s+/g, ' ').trim();
+      if (text) lines.push(text);
+    });
+  });
+  const titleLines = [];
+  const admin = [ ['', ''], ['', ''] ];
+  const fields = FORM_XV_AP_SERVICE_FIELD_LABELS.map(() => '');
+  let activeField = -1;
+  let activeAdmin = null;
+  lines.forEach((line) => {
+    const lower = line.toLowerCase();
+    const fieldIndex = formXVAPServiceFieldIndex(line);
+    if (fieldIndex >= 0) {
+      activeField = fieldIndex;
+      const inline = line.replace(/^[^:]*:\s*/, '').trim();
+      if (inline && inline !== line) fields[fieldIndex] = inline;
+      activeAdmin = null;
+      return;
+    }
+    if (/name\s+and\s+address\s+of\s+(?:the\s+)?contractor/.test(lower)) {
+      activeAdmin = [0, 0];
+      const inline = line.replace(/^[^:]*:\s*/, '').trim();
+      if (inline && inline !== line) admin[0][0] = inline;
+      activeField = -1;
+      return;
+    }
+    if (/name\s+and\s+address\s+of\s+(?:the\s+)?establishment/.test(lower)) {
+      activeAdmin = [0, 1];
+      const inline = line.replace(/^[^:]*:\s*/, '').trim();
+      if (inline && inline !== line) admin[0][1] = inline;
+      activeField = -1;
+      return;
+    }
+    if (/nature\s+and\s+location\s+of\s+work/.test(lower)) {
+      activeAdmin = [1, 0];
+      const inline = line.replace(/^[^:]*:\s*/, '').trim();
+      if (inline && inline !== line) admin[1][0] = inline;
+      activeField = -1;
+      return;
+    }
+    if (/name\s+and\s+address\s+of\s+(?:the\s+)?principal\s+employer/.test(lower)) {
+      activeAdmin = [1, 1];
+      const inline = line.replace(/^[^:]*:\s*/, '').trim();
+      if (inline && inline !== line) admin[1][1] = inline;
+      activeField = -1;
+      return;
+    }
+    if (activeField >= 0 && !fields[activeField] && !/^form\s+xv\b|^service\s+certificate$|^\[?vide\b/i.test(line)) {
+      fields[activeField] = line;
+      activeField = -1;
+      return;
+    }
+    if (activeAdmin && !admin[activeAdmin[0]][activeAdmin[1]] && !/^form\s+xv\b|^service\s+certificate$|^\[?vide\b/i.test(line)) {
+      admin[activeAdmin[0]][activeAdmin[1]] = line;
+      activeAdmin = null;
+      return;
+    }
+    if (/^form\s+xv\b|^service\s+certificate$|^\[?vide\b/i.test(line)) titleLines.push(line);
+  });
+  const seenTitles = new Set();
+  const uniqueTitleLines = titleLines.filter((line) => {
+    const key = String(line || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!key || seenTitles.has(key)) return false;
+    seenTitles.add(key);
+    return true;
+  });
+  return {
+    titles: uniqueTitleLines,
+    adminRows: admin,
+    fields: FORM_XV_AP_SERVICE_FIELD_LABELS.map((label, index) => `${label}: ${fields[index]}`.trimEnd()),
+    fieldRows: FORM_XV_AP_SERVICE_FIELD_LABELS.map((label, index) => [label, fields[index]])
+  };
 };
 
 const FORM_XV_RJ_PDF_HEADER_LABELS = [
@@ -1742,7 +2047,50 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
   for (let r = 0; r < Math.min(padded.length, 20); r += 1) {
     const filled = padded[r].filter((c) => c);
     const blob = filled.join(' ').toLowerCase();
+    const isFormXXAP = looksLikeFormXXAPPdfContext(
+      [],
+      padded.slice(0, Math.min(padded.length, 20)),
+      sheetName
+    );
+    const isFormXXIAP = looksLikeFormXXIAPPdfContext(
+      [],
+      padded.slice(0, Math.min(padded.length, 20)),
+      sheetName
+    );
+    const isFormXVIIAP = looksLikeFormXVIIAPPdfContext(
+      [],
+      padded.slice(0, Math.min(padded.length, 20)),
+      sheetName
+    );
+    const isFormXVIAP = looksLikeFormXVIAPPdfContext(
+      [],
+      padded.slice(0, Math.min(padded.length, 24)),
+      sheetName
+    );
+    const isFormXIXAP = isFormXIXAPWageSlipPdfContext(
+      [],
+      padded.slice(0, Math.min(padded.length, 24)),
+      sheetName
+    );
+    if (
+      (isFormXXAP || isFormXXIAP || isFormXVIIAP) &&
+      (isFormXXAPAdministrativeRow(padded[r]) || isFormXVIIAdministrativeRow(padded[r]))
+    ) {
+      const unique = [];
+      padded[r].forEach((cell) => {
+        const text = String(cell || '').trim();
+        if (text && !unique.includes(text)) unique.push(text);
+      });
+      unique.forEach((text) => {
+        expandStatutoryMetaSegments(text).forEach((segment) => metaLines.push(segment));
+      });
+      tableStartRow = r + 1;
+      continue;
+    }
     const isColHeader =
+      (isFormXXAPTableHeaderRow(padded[r]) && filled.length >= 5) ||
+      (isFormXVIAPTableHeaderRow(padded[r]) && filled.length >= 3) ||
+      (isFormXVIAP && isFormXVIIDateNumberRow(padded[r])) ||
       (isWageRegisterColHeaderBlob(blob) && filled.length >= 3) ||
       (isFormCLwfColHeaderBlob(blob) && filled.length >= 2) ||
       (isForm25TamilNaduColHeaderBlob(blob) && filled.length >= 3) ||
@@ -1752,6 +2100,13 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
       filled.filter((c) => /^\d{1,2}$/.test(c)).length >= Math.max(6, filled.length * 0.6);
 
     if (isColHeader || isNumberRow) {
+      tableStartRow = r;
+      break;
+    }
+
+    // AP Form XIX stores each wage label/value as a short row, so do not
+    // promote those rows into metadata before the AP normalizer can pair them.
+    if (isFormXIXAP && filled.some(isFormXIXAPWageLabel)) {
       tableStartRow = r;
       break;
     }
@@ -1813,6 +2168,8 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
   }
 
   let finalRows = padded;
+  let formXIXAPLayout = false;
+  let formXIXAPFooterLines = [];
   if (isForm25Tn) {
     finalRows = trimForm25TamilNaduPdfTrailingEmployeeRows(padded, tableStartRow);
   }
@@ -1856,14 +2213,17 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
     );
   }
   if (looksLikeFormXIXWageSlipPdfContext(metaLines, finalRows, sheetName)) {
-    const normalized = normalizeFormXIXWageSlipPdfMatrix(
-      finalRows,
-      finalColCount,
-      tableStartRow
-    );
+    const normalized = looksLikeFormXIXMPCLRAPdfContext(metaLines, finalRows, sheetName)
+      ? normalizeFormXIXMPCLRAWageSlipPdfMatrix(finalRows, finalColCount, tableStartRow, metaLines)
+      : isFormXIXAPWageSlipPdfContext(metaLines, finalRows, sheetName)
+        ? normalizeFormXIXAPWageSlipPdfMatrix(finalRows, finalColCount, tableStartRow, metaLines)
+        : normalizeFormXIXWageSlipPdfMatrix(finalRows, finalColCount, tableStartRow);
     finalRows = normalized.rows;
     finalColCount = normalized.colCount;
     tableStartRow = normalized.tableStartRow;
+    formXIXAPLayout = normalized.formXIXAPLayout === true;
+    formXIXAPFooterLines = normalized.formXIXAPFooterLines || [];
+    if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
   }
   if (looksLikeFormXIVEmploymentCardPdfContext(metaLines, finalRows, sheetName)) {
     const normalized = normalizeFormXIVEmploymentCardPdfMatrix(
@@ -1884,7 +2244,9 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
     rows: finalRows,
     colCount: finalColCount,
     metaLines,
-    tableStartRow
+    tableStartRow,
+    formXIXAPLayout,
+    formXIXAPFooterLines
   };
 };
 
@@ -1912,6 +2274,9 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
             isFormXIVEmploymentCardWorkmanLabelText(String(row?.[0] || ''))
         );
       if (formXIVAlreadyNormalized) {
+        return;
+      }
+      if (matrix.formXIXAPLayout === true) {
         return;
       }
 
@@ -2005,16 +2370,46 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
         );
       }
 
+      // Form XVI AP Muster Roll: trim trailing blank columns after Remarks.
+      if (looksLikeFormXVIAPPdfContext(matrix.metaLines, matrix.rows, matrix.name)) {
+        const trimmed = trimTrailingBlankPdfColumns(matrix.rows, matrix.colCount, {
+          clampToRemarks: true
+        });
+        matrix.rows = trimmed.rows;
+        matrix.colCount = trimmed.colCount;
+      }
+
       // Form XIX Wage Slip: collapse sparse merges into the Excel 5-column band.
       if (looksLikeFormXIXWageSlipPdfContext(matrix.metaLines, matrix.rows, matrix.name)) {
-        const normalized = normalizeFormXIXWageSlipPdfMatrix(
-          matrix.rows,
-          matrix.colCount,
-          matrix.tableStartRow || 0
-        );
+        const normalized = looksLikeFormXIXMPCLRAPdfContext(matrix.metaLines, matrix.rows, matrix.name)
+          ? normalizeFormXIXMPCLRAWageSlipPdfMatrix(
+              matrix.rows,
+              matrix.colCount,
+              matrix.tableStartRow || 0,
+              matrix.metaLines
+            )
+          : isFormXIXAPWageSlipPdfContext(
+                matrix.metaLines,
+                matrix.rows,
+                matrix.name
+              )
+            ? normalizeFormXIXAPWageSlipPdfMatrix(
+                matrix.rows,
+                matrix.colCount,
+                matrix.tableStartRow || 0,
+                matrix.metaLines
+              )
+            : normalizeFormXIXWageSlipPdfMatrix(
+                matrix.rows,
+                matrix.colCount,
+                matrix.tableStartRow || 0
+              );
         matrix.rows = normalized.rows;
         matrix.colCount = normalized.colCount;
         matrix.tableStartRow = normalized.tableStartRow;
+        matrix.formXIXAPLayout = normalized.formXIXAPLayout === true;
+        matrix.formXIXAPFooterLines = normalized.formXIXAPFooterLines || [];
+        if (Array.isArray(normalized.metaLines)) matrix.metaLines = normalized.metaLines;
       }
 
       // Form XIV Employment Card: single label|value columns (no empty table cells).
@@ -2278,7 +2673,8 @@ const isStatutoryGroupHeaderLabel = (text) =>
   isLeaveCategoryGroupLabel(text) ||
   isWageDeductionGroupLabel(text) ||
   isFormVIFestivalGroupLabel(text) ||
-  isFormBRajasthanWageRateGroupLabel(text);
+  isFormBRajasthanWageRateGroupLabel(text) ||
+  isFormXXDateOfRecoveryGroupLabel(text);
 
 /** True when a leaf header marks the end of a Deductions / Leave Wages group span. */
 const isGroupBandStopLeaf = (text) => {
@@ -2716,15 +3112,23 @@ const enforcePdfColumnMinWidths = (widths, headers, usableWidth, options = {}) =
   if (!src.length) return src;
   const total = Math.max(1, Number(usableWidth) || src.reduce((a, b) => a + b, 0));
   const compactSerial = options?.compactSerial === true;
+  const tightSerial = options?.tightSerial === true;
+  const compactSex = options?.compactSex === true;
   const mins = src.map((_, i) => {
     const h = String(headers?.[i] || '')
       .replace(/\s+/g, ' ')
       .trim();
     const lower = h.toLowerCase();
     if (isPdfSerialNumberHeader(h)) {
-      return compactSerial ? Math.max(32, total * 0.045) : Math.max(52, total * 0.08);
+      return tightSerial
+        ? Math.max(24, total * 0.02)
+        : compactSerial
+          ? Math.max(32, total * 0.045)
+          : Math.max(52, total * 0.08);
     }
-    if (/^(sex|gender|age|photo)$/i.test(h)) return Math.max(28, total * 0.045);
+    if (/^(sex|gender|age|photo)$/i.test(h)) {
+      return compactSex ? Math.max(18, total * 0.025) : Math.max(28, total * 0.045);
+    }
     if (h.length >= 55) return Math.max(56, total * 0.09);
     if (h.length >= 28 || /name|address|witness|signature|occupation|department/i.test(lower)) {
       return Math.max(36, total * 0.06);
@@ -3242,6 +3646,214 @@ const isStatutoryFieldMetaLine = (line) => {
   return false;
 };
 
+const extractFormXXAPAdministrativeRows = (rows, tableStart, metaLines = []) => {
+  const out = [
+    [
+      'Name and Address of Contractor. :',
+      'Name and address of Establishment in/under which contract is carried on:'
+    ],
+    ['Nature and location of work. :', 'Name and address of Principal Employer :']
+  ];
+  const sourceRows = [
+    ...rows.slice(0, Math.min(Number(tableStart) || 0, rows.length)),
+    ...(metaLines || []).map((line) => [line])
+  ];
+  sourceRows.forEach((sourceRow) => {
+    const cells = (sourceRow || [])
+      .map((cell) => String(cell || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    if (!cells.length) return;
+    const blob = cells.join(' ').toLowerCase();
+    const target = /nature\s+and\s+location\s+of\s+work/.test(blob) || /principal\s+employer/.test(blob) ? 1 :
+      /contractor/.test(blob) || /establishment/.test(blob) ? 0 : -1;
+    if (target < 0) return;
+    const leftIndex = cells.findIndex((cell) => /contractor|nature\s+and\s+location\s+of\s+work/i.test(cell));
+    const rightIndex = cells.findIndex((cell) => /establishment|principal\s+employer/i.test(cell));
+    const left = leftIndex >= 0 ? cells[leftIndex] : '';
+    const right = rightIndex >= 0 ? cells[rightIndex] : '';
+    const continuation = (index) =>
+      index >= 0 && index + 1 < cells.length &&
+      !/contractor|establishment|nature\s+and\s+location\s+of\s+work|principal\s+employer/i.test(cells[index + 1])
+        ? ` ${cells[index + 1]}`
+        : '';
+    if (target === 0) {
+      if (left) out[0][0] = left + continuation(leftIndex);
+      if (right) out[0][1] = right + continuation(rightIndex);
+    } else {
+      if (left) out[1][0] = left + continuation(leftIndex);
+      if (right) out[1][1] = right + continuation(rightIndex);
+    }
+  });
+  return out;
+};
+
+const extractFormXVIIAPAdministrativeRows = (rows, tableStart, metaLines = []) => {
+  const out = [
+    ['', ''],
+    ['', ''],
+    ['', '']
+  ];
+  const cells = [
+    ...rows.slice(0, Math.min(Number(tableStart) || 0, rows.length)).flat(),
+    ...(metaLines || [])
+  ]
+    .map((cell) => String(cell || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const fields = [
+    { row: 0, side: 0, re: /contractor/i },
+    // Tolerate Establishemnt typo and split "in/" / "under which contract" labels.
+    { row: 0, side: 1, re: /establ(?:ishment|ishemnt)|under\s+which\s+contract/i },
+    { row: 1, side: 0, re: /nature\s+and\s+location\s+of\s+work/i },
+    { row: 1, side: 1, re: /principal\s+employer/i },
+    { row: 2, side: 0, re: /wage\s+period/i }
+  ];
+  const labelRe =
+    /contractor|establ(?:ishment|ishemnt)|under\s+which\s+contract|nature\s+and\s+location\s+of\s+work|principal\s+employer|wage\s+period/i;
+  const isDuplicateToken = (value) => {
+    const compact = String(value || '')
+      .replace(/\s+/g, '')
+      .toLowerCase();
+    if (compact.length < 8) return false;
+    const half = Math.floor(compact.length / 2);
+    return compact.slice(0, half) === compact.slice(half, half * 2);
+  };
+  const dedupeValue = (value) => {
+    let v = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!v) return '';
+    // "AP-Tadipatri AP-Tadipatri" / "VAYONA ENERGY VAYONA ENERGY…"
+    const parts = v.split(/\s{2,}|\s\|\s/);
+    if (parts.length === 2 && parts[0].trim().toLowerCase() === parts[1].trim().toLowerCase()) {
+      return parts[0].trim();
+    }
+    const tokens = v.split(/\s+/);
+    if (tokens.length >= 4 && tokens.length % 2 === 0) {
+      const mid = tokens.length / 2;
+      const a = tokens.slice(0, mid).join(' ').toLowerCase();
+      const b = tokens.slice(mid).join(' ').toLowerCase();
+      if (a === b) return tokens.slice(0, mid).join(' ');
+    }
+    if (isDuplicateToken(v)) {
+      return v.slice(0, Math.ceil(v.length / 2)).trim();
+    }
+    return v;
+  };
+  fields.forEach(({ row, side, re }) => {
+    const index = cells.findIndex((cell) => re.test(cell));
+    if (index < 0 || out[row][side]) return;
+    const source = cells[index];
+    const colon = source.indexOf(':');
+    let value = colon >= 0 ? source.slice(colon + 1).trim() : '';
+    if (!value && index + 1 < cells.length && !labelRe.test(cells[index + 1])) {
+      value = cells[index + 1];
+    }
+    // Establishment value often sits on the next meta line (below the split label).
+    if (!value && side === 1 && row === 0) {
+      for (let i = index + 1; i < Math.min(index + 4, cells.length); i += 1) {
+        if (labelRe.test(cells[i])) continue;
+        value = cells[i];
+        break;
+      }
+    }
+    value = dedupeValue(value);
+    const label = source.slice(0, colon >= 0 ? colon + 1 : source.length).trim();
+    out[row][side] = value ? `${label} ${value}`.trim() : source;
+  });
+  return out;
+};
+
+const extractFormXVIAPHeaderFields = (rows, tableStart, metaLines = []) => {
+  // Combine all text into one string - handle merged metaLines properly
+  let fullText = [...(metaLines || []), ...rows.slice(0, Math.min(Number(tableStart) || 0, rows.length)).flat()]
+    .map((v) => String(v || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join(' ');
+ 
+  // Remove rule text from the beginning so it doesn't interfere with field extraction
+  fullText = fullText.replace(/^.*?(?=\s+Name\s+and\s+Address\s+of\s+Contractor)/i, '');
+ 
+  // Field patterns - with label text preserved for output
+  const fieldPatterns = [
+    { re: /address\s+of\s+the\s+establishment\s*:/i, label: 'Address of the Establishment :', key: 'establishment' },
+    { re: /name\s+and\s+address\s+of\s+contractor\.?\s*:/i, label: 'Name and Address of Contractor. :', key: 'contractor' },
+    { re: /name\s+and\s+address\s+of\s+principal\s+employer\.?\s*:/i, label: 'Name and address of Principal Employer :', key: 'employer' },
+    { re: /nature\s+and\s+location\s+of\s+work\s*:/i, label: 'Nature and Location of work :', key: 'nature' },
+    { re: /for\s+the\s+month\s+of\s*:/i, label: 'For the Month of :', key: 'month' }
+  ];
+ 
+  const extracted = {};
+ 
+  // For each field, find its content by looking between field labels
+  for (let i = 0; i < fieldPatterns.length; i++) {
+    const current = fieldPatterns[i];
+    const match = fullText.match(current.re);
+   
+    if (!match) continue;
+   
+    // Start position after the colon
+    const labelEnd = match.index + match[0].length;
+    let valueEnd = fullText.length;
+   
+    // Find where value ends: look for next field label
+    const remaining = fullText.substr(labelEnd);
+   
+    // Check for next field label
+    let nextFieldMatch = null;
+    for (let j = i + 1; j < fieldPatterns.length; j++) {
+      const nextMatch = remaining.match(fieldPatterns[j].re);
+      if (nextMatch) {
+        if (!nextFieldMatch || nextMatch.index < nextFieldMatch.index) {
+          nextFieldMatch = nextMatch;
+        }
+        break;
+      }
+    }
+   
+    if (nextFieldMatch) {
+      valueEnd = labelEnd + nextFieldMatch.index;
+    }
+   
+    // Also stop at table header indicators (S.No, Name of the Employee, Dates, Remarks)
+    const tableMatch = remaining.match(/\bS\.?\s*No\s*\b|\bName\s+of\s+the\s+Employee\b|\bDates\b|\bRemarks\b/i);
+    if (tableMatch && tableMatch.index < valueEnd - labelEnd) {
+      valueEnd = labelEnd + tableMatch.index;
+    }
+   
+    // Extract and clean value
+    let value = fullText.substring(labelEnd, valueEnd).trim();
+    value = value.replace(/^[:\s]+|[\s]+$/g, '').trim();
+    if (current.key === 'establishment') {
+      value = value
+        .replace(/\(?\s*vide\s+rule[\s\S]*?central\s*\/?\s*a\.?\s*p\.?\s*rules?\.?\)?/i, '')
+        .replace(/[\s,;:-]+$/, '')
+        .trim();
+    }
+    if (current.key === 'nature') {
+      value = sanitizeFormXVIAPNatureValue(value);
+    }
+    if (current.key === 'month') {
+      value = sanitizeFormXVIAPMonthValue(value);
+    }
+   
+    // Only use if valid (not empty and not a form/rule indicator)
+    if (value && !/^\s*(form|vide|rule|s\.?\s*no)/i.test(value) && value.length > 1) {
+      extracted[current.key] = `${current.label} ${value}`;
+    }
+  }
+ 
+  return {
+    fields: [
+      extracted.establishment || 'Address of the Establishment :',
+      extracted.contractor || 'Name and Address of Contractor. :',
+      extracted.employer || 'Name and address of Principal Employer :'
+    ],
+    rightFields: [
+      extracted.nature || 'Nature and Location of work :',
+      extracted.month || 'For the Month of :',
+      ''
+    ]
+  };
+};
+
 /**
  * Build bordered header model for any statutory form (titles + field rows).
  * Form XXVI keeps Excel-style Month/Date right column when available.
@@ -3260,6 +3872,98 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
   const effectiveMetaLines = preferForm15Part1
     ? scrubForm15Part1MetaLines(metaLines)
     : metaLines;
+
+  const isFormXIIIAP = looksLikeFormXIIIAPPdfContext(effectiveMetaLines, rows, sheetName);
+  if (isFormXIIIAP) {
+    return {
+      titles: getFormXIIIAPHeaderTitles(effectiveMetaLines, rows, tableStart),
+      fields: [],
+      rightFields: [],
+      formXIIIAP: true,
+      formXIIIAPAdminRows: extractFormXIIIAPAdministrativeRows(
+        effectiveMetaLines,
+        rows,
+        tableStart
+      ),
+      hasSystemNote: (effectiveMetaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
+      isFormXXVI: false,
+      isFormW: false,
+      isFormXXVIIRegister: false,
+      titleBoxFullBorder: false,
+      hideRightBandSplit: false
+    };
+  }
+
+  const isFormXXIAP = looksLikeFormXXIAPPdfContext(effectiveMetaLines, rows, sheetName);
+  if (isFormXXIAP) {
+    return {
+      titles: getFormXXIAPHeaderTitles(effectiveMetaLines, rows),
+      fields: [],
+      rightFields: [],
+      formXXIAP: true,
+      formXXAPAdminRows: extractFormXXAPAdministrativeRows(rows, tableStart, effectiveMetaLines),
+      hasSystemNote: (effectiveMetaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
+      isFormXXVI: false,
+      isFormW: false,
+      isFormXXVIIRegister: false,
+      titleBoxFullBorder: false,
+      hideRightBandSplit: false
+    };
+  }
+
+  const isFormXVIIAP = looksLikeFormXVIIAPPdfContext(effectiveMetaLines, rows, sheetName);
+  if (isFormXVIIAP) {
+    return {
+      titles: getFormXVIIAPHeaderTitles(effectiveMetaLines, rows),
+      fields: [],
+      rightFields: [],
+      formXVIIAP: true,
+      formXVIIAPAdminRows: extractFormXVIIAPAdministrativeRows(rows, tableStart, effectiveMetaLines),
+      hasSystemNote: (effectiveMetaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
+      isFormXXVI: false,
+      isFormW: false,
+      isFormXXVIIRegister: false,
+      titleBoxFullBorder: false,
+      hideRightBandSplit: false
+    };
+  }
+  const isFormXVIAP = looksLikeFormXVIAPPdfContext(effectiveMetaLines, rows, sheetName);
+  if (isFormXVIAP) {
+    const formXVIFields = extractFormXVIAPHeaderFields(rows, tableStart, effectiveMetaLines);
+    return {
+      titles: getFormXVIAPHeaderTitles(effectiveMetaLines, rows),
+      ...formXVIFields,
+      formXVIAP: true,
+      hasSystemNote: (effectiveMetaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
+      isFormXXVI: false,
+      isFormW: false,
+      isFormXXVIIRegister: false,
+      titleBoxFullBorder: false,
+      hideRightBandSplit: false
+    };
+  }
+
+  const isFormXXAP = looksLikeFormXXAPPdfContext(effectiveMetaLines, rows, sheetName);
+  if (isFormXXAP) {
+    const titles = getFormXXAPHeaderTitles(effectiveMetaLines, rows);
+    return {
+      titles,
+      fields: [],
+      rightFields: [],
+      formXXAP: true,
+      formXXAPAdminRows: extractFormXXAPAdministrativeRows(
+        rows,
+        tableStart,
+        effectiveMetaLines
+      ),
+      hasSystemNote: (effectiveMetaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
+      isFormXXVI: false,
+      isFormW: false,
+      isFormXXVIIRegister: false,
+      titleBoxFullBorder: false,
+      hideRightBandSplit: false
+    };
+  }
 
   const xxvi = detectFormXXVIPdfLayout(effectiveMetaLines, rows, tableStart);
   if (xxvi) {
@@ -3326,6 +4030,28 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
       isFormXXVIIRegister: false,
       titleBoxFullBorder: false,
       hideRightBandSplit: false,
+    };
+  }
+
+  if (looksLikeFormXVAPServiceCertificatePdfContext(effectiveMetaLines, rows, sheetName)) {
+    const serviceHeader = buildFormXVAPServiceCertificateHeaderModel(
+      effectiveMetaLines,
+      rows,
+      tableStart
+    );
+    return {
+      titles: serviceHeader.titles,
+      fields: serviceHeader.fields,
+      rightFields: [],
+      formXVAPService: true,
+      formXVAPAdminRows: serviceHeader.adminRows,
+      formXVAPFieldRows: serviceHeader.fieldRows,
+      hasSystemNote: (effectiveMetaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
+      isFormXXVI: false,
+      isFormW: false,
+      isFormXXVIIRegister: false,
+      titleBoxFullBorder: false,
+      hideRightBandSplit: false
     };
   }
 
@@ -3508,6 +4234,22 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
  * Excel-style bordered header for ALL statutory forms — vertical/horizontal line grid
  * for form name + administrative fields below.
  */
+const uniqueExpandedTitleBands = (titles = []) => {
+  const seen = new Set();
+  const out = [];
+  (Array.isArray(titles) ? titles : []).forEach((title) => {
+    expandStatutoryMetaSegments(title).forEach((seg) => {
+      const line = String(seg || '').replace(/\s+/g, ' ').trim();
+      if (!line) return;
+      const key = line.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(line);
+    });
+  });
+  return out;
+};
+
 const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
   const { marginX, marginTop, marginBottom, usableWidth, pageHeight } = layout;
   let y = yStart;
@@ -3515,10 +4257,38 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
   const x1 = marginX + usableWidth;
   const padX = 6;
   const lineH = 10;
-  const titles = Array.isArray(headerModel?.titles) ? headerModel.titles : [];
+  const rawTitles = headerModel?.formXIIIAP
+    ? Array.isArray(headerModel.titles) ? headerModel.titles : []
+    : Array.isArray(headerModel?.titles)
+      ? headerModel.titles
+      : [];
   const fields = Array.isArray(headerModel?.fields) ? headerModel.fields : [];
   const rightFields = Array.isArray(headerModel?.rightFields) ? headerModel.rightFields : [];
   const genderBox = headerModel?.genderBox || null;
+  const formXXAPAdminRows = Array.isArray(headerModel?.formXXAPAdminRows)
+    ? headerModel.formXXAPAdminRows
+    : [];
+  const formXVIIAPAdminRows = Array.isArray(headerModel?.formXVIIAPAdminRows)
+    ? headerModel.formXVIIAPAdminRows
+    : [];
+  const formXIIIAPAdminRows = Array.isArray(headerModel?.formXIIIAPAdminRows)
+    ? headerModel.formXIIIAPAdminRows
+    : [];
+  const formXVAPAdminRows = Array.isArray(headerModel?.formXVAPAdminRows)
+    ? headerModel.formXVAPAdminRows
+    : [];
+  const formXVAPFieldRows = Array.isArray(headerModel?.formXVAPFieldRows)
+    ? headerModel.formXVAPFieldRows
+    : [];
+  const isApForm =
+    headerModel?.formXXAP === true ||
+    headerModel?.formXXIAP === true ||
+    headerModel?.formXVIIAP === true ||
+    headerModel?.formXVIAP === true ||
+    headerModel?.formXIIIAP === true ||
+    headerModel?.formXIXAP === true ||
+    headerModel?.formXVAPService === true;
+  const titles = isApForm ? uniqueExpandedTitleBands(rawTitles) : rawTitles;
   const isFormA = titles.some((title) => /^form\s*a\b/i.test(String(title || '').trim()));
   const useRightBand = rightFields.some((t) => String(t || '').trim());
   const hideRightBandSplit = headerModel?.hideRightBandSplit === true;
@@ -3543,14 +4313,15 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
   const paintFullBand = (text, { bold = false, size = 9, align = 'center', minH = 16 } = {}) => {
     const line = String(text || '').trim();
     if (!line) return;
+    const effectiveSize = isApForm ? 9 : size;
     doc.setFont('helvetica', bold ? 'bold' : 'normal');
-    doc.setFontSize(size);
+    doc.setFontSize(effectiveSize);
     const wrapped = doc.splitTextToSize(line, usableWidth - padX * 2);
-    const h = Math.max(minH, wrapped.length * (size + 2) + 8);
+    const h = Math.max(minH, wrapped.length * (effectiveSize + 2) + 8);
     ensureSpace(h);
     strokeRect(x0, y, usableWidth, h);
     doc.setTextColor(0, 0, 0);
-    const textY = y + (h - wrapped.length * (size + 2)) / 2 + size;
+    const textY = y + (h - wrapped.length * (effectiveSize + 2)) / 2 + effectiveSize;
     if (align === 'right') {
       doc.text(wrapped, x1 - padX, textY, { align: 'right' });
     } else if (align === 'left') {
@@ -3580,7 +4351,7 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
         const isRule = /see\s+(?:sub-)?rule|prescribed\s+under/i.test(lower);
         const isActBanner = /^the\s+.+\b(act|rules)\b/i.test(line);
         const bold = isFormName || isRegister || prepared.length === 0;
-        const size = isFormName ? 11 : isRegister ? 10 : isRule || isActBanner ? 8 : 9;
+        const size = isApForm ? 9 : isFormName ? 11 : isRegister ? 10 : isRule || isActBanner ? 8 : 9;
         const minH = isFormName || isRegister ? 20 : 16;
         doc.setFont('helvetica', bold ? 'bold' : 'normal');
         doc.setFontSize(size);
@@ -3614,16 +4385,17 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
     });
   };
 
-  const paintSplitBand = (leftText, rightText, { minH = 16 } = {}) => {
+  const paintSplitBand = (leftText, rightText, { minH = 16, size = 8 } = {}) => {
+    const effectiveSize = isApForm ? 9 : size;
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
+    doc.setFontSize(effectiveSize);
     const leftW = useRightBand ? splitX - x0 - padX * 2 : usableWidth - padX * 2;
     const leftWrapped = doc.splitTextToSize(String(leftText || ''), Math.max(leftW, 40));
     const rightWrapped =
       useRightBand && String(rightText || '').trim()
         ? doc.splitTextToSize(String(rightText || ''), rightBandW - padX * 2)
         : [];
-    const h = Math.max(minH, Math.max(leftWrapped.length, rightWrapped.length || 1) * lineH + 6);
+    const h = Math.max(minH, Math.max(leftWrapped.length, rightWrapped.length || 1) * (effectiveSize + 2) + 6);
     ensureSpace(h);
     strokeRect(x0, y, usableWidth, h);
     // Form XXVII: keep Month/Year on the right without an internal vertical divider.
@@ -3718,7 +4490,7 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
         const isActBanner = /^the\s+.+\b(act|rules)\b/i.test(seg);
         paintFullBand(seg, {
           bold: isFormName || isRegister || titlePaintIdx === 0,
-          size: isFormName ? 11 : isRegister ? 10 : isRule || isActBanner ? 8 : 9,
+          size: isApForm ? 9 : isFormName ? 11 : isRegister ? 10 : isRule || isActBanner ? 8 : 9,
           align: 'center',
           minH: isFormName || isRegister ? 20 : 16
         });
@@ -3727,15 +4499,65 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
     });
   }
 
-  fields.forEach((field, idx) => {
+  if (
+    (headerModel?.formXXAP || headerModel?.formXXIAP || headerModel?.formXVIIAP || headerModel?.formXIIIAP) &&
+    (formXXAPAdminRows.length || formXVIIAPAdminRows.length || formXIIIAPAdminRows.length)
+  ) {
+    (formXIIIAPAdminRows.length
+      ? formXIIIAPAdminRows
+      : formXVIIAPAdminRows.length
+        ? formXVIIAPAdminRows
+        : formXXAPAdminRows
+    ).forEach((row) => {
+      const left = String(row[0] || '');
+      const right = String(row[1] || '');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(isApForm ? 9 : headerModel?.formXIIIAP ? 9 : 8);
+      const half = usableWidth / 2;
+      const leftLines = doc.splitTextToSize(left, half - padX * 2);
+      const rightLines = doc.splitTextToSize(right, half - padX * 2);
+      const h = Math.max(30, Math.max(leftLines.length, rightLines.length || 1) * 10 + 10);
+      ensureSpace(h);
+      strokeRect(x0, y, usableWidth, h);
+      doc.line(x0 + half, y, x0 + half, y + h);
+      if (leftLines.length) doc.text(leftLines, x0 + padX, y + 16);
+      if (rightLines.length) doc.text(rightLines, x0 + half + padX, y + 16);
+      y += h;
+    });
+  }
+
+  if (headerModel?.formXVAPService && formXVAPAdminRows.length) {
+    formXVAPAdminRows.forEach((row) => {
+      const left = String(row[0] || '');
+      const right = String(row[1] || '');
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      const half = usableWidth / 2;
+      const leftLines = doc.splitTextToSize(left, half - padX * 2);
+      const rightLines = doc.splitTextToSize(right, half - padX * 2);
+      const h = Math.max(52, Math.max(leftLines.length, rightLines.length || 1) * 10 + 18);
+      ensureSpace(h);
+      strokeRect(x0, y, usableWidth, h);
+      doc.line(x0 + half, y, x0 + half, y + h);
+      if (leftLines.length) doc.text(leftLines, x0 + padX, y + 14);
+      if (rightLines.length) doc.text(rightLines, x0 + half + padX, y + 14);
+      y += h;
+    });
+  }
+
+  if (headerModel?.formXVAPService && formXVAPFieldRows.length) {
+    formXVAPFieldRows.forEach(([left, right]) => paintSplitBand(left, right, { minH: 22, size: 9 }));
+  } else fields.forEach((field, idx) => {
     const right = rightFields[idx] || '';
-    if (useRightBand && idx < Math.max(rightFields.length, 2) && (right || idx < 2)) {
-      paintSplitBand(field, right, { minH: 16 });
+    if (headerModel?.formXVAPService) {
+      paintSplitBand(field, '', { minH: 22, size: 9 });
+    } else if (useRightBand && idx < Math.max(rightFields.length, 2) && (right || idx < 2)) {
+      paintSplitBand(field, right, { minH: 16, size: headerModel?.formXVIAP ? 9 : 8 });
     } else {
       const centerFormAPartA = isFormA && /\[?\s*part\s*[-\s]?a\s*:/i.test(String(field || ''));
       paintFullBand(field, {
         bold: false,
-        size: 8,
+        size: headerModel?.formXVIAP ? 9 : 8,
         align: centerFormAPartA ? 'center' : 'left',
         minH: 16
       });
@@ -3779,6 +4601,13 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     preferredTitle: pdfOpts.preferredTitle || '',
     fileName: pdfOpts.fileName || ''
   });
+  if (matrix.formXIXAPLayout === true) headerModel.formXIXAP = true;
+  const isFormXXAP = headerModel.formXXAP === true;
+  const isFormXXIAP = headerModel.formXXIAP === true;
+  const isFormXVIIAP = headerModel.formXVIIAP === true;
+  const isFormXVIAP = headerModel.formXVIAP === true;
+  const isFormXIIIAP = headerModel.formXIIIAP === true;
+  const isFormXIXAP = matrix.formXIXAPLayout === true;
 
   let headerBandEnd = tableStart;
   for (let r = tableStart; r < Math.min(rows.length, tableStart + 8); r += 1) {
@@ -3792,6 +4621,34 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   );
   if (isFormXIVEmploymentCardSheet) {
     headerBandEnd = tableStart - 1;
+  }
+  if (isFormXIXAP) {
+    headerBandEnd = tableStart - 1;
+  }
+  if (isFormXXAP) {
+    headerBandEnd = Math.min(rows.length - 1, tableStart + 1);
+  }
+  if (isFormXVIIAP) {
+    const formXVIIHeaderStart = Math.max(0, tableStart - 4);
+    const formXVIIHeaderEnd = Math.min(rows.length - 1, tableStart + 3);
+    for (let r = formXVIIHeaderStart; r <= formXVIIHeaderEnd; r += 1) {
+      const blob = (rows[r] || []).join(' ').toLowerCase();
+      if (
+        /deductions\s*,?\s*if\s+any|wage\s+period|register\s+of\s+workmen|name\s+of\s+workmen/.test(
+          blob
+        )
+      ) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+    }
+  }
+  if (isFormXVIAP) {
+    for (let r = Math.max(0, tableStart - 4); r <= Math.min(rows.length - 1, tableStart + 4); r += 1) {
+      const blob = (rows[r] || []).join(' ').toLowerCase();
+      if (/(^|\s)dates?(\s|$)|attendance|muster\s+roll/.test(blob)) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+    }
   }
   // Form W has a 3-row merged header band (group → mid → leaf).
   if (headerModel.isFormW) {
@@ -3836,10 +4693,62 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       headerBandEnd = Math.max(headerBandEnd, r);
     }
   }
-  const dayBand = detectDailyHoursBand(rows, tableStart, headerBandEnd, colCount);
+  const formXVIDateBand = isFormXVIAP
+    ? (() => {
+        for (let r = Math.max(0, tableStart - 4); r <= Math.min(rows.length - 1, tableStart + 5); r += 1) {
+          const row = rows[r] || [];
+          const dateStart = row.findIndex((cell) => /^1$/.test(String(cell || '').trim()));
+          if (dateStart < 0) continue;
+          let dateEnd = dateStart;
+          for (let n = 1; n <= 31; n += 1) {
+            if (String(row[dateStart + n - 1] || '').trim() !== String(n)) break;
+            dateEnd = dateStart + n - 1;
+          }
+          if (dateEnd - dateStart + 1 >= 20) {
+            const labelRow = Math.max(0, r - 1);
+            return { labelRow, start: dateStart, end: Math.min(dateStart + 30, colCount - 1), label: 'Dates' };
+          }
+        }
+        return null;
+      })()
+    : null;
+  const dayBand = formXVIDateBand || detectDailyHoursBand(rows, tableStart, headerBandEnd, colCount);
   const groupBands = detectStatutoryGroupHeaderBands(rows, tableStart, headerBandEnd, colCount);
   // Resolve leaf headers for ALL forms so widths follow column names (Form 11, Form W, …).
   const leafHeaders = resolveLeafHeaderTexts(rows, tableStart, headerBandEnd, colCount);
+  const formXVIRemarksColumn = isFormXVIAP
+    ? rows
+        .slice(Math.max(0, tableStart - 4), Math.min(rows.length, tableStart + 4))
+        .reduce((found, row) => {
+          if (found >= 0) return found;
+          return (row || []).findIndex((cell) => /^remarks?$/i.test(String(cell || '').trim()));
+        }, -1)
+    : -1;
+  const formXVIIHeaderRows = isFormXVIIAP
+    ? rows
+        .map((row, index) => ({ row, index }))
+        .filter(({ row, index }) => {
+          if (index > tableStart + 5 || index < Math.max(0, tableStart - 6)) return false;
+          const blob = (row || []).join(' ').toLowerCase();
+          return (
+            /serial\s+no|s\.?\s*no|register\s+of\s+workmen|name\s+of\s+workmen|no\.?\s*of\s*days\s+worked/.test(blob) ||
+            /basic\s+wages?|other\s+cash\s+payments?|total\s+deductions?|deductions\s*,?\s*if\s+any/.test(blob)
+          );
+        })
+    : [];
+  const formXVIIHeaderTextAt = (column) =>
+    formXVIIHeaderRows
+      .map(({ row }) => String(row?.[column] || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join(' ');
+  const formXVIIDeductionStart = isFormXVIIAP
+    ? formXVIIHeaderRows.reduce((found, { row }) => {
+        const index = (row || []).findIndex((cell) =>
+          /deductions\s*,?\s*if\s+any/i.test(String(cell || ''))
+        );
+        return found >= 0 ? found : index;
+      }, -1)
+    : -1;
   const isFormXIXRajasthanOvertimeSheet = looksLikeFormXIXRajasthanOvertimePdfContext(
     metaLines,
     rows,
@@ -3848,11 +4757,15 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   const isFormASheet = looksLikeFormAPdfContext(metaLines, rows, matrix.name || '');
   const isFormBRajasthanSheet = looksLikeFormBRajasthanPdfContext(metaLines, rows, matrix.name || '');
 
+  const isFormXVAP = headerModel.formXVAPService === true;
+  const isApForm =
+    isFormXXAP || isFormXXIAP || isFormXVIIAP || isFormXVIAP || isFormXIIIAP || isFormXIXAP || isFormXVAP;
+  const isApMultiLevelForm = isFormXXAP || isFormXXIAP || isFormXVIIAP || isFormXVIAP;
   const weights = [];
   for (let c = 0; c < colCount; c += 1) {
     const inDayBand = dayBand && c >= dayBand.start && c <= dayBand.end;
     if (inDayBand) {
-      weights.push(2.2);
+      weights.push(isApMultiLevelForm ? 1.6 : 2.2);
       continue;
     }
     let maxLen = 4;
@@ -3873,6 +4786,28 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       weights.push(formXXVIITamilNaduColumnWeight(leafHeaders[c], maxDataLen || maxLen));
       continue;
     }
+    if (
+      isApMultiLevelForm &&
+      (c === formXVIRemarksColumn ||
+        /^remarks?$/i.test(String(leafHeaders[c] || '').replace(/\s+/g, ' ').trim()))
+    ) {
+      weights.push(isFormXVIAP ? 60 : 9.5);
+      continue;
+    }
+    if (isFormXVIAP) {
+      if (c === 0) {
+        weights.push(4.5);
+        continue;
+      }
+      if (c === 1 || c === 2) {
+        weights.push(13);
+        continue;
+      }
+      if (c === 3) {
+        weights.push(3.5);
+        continue;
+      }
+    }
     const weight = statutoryHeaderColumnWeight(leafHeaders[c], maxDataLen || maxLen, colCount);
     weights.push(
       (isFormXIXRajasthanOvertimeSheet || isFormASheet || isFormBRajasthanSheet) &&
@@ -3884,12 +4819,20 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   const weightSum = weights.reduce((a, b) => a + b, 0) || 1;
   const rawWidths = weights.map((w) => (w / weightSum) * usableWidth);
   const colWidths = enforcePdfColumnMinWidths(rawWidths, leafHeaders, usableWidth, {
-    compactSerial: isFormXIXRajasthanOvertimeSheet || isFormASheet || isFormBRajasthanSheet
+    compactSerial:
+      isFormXVIAP ||
+      isFormXIXRajasthanOvertimeSheet ||
+      isFormASheet ||
+      isFormBRajasthanSheet,
+    tightSerial: isFormXVIAP,
+    compactSex: isFormXVIAP
   });
   const colXs = [marginX];
   for (let i = 0; i < colWidths.length; i += 1) colXs.push(colXs[i] + colWidths[i]);
 
-  const fontSize = headerModel.isFormW
+  const fontSize = isApForm
+    ? 9
+    : headerModel.isFormW
     ? colCount > 28
       ? 5.2
       : 5.8
@@ -3953,21 +4896,22 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   const paintMetaLine = (text, { bold = false, size = 9, align = 'left' } = {}) => {
     const line = String(text || '').replace(/\s+/g, ' ').trim();
     if (!line) return;
+    const effectiveSize = isApForm ? 9 : size;
     doc.setFont('helvetica', bold ? 'bold' : 'normal');
-    doc.setFontSize(size);
+    doc.setFontSize(effectiveSize);
     doc.setTextColor(0, 0, 0);
     const wrapped = doc.splitTextToSize(line, usableWidth);
-    const blockH = wrapped.length * (size + 2) + 3;
+    const blockH = wrapped.length * (effectiveSize + 2) + 3;
     if (y + blockH > pageHeight - marginBottom) {
       doc.addPage();
       y = marginTop;
     }
     if (align === 'center') {
-      doc.text(wrapped, pageWidth / 2, y + size, { align: 'center' });
+      doc.text(wrapped, pageWidth / 2, y + effectiveSize, { align: 'center' });
     } else if (align === 'right') {
-      doc.text(wrapped, pageWidth - marginX, y + size, { align: 'right' });
+      doc.text(wrapped, pageWidth - marginX, y + effectiveSize, { align: 'right' });
     } else {
-      doc.text(wrapped, marginX, y + size);
+      doc.text(wrapped, marginX, y + effectiveSize);
     }
     y += blockH;
   };
@@ -4037,7 +4981,8 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
             : 8;
       maxLines = Math.max(maxLines, Math.min(wrapped.length, lineCap));
     }
-    return Math.max(fontSize + 5, maxLines * (fontSize + 1.5) + 4);
+    const rowHeight = Math.max(fontSize + 5, maxLines * (fontSize + 1.5) + 4);
+    return isFormXVIAP ? Math.max(34, rowHeight * 1.35) : rowHeight;
   };
 
   const paintGridRow = (row, rowIndex, rowH) => {
@@ -4045,6 +4990,10 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     const mergeDayLabel = isDayBandLabelHeaderRow(row, rowIndex);
     const nilSpan = resolveNilOfTheMonthPdfSpan(row, colCount, rowIndex, headerBandEnd);
     const isHeaderRow = rowIndex <= headerBandEnd;
+    const isFormXIIINumberRow =
+      isFormXIIIAP &&
+      isHeaderRow &&
+      (row || []).filter((cell) => /^\(?\s*\d{1,2}\s*\)?$/.test(String(cell || '').trim())).length >= 3;
     doc.setDrawColor(0, 0, 0);
     doc.setLineWidth(0.4);
     doc.setFont('helvetica', bold ? 'bold' : 'normal');
@@ -4122,12 +5071,94 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
 
       const cellW = Math.max(colWidths[c] - 3, 6);
       const alignRight = isPurePdfNumericText(raw);
+      const normalizedLeaf = String(leafHeaders[c] || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      const formXVIIHeaderText = `${normalizedLeaf} ${formXVIIHeaderTextAt(c)}`.toLowerCase();
+      const formXVIICenterColumn =
+        isFormXVIIAP &&
+        (c === 0 ||
+          /days?\s+worked|serial\s+no/.test(formXVIIHeaderText) ||
+          (formXVIIDeductionStart >= 0 &&
+            c >= formXVIIDeductionStart &&
+            c < formXVIIDeductionStart + 5));
+
+      const formXVIIAmountColumn =
+        isFormXVIIAP &&
+        /basic\s+wages?|other\s+cash\s+payments?|total\s+deductions?/.test(formXVIIHeaderText);
+      const displayRaw = formXVIIAmountColumn && /^-?\d+(?:\.\d+)?$/.test(raw.trim())
+        ? Number(raw).toLocaleString('en-IN', { maximumFractionDigits: 0 })
+        : raw;
+
+      if (isFormXIXAP && colCount === 2) {
+        const apDisplay = c === 1
+          ? formatFormXIXAPMoneyValue(row[0], raw)
+          : raw;
+        const apLines = doc.splitTextToSize(apDisplay, cellW).slice(0, 8);
+        if (c === 1 && isPurePdfNumericText(apDisplay)) {
+          doc.text(apLines, colXs[c] + colWidths[c] - 1.5, y + fontSize + 1, { align: 'right' });
+        } else {
+          doc.text(apLines, colXs[c] + 1.5, y + fontSize + 1);
+        }
+        continue;
+      }
+
+      if (isFormXIIINumberRow && alignRight) {
+        doc.text(raw, colXs[c] + colWidths[c] / 2, y + (rowH + fontSize) / 2 - 1, {
+          align: 'center'
+        });
+        continue;
+      }
+
+      if (formXVIIAmountColumn && !isHeaderRow && displayRaw.trim()) {
+        let size = fontSize;
+        doc.setFontSize(size);
+        while (!isApForm && size > 3.2 && doc.getTextWidth(displayRaw) > cellW) {
+          size -= 0.4;
+          doc.setFontSize(size);
+        }
+        doc.text(displayRaw, colXs[c] + colWidths[c] - 1.5, y + (rowH + size) / 2 - 1, { align: 'right' });
+        doc.setFontSize(fontSize);
+        continue;
+      }
+
+      if (formXVIICenterColumn && !isHeaderRow && displayRaw.trim()) {
+        let size = fontSize;
+        doc.setFontSize(size);
+        while (!isApForm && size > 3.2 && doc.getTextWidth(displayRaw) > cellW) {
+          size -= 0.4;
+          doc.setFontSize(size);
+        }
+        doc.text(displayRaw, colXs[c] + colWidths[c] / 2, y + (rowH + size) / 2 - 1, { align: 'center' });
+        doc.setFontSize(fontSize);
+        continue;
+      }
+
+      // Form XVI AP: center S.No column (column 0) and date columns (1-31)
+      const isFormXVISNoColumn = isFormXVIAP && c === 0;
+      const isFormXVIDateColumn = isFormXVIAP && formXVIDateBand && c >= formXVIDateBand.start && c <= formXVIDateBand.end;
+     
+      if ((isFormXXAP || isFormXXIAP || isFormXIIIAP || isFormXVISNoColumn) && c === 0) {
+        doc.text(raw, colXs[c] + colWidths[c] / 2, y + (rowH + fontSize) / 2 - 1, {
+          align: 'center'
+        });
+        continue;
+      }
+
+      // Center the date columns in Form XVI AP
+      if (isFormXVIDateColumn && !isHeaderRow && raw.trim()) {
+        doc.text(raw, colXs[c] + colWidths[c] / 2, y + (rowH + fontSize) / 2 - 1, {
+          align: 'center'
+        });
+        continue;
+      }
 
       // Amounts / counts: single line, shrink font instead of mid-digit wrap.
       if (!isHeaderRow && alignRight) {
         let size = fontSize;
         doc.setFontSize(size);
-        while (size > 3.2 && doc.getTextWidth(raw) > cellW) {
+        while (!isApForm && size > 3.2 && doc.getTextWidth(raw) > cellW) {
           size -= 0.4;
           doc.setFontSize(size);
         }
@@ -4167,6 +5198,239 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     }
   };
 
+  const paintFormXXAPTableHeader = () => {
+    if (!isFormXXAP || tableStart + 1 >= rows.length) return;
+    const topRow = rows[tableStart] || [];
+    const childRow = rows[tableStart + 1] || [];
+    const topH = 46;
+    const childH = 32;
+    const totalH = topH + childH;
+    if (y + totalH > pageHeight - marginBottom) {
+      doc.addPage();
+      y = marginTop;
+    }
+    doc.setDrawColor(0, 0, 0);
+    doc.setLineWidth(0.4);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    for (let c = 0; c < colCount; c += 1) {
+      const isRecoveryChild = c >= 9 && c <= 11;
+      if (!isRecoveryChild) {
+        doc.rect(colXs[c], y, colWidths[c], totalH, 'S');
+        const text = String(topRow[c] || '').trim();
+        if (text) {
+          const lines = /^remarks?$/i.test(text)
+            ? [text]
+            : doc.splitTextToSize(text, Math.max(colWidths[c] - 4, 8)).slice(0, 5);
+          const headerFontSize = isFormXVIAP ? 9 : 11;
+          const textH = lines.length * (headerFontSize + 1);
+          doc.text(lines, colXs[c] + colWidths[c] / 2, y + (totalH - textH) / 2 + headerFontSize, {
+            align: 'center'
+          });
+        }
+        continue;
+      }
+      if (c === 9) {
+        const recoveryW = colXs[12] - colXs[9];
+        doc.rect(colXs[9], y, recoveryW, topH, 'S');
+        const parent = String(topRow[9] || 'Date of recovery').trim();
+        const lines = doc.splitTextToSize(parent, Math.max(recoveryW - 4, 8)).slice(0, 3);
+        const textH = lines.length * (fontSize + 1);
+        doc.text(lines, colXs[9] + recoveryW / 2, y + (topH - textH) / 2 + fontSize, {
+          align: 'center'
+        });
+      }
+      const childText = String(childRow[c] || '').trim();
+      doc.rect(colXs[c], y + topH, colWidths[c], childH, 'S');
+      if (childText) {
+        const lines = doc.splitTextToSize(childText, Math.max(colWidths[c] - 4, 8)).slice(0, 3);
+        const textH = lines.length * (fontSize + 1);
+        doc.text(lines, colXs[c] + colWidths[c] / 2, y + topH + (childH - textH) / 2 + fontSize, {
+          align: 'center'
+        });
+      }
+    }
+    y += totalH;
+  };
+
+  const paintFormXVIIAPTableHeader = () => {
+    if (!isFormXVIIAP) return;
+    let parentRowIndex = -1;
+    const searchStart = Math.max(0, tableStart - 8);
+    const searchEnd = Math.min(rows.length - 1, tableStart + 5);
+    for (let r = searchStart; r <= searchEnd; r += 1) {
+      if ((rows[r] || []).some((cell) => /deductions\s*,?\s*if\s+any/i.test(String(cell || '')))) {
+        parentRowIndex = r;
+        break;
+      }
+    }
+    if (parentRowIndex < 0 || parentRowIndex + 1 >= rows.length) return;
+    const topRow = rows[parentRowIndex] || [];
+    const childRow = rows[parentRowIndex + 1] || [];
+    const topH = 52;
+    const childH = 30;
+    const totalH = topH + childH;
+    const headerFontSize = 8;
+    const lineHeightFactor = 1.12;
+    const deductionStart = topRow.findIndex((cell) =>
+      /deductions\s*,?\s*if\s+any/i.test(String(cell || ''))
+    );
+    if (deductionStart < 0) return;
+    const ranges = [{ start: deductionStart, end: Math.min(colCount - 1, deductionStart + 4) }];
+    const wageStart = topRow.findIndex((cell) => /wage\s+period/i.test(String(cell || '')));
+    if (wageStart >= 0) ranges.unshift({ start: wageStart, end: Math.min(colCount - 1, wageStart + 1) });
+    const mergedColumn = (col) => ranges.find((range) => col >= range.start && col <= range.end);
+    if (y + totalH > pageHeight - marginBottom) {
+      doc.addPage();
+      y = marginTop;
+    }
+    const previousLineHeight =
+      typeof doc.getLineHeightFactor === 'function' ? doc.getLineHeightFactor() : 1.15;
+    doc.setDrawColor(0, 0, 0);
+    doc.setLineWidth(0.4);
+    doc.setFont('helvetica', 'bold');
+    doc.setLineHeightFactor(lineHeightFactor);
+
+    const paintFormXVIIHeaderLabel = (text, boxX, boxY, boxW, boxH, vAlign = 'top') => {
+      const raw = String(text || '').trim();
+      if (!raw) return;
+      let size = headerFontSize;
+      doc.setFontSize(size);
+      const maxW = Math.max(boxW - 4.4, 6);
+      let lines = doc.splitTextToSize(raw, maxW);
+      const maxFit = (s) => Math.max(1, Math.floor((boxH - 13) / Math.max(s * lineHeightFactor, 1)));
+      while (size > 6.2 && lines.length > maxFit(size)) {
+        size -= 0.3;
+        doc.setFontSize(size);
+        lines = doc.splitTextToSize(raw, maxW);
+      }
+      lines = lines.slice(0, maxFit(size));
+      doc.setFontSize(size);
+      const { firstBaseline } = formXVIIAPHeaderTextMetrics({
+        lineCount: lines.length,
+        fontSize: size,
+        cellHeight: boxH,
+        lineHeightFactor,
+        vAlign
+      });
+      doc.text(lines, boxX + boxW / 2, boxY + firstBaseline, { align: 'center' });
+    };
+
+    for (let c = 0; c < colCount; c += 1) {
+      const range = mergedColumn(c);
+      if (range && c > range.start) continue;
+      if (range) {
+        const width = colXs[range.end + 1] - colXs[range.start];
+        doc.rect(colXs[range.start], y, width, topH, 'S');
+        paintFormXVIIHeaderLabel(topRow[range.start], colXs[range.start], y, width, topH, 'middle');
+        for (let child = range.start; child <= range.end; child += 1) {
+          doc.rect(colXs[child], y + topH, colWidths[child], childH, 'S');
+          paintFormXVIIHeaderLabel(
+            childRow[child],
+            colXs[child],
+            y + topH,
+            colWidths[child],
+            childH,
+            'middle'
+          );
+        }
+        continue;
+      }
+      doc.rect(colXs[c], y, colWidths[c], totalH, 'S');
+      paintFormXVIIHeaderLabel(topRow[c], colXs[c], y, colWidths[c], totalH, 'top');
+    }
+    doc.setLineHeightFactor(previousLineHeight);
+    doc.setFontSize(fontSize);
+    y += totalH;
+  };
+
+  const paintFormXVIAPTableHeader = () => {
+    if (!isFormXVIAP || !formXVIDateBand) return;
+   
+    // Find the header row that contains S.No, Name of Employee, etc.
+    let headerRowIndex = -1;
+    for (let r = Math.max(0, tableStart - 4); r <= Math.min(rows.length - 1, tableStart + 2); r += 1) {
+      const blob = (rows[r] || []).join(' ').toLowerCase();
+      if (/s\.?\s*no|name\s+of\s+the\s+employee/i.test(blob)) {
+        headerRowIndex = r;
+        break;
+      }
+    }
+   
+    if (headerRowIndex < 0 || headerRowIndex + 1 >= rows.length) return;
+   
+    const topRow = rows[headerRowIndex] || [];
+    // The dateRow is the one that actually contains the date numbers 1-31
+    // This is the row AFTER labelRow (which is found as r-1 in formXVIDateBand detection)
+    const dateRow = rows[formXVIDateBand.labelRow + 1] || rows[headerRowIndex + 1] || [];
+    const topH = 48;
+    const dateH = 34;
+    const totalH = topH + dateH;
+   
+    if (y + totalH > pageHeight - marginBottom) {
+      doc.addPage();
+      y = marginTop;
+    }
+   
+    doc.setDrawColor(0, 0, 0);
+    doc.setLineWidth(0.4);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+   
+    // Iterate through columns
+    for (let c = 0; c < colCount; c += 1) {
+      const inDateBand = c >= formXVIDateBand.start && c <= formXVIDateBand.end;
+     
+      // Skip if we've already handled this column as part of a merged date band
+      if (inDateBand && c > formXVIDateBand.start) continue;
+     
+      // Dates band: merge all date columns under "Dates" parent
+      if (inDateBand && c === formXVIDateBand.start) {
+        const dateWidth = colXs[formXVIDateBand.end + 1] - colXs[formXVIDateBand.start];
+       
+        // Top row: "Dates" header spanning all date columns
+        doc.rect(colXs[formXVIDateBand.start], y, dateWidth, topH, 'S');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(fontSize);
+        doc.text('Dates', colXs[formXVIDateBand.start] + dateWidth / 2, y + topH / 2 + fontSize / 2, { align: 'center' });
+       
+        // Bottom row: individual date numbers (1-31)
+        for (let dateCol = formXVIDateBand.start; dateCol <= formXVIDateBand.end; dateCol += 1) {
+          doc.rect(colXs[dateCol], y + topH, colWidths[dateCol], dateH, 'S');
+          const dateNum = String(dateRow[dateCol] || '').trim();
+          if (dateNum && /^\d{1,2}$/.test(dateNum)) {
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(fontSize);
+            doc.text(dateNum, colXs[dateCol] + colWidths[dateCol] / 2, y + topH + dateH / 2 + fontSize / 2, { align: 'center' });
+          }
+        }
+        continue;
+      }
+     
+      // Non-date columns: full height (top + date height combined)
+      doc.rect(colXs[c], y, colWidths[c], totalH, 'S');
+      const text = String(topRow[c] || '').trim();
+      if (text) {
+        doc.setFont('helvetica', 'bold');
+        let headerFontSize = 9;
+        doc.setFontSize(headerFontSize);
+        const isRemarksHeader = /^remarks?$/i.test(text);
+        const availableWidth = Math.max(colWidths[c] - 6, 8);
+        while (isRemarksHeader && headerFontSize > 6 && doc.getTextWidth(text) > availableWidth) {
+          headerFontSize -= 0.5;
+          doc.setFontSize(headerFontSize);
+        }
+        const lines = isRemarksHeader
+          ? [text]
+          : doc.splitTextToSize(text, availableWidth).slice(0, 4);
+        const textH = lines.length * (headerFontSize + 1);
+        doc.text(lines, colXs[c] + colWidths[c] / 2, y + (totalH - textH) / 2 + headerFontSize, { align: 'center' });
+      }
+    }
+   
+    y += totalH;
+  };
+
   // All forms: bordered “vertical line” header (form name + fields), matching Excel model.
   if ((headerModel.titles || []).length || (headerModel.fields || []).length) {
     y = paintBorderedStatutoryHeader(
@@ -4189,6 +5453,10 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     );
   }
 
+  paintFormXXAPTableHeader();
+  paintFormXVIIAPTableHeader();
+  paintFormXVIAPTableHeader();
+
   if (headerModel.hasSystemNote) pendingSystemNote = true;
   metaLines.forEach((line) => {
     if (isSystemGeneratedDocumentNote(line)) pendingSystemNote = true;
@@ -4201,6 +5469,9 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   for (let r = tableStart; r < rows.length; r += 1) {
     const row = rows[r];
     if (!rowHasContent(row)) continue;
+    if (isFormXIIIAP && isFormXIIIPdfTitleRow(row)) continue;
+    if (isApForm && isApPdfHeadingRow(row)) continue;
+    if ((isFormXXAP || isFormXVIIAP || isFormXVIAP) && r <= headerBandEnd) continue;
 
     // Never draw the footer inside Sr. No. — paint after the full column band.
     if (isSystemGeneratedDocumentNoteRow(row)) {
@@ -4241,6 +5512,13 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       if (r > headerBandEnd) repeatColumnHeaders();
     }
     paintGridRow(row, r, rowH);
+  }
+
+  if (isFormXIXAP && Array.isArray(matrix.formXIXAPFooterLines)) {
+    matrix.formXIXAPFooterLines.forEach((line) => {
+      y += 6;
+      paintMetaLine(line, { size: 9, align: 'right' });
+    });
   }
 
   // Also catch a note that landed in the meta band or above the table start.
@@ -4333,7 +5611,24 @@ export async function buildStatutoryDraftPdfBlob({
     }
   }
 
-  const matricesForPdf = filterStatutoryPdfMatrices(allMatrices);
+  let matricesForPdf = filterStatutoryPdfMatrices(allMatrices);
+  if (
+    matricesForPdf.some((m) =>
+      looksLikeFormXVAPServiceCertificatePdfContext(m.metaLines, m.rows, m.name)
+    )
+  ) {
+    const withWorkman = matricesForPdf.filter((m) => {
+      if (!looksLikeFormXVAPServiceCertificatePdfContext(m.metaLines, m.rows, m.name)) return true;
+      const blob = [...(m.metaLines || []), ...(m.rows || []).slice(0, 40).flat()].join('\n');
+      const match = blob.match(/name\s+and\s+address\s+of\s+the\s+workm[ae]n[:\s.]+([^\n]+)/i);
+      const value = String(match?.[1] || '')
+        .replace(/^[:.\s]+/, '')
+        .trim();
+      if (!value || /^enter\b/i.test(value)) return false;
+      return true;
+    });
+    if (withWorkman.length) matricesForPdf = withWorkman;
+  }
   if (!matricesForPdf.length) {
     throw new Error('Draft Excel has no readable rows to put in the PDF.');
   }
@@ -4391,6 +5686,12 @@ export async function buildStatutoryDraftPdfBlob({
   );
   const hasBorderedHeader =
     (firstHeaderModel.titles || []).length > 0 || (firstHeaderModel.fields || []).length > 0;
+  const isApPdf =
+    firstHeaderModel.formXXAP === true ||
+    firstHeaderModel.formXXIAP === true ||
+    firstHeaderModel.formXVIIAP === true ||
+    firstHeaderModel.formXVIAP === true ||
+    firstHeaderModel.formXIIIAP === true;
   // Use a real form title only — never the Excel/ZIP draft file name as a PDF heading.
   const headingCandidate = String(title || '')
     .replace(EXCEL_EXT_RE, '')
@@ -4401,7 +5702,7 @@ export async function buildStatutoryDraftPdfBlob({
     headingCandidate && !looksLikeExcelDraftFileLabel(headingCandidate) ? headingCandidate : '';
   if (!hasBorderedHeader && heading) {
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
+    doc.setFontSize(isApPdf ? 9 : 11);
     doc.setTextColor(0, 0, 0);
     doc.text(heading, doc.internal.pageSize.getWidth() / 2, 20, { align: 'center' });
   }
@@ -4421,6 +5722,8 @@ export async function buildStatutoryDraftPdfBlob({
 export async function buildFormLGJDraftPdfBlob(opts = {}) {
   return buildStatutoryDraftPdfBlob(opts);
 }
+
+export { buildFormXVAPServiceCertificatePdfBlob };
 
 export function draftFileNameToPdfName(fileName) {
   const base = String(fileName || 'statutory-draft')
@@ -4449,6 +5752,8 @@ export const statutoryDraftPdfTestUtils = {
   looksLikeFormXVRajasthanWageSlipPdfContext,
   buildFormXVRajasthanWageSlipHeaderModel,
   isFormXIXWageSlipColHeaderBlob,
+  isFormXIXAPWageSlipPdfContext,
+  normalizeFormXIXAPWageSlipPdfMatrix,
   normalizeFormXIXWageSlipPdfMatrix,
   looksLikeFormXIVEmploymentCardPdfContext,
   normalizeFormXIVEmploymentCardPdfMatrix,
@@ -4510,5 +5815,24 @@ export const statutoryDraftPdfTestUtils = {
   isPdfSerialNumberHeader,
   statutoryHeaderColumnWeight,
   enforcePdfColumnMinWidths,
-  resolveLeafHeaderTexts
+  resolveLeafHeaderTexts,
+   // Form XX Andhra Pradesh
+  isFormXXDateOfRecoveryGroupLabel,
+  isFormXXAPAdministrativeRow,
+  getFormXXAPHeaderTitles,
+  isFormXXAPTableHeaderRow,
+  looksLikeFormXXAPPdfContext,
+  getFormXXIAPHeaderTitles,
+  looksLikeFormXXIAPPdfContext,
+  getFormXVIIAPHeaderTitles,
+  isFormXVIIAdministrativeRow,
+  isFormXVIAPTableHeaderRow,
+  looksLikeFormXVIIAPPdfContext,
+  getFormXVIAPHeaderTitles,
+  isFormXVIIDateNumberRow,
+  isFormXVIITableHeaderRow,
+  looksLikeFormXVIAPPdfContext,
+  getFormXIIIAPHeaderTitles,
+  uniqueExpandedTitleBands,
+  isApPdfHeadingRow,
 };

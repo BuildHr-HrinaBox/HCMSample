@@ -327,7 +327,14 @@ export function normalizeFormXVIIIMPHeaderFieldLabel(label) {
 function formXVIIIMPHeaderFieldAlias(norm) {
   if (!norm) return '';
   if (norm.includes('registration') && norm.includes('certificate')) return 'registration';
-  if (norm === 'month' || norm.includes('month year') || norm === 'month year') return 'month';
+  if (
+    norm === 'month' ||
+    norm.includes('month year') ||
+    norm === 'month year' ||
+    norm.includes('for the month')
+  ) {
+    return 'month';
+  }
   if (norm.includes('nature') && norm.includes('location')) return 'nature';
   if (norm.includes('contractor')) return 'contractor';
   if (norm.includes('principal employer') || (norm.includes('employer') && !norm.includes('contractor'))) {
@@ -336,6 +343,195 @@ function formXVIIIMPHeaderFieldAlias(norm) {
   if (norm.includes('manager') || norm.includes('incharge')) return 'manager';
   if (norm.includes('establishment')) return 'establishment';
   return `label:${norm}`;
+}
+
+/** Stable header key for MP Combined Register "FOR THE MONTH ------------" cell (S2). */
+export const FORM_XVIII_MP_FOR_THE_MONTH_KEY = 'form_xviii_mp_for_the_month';
+export const FORM_XVIII_MP_FOR_THE_MONTH_LABEL = 'FOR THE MONTH';
+
+export function isFormXVIIIMPForTheMonthCellText(text) {
+  return /\bfor\s+the\s+month\b/i.test(String(text || ''));
+}
+
+/** Strip dashes / colon so "FOR THE MONTH ------------" → "" and "FOR THE MONTH August 2026" → "August 2026". */
+export function extractFormXVIIIMPMonthYearFromForTheMonthText(text) {
+  const s = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return '';
+  const m = s.match(/^for\s+the\s+month\s*[-–—:\s]*(.*)$/i);
+  if (!m) return s;
+  return String(m[1] || '')
+    .replace(/^[-–—:\s]+/, '')
+    .replace(/[-–—]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Excel / display text: "FOR THE MONTH August 2026" (no colon; replaces template dashes). */
+export function formatFormXVIIIMPForTheMonthDisplay(monthYearText) {
+  const raw = String(monthYearText || '').trim();
+  if (!raw) return '';
+  const monthYear = extractFormXVIIIMPMonthYearFromForTheMonthText(raw);
+  if (!monthYear) return FORM_XVIII_MP_FOR_THE_MONTH_LABEL;
+  return `${FORM_XVIII_MP_FOR_THE_MONTH_LABEL} ${monthYear}`;
+}
+
+export function isFormXVIIIMPForTheMonthHeaderField(field) {
+  if (!field || typeof field !== 'object') return false;
+  if (String(field.key || '').trim() === FORM_XVIII_MP_FOR_THE_MONTH_KEY) return true;
+  const norm = normalizeFormXVIIIMPHeaderFieldLabel(field.label || field.key);
+  return norm.includes('for the month');
+}
+
+function isFormXVIIIMPForTheMonthPlaceholderValue(value) {
+  const cur = String(value ?? '').trim();
+  if (!cur) return true;
+  if (/^enter\b/i.test(cur)) return true;
+  if (/^[-–—.\s]+$/.test(cur)) return true;
+  if (isFormXVIIIMPForTheMonthCellText(cur) && !extractFormXVIIIMPMonthYearFromForTheMonthText(cur)) {
+    return true;
+  }
+  return false;
+}
+
+/** Ensure modal/download header fields include FOR THE MONTH (template has dashes, no colon). */
+export function ensureFormXVIIIMPForTheMonthHeaderField(fields) {
+  const list = Array.isArray(fields) ? [...fields] : [];
+  const existing = list.find((f) => isFormXVIIIMPForTheMonthHeaderField(f));
+  if (existing) {
+    if (!existing.key) existing.key = FORM_XVIII_MP_FOR_THE_MONTH_KEY;
+    if (!String(existing.label || '').trim()) existing.label = FORM_XVIII_MP_FOR_THE_MONTH_LABEL;
+    return list;
+  }
+  list.push({
+    label: FORM_XVIII_MP_FOR_THE_MONTH_LABEL,
+    value: '',
+    key: FORM_XVIII_MP_FOR_THE_MONTH_KEY,
+  });
+  return list;
+}
+
+/**
+ * Autofill headerFormData with the selected month/year (value = "August 2026").
+ * MP-only — does not touch TN Form XVIII Month/Year.
+ */
+export function applyFormXVIIIMPForTheMonthToHeaderData(headerData, monthYearText, fields = []) {
+  const monthYear = extractFormXVIIIMPMonthYearFromForTheMonthText(monthYearText);
+  if (!monthYear) return headerData && typeof headerData === 'object' ? { ...headerData } : {};
+  const next = headerData && typeof headerData === 'object' ? { ...headerData } : {};
+  const fieldList = Array.isArray(fields) ? fields : [];
+  const monthField = fieldList.find((f) => isFormXVIIIMPForTheMonthHeaderField(f));
+  const keys = [
+    monthField?.key,
+    FORM_XVIII_MP_FOR_THE_MONTH_KEY,
+    'form_header_for_the_month',
+    'form_header_month',
+    'form_header_month_year',
+  ].filter(Boolean);
+  const uniqueKeys = [...new Set(keys.map((k) => String(k).trim()).filter(Boolean))];
+  for (const key of uniqueKeys) {
+    if (isFormXVIIIMPForTheMonthPlaceholderValue(next[key])) {
+      next[key] = monthYear;
+    }
+  }
+  if (isFormXVIIIMPForTheMonthPlaceholderValue(next[FORM_XVIII_MP_FOR_THE_MONTH_KEY])) {
+    next[FORM_XVIII_MP_FOR_THE_MONTH_KEY] = monthYear;
+  }
+  return next;
+}
+
+/** Resolve month/year text from header form data for Excel export. */
+export function resolveFormXVIIIMPForTheMonthFromHeaderData(headerFormData = {}, fields = []) {
+  const data = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+  const fieldList = Array.isArray(fields) ? fields : [];
+  const monthField = fieldList.find((f) => isFormXVIIIMPForTheMonthHeaderField(f));
+  const tryKeys = [
+    monthField?.key,
+    FORM_XVIII_MP_FOR_THE_MONTH_KEY,
+    'form_header_for_the_month',
+    'form_header_month',
+    'form_header_month_year',
+  ];
+  for (const key of tryKeys) {
+    if (!key) continue;
+    const val = extractFormXVIIIMPMonthYearFromForTheMonthText(data[key]);
+    if (val) return val;
+  }
+  for (const field of fieldList) {
+    if (!isFormXVIIIMPForTheMonthHeaderField(field)) continue;
+    const val = extractFormXVIIIMPMonthYearFromForTheMonthText(field.value);
+    if (val) return val;
+  }
+  return '';
+}
+
+/**
+ * Replace template "FOR THE MONTH ------------" with "FOR THE MONTH August 2026".
+ * Writes only the merge-anchor cell; MP Combined Register only.
+ */
+export function writeFormXVIIIMPForTheMonthToWorksheet(
+  worksheet,
+  monthYearText,
+  { headerRowEnd = 12, maxScanCols = 80 } = {}
+) {
+  const display = formatFormXVIIIMPForTheMonthDisplay(monthYearText);
+  if (!worksheet || !display) return false;
+
+  const excelCellValueToString = (val) => {
+    if (val == null) return '';
+    if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+    if (val instanceof Date) return val.toISOString();
+    if (typeof val === 'object') {
+      if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+      if (val.text != null) return String(val.text);
+      if (val.result != null) return String(val.result);
+    }
+    return '';
+  };
+
+  const getMergeTopLeft = (r, c) => {
+    let topLeft = { r, c };
+    const merges = worksheet.model?.merges;
+    if (Array.isArray(merges)) {
+      for (let mi = 0; mi < merges.length; mi += 1) {
+        const parts = String(merges[mi] || '').split(':');
+        if (parts.length !== 2) continue;
+        const tl = worksheet.getCell(parts[0]);
+        const br = worksheet.getCell(parts[1]);
+        if (!tl || !br) continue;
+        if (r >= tl.row && r <= br.row && c >= tl.col && c <= br.col) {
+          topLeft = { r: tl.row, c: tl.col };
+          break;
+        }
+      }
+    }
+    return topLeft;
+  };
+
+  const rowEnd = Math.max(1, Number(headerRowEnd) || 12);
+  const colMax = Math.max(20, Number(maxScanCols) || 80);
+  const writtenAnchors = new Set();
+
+  for (let r = 1; r <= rowEnd; r += 1) {
+    for (let c = 1; c <= colMax; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!isFormXVIIIMPForTheMonthCellText(raw)) continue;
+      const tl = getMergeTopLeft(r, c);
+      const anchorKey = `${tl.r}:${tl.c}`;
+      if (writtenAnchors.has(anchorKey)) continue;
+      const cell = worksheet.getCell(tl.r, tl.c);
+      cell.value = display;
+      cell.alignment = {
+        ...(cell.alignment || {}),
+        wrapText: false,
+        vertical: 'middle',
+        horizontal: 'left',
+      };
+      writtenAnchors.add(anchorKey);
+    }
+  }
+  return writtenAnchors.size > 0;
 }
 
 function formXVIIIMPHeaderFieldHasValue(field) {
@@ -2848,6 +3044,21 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
     headerRowEnd: Math.max(1, startRow - 1),
     maxScanCols: 80
   });
+
+  // Template cell is "FOR THE MONTH ------------" (no colon) — write selected month in place.
+  {
+    const mpMonthYear =
+      resolveFormXVIIIMPForTheMonthFromHeaderData(
+        headerFormData,
+        Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : []
+      ) || '';
+    if (mpMonthYear) {
+      writeFormXVIIIMPForTheMonthToWorksheet(worksheet, mpMonthYear, {
+        headerRowEnd: Math.max(1, startRow - 1, 8),
+        maxScanCols: 80,
+      });
+    }
+  }
 
   const normalize = (txt) =>
     String(txt || '')

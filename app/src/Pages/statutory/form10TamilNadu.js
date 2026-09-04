@@ -226,6 +226,88 @@ export function buildForm10EmployeeDisplayName(emp) {
   return fullName || firstName || lastName || '';
 }
 
+/**
+ * Merge People identity with Form 10 row First/Last name columns for strict TN payroll lookup.
+ */
+export function buildForm10PayrollMatchIdentity(emp, row, headers = []) {
+  const empParts = readForm10PersonNameParts(emp);
+  const rowParts = collectForm10RowNameParts(row, headers);
+  const firstName = rowParts.firstName || empParts.firstName || '';
+  const lastName = rowParts.lastName || empParts.lastName || '';
+  const fullName =
+    rowParts.fullName || empParts.fullName || `${firstName} ${lastName}`.trim();
+  const base = emp && typeof emp === 'object' ? { ...emp } : {};
+  return {
+    ...base,
+    FirstName: firstName || base.FirstName || base.firstName || base.first_name || '',
+    LastName: lastName || base.LastName || base.lastName || base.last_name || '',
+    firstName: firstName || base.firstName || base.first_name || '',
+    lastName: lastName || base.lastName || base.last_name || '',
+    first_name: firstName || base.first_name || base.firstName || '',
+    last_name: lastName || base.last_name || base.lastName || '',
+    EmployeeName: fullName || base.EmployeeName || base.employee_name || '',
+    employee_name: fullName || base.employee_name || base.EmployeeName || '',
+    Name: fullName || base.Name || base.name || '',
+    name: fullName || base.name || base.Name || '',
+  };
+}
+
+/** Find a People record whose FirstName+LastName match the form row name parts. */
+export function findForm10EmployeeByFirstAndLastName(employees, nameParts = null) {
+  const parts = nameParts && typeof nameParts === 'object' ? nameParts : {};
+  const { firstName, lastName } = parts;
+  if (!firstName || !lastName) return null;
+  const list = Array.isArray(employees) ? employees : [];
+  for (let i = 0; i < list.length; i += 1) {
+    const item = list[i];
+    const emp = item?.Employee || item?.employee || item;
+    if (
+      form10FirstAndLastNamesMatch(emp, {
+        firstName,
+        lastName,
+        fullName: parts.fullName || `${firstName} ${lastName}`.trim(),
+      })
+    ) {
+      return emp;
+    }
+  }
+  return null;
+}
+
+const form10PayrollRowIdentityKey = (row) => {
+  const { firstName, lastName, fullName } = readForm10PersonNameParts(row);
+  if (firstName && lastName) return `fn:${normForm10Name(firstName)}|ln:${normForm10Name(lastName)}`;
+  if (fullName) return `name:${normForm10Name(fullName)}`;
+  return '';
+};
+
+/**
+ * Tamil Nadu strict payroll resolver — FirstName AND LastName only (Form 10 / Form XV / Form XXIII TN).
+ */
+export function buildFormTamilNaduPayrollRowResolver(payrollRows, options = {}) {
+  const rows = (Array.isArray(payrollRows) ? payrollRows : []).filter(
+    (row) => row && typeof row === 'object' && row.fetch_error !== true
+  );
+  const getExtraParts =
+    typeof options.getExtraParts === 'function' ? options.getExtraParts : () => null;
+  const usedKeys = new Set();
+  return (emp, formRow) => {
+    const extraParts = formRow != null ? getExtraParts(emp, formRow) : null;
+    const available = rows.filter((row) => {
+      const key = form10PayrollRowIdentityKey(row);
+      return !key || !usedKeys.has(key);
+    });
+    const hit = findForm10PayrollRowByFirstAndLastName(
+      emp,
+      available.length > 0 ? available : rows,
+      extraParts
+    );
+    const hitKey = form10PayrollRowIdentityKey(hit);
+    if (hit && hitKey) usedKeys.add(hitKey);
+    return hit;
+  };
+}
+
 export function applyForm10UnmatchedPayrollAmountsNil(row, headers, nilText = 'Nil') {
   if (!row || typeof row !== 'object' || !Array.isArray(headers)) return row;
   const norm = (h) =>

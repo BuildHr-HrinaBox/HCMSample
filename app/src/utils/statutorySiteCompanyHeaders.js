@@ -26,7 +26,8 @@ export function statutoryHeaderLabelMatchKey(label) {
   if (/(?:name|nature)\s+and\s+location\s+of\s+work/.test(compact)) {
     return 'statutory_nature_location';
   }
-  if (/establishment\s+in.*under\s+which\s+contract/.test(compact)) {
+  // AP Form XIII template misspells "Establishment" as "Establishemnt".
+  if (/establ(?:ishment|ishemnt)\s+in.*under\s+which\s+contract/.test(compact)) {
     return 'statutory_establishment_contract';
   }
   if (/name\s+and\s+address\s+of\s+principal\s+employer/.test(compact) ||
@@ -79,6 +80,12 @@ export function buildSiteContractorNameAndAddress(site) {
   const addrLine = [addr, city, state].filter(Boolean).join(', ');
   if (addrLine) parts.push(addrLine);
   return parts.join(', ').trim();
+}
+
+export function isContractorHeaderLabel(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact || /principal/.test(compact)) return false;
+  return /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/.test(compact);
 }
 
 /**
@@ -500,12 +507,19 @@ export function isEstablishmentNameHeaderLabel(label) {
     /^name\s+of\s+establishment$/.test(compact) ||
     /name\s+of\s+establishment\s+shop/.test(compact) ||
     /name\s+of\s+the\s+establishment\s+shop/.test(compact) ||
-    /name\s+and\s+address\s+of\s+(?:the\s+)?establishment/.test(compact) ||
-    /name\s+address\s+of\s+(?:the\s+)?establishment/.test(compact)
+    /name\s+and\s+address\s+of\s+(?:the\s+)?establ(?:ishment|ishemnt)/.test(compact) ||
+    /name\s+address\s+of\s+(?:the\s+)?establ(?:ishment|ishemnt)/.test(compact)
   ) {
     return true;
   }
   return false;
+}
+
+/** "Name and address of establishment in/under which contract is carried on" (incl. Establishemnt typo). */
+export function isEstablishmentContractCarriedHeaderLabel(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact) return false;
+  return /establ(?:ishment|ishemnt)\s+in.*under\s+which\s+contract/.test(compact);
 }
 
 export function isEstablishmentAddressHeaderLabel(label) {
@@ -535,6 +549,13 @@ export function isMonthYearHeaderLabel(label) {
   const compact = normalizeStatutoryHeaderLabel(label);
   if (!compact) return false;
   return /^month\s+year$/.test(compact) || /^month\s*\/\s*year$/.test(compact);
+}
+
+/** Form XVI Muster Roll / Form B — "For the Month of : July 2026". */
+export function isForTheMonthOfHeaderLabel(label) {
+  const compact = normalizeStatutoryHeaderLabel(label);
+  if (!compact) return false;
+  return /^for\s+the\s+month\s+of\b/.test(compact);
 }
 
 export function isNatureLocationHeaderLabel(label) {
@@ -653,7 +674,9 @@ export const STATUTORY_REGISTRATION_HEADER_KEYS = new Set([
 
 export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
   {
-    match: /name\s+and\s+address\s+of\s+(?:the\s+)?establishment/i,
+    // Exclude "establishment in/under which contract is carried on" (separate CLRA field).
+    match:
+      /name\s+and\s+address\s+of\s+(?:the\s+)?establishment(?![\s\S]*under\s+which\s+contract)/i,
     label: 'Name and Address of the Establishment:',
     key: 'statutory_establishment_name_address',
     kind: 'establishment_name'
@@ -723,7 +746,8 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     key: 'form_xxiii_nature_location_work'
   },
   {
-    match: /establishment\s+in\s*\/?\s*under\s+which\s+contract\s+is\s+carried\s+on/i,
+    // Tolerate AP Form XIII template typo "Establishemnt".
+    match: /establ(?:ishment|ishemnt)\s+in\s*\/?\s*under\s+which\s+contract\s+is\s+carried\s+on/i,
     label: '3. Name and address of establishment in/under which contract is carried on',
     key: 'form_xxiii_establishment_contract_carried'
   },
@@ -915,6 +939,7 @@ export function applySiteCompanyHeaderAutofill(
     fillKey('form_xv_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
     fillKey('form25_establishment', establishmentNameText, establishmentFillOpts);
     fillKey('form_xxiii_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
+    fillKey('form_xiii_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
   }
   if (establishmentAddressText) {
     STATUTORY_ESTABLISHMENT_ADDRESS_HEADER_KEYS.forEach((key) =>
@@ -1006,6 +1031,7 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
       'form25_establishment',
       'form_xv_establishment_contract_carried',
       'form_xxiii_establishment_contract_carried',
+      'form_xiii_establishment_contract_carried',
       'form_xxvi_ap_establishment',
       'form_h_establishment_name_address',
       'form_f_establishment_name_address',
@@ -1047,6 +1073,15 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   if (isMonthYearHeaderLabel(label)) {
     return tryKeys(['form_t_month_year', 'form_xviii_month_year']);
   }
+  if (isForTheMonthOfHeaderLabel(label) || key === 'form_b_header_for_the_month_of' || key === 'form_xvi_for_the_month_of') {
+    return tryKeys([
+      key,
+      'form_b_header_for_the_month_of',
+      'form_xvi_for_the_month_of',
+      'form_t_month_year',
+      'form_xviii_month_year'
+    ]);
+  }
   if (isFormXMonthOnlyHeaderLabel(label) || STATUTORY_FORM_X_MONTH_HEADER_KEYS.has(key)) {
     return tryKeys(['form_x_month']);
   }
@@ -1079,8 +1114,9 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
       'form_xix_ap_nature_location'
     ]);
   }
-  if (/establishment\s+in.*under\s+which\s+contract/i.test(normalizeStatutoryHeaderLabel(label))) {
+  if (isEstablishmentContractCarriedHeaderLabel(label)) {
     return tryKeys([
+      'form_xiii_establishment_contract_carried',
       'form_xxiii_establishment_contract_carried',
       'form_xv_establishment_contract_carried',
       'form_xviii_establishment_contract_carried',
@@ -1336,7 +1372,7 @@ export function clearStatutoryHeaderCellsBeyondColumn(
   const r0 = Math.max(1, Number(rowFrom) || 1);
   const r1 = Math.max(r0, Number(rowTo) || r0);
   const spillRe =
-    /address\s+of\s+the\s+establishment|name\s+and\s+address\s+of\s+principal\s+employer|establishment\s+in.*under\s+which\s+contract|name\s+of\s+establishment\s*\/\s*shop|registration\s+no|name\s+and\s+address\s+of\s+contractor|nature\s+and\s+location\s+of\s+work/i;
+    /address\s+of\s+the\s+establishment|name\s+and\s+address\s+of\s+principal\s+employer|establ(?:ishment|ishemnt)\s+in.*under\s+which\s+contract|name\s+of\s+establishment\s*\/\s*shop|registration\s+no|name\s+and\s+address\s+of\s+contractor|nature\s+and\s+location\s+of\s+work/i;
   for (let r = r0; r <= r1; r += 1) {
     for (let c = c0; c <= c1; c += 1) {
       const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();

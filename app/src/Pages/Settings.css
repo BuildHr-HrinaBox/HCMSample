@@ -13,6 +13,16 @@
   padding: 2px 2px 12px;
 }
 
+.settings-list-card > .settings-page-heading.settings-page-heading--row {
+  padding: 12px 4px 24px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.settings-list-card > .settings-list-body {
+  padding: 4px 4px 20px;
+}
+
 .settings-page-heading--row {
   display: flex;
   align-items: center;
@@ -39,6 +49,57 @@
 
 .settings-list-body {
   padding: 16px 20px 20px;
+}
+
+.settings-hub-body {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.settings-hub-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.settings-hub-section:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.settings-hub-section-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.settings-hub-section .settings-page-heading {
+  padding: 0;
+}
+
+.settings-hub-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-hub-section .settings-inline-form-wrap {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.settings-hub-section .settings-modal.company-details-modal {
+  height: auto;
+  border-radius: 12px;
+}
+
+.settings-hub-section .settings-message {
+  margin-left: 0;
+  margin-right: 0;
 }
 
 .settings-due-date-list {
@@ -87,6 +148,18 @@
   gap: 7px;
   color: #718096;
   font-size: 0.72rem;
+}
+
+.settings-chro-card-fields {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 24px 40px;
+}
+
+.settings-chro-card-fields .settings-due-date-info {
+  min-width: 180px;
 }
 
 .settings-due-date-actions {
@@ -200,6 +273,26 @@
   padding: 10px 18px;
 }
 
+.settings-page.company-details-page-form-open {
+  padding-top: 24px;
+}
+
+.settings-page.company-details-page-form-open .settings-shell {
+  padding-top: 8px;
+}
+
+.settings-page.company-details-page-form-open .settings-inline-form-wrap {
+  margin-top: 12px;
+}
+
+.settings-page.company-details-page-form-open .settings-modal .company-details-modal-body {
+  padding-top: 28px;
+}
+
+.settings-page.company-details-page-form-open .settings-section-card.company-details-section-card {
+  margin-top: 4px;
+}
+
 @media (max-width: 720px) {
   .settings-due-date-card {
     align-items: flex-start;
@@ -218,7 +311,208 @@
     border-left: 0;
   }
 
+  .settings-chro-card-fields {
+    width: 100%;
+  }
+
   .settings-modal.company-details-modal {
     width: 100%;
   }
+
+  .notification-table-name-cell {
+    flex-wrap: wrap;
+  }
+}
+
+.notification-table-toolbar {
+  margin-top: 0;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+}
+
+.settings-list-card .company-details-table-wrap {
+  margin-top: 8px;
+}
+
+.notification-table-status-filter .company-details-sort-select {
+  min-width: 130px;
+}
+
+.notification-data-table {
+  table-layout: auto;
+}
+
+.notification-data-table th,
+.notification-data-table td {
+  vertical-align: middle;
+}
+
+.notification-data-table th:nth-child(1),
+.notification-data-table td:nth-child(1) {
+  width: 28%;
+  min-width: 220px;
+}
+
+.notification-data-table th:nth-child(3),
+.notification-data-table td:nth-child(3) {
+  width: 22%;
+  min-width: 200px;
+}
+
+.notification-data-table th:nth-child(4),
+.notification-data-table td:nth-child(4) {
+  width: 110px;
+  min-width: 110px;
+}
+
+.notification-data-table th:nth-child(5),
+.notification-data-table td:nth-child(5) {
+  width: 120px;
+  min-width: 120px;
+}
+
+.notification-table-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.notification-table-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.notification-table-icon--purple {
+  background: #f0eaff;
+  color: #7c3aed;
+}
+
+.notification-table-icon--orange {
+  background: #fff3e8;
+  color: #ea580c;
+}
+
+.notification-table-icon--blue {
+  background: #e8f2ff;
+  color: #2563eb;
+}
+
+.notification-table-icon--green {
+  background: #e8f8ef;
+  color: #16a34a;
+}
+
+.notification-table-cell-stack {
+  display: grid;
+  gap: 4px;
+}
+
+.notification-table-cell-primary {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.notification-table-cell-secondary {
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+
+.notification-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.notification-status-badge--active {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.notification-status-badge--paused {
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+.notification-table-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.notification-table-edit-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+}
+
+.notification-table-menu-wrap {
+  position: relative;
+}
+
+.notification-table-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #374151;
+  cursor: pointer;
+}
+
+.notification-table-menu-btn:hover {
+  background: #f9fafb;
+}
+
+.notification-table-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  min-width: 120px;
+  padding: 6px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+}
+
+.notification-table-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  font-size: 0.84rem;
+  color: #111827;
+  cursor: pointer;
+}
+
+.notification-table-menu-item:hover {
+  background: #f3f4f6;
+}
+
+.notification-table-menu-item--danger {
+  color: #dc2626;
+}
+
+.notification-table-empty-cell {
+  padding: 28px 16px !important;
+  text-align: center;
+  color: #64748b;
 }

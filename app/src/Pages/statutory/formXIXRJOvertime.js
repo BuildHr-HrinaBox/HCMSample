@@ -1,13 +1,18 @@
+import * as XLSX from 'xlsx';
 import {
   flattenPayrollEarningColumns,
   readForm10GrossPayAmount,
   readPayrollNetPayForStatutory,
 } from '../../utils/payrollEarnings';
+import { resolveHeaderFieldExportValue } from '../../utils/statutorySiteCompanyHeaders';
 import { isFormXIXRajasthanOvertimeRegisterContext } from './formXIXAPWageSlip';
 
 /** Rajasthan Form XIX — Register of Overtime [Rule 77(2)(e)] autofill helpers. */
 
 const FORM_XIX_RJ_NIL = 'Nil';
+
+/** Form_XIX_RJ.xlsx keeps an empty (often merged) column A. Serial No. is column B. */
+export const FORM_XIX_RJ_DEFAULT_TABLE_START_COL0 = 1;
 
 /** Official Form XIX RJ column order [See Rule 77 (2)(e)] — no blank spacer columns. */
 export const FORM_XIX_RJ_TABLE_HEADERS = [
@@ -170,6 +175,155 @@ function classifyFormXIXRJHeaderIndex(h) {
 export function resolveFormXIXRJTableHeaders(_tableHeaders) {
   // Always canonical — never keep a leading blank Excel spacer as column 1.
   return [...FORM_XIX_RJ_TABLE_HEADERS];
+}
+
+function combineFormXIXRJHeaderBandText(readCell, startRow, col, extraRows = 2) {
+  const parts = [];
+  for (let i = 0; i <= extraRows; i += 1) {
+    const t = String(readCell(startRow + i, col) || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (t && parts[parts.length - 1] !== t) parts.push(t);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * Consecutive 1..15 numbering row under the table headers.
+ * Form_XIX_RJ.xlsx uses this row; a gap (1 in A, 2 in C) is NOT the original layout.
+ */
+function findFormXIXRJConsecutiveNumberBand(readCell, maxRows, maxCols, colCount) {
+  for (let r = 0; r < maxRows; r += 1) {
+    for (let start = 0; start <= maxCols - 8; start += 1) {
+      let hits = 0;
+      for (let j = 0; j < colCount; j += 1) {
+        const t = String(readCell(r, start + j) || '')
+          .replace(/\s+/g, '')
+          .trim();
+        if (t === String(j + 1)) hits += 1;
+      }
+      if (hits >= Math.max(10, Math.floor(colCount * 0.7))) {
+        return { indexRow: r, startCol: start };
+      }
+    }
+  }
+  return null;
+}
+
+function findFormXIXRJNameColumn(readCell, maxRows, maxCols) {
+  for (let r = 0; r < maxRows; r += 1) {
+    for (let c = 0; c < maxCols; c += 1) {
+      const thisCell = String(readCell(r, c) || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!thisCell) continue;
+      const band = combineFormXIXRJHeaderBandText(readCell, r, c, 2);
+      if (isFormXIXRJWorkmanNameHeader(thisCell) || isFormXIXRJWorkmanNameHeader(band)) {
+        return { nameRow: r, nameCol: c };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Sequential canonical map starting at column B unless a real Serial No. column is given.
+ * Never starts at column A — Form_XIX_RJ.xlsx uses A as a left-margin spacer.
+ */
+export function buildFormXIXRJExportColMap(
+  tableStartCol = FORM_XIX_RJ_DEFAULT_TABLE_START_COL0,
+  headers = FORM_XIX_RJ_TABLE_HEADERS
+) {
+  const parsed = Number(tableStartCol);
+  const start =
+    Number.isFinite(parsed) && parsed >= 1 ? parsed : FORM_XIX_RJ_DEFAULT_TABLE_START_COL0;
+  const hdrs = resolveFormXIXRJTableHeaders(headers);
+  const headerToCol = new Map();
+  hdrs.forEach((header, j) => {
+    if (header) headerToCol.set(header, start + j);
+  });
+  return { headers: hdrs, headerToCol, tableStartCol: start };
+}
+
+function buildConsecutiveFormXIXRJColMap(startCol, headers, snoRow = -1, dataStartRow = -1) {
+  const start =
+    Number.isFinite(startCol) && startCol >= 0 ? startCol : FORM_XIX_RJ_DEFAULT_TABLE_START_COL0;
+  const mapped = buildFormXIXRJExportColMap(Math.max(start, 0), headers);
+  // buildFormXIXRJExportColMap bumps 0 → B; allow a true start at A only when Serial really sits there.
+  if (start === 0) {
+    const hdrs = resolveFormXIXRJTableHeaders(headers);
+    const headerToCol = new Map();
+    hdrs.forEach((header, j) => {
+      if (header) headerToCol.set(header, j);
+    });
+    return { headers: hdrs, headerToCol, tableStartCol: 0, snoRow, dataStartRow };
+  }
+  return { ...mapped, snoRow, dataStartRow };
+}
+
+/**
+ * Map canonical Form XIX RJ headers onto the original template's physical Excel columns.
+ * Original Form_XIX_RJ.xlsx is 15 consecutive columns (Serial beside Name) — usually B–P.
+ * Never insert a blank gap between Serial No. and Name of workman.
+ */
+export function mapFormXIXRJHeadersToTemplateCols(
+  readCell,
+  { headers = FORM_XIX_RJ_TABLE_HEADERS, maxRows = 45, maxCols = 32 } = {}
+) {
+  const canon = resolveFormXIXRJTableHeaders(headers);
+  const fallback = buildFormXIXRJExportColMap(FORM_XIX_RJ_DEFAULT_TABLE_START_COL0, canon);
+  if (typeof readCell !== 'function') {
+    return { ...fallback, snoRow: -1, dataStartRow: -1 };
+  }
+
+  const numberBand = findFormXIXRJConsecutiveNumberBand(readCell, maxRows, maxCols, canon.length);
+  if (numberBand) {
+    const snoRow = Math.max(0, numberBand.indexRow - 1);
+    return buildConsecutiveFormXIXRJColMap(
+      numberBand.startCol,
+      canon,
+      snoRow,
+      numberBand.indexRow + 1
+    );
+  }
+
+  const nameHit = findFormXIXRJNameColumn(readCell, maxRows, maxCols);
+  if (nameHit && nameHit.nameCol >= 1) {
+    // Serial No. is the column immediately left of Name — do not skip a spacer in between.
+    const startCol = nameHit.nameCol - 1;
+    return buildConsecutiveFormXIXRJColMap(startCol, canon, nameHit.nameRow, nameHit.nameRow + 2);
+  }
+
+  return { ...fallback, snoRow: -1, dataStartRow: -1 };
+}
+
+/** SheetJS worksheet → original Form XIX RJ column map (0-based). */
+export function mapFormXIXRJHeadersToSheetJsCols(worksheet, headers = FORM_XIX_RJ_TABLE_HEADERS) {
+  if (!worksheet) return buildFormXIXRJExportColMap(FORM_XIX_RJ_DEFAULT_TABLE_START_COL0, headers);
+  const merges = worksheet['!merges'] || [];
+  const raw = (r, c) => {
+    if (r < 0 || c < 0) return '';
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const cell = worksheet[ref];
+    if (cell && cell.v != null) return String(cell.v).trim();
+    return '';
+  };
+  const readCell = (r, c) => {
+    const direct = raw(r, c);
+    if (direct) return direct;
+    for (let i = 0; i < merges.length; i += 1) {
+      const m = merges[i];
+      if (!m?.s || !m?.e) continue;
+      if (r >= m.s.r && r <= m.e.r && c >= m.s.c && c <= m.e.c) {
+        const t = raw(m.s.r, m.s.c);
+        if (t) return t;
+      }
+    }
+    return '';
+  };
+  return mapFormXIXRJHeadersToTemplateCols(readCell, { headers });
 }
 
 /** Read one cell for Form XIX RJ modal grid (handles blank-key serial shift). */
@@ -526,6 +680,273 @@ export function prepareFormXIXRJOvertimeExportRows(rows, headers = null) {
     if (meaningful || hasName) out.push(next);
   });
   return out;
+}
+
+function excelJsPlainText(cell) {
+  const v = cell?.value;
+  if (v == null) return '';
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v).trim();
+  if (typeof v === 'object') {
+    if (Array.isArray(v.richText)) return v.richText.map((rt) => rt?.text || '').join('').trim();
+    if (v.text != null) return String(v.text).trim();
+    if (v.result != null) return String(v.result).trim();
+  }
+  return String(v).trim();
+}
+
+function unmergeExcelJsIntersectingRange(worksheet, rowFrom1, rowTo1, colFrom1, colTo1) {
+  const merges = worksheet?.model?.merges;
+  if (!Array.isArray(merges) || merges.length === 0) return;
+  const toRemove = [];
+  for (const range of merges) {
+    const parts = String(range || '').split(':');
+    if (parts.length !== 2) continue;
+    const start = parts[0].match(/^([A-Z]+)(\d+)$/i);
+    const end = parts[1].match(/^([A-Z]+)(\d+)$/i);
+    if (!start || !end) continue;
+    const mr1 = parseInt(start[2], 10);
+    const mr2 = parseInt(end[2], 10);
+    const colLetterTo1 = (letters) => {
+      let n = 0;
+      const s = String(letters || '').toUpperCase();
+      for (let i = 0; i < s.length; i += 1) n = n * 26 + (s.charCodeAt(i) - 64);
+      return n;
+    };
+    const mc1 = colLetterTo1(start[1]);
+    const mc2 = colLetterTo1(end[1]);
+    if (mr2 < rowFrom1 || mr1 > rowTo1) continue;
+    if (mc2 < colFrom1 || mc1 > colTo1) continue;
+    toRemove.push(range);
+  }
+  toRemove.forEach((range) => {
+    try {
+      worksheet.unMergeCells(range);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+}
+
+function copyExcelJsCellValueLeftToRight(worksheet, row1, fromCol1, toCol1) {
+  const src = worksheet.getCell(row1, fromCol1);
+  const dst = worksheet.getCell(row1, toCol1);
+  if (excelJsPlainText(dst)) return false;
+  const srcText = excelJsPlainText(src);
+  if (!srcText) return false;
+  dst.value = src.value;
+  if (src.alignment && typeof src.alignment === 'object') {
+    dst.alignment = { ...src.alignment };
+  }
+  src.value = null;
+  return true;
+}
+
+/**
+ * Official Form_XIX_RJ.xlsx: empty column A, Serial No. in B, Name in C.
+ * Broken downloads put Serial in A with a blank gap at B — slide A → B when B is empty.
+ */
+export function compactFormXIXRJGapColumnsOnExcelJs(worksheet, headerRow1, throughRow1) {
+  if (!worksheet || headerRow1 < 1) return false;
+  const a = excelJsPlainText(worksheet.getCell(headerRow1, 1));
+  const b = excelJsPlainText(worksheet.getCell(headerRow1, 2));
+  const c = excelJsPlainText(worksheet.getCell(headerRow1, 3));
+  const gap =
+    isFormXIXRJSerialHeader(a) &&
+    !b &&
+    (isFormXIXRJWorkmanNameHeader(c) || /name\s+of\s+workman/i.test(c));
+  if (!gap) return false;
+  const last = Math.max(headerRow1, Number(throughRow1) || headerRow1);
+  unmergeExcelJsIntersectingRange(worksheet, headerRow1, last, 1, 2);
+  for (let r = headerRow1; r <= last; r += 1) {
+    copyExcelJsCellValueLeftToRight(worksheet, r, 1, 2);
+  }
+  return true;
+}
+
+export function findFormXIXRJExcelJsTableLayout(worksheet) {
+  if (!worksheet) return null;
+  let nameRow = -1;
+  let nameCol = -1;
+  let serialCol = -1;
+  const maxR = Math.min(40, Math.max(Number(worksheet.rowCount) || 0, 20));
+  const maxC = 20;
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= maxC; c += 1) {
+      const t = excelJsPlainText(worksheet.getCell(r, c));
+      if (!t) continue;
+      if (nameRow < 0 && isFormXIXRJWorkmanNameHeader(t)) {
+        nameRow = r;
+        nameCol = c;
+      }
+      if (serialCol < 0 && isFormXIXRJSerialHeader(t)) serialCol = c;
+    }
+    if (nameRow > 0 && serialCol > 0) break;
+  }
+  if (nameRow < 1) return null;
+  const headerRow1 = nameRow;
+  let tableStartCol1 =
+    serialCol > 0 && serialCol < nameCol ? serialCol : Math.max(2, nameCol - 1);
+  if (tableStartCol1 < 2) tableStartCol1 = 2;
+  let numberRow1 = headerRow1 + 1;
+  const colCount = FORM_XIX_RJ_TABLE_HEADERS.length;
+  for (let r = headerRow1; r <= headerRow1 + 3; r += 1) {
+    let hits = 0;
+    for (let j = 0; j < colCount; j += 1) {
+      const t = String(excelJsPlainText(worksheet.getCell(r, tableStartCol1 + j)) || '').replace(/\s+/g, '');
+      if (t === String(j + 1)) hits += 1;
+    }
+    if (hits >= 8) {
+      numberRow1 = r;
+      break;
+    }
+  }
+  const dataStartRow1 = Math.max(headerRow1 + 2, numberRow1 + 1);
+  return {
+    headerRow1,
+    numberRow1,
+    dataStartRow1,
+    tableStartCol1,
+    tableStartCol0: tableStartCol1 - 1,
+    colTo1: tableStartCol1 + colCount - 1,
+  };
+}
+
+export function restoreFormXIXRJExcelJsVerticalTableHeaders(worksheet, layout) {
+  if (!worksheet || !layout?.headerRow1) return;
+  const row = worksheet.getRow(layout.headerRow1);
+  row.hidden = false;
+  row.height = Math.max(Number(row.height) || 0, 78);
+  const c0 = Math.max(2, layout.tableStartCol1 || 2);
+  const c1 = Math.max(c0, layout.colTo1 || c0 + 14);
+  for (let c = c0; c <= c1; c += 1) {
+    const cell = worksheet.getCell(layout.headerRow1, c);
+    if (!excelJsPlainText(cell) && c > c0 + 2) continue;
+    const cur = cell.alignment && typeof cell.alignment === 'object' ? cell.alignment : {};
+    cell.alignment = {
+      ...cur,
+      textRotation: 90,
+      wrapText: true,
+      horizontal: 'center',
+      vertical: 'middle',
+    };
+  }
+}
+
+export function worksheetLooksLikeFormXIXRJOvertime(worksheet) {
+  if (!worksheet) return false;
+  let sawFormXix = false;
+  let sawOvertime = false;
+  let sawWorkman = false;
+  const maxR = Math.min(20, Math.max(Number(worksheet.rowCount) || 0, 8));
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= 16; c += 1) {
+      const t = excelJsPlainText(worksheet.getCell(r, c)).toLowerCase();
+      if (!t) continue;
+      if (/^form\s*xix\b/.test(t) || t === 'form xix') sawFormXix = true;
+      if (/register\s+of\s+over[\s-]*time/.test(t) || /see\s+rule\s*77/.test(t)) sawOvertime = true;
+      if (/name\s+of\s+workman/.test(t)) sawWorkman = true;
+    }
+  }
+  return sawFormXix && (sawOvertime || sawWorkman);
+}
+
+/** Keep official Form XIX RJ boxes: empty A, vertical B–P headers, no Serial/Name gap. */
+export function applyFormXIXRJOriginalTemplateLayoutToExcelJs(worksheet) {
+  if (!worksheetLooksLikeFormXIXRJOvertime(worksheet)) return null;
+  let layout = findFormXIXRJExcelJsTableLayout(worksheet) || {
+    headerRow1: 13,
+    numberRow1: 14,
+    dataStartRow1: 15,
+    tableStartCol1: 2,
+    tableStartCol0: 1,
+    colTo1: 16,
+  };
+  const through = Math.max(
+    layout.dataStartRow1 + 40,
+    Number(worksheet.actualRowCount) || 0,
+    Number(worksheet.rowCount) || 0,
+    40
+  );
+  compactFormXIXRJGapColumnsOnExcelJs(worksheet, layout.headerRow1, through);
+  layout = findFormXIXRJExcelJsTableLayout(worksheet) || layout;
+  layout.tableStartCol1 = Math.max(2, layout.tableStartCol1 || 2);
+  layout.tableStartCol0 = layout.tableStartCol1 - 1;
+  layout.colTo1 = layout.tableStartCol1 + FORM_XIX_RJ_TABLE_HEADERS.length - 1;
+  restoreFormXIXRJExcelJsVerticalTableHeaders(worksheet, layout);
+  return layout;
+}
+
+const FORM_XIX_RJ_HEADER_VALUE_KINDS = [
+  {
+    test: (t) => /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i.test(t) && !/principal/.test(t),
+    field: { key: 'form_xxiii_contractor', label: 'Name and address of the Contractor' },
+  },
+  {
+    test: (t) => /(?:name|nature)\s+and\s+location\s+of\s+work/i.test(t),
+    field: { key: 'form_xxiii_nature_location_work', label: 'Name and location of work' },
+  },
+  {
+    test: (t) => /establishment.*contract\s+is\s+carried/i.test(t),
+    field: { key: 'form_xxiii_establishment_contract_carried', label: 'Name and address of Establishment' },
+  },
+  {
+    test: (t) => /principal\s+employer/i.test(t),
+    field: { key: 'statutory_principal_employer', label: 'Name and address of Principal Employer' },
+  },
+];
+
+function placeFormXIXRJValueOnOriginalLabel(cell, value) {
+  const raw = excelJsPlainText(cell);
+  const val = String(value || '').trim();
+  if (!raw || !val) return;
+  if (raw.includes(val)) return;
+  const dots = raw.match(/^(.*?)(\.{3,})\s*(.*)$/);
+  if (dots) {
+    cell.value = `${dots[1]}${dots[2]} ${val}`;
+    return;
+  }
+  if (/:/.test(raw)) {
+    const label = raw.split(':')[0].replace(/\.+$/, '').trim();
+    cell.value = `${label}: ${val}`;
+    return;
+  }
+  cell.value = `${raw.replace(/\.+$/, '').trim()} ${val}`;
+}
+
+/**
+ * Write contractor / work / establishment / employer values onto the original dotted
+ * labels. Never replace official wording or merge those rows.
+ */
+export function writeFormXIXRJHeaderValuesOntoOriginalLabels(
+  worksheet,
+  headerFormData,
+  parsedFormHeader,
+  headerRowEnd1
+) {
+  if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
+  const rowEnd = Math.max(1, Number(headerRowEnd1) || 12);
+  const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  const written = new Set();
+  for (let r = 1; r <= rowEnd; r += 1) {
+    for (let c = 1; c <= 16; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      const raw = excelJsPlainText(cell);
+      if (!raw) continue;
+      for (const kind of FORM_XIX_RJ_HEADER_VALUE_KINDS) {
+        if (!kind.test(raw) || written.has(kind.field.key)) continue;
+        let val = resolveHeaderFieldExportValue(headerFormData, kind.field);
+        if (!val) {
+          const parsed = parsedFields.find((f) => kind.test(String(f?.label || '')));
+          if (parsed) val = resolveHeaderFieldExportValue(headerFormData, parsed);
+        }
+        if (val) {
+          placeFormXIXRJValueOnOriginalLabel(cell, val);
+          written.add(kind.field.key);
+        }
+        break;
+      }
+    }
+  }
 }
 
 export { FORM_XIX_RJ_NIL };

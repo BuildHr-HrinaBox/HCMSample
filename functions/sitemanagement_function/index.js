@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const catalystSDK = require('zcatalyst-sdk-node');
 const { sendPendingFormsDigest } = require('./pendingFormsMailer');
+const { sendApprovedSitesReportToChro, buildApprovedSitesEmailHtml } = require('./approvedSitesMailer');
 
 const app = express();
 
@@ -777,6 +778,98 @@ app.get('/sitemanagement/pending-forms-email', async (req, res) => {
     res.status(500).json({
       status: 'failure',
       message: err.message || 'Failed to preview pending form emails.'
+    });
+  }
+});
+
+/**
+ * Email the CHRO Notification address(es) the Approved Sites Report.
+ * Query/body: force=true, dryRun=true.
+ */
+app.post('/sitemanagement/approved-sites-email', async (req, res) => {
+  try {
+    const { catalyst } = res.locals;
+    const force = parseTruthyFlag(req.body?.force ?? req.query?.force ?? true);
+    const dryRun = parseTruthyFlag(req.body?.dryRun ?? req.query?.dryRun);
+    const result = await sendApprovedSitesReportToChro(catalyst, {
+      force,
+      dryRun,
+      requireMonthlySendDay: false
+    });
+    res.status(200).json({
+      status: 'success',
+      message: result.skipped
+        ? result.reason || 'Approved sites report was not sent.'
+        : result.dryRun
+          ? `Preview ready for ${result.toEmails?.length || 0} CHRO mailbox(es).`
+          : `Sent approved sites report to ${result.emailsSent} CHRO mailbox(es).`,
+      data: result
+    });
+  } catch (err) {
+    console.error('approved-sites-email:', err);
+    res.status(500).json({
+      status: 'failure',
+      message: err.message || 'Failed to send approved sites report.'
+    });
+  }
+});
+
+app.get('/sitemanagement/approved-sites-email', async (req, res) => {
+  try {
+    const { catalyst } = res.locals;
+    if (parseTruthyFlag(req.query?.previewHtml)) {
+      const html = buildApprovedSitesEmailHtml({
+        chroName: 'CHRO',
+        periodLabel: 'August 2026',
+        approvedCount: 62,
+        pendingCount: 10,
+        returnedCount: 3,
+        activeCount: 75,
+        complianceScore: 83,
+        approvedSites: [
+          {
+            siteName: 'Nimbagallu Site',
+            label: 'AP – Nimbagallu Site',
+            siteKey: 'nimbagallu site',
+            state: 'Andhra Pradesh',
+            industry: 'Shops and Establishment',
+            formNumber: 'Form XII',
+            formName: 'Register of Advances of Wages'
+          },
+          {
+            siteName: 'Nimbagallu Site',
+            label: 'AP – Nimbagallu Site',
+            siteKey: 'nimbagallu site',
+            state: 'Andhra Pradesh',
+            industry: 'Shops and Establishment',
+            formNumber: 'Form XX',
+            formName: 'Register of Fines'
+          },
+          {
+            siteName: 'Dhar (ABREL) Site',
+            label: 'MP – Dhar (ABREL) Site',
+            siteKey: 'dhar (abrel) site',
+            state: 'Madhya Pradesh',
+            industry: 'CLRA',
+            formNumber: 'Form XXIII_MP',
+            formName: 'Register of Overtime'
+          }
+        ]
+      });
+      res.set('Content-Type', 'text/html; charset=utf-8');
+      return res.status(200).send(html);
+    }
+    const result = await sendApprovedSitesReportToChro(catalyst, {
+      force: true,
+      dryRun: true,
+      requireMonthlySendDay: false
+    });
+    res.status(200).json({ status: 'success', data: result });
+  } catch (err) {
+    console.error('approved-sites-email preview:', err);
+    res.status(500).json({
+      status: 'failure',
+      message: err.message || 'Failed to preview approved sites report.'
     });
   }
 });

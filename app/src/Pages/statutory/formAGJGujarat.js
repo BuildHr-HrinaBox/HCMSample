@@ -49,7 +49,11 @@ export function formAGJHeaderAliasBucket(norm) {
   const n = String(norm || '').trim();
   if (!n) return '';
   if (/^sr\.?\s*no|^s\.?\s*no|serial|sl\.?\s*no|^no\.?$/.test(n)) return 'sno';
-  if (/employee/.test(n) && (/workme|workman|worker|id/.test(n) || /workmen/.test(n))) {
+  // "Employee Code" (RJ Form A) and "Employees/ Workmen/ Worker Code" (GJ)
+  if (
+    /employee/.test(n) &&
+    (/code|id/.test(n) || /workme|workman|worker|workmen/.test(n))
+  ) {
     return 'employeeId';
   }
   if (n === 'name' || /^name$/.test(n)) return 'firstName';
@@ -72,7 +76,15 @@ export function formAGJHeaderAliasBucket(norm) {
   }
   if (/branch/.test(n) || (/\bifsc\b/.test(n) && !/bank\s*a/.test(n))) return 'bankBranchIfsc';
   if (n === 'bank' || (/bank/.test(n) && !/account|ac|branch|ifsc|no/.test(n))) return 'bankName';
-  if (/category/.test(n) && (/address|addr|\ba\b/.test(n) || n.includes('category a'))) {
+  // RJ Form A: Category (HS/S/SS/US)* — skill band, not address
+  if (
+    /category/.test(n) &&
+    (/\(hs|hs\s*\/\s*s|\/ss\/|\/us\)|highly\s*skill|semi\s*skill|un\s*skill/.test(n) ||
+      /\bhs\b/.test(n))
+  ) {
+    return 'skillCategory';
+  }
+  if (/category/.test(n) && (/address|addr/.test(n) || n.includes('category a'))) {
     return 'categoryAddress';
   }
   if (/type/.test(n) && (/employ|en\b|employment/.test(n))) return 'employmentType';
@@ -390,6 +402,44 @@ function readCategoryAddress(emp) {
   return [city, state].filter(Boolean).join(', ') || address;
 }
 
+/** Normalize skill band to Form A Category (HS/S/SS/US)*. */
+export function normalizeFormASkillCategory(raw) {
+  const t = String(raw || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t) return '';
+  const compact = t.toLowerCase().replace(/[^a-z]/g, '');
+  if (compact === 'hs' || compact === 'highlyskilled' || compact.startsWith('highlyskill')) return 'HS';
+  if (compact === 'ss' || compact === 'semiskilled' || compact.startsWith('semiskill')) return 'SS';
+  if (compact === 'us' || compact === 'unskilled' || compact.startsWith('unskill')) return 'US';
+  if (compact === 's' || compact === 'skilled' || (compact.startsWith('skill') && !compact.includes('semi') && !compact.includes('un') && !compact.includes('high'))) {
+    return 'S';
+  }
+  if (/^(HS|S|SS|US)$/i.test(t)) return t.toUpperCase();
+  return t;
+}
+
+function readSkillCategory(emp) {
+  const raw = pickEmployeeValue(emp, [
+    'Skill_Category',
+    'Skill Category',
+    'SkillCategory',
+    'Skill_Level',
+    'Skill Level',
+    'SkillLevel',
+    'Worker_Category',
+    'Worker Category',
+    'WorkerCategory',
+    'Emp_Category',
+    'Employee Category',
+    'EmployeeCategory',
+    'Category_HS_S_SS_US',
+    'Skill',
+  ]);
+  return normalizeFormASkillCategory(raw);
+}
+
 function readMobile(emp) {
   return pickEmployeeValue(emp, [
     'Mobile',
@@ -611,6 +661,8 @@ function bucketValueForEmployee(bucket, emp, helpers = {}) {
       return readDesignation(emp);
     case 'categoryAddress':
       return readCategoryAddress(emp);
+    case 'skillCategory':
+      return readSkillCategory(emp);
     case 'employmentType':
       return readEmployeeTypeFromEmployee(emp);
     case 'mobile':

@@ -1,6 +1,8 @@
 import {
   FORM_XIX_KA_ALL_TABLE_HEADERS,
+  FORM_XIX_KA_OT_NIL,
   FORM_XIX_KA_RATE_DEFAULT,
+  applyFormXIXKarnatakaAutofillFromSite,
   applyFormXIXKarnatakaEmployeeToRow,
   isFormXIXKARateHeader,
   isFormXIXKAUnitsHeader,
@@ -54,5 +56,40 @@ describe('Form XIX Karnataka wage slip', () => {
     expect(String(row['No. of units worked in case of piece rate'] ?? '').trim()).toBe('');
     expect(Number(row['Deductions, any'])).toBe(3464);
     expect(String(row['If Actual wages paid'])).toBe('67928');
+  });
+
+  it('puts NIL under overtime dates and overtime hours/amount columns', () => {
+    const row = applyFormXIXKarnatakaEmployeeToRow(
+      {},
+      { FirstName: 'Test', LastName: 'Worker', EmployeeID: 'VE0712' },
+      FORM_XIX_KA_ALL_TABLE_HEADERS,
+      {
+        payrollRow: {
+          paid_days: 31,
+          overtime_date: '2026-05-12',
+          overtime_hours: 4,
+          overtime: 800,
+          gross_pay: 71392,
+          net_pay: 67928,
+        },
+      }
+    );
+    expect(row['Dates on which overtime worked']).toBe(FORM_XIX_KA_OT_NIL);
+    expect(row['Overtime hours and amount of overtime wages']).toBe(FORM_XIX_KA_OT_NIL);
+  });
+
+  it('writes company name and address into the establishment header field', () => {
+    const next = applyFormXIXKarnatakaAutofillFromSite(
+      {},
+      {
+        contractorText: 'VAYONA ENERGY PRIVATE LIMITED',
+        establishmentText: 'VAYONA ENERGY PRIVATE LIMITED, Company Street, Bengaluru, Karnataka',
+        natureLocationText: 'KA-Bableshwar',
+        principalEmployerText: 'M/s Clean Wind Power Bableshwar Pvt Ltd.',
+      }
+    );
+    expect(next.form_xix_ka_establishment).toBe(
+      'VAYONA ENERGY PRIVATE LIMITED, Company Street, Bengaluru, Karnataka'
+    );
   });
 });

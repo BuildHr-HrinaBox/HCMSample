@@ -57,7 +57,10 @@
       "leave_job_function",
       "leaveapi_function",
       "leavescheduler_job_function",
-      "pendingforms_job_function"
+      "pendingforms_job_function",
+      "chro_job_function",
+      "pending_function",
+      "remaindarfunctiom"
     ],
     "ignore": [],
     "source": "functions"

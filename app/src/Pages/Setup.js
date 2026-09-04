@@ -18,6 +18,8 @@ const FORMMASTER_API = '/server/formmaster_function/records';
 const SITE_API = '/server/sitemanagement_function/sitemanagement';
 const SETUP_API = '/server/setup_function/setup';
 const EMAILS_STORAGE_KEY = 'hcm_setup_form_emails';
+const META_STORAGE_KEY = 'hcm_setup_form_meta';
+const FILTERS_STORAGE_KEY = 'hcm_setup_filters';
 const EMAIL_VALUE_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ROWS_PER_PAGE = 10;
 
@@ -60,8 +62,57 @@ function writeStoredEmails(map) {
   }
 }
 
-function emailStorageKey(state, site, formName) {
-  return `${String(state || '').trim().toLowerCase()}|${String(site || '').trim().toLowerCase()}|${String(formName || '').trim().toLowerCase()}`;
+function readStoredMeta() {
+  try {
+    const raw = localStorage.getItem(META_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeStoredMeta(map) {
+  try {
+    localStorage.setItem(META_STORAGE_KEY, JSON.stringify(map));
+  } catch (_) {
+    /* ignore quota / private mode */
+  }
+}
+
+function persistSetupMaps(emailsMap, metaMap) {
+  writeStoredEmails(emailsMap);
+  writeStoredMeta(metaMap);
+}
+
+function readStoredFilters() {
+  try {
+    const raw = sessionStorage.getItem(FILTERS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeStoredFilters(filters) {
+  try {
+    sessionStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
+  } catch (_) {
+    /* ignore quota / private mode */
+  }
+}
+
+function emailStorageKey(state, site, formName, industryType = '', act = '', description = '') {
+  return [
+    String(state || '').trim().toLowerCase(),
+    String(site || '').trim().toLowerCase(),
+    String(formName || '').trim().toLowerCase(),
+    String(industryType || '').trim().toLowerCase(),
+    String(act || '').trim().toLowerCase(),
+    String(description || '').trim().toLowerCase(),
+  ].join('|');
 }
 
 function uniqueSorted(values) {
@@ -90,10 +141,20 @@ function parseStoredEmails(value) {
 function mapSetupRowsToEmails(rows) {
   const map = {};
   (Array.isArray(rows) ? rows : []).forEach((row) => {
-    const formName = row?.formName || row?.FormName;
+    const formName = row?.formName || row?.FormName || row?.Name;
     if (!formName) return;
-    const key = emailStorageKey(row.state || row.State, row.site || row.Site, formName);
-    map[key] = parseStoredEmails(row.email ?? row.Email);
+    const industryType = row.industryType ?? row.IndustryType ?? '';
+    const act = row.act ?? row.Act ?? '';
+    const description = row.description ?? row.Description ?? '';
+    const key = emailStorageKey(
+      row.state || row.State,
+      row.site || row.Site,
+      formName,
+      industryType,
+      act,
+      description
+    );
+    map[key] = parseStoredEmails(row.email ?? row.Email ?? row.emails);
   });
   return map;
 }
@@ -101,22 +162,90 @@ function mapSetupRowsToEmails(rows) {
 function mapSetupRowsToMeta(rows) {
   const map = {};
   (Array.isArray(rows) ? rows : []).forEach((row) => {
-    const formName = row?.formName || row?.FormName;
+    const formName = String(row?.formName || row?.FormName || row?.Name || '').trim();
     if (!formName) return;
-    const key = emailStorageKey(row.state || row.State, row.site || row.Site, formName);
+    const industryType = String(row.industryType ?? row.IndustryType ?? '').trim();
+    const act = String(row.act ?? row.Act ?? '').trim();
+    const description = String(row.description ?? row.Description ?? '').trim();
+    const key = emailStorageKey(
+      row.state || row.State,
+      row.site || row.Site,
+      formName,
+      industryType,
+      act,
+      description
+    );
     map[key] = {
-      act: String(row.act ?? row.Act ?? '').trim(),
-      description: String(row.description ?? row.Description ?? '').trim(),
-      role: String(row.role ?? row.Role ?? '').trim(),
+      formName,
+      act,
+      description,
+      role: String(row.role ?? row.Role ?? row.roleName ?? row.RoleName ?? '').trim(),
       state: String(row.state ?? row.State ?? '').trim(),
       site: String(row.site ?? row.Site ?? '').trim(),
+      industryType,
+      emails: parseStoredEmails(row.email ?? row.Email ?? row.emails),
     };
   });
   return map;
 }
 
+function emailsForMetaKey(emailsMap, key, meta) {
+  if (Object.prototype.hasOwnProperty.call(emailsMap || {}, key)) {
+    const exact = parseStoredEmails(emailsMap[key]);
+    if (exact.length) return exact;
+  }
+  const fromMeta = parseStoredEmails(meta?.emails);
+  if (fromMeta.length) return fromMeta;
+
+  const formKey = String(meta?.formName || '').trim().toLowerCase();
+  const stateKey = normalizeStateCompareKey(meta?.state);
+  const bucket = [];
+  Object.entries(emailsMap || {}).forEach(([storedKey, value]) => {
+    const parts = String(storedKey).split('|');
+    if (parts.length < 3) return;
+    const [keyState, keySite, keyForm] = parts;
+    if (formKey && keyForm !== formKey) return;
+    if (stateKey && normalizeStateCompareKey(keyState) !== stateKey) return;
+    if (siteKey && !sitesMatchFilter(keySite, meta?.site)) return;
+    parseStoredEmails(value).forEach((email) => bucket.push(email));
+  });
+  return uniqueSorted(bucket);
+}
+
+function mergeEmailMaps(base, incoming) {
+  const next = { ...(base || {}) };
+  Object.entries(incoming || {}).forEach(([key, value]) => {
+    const incomingEmails = parseStoredEmails(value);
+    if (incomingEmails.length || !Object.prototype.hasOwnProperty.call(next, key)) {
+      next[key] = incomingEmails;
+    }
+  });
+  return next;
+}
+
+function mergeMetaMaps(base, incoming) {
+  const next = { ...(base || {}) };
+  Object.entries(incoming || {}).forEach(([key, value]) => {
+    const prev = next[key] && typeof next[key] === 'object' ? next[key] : {};
+    const incomingEmails = parseStoredEmails(value?.emails);
+    const prevEmails = parseStoredEmails(prev.emails);
+    next[key] = {
+      ...prev,
+      ...value,
+      formName: String(value?.formName || prev.formName || '').trim(),
+      role: String(value?.role || prev.role || '').trim(),
+      industryType: String(value?.industryType || prev.industryType || '').trim(),
+      act: String(value?.act || prev.act || '').trim(),
+      description: String(value?.description || prev.description || '').trim(),
+      state: String(value?.state || prev.state || '').trim(),
+      site: String(value?.site || prev.site || '').trim(),
+      emails: incomingEmails.length ? incomingEmails : prevEmails,
+    };
+  });
+  return next;
+}
+
 function buildSavedAccessRows(setupMeta, emailsMap, formRecords, { state = '', site = '' } = {}) {
-  const scopeState = normalizeStateCompareKey(state);
   const siteFilter = String(site || '').trim();
   const formNameLookup = new Map();
   (Array.isArray(formRecords) ? formRecords : []).forEach((row) => {
@@ -128,31 +257,45 @@ function buildSavedAccessRows(setupMeta, emailsMap, formRecords, { state = '', s
   const seen = new Set();
 
   Object.entries(setupMeta || {}).forEach(([key, meta]) => {
-    const roleName = String(meta?.role || '').trim();
-    if (!roleName) return;
-
     const parts = key.split('|');
-    if (parts.length < 3) return;
     const rowState = String(meta?.state || parts[0] || '').trim();
     const rowSite = String(meta?.site || parts[1] || '').trim();
-    const keyFormLower = parts[2];
+    const keyFormLower = String(meta?.formName || parts[2] || '')
+      .trim()
+      .toLowerCase();
 
-    if (state && normalizeStateCompareKey(rowState) !== scopeState) return;
+    if (state) {
+      const stateOk =
+        checklistStateMatchesSiteState(rowState, state) ||
+        normalizeStateCompareKey(rowState) === normalizeStateCompareKey(state);
+      if (!stateOk) return;
+    }
     if (siteFilter && !sitesMatchFilter(rowSite, siteFilter)) return;
     if (seen.has(key)) return;
     seen.add(key);
 
-    const formName = formNameLookup.get(keyFormLower) || keyFormLower;
-    const assignedEmails = Object.prototype.hasOwnProperty.call(emailsMap || {}, key)
-      ? parseStoredEmails(emailsMap[key])
-      : [];
+    const formName =
+      String(meta?.formName || '').trim() ||
+      formNameLookup.get(keyFormLower) ||
+      keyFormLower;
+    if (!formName) return;
+
+    const assignedEmails = emailsForMetaKey(emailsMap, key, {
+      ...meta,
+      formName,
+      state: rowState,
+      site: rowSite,
+    });
+    const roleName = String(meta?.role || '').trim();
+    if (!roleName && assignedEmails.length === 0) return;
 
     rows.push({
       id: key,
       formName,
-      roleName,
+      roleName: roleName || '—',
       act: String(meta?.act || '').trim(),
       description: String(meta?.description || '').trim(),
+      industryType: String(meta?.industryType || '').trim(),
       rowState,
       rowSite,
       emails: assignedEmails,
@@ -161,8 +304,29 @@ function buildSavedAccessRows(setupMeta, emailsMap, formRecords, { state = '', s
     });
   });
 
-  rows.sort((a, b) => a.formName.localeCompare(b.formName));
-  return rows;
+  rows.sort((a, b) => {
+    const score = (row) => (row.industryType ? 2 : 0) + (row.emails.length ? 1 : 0);
+    return score(b) - score(a) || a.formName.localeCompare(b.formName);
+  });
+  const collapsed = [];
+  const seenDisplay = new Set();
+  rows.forEach((row) => {
+    const displayKey = [
+      row.rowState,
+      row.rowSite,
+      row.formName,
+      row.act,
+      row.description,
+      row.roleName,
+    ]
+      .map((value) => String(value || '').trim().toLowerCase())
+      .join('|');
+    if (seenDisplay.has(displayKey)) return;
+    seenDisplay.add(displayKey);
+    collapsed.push(row);
+  });
+  collapsed.sort((a, b) => a.formName.localeCompare(b.formName));
+  return collapsed;
 }
 
 function sitesMatchFilter(keySite, selectedSite) {
@@ -232,12 +396,20 @@ function findSetupMetaForForm(metaMap, formName, { state = '', site = '' } = {})
 }
 
 function exportAccessRowsCsv(rows) {
-  const headers = ['Role Name', 'Act', 'Description', 'Form Name', 'Email ID', 'Status'];
+  const headers = ['Role Name', 'Act', 'Industry Type', 'Description', 'Form Name', 'Email ID', 'Status'];
   const escape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
   const lines = [headers.map(escape).join(',')];
   rows.forEach((row) => {
     lines.push(
-      [row.roleName, row.act, row.description, row.formName, row.emailDisplay, row.status]
+      [
+        row.roleName,
+        row.act,
+        row.industryType,
+        row.description,
+        row.formName,
+        row.emailDisplay,
+        row.status,
+      ]
         .map(escape)
         .join(',')
     );
@@ -426,11 +598,14 @@ export default function Setup({ userEmail = '' }) {
   const [formRecords, setFormRecords] = useState([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
-  const [selectedState, setSelectedState] = useState('');
-  const [selectedSite, setSelectedSite] = useState('');
-  const [statusFilter, setStatusFilter] = useState('Active');
+  const [selectedState, setSelectedState] = useState(() => readStoredFilters()?.state || '');
+  const [selectedSite, setSelectedSite] = useState(() => readStoredFilters()?.site || '');
+  const [selectedIndustryType, setSelectedIndustryType] = useState(
+    () => readStoredFilters()?.industryType || ''
+  );
+  const [statusFilter, setStatusFilter] = useState(() => readStoredFilters()?.status || 'All');
   const [emails, setEmails] = useState(() => readStoredEmails());
-  const [setupMeta, setSetupMeta] = useState({});
+  const [setupMeta, setSetupMeta] = useState(() => readStoredMeta());
   const [saving, setSaving] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [showCreateRole, setShowCreateRole] = useState(false);
@@ -445,9 +620,9 @@ export default function Setup({ userEmail = '' }) {
   const [createRoleMessage, setCreateRoleMessage] = useState('');
   const [createRoleSaving, setCreateRoleSaving] = useState(false);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async ({ preserveMessage = false } = {}) => {
     setLoading(true);
-    setMessage('');
+    if (!preserveMessage) setMessage('');
     try {
       let cachedSites = [];
       try {
@@ -484,15 +659,45 @@ export default function Setup({ userEmail = '' }) {
       if (setupData?.status === 'success' && Array.isArray(setupData.data)) {
         const fromBackend = mapSetupRowsToEmails(setupData.data);
         const metaFromBackend = mapSetupRowsToMeta(setupData.data);
+        const hasMappedMeta = Object.keys(metaFromBackend).length > 0;
+        const hasMappedEmails = Object.keys(fromBackend).length > 0;
+
         setEmails((prev) => {
-          const next = { ...prev, ...fromBackend };
-          writeStoredEmails(next);
-          return next;
+          const merged =
+            hasMappedEmails || hasMappedMeta
+              ? mergeEmailMaps(prev, fromBackend)
+              : Object.keys(prev).length
+                ? prev
+                : readStoredEmails();
+          writeStoredEmails(merged);
+          return merged;
         });
-        setSetupMeta((prev) => ({ ...prev, ...metaFromBackend }));
+        setSetupMeta((prev) => {
+          const merged =
+            hasMappedMeta
+              ? mergeMetaMaps(prev, metaFromBackend)
+              : Object.keys(prev).length
+                ? prev
+                : readStoredMeta();
+          writeStoredMeta(merged);
+          return merged;
+        });
+        return setupData.data;
       }
+      setEmails((prev) => {
+        const cached = Object.keys(prev).length ? prev : readStoredEmails();
+        writeStoredEmails(cached);
+        return cached;
+      });
+      setSetupMeta((prev) => {
+        const cached = Object.keys(prev).length ? prev : readStoredMeta();
+        writeStoredMeta(cached);
+        return cached;
+      });
+      return [];
     } catch (err) {
-      setMessage(err?.message || 'Failed to load Setup data.');
+      if (!preserveMessage) setMessage(err?.message || 'Failed to load Setup data.');
+      return [];
     } finally {
       setLoading(false);
     }
@@ -501,6 +706,15 @@ export default function Setup({ userEmail = '' }) {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    writeStoredFilters({
+      status: statusFilter,
+      industryType: selectedIndustryType,
+      state: selectedState,
+      site: selectedSite,
+    });
+  }, [statusFilter, selectedIndustryType, selectedState, selectedSite]);
 
   const stateOptions = useMemo(
     () => uniqueSorted(sites.map(siteStateFromRecord)),
@@ -518,14 +732,28 @@ export default function Setup({ userEmail = '' }) {
   );
 
   useEffect(() => {
-    if (selectedState && !stateOptions.includes(selectedState)) {
+    if (!selectedState || stateOptions.length === 0) return;
+    const stillValid = stateOptions.some(
+      (option) =>
+        option === selectedState ||
+        normalizeStateCompareKey(option) === normalizeStateCompareKey(selectedState) ||
+        checklistStateMatchesSiteState(option, selectedState)
+    );
+    if (!stillValid) {
       setSelectedState('');
       setSelectedSite('');
     }
   }, [selectedState, stateOptions]);
 
   useEffect(() => {
-    if (selectedSite && !siteOptions.includes(selectedSite)) {
+    if (!selectedSite || siteOptions.length === 0) return;
+    const stillValid = siteOptions.some(
+      (option) =>
+        option === selectedSite ||
+        option.toLowerCase() === selectedSite.toLowerCase() ||
+        sitesMatchFilter(option, selectedSite)
+    );
+    if (!stillValid) {
       setSelectedSite('');
     }
   }, [selectedSite, siteOptions]);
@@ -544,8 +772,7 @@ export default function Setup({ userEmail = '' }) {
     const bucket = [];
     const admin = isValidEmail(adminEmail) ? adminEmail : '';
     sitesForScope.forEach((site) => {
-      const siteEmail = siteInchargeEmail(site);
-      if (isValidEmail(siteEmail)) bucket.push(siteEmail);
+      parseStoredEmails(siteInchargeEmail(site)).forEach((email) => bucket.push(email));
     });
     const merged = uniqueSorted(bucket);
     if (!admin) return merged;
@@ -565,8 +792,7 @@ export default function Setup({ userEmail = '' }) {
       parseStoredEmails(value).forEach((email) => bucket.push(email));
     });
     sitesForScope.forEach((site) => {
-      const siteEmail = siteInchargeEmail(site);
-      if (isValidEmail(siteEmail)) bucket.push(siteEmail);
+      parseStoredEmails(siteInchargeEmail(site)).forEach((email) => bucket.push(email));
     });
     const merged = uniqueSorted(bucket);
     const admin = isValidEmail(adminEmail) ? adminEmail : '';
@@ -589,8 +815,35 @@ export default function Setup({ userEmail = '' }) {
     if (statusFilter !== 'All') {
       rows = rows.filter((row) => row.status === statusFilter);
     }
+    if (selectedIndustryType) {
+      const wantCategory = industryLabelToActCategory(selectedIndustryType);
+      const wantLabel = String(selectedIndustryType).trim().toLowerCase();
+      rows = rows.filter((row) => {
+        const haveLabel = String(row.industryType || '').trim().toLowerCase();
+        if (haveLabel) {
+          if (haveLabel === wantLabel) return true;
+          const haveCategory = industryLabelToActCategory(row.industryType);
+          if (wantCategory && haveCategory && haveCategory === wantCategory) return true;
+        }
+        if (wantCategory) {
+          const actCategory = getActCategoryFromActSector(row.act, '');
+          if (actCategory && actCategory !== 'other' && actCategory === wantCategory) return true;
+          const siteRec = sites.find((site) =>
+            sitesMatchFilter(siteNameFromSiteRecord(site), row.rowSite)
+          );
+          if (siteRec) {
+            const siteCategory = industryLabelToActCategory(siteIndustry(siteRec));
+            if (siteCategory && siteCategory === wantCategory) return true;
+          }
+          // IndustryType was not persisted on older rows — keep them visible
+          // when state/site already match the selected scope.
+          if (!haveLabel) return true;
+        }
+        return false;
+      });
+    }
     return rows;
-  }, [accessRows, statusFilter]);
+  }, [accessRows, statusFilter, selectedIndustryType, sites]);
 
   const totalRows = displayedRows.length;
   const totalPages = Math.max(1, Math.ceil(totalRows / ROWS_PER_PAGE));
@@ -610,10 +863,20 @@ export default function Setup({ userEmail = '' }) {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [statusFilter, selectedState, selectedSite]);
+  }, [statusFilter, selectedState, selectedSite, selectedIndustryType]);
 
-  const handleEmailChange = (formName, nextEmails, { state = selectedState, site = selectedSite } = {}) => {
-    const key = emailStorageKey(state, site, formName);
+  const handleEmailChange = (
+    formName,
+    nextEmails,
+    {
+      state = selectedState,
+      site = selectedSite,
+      industryType = '',
+      act = '',
+      description = '',
+    } = {}
+  ) => {
+    const key = emailStorageKey(state, site, formName, industryType, act, description);
     setEmails((prev) => {
       const next = { ...prev, [key]: nextEmails };
       writeStoredEmails(next);
@@ -624,35 +887,45 @@ export default function Setup({ userEmail = '' }) {
   const handleRoleChange = (
     formName,
     role,
-    { state = selectedState, site = selectedSite, act = '', description = '' } = {}
+    {
+      state = selectedState,
+      site = selectedSite,
+      act = '',
+      description = '',
+      industryType = '',
+    } = {}
   ) => {
-    const key = emailStorageKey(state, site, formName);
+    const key = emailStorageKey(state, site, formName, industryType, act, description);
     setSetupMeta((prev) => ({
       ...prev,
       [key]: {
         ...(prev[key] || {}),
+        formName: String(formName || prev[key]?.formName || '').trim(),
         role: String(role || '').trim(),
         state: String(state || prev[key]?.state || '').trim(),
         site: String(site || prev[key]?.site || '').trim(),
         act: String(act || prev[key]?.act || '').trim(),
         description: String(description || prev[key]?.description || '').trim(),
+        industryType: String(industryType || prev[key]?.industryType || '').trim(),
       },
     }));
   };
 
   const handleReset = () => {
-    setStatusFilter('Active');
+    setStatusFilter('All');
+    setSelectedIndustryType('');
     setSelectedState('');
     setSelectedSite('');
     setCurrentPage(1);
     setMessage('');
+    writeStoredFilters({ status: 'All', industryType: '', state: '', site: '' });
   };
 
   const openCreateRole = () => {
     setCreateRoleForm({
       roleName: '',
       status: 'Active',
-      industryType: '',
+      industryType: selectedIndustryType || '',
       state: selectedState || '',
       site: selectedSite || '',
       formUsers: {},
@@ -719,8 +992,7 @@ export default function Setup({ userEmail = '' }) {
     const bucket = [];
     const admin = isValidEmail(adminEmail) ? adminEmail : '';
     createRoleSitesForScope.forEach((site) => {
-      const siteEmail = siteInchargeEmail(site);
-      if (isValidEmail(siteEmail)) bucket.push(siteEmail);
+      parseStoredEmails(siteInchargeEmail(site)).forEach((email) => bucket.push(email));
     });
     const merged = uniqueSorted(bucket);
     if (!admin) return merged;
@@ -740,18 +1012,26 @@ export default function Setup({ userEmail = '' }) {
     rows.forEach((row) => {
       const formName = String(row.formName || row.FormName || '').trim();
       if (!formName) return;
+      const act = String(row.act || row.Act || '').trim();
+      const description = String(row.description || row.Description || '').trim();
       if (wantCategory) {
         const rowCategory = getActCategoryFromActSector(row.act || row.Act, row.sector || row.Sector);
         if (rowCategory && rowCategory !== wantCategory) return;
       }
-      const key = formName.toLowerCase();
+      const key = [
+        formName.toLowerCase(),
+        act.toLowerCase(),
+        description.toLowerCase(),
+        String(createRoleForm.state || '').trim().toLowerCase(),
+        String(createRoleForm.industryType || '').trim().toLowerCase(),
+      ].join('|');
       if (seen.has(key)) return;
       seen.add(key);
       unique.push({
         id: row.id || key,
         formName,
-        act: String(row.act || row.Act || '').trim(),
-        description: String(row.description || row.Description || '').trim(),
+        act,
+        description,
       });
     });
     unique.sort((a, b) => a.formName.localeCompare(b.formName));
@@ -778,18 +1058,34 @@ export default function Setup({ userEmail = '' }) {
     setCreateRoleMessage('');
   };
 
-  const updateCreateRoleFormUsers = (formName, nextEmails) => {
+  const updateCreateRoleFormUsers = (formName, nextEmails, formMeta = {}) => {
+    const userKey = [
+      String(formName || '').trim().toLowerCase(),
+      String(formMeta.act || '').trim().toLowerCase(),
+      String(formMeta.description || '').trim().toLowerCase(),
+    ].join('|');
     setCreateRoleForm((prev) => ({
       ...prev,
       formUsers: {
         ...prev.formUsers,
-        [formName]: nextEmails,
+        [userKey]: nextEmails,
       },
     }));
   };
 
-  const getCreateRoleFormUserValue = (formName) => {
+  const getCreateRoleFormUserValue = (form) => {
+    const formName = typeof form === 'string' ? form : form?.formName;
+    const act = typeof form === 'string' ? '' : form?.act || '';
+    const description = typeof form === 'string' ? '' : form?.description || '';
     if (createRoleForm.status !== 'Active') return [];
+    const userKey = [
+      String(formName || '').trim().toLowerCase(),
+      String(act || '').trim().toLowerCase(),
+      String(description || '').trim().toLowerCase(),
+    ].join('|');
+    if (Object.prototype.hasOwnProperty.call(createRoleForm.formUsers, userKey)) {
+      return parseStoredEmails(createRoleForm.formUsers[userKey]);
+    }
     if (Object.prototype.hasOwnProperty.call(createRoleForm.formUsers, formName)) {
       return parseStoredEmails(createRoleForm.formUsers[formName]);
     }
@@ -822,6 +1118,7 @@ export default function Setup({ userEmail = '' }) {
       return;
     }
 
+    const industryType = String(createRoleForm.industryType || '').trim();
     const isActive = createRoleForm.status === 'Active';
     const rows = createRoleForms
       .map((form) => ({
@@ -829,7 +1126,8 @@ export default function Setup({ userEmail = '' }) {
         act: form.act,
         description: form.description,
         role: roleName,
-        emails: isActive ? getCreateRoleFormUserValue(form.formName) : [],
+        industryType,
+        emails: isActive ? getCreateRoleFormUserValue(form) : [],
       }))
       .filter((row) => row.emails.length > 0);
 
@@ -841,19 +1139,29 @@ export default function Setup({ userEmail = '' }) {
     const next = { ...emails };
     const nextMeta = { ...setupMeta };
     rows.forEach((row) => {
-      const key = emailStorageKey(state, site, row.formName);
+      const key = emailStorageKey(
+        state,
+        site,
+        row.formName,
+        row.industryType,
+        row.act,
+        row.description
+      );
       next[key] = row.emails;
       nextMeta[key] = {
+        formName: row.formName,
         act: row.act,
         description: row.description,
         role: row.role,
+        industryType: row.industryType,
         state,
         site,
+        emails: row.emails,
       };
     });
     setEmails(next);
     setSetupMeta(nextMeta);
-    writeStoredEmails(next);
+    persistSetupMaps(next, nextMeta);
 
     setCreateRoleSaving(true);
     setCreateRoleMessage('');
@@ -865,6 +1173,7 @@ export default function Setup({ userEmail = '' }) {
         body: JSON.stringify({
           state,
           site,
+          industryType,
           rows,
         }),
       });
@@ -872,10 +1181,58 @@ export default function Setup({ userEmail = '' }) {
       if (!res.ok || data?.status !== 'success') {
         throw new Error(data?.message || 'Failed to create role.');
       }
+
+      const savedRows = Array.isArray(data.data) ? data.data : [];
+      if (savedRows.length) {
+        const enriched = savedRows.map((row) => ({
+          ...row,
+          formName: row.formName || row.FormName,
+          role: row.role || roleName,
+          industryType: row.industryType || industryType,
+          state: row.state || state,
+          site: row.site || site,
+          act: row.act || '',
+          description: row.description || '',
+          email: row.email || (Array.isArray(row.emails) ? row.emails.join(', ') : ''),
+        }));
+        const savedMeta = mapSetupRowsToMeta(enriched);
+        const savedEmails = mapSetupRowsToEmails(enriched);
+        setSetupMeta((prev) => {
+          const merged = mergeMetaMaps({ ...prev, ...nextMeta }, savedMeta);
+          writeStoredMeta(merged);
+          return merged;
+        });
+        setEmails((prev) => {
+          const merged = mergeEmailMaps({ ...prev, ...next }, savedEmails);
+          writeStoredEmails(merged);
+          return merged;
+        });
+      }
+
+      const successMessage = data.message || `Role "${roleName}" created successfully.`;
+      setStatusFilter('All');
+      setSelectedIndustryType(industryType);
       setSelectedState(state);
       setSelectedSite(site);
-      setMessage(data.message || `Role "${roleName}" created successfully.`);
+      setMessage(successMessage);
       closeCreateRole();
+      await loadData({ preserveMessage: true });
+      // Keep optimistic create data if GET is empty / lagging; backend rows win on key conflict
+      setSetupMeta((prev) => {
+        const merged = mergeMetaMaps(nextMeta, prev);
+        writeStoredMeta(merged);
+        return merged;
+      });
+      setEmails((prev) => {
+        const merged = mergeEmailMaps(next, prev);
+        writeStoredEmails(merged);
+        return merged;
+      });
+      setSelectedIndustryType(industryType);
+      setSelectedState(state);
+      setSelectedSite(site);
+      setStatusFilter('All');
+      setMessage(successMessage);
     } catch (err) {
       setCreateRoleMessage(err?.message || 'Failed to create role.');
     } finally {
@@ -903,6 +1260,7 @@ export default function Setup({ userEmail = '' }) {
         act: row.act,
         description: row.description,
         role: row.roleName,
+        industryType: row.industryType || '',
         emails: row.emails,
       });
     });
@@ -917,19 +1275,29 @@ export default function Setup({ userEmail = '' }) {
     accessRows.forEach((row) => {
       const state = row.rowState || selectedState;
       const site = row.rowSite || selectedSite;
-      const key = emailStorageKey(state, site, row.formName);
+      const key = emailStorageKey(
+        state,
+        site,
+        row.formName,
+        row.industryType,
+        row.act,
+        row.description
+      );
       next[key] = row.emails;
       nextMeta[key] = {
+        formName: row.formName,
         act: row.act,
         description: row.description,
         role: row.roleName,
+        industryType: row.industryType || '',
         state,
         site,
+        emails: row.emails,
       };
     });
     setEmails(next);
     setSetupMeta(nextMeta);
-    writeStoredEmails(next);
+    persistSetupMaps(next, nextMeta);
 
     setSaving(true);
     setMessage('');
@@ -952,7 +1320,10 @@ export default function Setup({ userEmail = '' }) {
         }
         totalSaved += Array.isArray(data.data) ? data.data.length : group.rows.length;
       }
-      setMessage(`Saved ${totalSaved} Setup record(s).`);
+      const successMessage = `Saved ${totalSaved} Setup record(s).`;
+      setMessage(successMessage);
+      await loadData({ preserveMessage: true });
+      setMessage(successMessage);
     } catch (err) {
       setMessage(err?.message || 'Failed to save Setup data.');
     } finally {
@@ -1128,8 +1499,13 @@ export default function Setup({ userEmail = '' }) {
                         <td>
                           <UserChipMultiSelect
                             options={createRoleEmailOptions}
-                            value={getCreateRoleFormUserValue(form.formName)}
-                            onChange={(nextEmails) => updateCreateRoleFormUsers(form.formName, nextEmails)}
+                            value={getCreateRoleFormUserValue(form)}
+                            onChange={(nextEmails) =>
+                              updateCreateRoleFormUsers(form.formName, nextEmails, {
+                                act: form.act,
+                                description: form.description,
+                              })
+                            }
                             placeholder="Select users"
                           />
                         </td>
@@ -1208,6 +1584,25 @@ export default function Setup({ userEmail = '' }) {
           </label>
 
           <label className="setup-rba-field">
+            <span className="setup-rba-field-label">Industry Type</span>
+            <select
+              className="setup-rba-select"
+              value={selectedIndustryType}
+              onChange={(e) => {
+                setSelectedIndustryType(e.target.value);
+                setMessage('');
+              }}
+            >
+              <option value="">All industry types</option>
+              {INDUSTRY_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="setup-rba-field">
             <span className="setup-rba-field-label">State</span>
             <select
               className="setup-rba-select"
@@ -1270,6 +1665,7 @@ export default function Setup({ userEmail = '' }) {
                 <tr>
                   <th>Role Name</th>
                   <th>Act</th>
+                  <th>Industry Type</th>
                   <th>Description</th>
                   <th>Form Name</th>
                   <th>Email ID</th>
@@ -1279,10 +1675,10 @@ export default function Setup({ userEmail = '' }) {
               <tbody>
                 {displayedRows.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="setup-rba-empty">
-                      {selectedState
+                    <td colSpan={7} className="setup-rba-empty">
+                      {selectedState || selectedIndustryType || selectedSite || accessRows.length > 0
                         ? 'No roles found for the selected filters. Click Create Role to add one.'
-                        : 'Select a state to view roles, or click Create Role to add one.'}
+                        : 'No roles yet. Click Create Role to add one, or adjust filters.'}
                     </td>
                   </tr>
                 ) : (
@@ -1299,6 +1695,7 @@ export default function Setup({ userEmail = '' }) {
                               site: row.rowSite,
                               act: row.act,
                               description: row.description,
+                              industryType: row.industryType,
                             })
                           }
                           placeholder="Enter role name"
@@ -1306,6 +1703,7 @@ export default function Setup({ userEmail = '' }) {
                         />
                       </td>
                       <td>{row.act || '—'}</td>
+                      <td>{row.industryType || '—'}</td>
                       <td>{row.description || '—'}</td>
                       <td>{row.formName}</td>
                       <td>
@@ -1316,6 +1714,9 @@ export default function Setup({ userEmail = '' }) {
                             handleEmailChange(row.formName, nextEmails, {
                               state: row.rowState,
                               site: row.rowSite,
+                              industryType: row.industryType,
+                              act: row.act,
+                              description: row.description,
                             })
                           }
                         />

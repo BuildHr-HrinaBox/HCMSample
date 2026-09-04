@@ -3,6 +3,7 @@ import {
   isFormXMonthOnlyHeaderLabel,
   isFormXYearOnlyHeaderLabel,
   isFormVTamilNaduSkipAutofillHeader,
+  isEstablishmentContractCarriedHeaderLabel,
   resolveHeaderFieldExportValue,
   resolveCompanyRecordForStatutory,
   looksLikeDemoCompanyHeaderValue,
@@ -10,6 +11,7 @@ import {
   buildCompanyNameAndAddress,
   buildCompanyNameWithSiteAddress,
   buildStatutoryEmployerTextFromCompanies,
+  statutoryHeaderLabelMatchKey,
   writeFormUEstablishmentNameAddressToWorksheet,
 } from './statutorySiteCompanyHeaders';
 
@@ -19,6 +21,16 @@ describe('statutory header export helpers', () => {
     const field = { key: 'form_xviii_month_year', label: 'Month/Year' };
 
     expect(resolveHeaderFieldExportValue(headerFormData, field)).toBe('June 2024');
+  });
+
+  it('resolves Form XVI For the Month of from form_xvi_month', () => {
+    const headerFormData = { form_xvi_month: 'August 2026' };
+    expect(
+      resolveHeaderFieldExportValue(headerFormData, {
+        key: 'form_xvi_month',
+        label: 'For the Month of :'
+      })
+    ).toBe('August 2026');
   });
 
   it('resolves separate Form X Month and Year header values', () => {
@@ -37,6 +49,22 @@ describe('statutory header export helpers', () => {
     expect(isFormXMonthOnlyHeaderLabel('Month / Year')).toBe(false);
     expect(isFormXYearOnlyHeaderLabel('Year:')).toBe(true);
     expect(isFormXYearOnlyHeaderLabel('Calendar Year:')).toBe(false);
+  });
+
+  it('matches Form XIII Establishemnt typo to establishment-in-contract key', () => {
+    const typoLabel =
+      'Name and address of Establishemnt in/ under which contract is carried on :';
+    expect(isEstablishmentContractCarriedHeaderLabel(typoLabel)).toBe(true);
+    expect(statutoryHeaderLabelMatchKey(typoLabel)).toBe('statutory_establishment_contract');
+    expect(
+      resolveHeaderFieldExportValue(
+        {
+          form_xiii_establishment_contract_carried:
+            'VAYONA ENERGY PRIVATE LIMITED, Arumbakkam, Chennai',
+        },
+        { key: 'form_xxiii_establishment_contract_carried', label: typoLabel }
+      )
+    ).toBe('VAYONA ENERGY PRIVATE LIMITED, Arumbakkam, Chennai');
   });
 
   it('recognizes Form X gratuity header labels', () => {

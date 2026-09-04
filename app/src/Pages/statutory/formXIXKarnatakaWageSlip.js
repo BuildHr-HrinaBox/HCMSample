@@ -372,7 +372,11 @@ export const FORM_XIX_KA_ALL_TABLE_HEADERS = [
 /** Karnataka Form XIX — fixed text for rate column (not from payroll). */
 export const FORM_XIX_KA_RATE_DEFAULT = 'Monthly Wages';
 
+/** Karnataka Form XIX — OT date / hours columns are always NIL (not attendance or payroll). */
+export const FORM_XIX_KA_OT_NIL = 'NIL';
+
 function resolveKarnatakaExportCellValue(row, header) {
+  if (isFormXIXKAOtNilHeader(header)) return FORM_XIX_KA_OT_NIL;
   const value = getKarnatakaRowValueForHeader(row, header);
   if (value !== '') return value;
   // Units column must stay blank — header text contains "piece rate" and must not inherit Monthly Wages.
@@ -565,6 +569,36 @@ export function isFormXIXKAOvertimeDatesHeader(h) {
 
 export function isFormXIXKAOvertimeAmountHeader(h) {
   return /overtime\s+hours\s+and\s+amount/.test(normHeader(h));
+}
+
+export function isFormXIXKAOtNilHeader(h) {
+  return isFormXIXKAOvertimeDatesHeader(h) || isFormXIXKAOvertimeAmountHeader(h);
+}
+
+export function applyFormXIXKarnatakaOtNilToRow(row, headers, helpers = {}) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const out = row && typeof row === 'object' ? row : {};
+  const nilText = helpers.nilText != null ? String(helpers.nilText) : FORM_XIX_KA_OT_NIL;
+  hdrs.forEach((header) => {
+    if (!isFormXIXKAOtNilHeader(header)) return;
+    setKarnatakaRowValueForHeader(out, header, nilText);
+  });
+  Object.keys(out).forEach((key) => {
+    if (String(key).startsWith('__')) return;
+    if (isFormXIXKAOtNilHeader(key)) out[key] = nilText;
+  });
+  return out;
+}
+
+export function applyFormXIXKarnatakaOtNilToMappedRows(mappedData, headers, helpers = {}) {
+  if (!Array.isArray(mappedData)) return 0;
+  let hits = 0;
+  mappedData.forEach((row) => {
+    if (!row || typeof row !== 'object') return;
+    applyFormXIXKarnatakaOtNilToRow(row, headers, helpers);
+    hits += 1;
+  });
+  return hits;
 }
 
 export function isFormXIXKASkipPeopleAutofillHeader(h) {
@@ -1159,65 +1193,15 @@ const pickKarnatakaOvertimeAmount = (payrollRow) => {
 };
 
 /**
- * Fill Karnataka Form XIX OT columns from attendance (same source as Form XXIII Register of Overtime).
+ * Form XIX Karnataka OT columns are static NIL — never fill attendance dates or hours.
  */
 export function enrichFormXIXKarnatakaAttendanceOvertimeRows(mappedData, employees, headers, helpers = {}) {
-  const {
-    resolveOtRecords = null,
-    getOtHours = null,
-    dateKeyForOt = null,
-    formatOtHours = (n) => String(n ?? ''),
-    sanitizeValue = (v) => String(v ?? '').trim(),
-    overwrite = true,
-    monthCandidates = null,
-  } = helpers;
-  if (
-    !Array.isArray(mappedData) ||
-    mappedData.length === 0 ||
-    typeof resolveOtRecords !== 'function' ||
-    typeof getOtHours !== 'function'
-  ) {
-    return 0;
-  }
-
   const hdrs = mergeFormXIXKarnatakaAutofillHeaders(headers, helpers.parsedFormHeader);
-  const otDatesHdr = hdrs.find(isFormXIXKAOvertimeDatesHeader);
-  const otHoursHdr = hdrs.find(isFormXIXKAOvertimeAmountHeader);
-  if (!otDatesHdr && !otHoursHdr) return 0;
-
-  const canWrite = (current) => {
-    if (overwrite) return true;
-    return !String(current ?? '').trim();
-  };
-
-  let hits = 0;
-  mappedData.forEach((row, rowIndex) => {
-    if (!row || typeof row !== 'object') return;
-    const empItem = employees[rowIndex];
-    const emp = empItem?.Employee || empItem?.employee || empItem;
-    if (isFormXIXKarnatakaBlankMonthEmployee(emp, monthCandidates)) return;
-    const otRecords = resolveOtRecords(emp, row, rowIndex);
-    if (!Array.isArray(otRecords) || otRecords.length === 0) return;
-
-    const totalOtHours = otRecords.reduce(
-      (sum, rec) => sum + (Number(getOtHours(rec)) || 0),
-      0
-    );
-    if (totalOtHours <= 0) return;
-
-    const otDates = formatFormXIXKAOvertimeWorkedDatesList(otRecords, dateKeyForOt);
-    const hoursDisplay = formatOtHours(totalOtHours);
-    const hoursOnly = formatFormXIXKarnatakaOvertimeHoursOnly(hoursDisplay, '');
-
-    if (otDatesHdr && otDates && canWrite(getKarnatakaRowValueForHeader(row, otDatesHdr))) {
-      setKarnatakaRowValueForHeader(row, otDatesHdr, sanitizeValue(otDates));
-    }
-    if (otHoursHdr && hoursOnly && canWrite(getKarnatakaRowValueForHeader(row, otHoursHdr))) {
-      setKarnatakaRowValueForHeader(row, otHoursHdr, sanitizeValue(hoursOnly));
-    }
-    hits += 1;
+  return applyFormXIXKarnatakaOtNilToMappedRows(mappedData, hdrs, {
+    nilText: helpers.sanitizeValue
+      ? helpers.sanitizeValue(FORM_XIX_KA_OT_NIL)
+      : FORM_XIX_KA_OT_NIL,
   });
-  return hits;
 }
 
 /** Payroll table rows for Karnataka wage slip — gross_pay or net_pay; no live Zoho. */
@@ -1441,6 +1425,10 @@ export function applyFormXIXKarnatakaEmployeeToRow(row, emp, headers, helpers = 
     }
     if (isFormXIXKAUnitsHeader(header)) {
       setKarnatakaRowValueForHeader(out, header, '');
+      return;
+    }
+    if (isFormXIXKAOtNilHeader(header)) {
+      setKarnatakaRowValueForHeader(out, header, sanitizeValue(FORM_XIX_KA_OT_NIL));
     }
   });
   if (isFormXIXKarnatakaBlankDaysWorkedEmployee(emp)) {
@@ -1448,8 +1436,7 @@ export function applyFormXIXKarnatakaEmployeeToRow(row, emp, headers, helpers = 
   } else {
     setSemantic(isFormXIXKADaysWorkedHeader, payroll.daysWorked);
   }
-  setSemantic(isFormXIXKAOvertimeDatesHeader, payroll.overtimeDates);
-  setSemantic(isFormXIXKAOvertimeAmountHeader, payroll.overtimeHoursAndAmount);
+  applyFormXIXKarnatakaOtNilToRow(out, headerList, { nilText: sanitizeValue(FORM_XIX_KA_OT_NIL) });
   if (isFormXIXKarnatakaBlankFooterWageEmployee(emp)) {
     clearFormXIXKarnatakaSemanticFieldsOnRow(
       out,
@@ -1469,6 +1456,7 @@ export function applyFormXIXKarnatakaEmployeeToRow(row, emp, headers, helpers = 
     if (String(key).startsWith('__')) return;
     if (isFormXIXKARateHeader(key)) out[key] = sanitizeValue(FORM_XIX_KA_RATE_DEFAULT);
     if (isFormXIXKAUnitsHeader(key)) out[key] = '';
+    if (isFormXIXKAOtNilHeader(key)) out[key] = sanitizeValue(FORM_XIX_KA_OT_NIL);
   });
   syncFormXIXKarnatakaDeductionsFromGrossNet(out, headerList);
   out.__employeeLookupName = sanitizeValue(formatWorkmanNameAndGuardian(emp).split(/\r?\n/)[0]);
@@ -1495,20 +1483,26 @@ export function enrichFormXIXKarnatakaStaticFieldRows(mappedData, headers) {
   if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
   const hdrs = resolveFormXIXKarnatakaWageTableHeaders(headers);
   const rateHdrs = hdrs.filter(isFormXIXKARateHeader);
-  if (rateHdrs.length === 0) return 0;
+  const otNilHdrs = hdrs.filter(isFormXIXKAOtNilHeader);
+  if (rateHdrs.length === 0 && otNilHdrs.length === 0) return 0;
   let hits = 0;
   mappedData.forEach((row) => {
     if (!row || typeof row !== 'object') return;
     const rateKeys = new Set(rateHdrs);
+    const otKeys = new Set(otNilHdrs);
     Object.keys(row).forEach((key) => {
       if (String(key).startsWith('__')) return;
       if (isFormXIXKARateHeader(key)) rateKeys.add(key);
       if (isFormXIXKAUnitsHeader(key)) row[key] = '';
+      if (isFormXIXKAOtNilHeader(key)) otKeys.add(key);
     });
     rateKeys.forEach((header) => {
       row[header] = FORM_XIX_KA_RATE_DEFAULT;
     });
-    if (rateKeys.size > 0) hits += 1;
+    otKeys.forEach((header) => {
+      row[header] = FORM_XIX_KA_OT_NIL;
+    });
+    if (rateKeys.size > 0 || otKeys.size > 0) hits += 1;
   });
   return hits;
 }
@@ -1544,14 +1538,8 @@ export function enrichFormXIXKarnatakaPayrollRows(mappedData, employees, headers
         setKarnatakaRowValueForHeader(merged, header, prev);
         return;
       }
-      if (
-        prev !== '' &&
-        next === '' &&
-        (isFormXIXKAOvertimeDatesHeader(header) || isFormXIXKAOvertimeAmountHeader(header))
-      ) {
-        setKarnatakaRowValueForHeader(merged, header, prev);
-      }
     });
+    applyFormXIXKarnatakaOtNilToRow(merged, hdrs);
     Object.assign(row, merged);
     const payrollFields = applyFormXIXKarnatakaMonthDefaultPayroll(
       payrollRow && !payrollRow.fetch_error
@@ -1588,9 +1576,11 @@ export function overlayFormXIXKarnatakaUserEditsOntoRows(mappedRows, tableRows, 
     }
     const merged = { ...row };
     hdrs.forEach((header) => {
+      if (isFormXIXKAOtNilHeader(header)) return;
       const value = getKarnatakaRowValueForHeader(saved, header);
       if (value !== '') merged[header] = saved[header] ?? value;
     });
+    applyFormXIXKarnatakaOtNilToRow(merged, hdrs);
     return merged;
   });
 }

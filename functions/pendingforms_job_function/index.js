@@ -1,7 +1,7 @@
 'use strict';
 
 const catalystSDK = require('zcatalyst-sdk-node');
-const { sendPendingFormsDigest } = require('./pendingFormsMailer');
+const { sendApprovedSitesReportToChro } = require('./approvedSitesMailer');
 
 function readCronParam(cronDetails, name) {
   try {
@@ -30,11 +30,13 @@ function isTruthyParam(value) {
 }
 
 /**
- * Monthly cron (schedule in Catalyst Console for day 20, Asia/Kolkata).
- * Emails each Site Management In-Charge the pending statutory forms for their site.
+ * Monthly cron — schedule this job daily in Catalyst Console (Asia/Kolkata).
+ * - 28th: emails CHRO Notification the Approved Sites Report
+ *
+ * Pending forms digest is handled by pending_function using Settings → Pending Notification dates.
  *
  * Cron params:
- *   force=true   send even if today is not the 20th
+ *   force=true   send even if today is not the 28th
  *   dryRun=true  compile only; do not send mail
  *
  * @param {import('./types/cron').CronDetails} cronDetails
@@ -44,30 +46,40 @@ module.exports = async (cronDetails, context) => {
   const force = isTruthyParam(readCronParam(cronDetails, 'force'));
   const dryRun = isTruthyParam(readCronParam(cronDetails, 'dryRun'));
 
-  console.log('pendingforms_job_function: starting site-wise pending forms digest', { force, dryRun });
+  console.log('pendingforms_job_function: starting CHRO approved-sites report', { force, dryRun });
 
   try {
     const catalyst = catalystSDK.initialize(context);
-    const result = await sendPendingFormsDigest(catalyst, {
-      force,
-      dryRun,
-      requireMonthlySendDay: true
-    });
 
-    console.log('pendingforms_job_function: completed', {
-      skipped: result.skipped,
-      reason: result.reason || null,
-      periodLabel: result.periodLabel,
-      sitesConsidered: result.sitesConsidered,
-      emailsSent: result.emailsSent,
-      emailsFailed: result.emailsFailed,
-      sitesSkippedNoEmail: result.sitesSkippedNoEmail,
-      sitesSkippedNoPending: result.sitesSkippedNoPending
-    });
+    let chroResult = null;
+    try {
+      chroResult = await sendApprovedSitesReportToChro(catalyst, {
+        force,
+        dryRun,
+        requireMonthlySendDay: true
+      });
+      console.log('pendingforms_job_function: CHRO approved-sites report', {
+        skipped: chroResult.skipped,
+        reason: chroResult.reason || null,
+        emailsSent: chroResult.emailsSent,
+        emailsFailed: chroResult.emailsFailed,
+        toEmails: chroResult.toEmails || []
+      });
+    } catch (chroErr) {
+      console.error('pendingforms_job_function: CHRO approved-sites report failed', chroErr?.message || chroErr);
+      context.closeWithFailure();
+      return;
+    }
 
-    if (result.skipped) {
-      if (result.reason && /mail sender|from_email|Mail →|MAIL_FROM/i.test(result.reason)) {
-        console.error('pendingforms_job_function: mail configuration missing', result.reason);
+    if (chroResult?.emailsFailed) {
+      console.error('pendingforms_job_function: CHRO approved-sites report send failed');
+      context.closeWithFailure();
+      return;
+    }
+
+    if (chroResult?.skipped) {
+      if (chroResult.reason && /mail sender|from_email|Mail →|MAIL_FROM/i.test(chroResult.reason)) {
+        console.error('pendingforms_job_function: mail configuration missing', chroResult.reason);
         context.closeWithFailure();
         return;
       }
@@ -75,15 +87,12 @@ module.exports = async (cronDetails, context) => {
       return;
     }
 
-    if (result.emailsSent > 0) {
+    if (chroResult && chroResult.emailsSent > 0) {
       context.closeWithSuccess();
       return;
     }
 
-    console.error(
-      'pendingforms_job_function: no emails sent',
-      result.emailsFailed ? 'send failed' : 'no pending forms with In-Charge email'
-    );
+    console.error('pendingforms_job_function: CHRO approved-sites report was not sent', chroResult?.reason || '');
     context.closeWithFailure();
   } catch (err) {
     console.error('pendingforms_job_function error:', err && err.message ? err.message : err);

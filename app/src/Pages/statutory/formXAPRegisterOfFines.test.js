@@ -1,5 +1,6 @@
 import {
   cloneFormXIIIAPWorksheetClean,
+  buildFormXIIIAPWorkbookWithTemplateStyles,
   isFormXIIIRegisterOfWorkmenContext,
   isFormXAPRegisterOfFinesContext,
   blobIndicatesFormIRegisterOfFinesNotFormX,
@@ -7,9 +8,20 @@ import {
   sheetBlobIndicatesFormXLeaveRegister,
   matchesFormXHint,
   FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT,
+  FORM_XXI_AP_FINE_COLUMN_NIL_TEXT,
   isFormXXAPDeductionNilHeader,
   applyFormXXAPDeductionsNilToMappedRows,
+  resolveFormXXAPLeafHeaders,
+  dedupeFormXXAPConcatenatedHeader,
+  normalizeFormXXAPExportHeaders,
+  pickFormXXAPExportHeaders,
+  exportFormXXAPRowValuesByHeaders,
+  reapplyFormXXAPDownloadTableBordersFromWorksheet,
+  isFormXXIAPFineNilHeader,
+  applyFormXXIAPFinesNilToMappedRows,
 } from './formXAPRegisterOfFines';
+import { excelJSCellHasFullBoxBorder } from '../../utils/excelTableBorders';
+import ExcelJS from 'exceljs';
 import { isFormXRajasthanEmploymentCardContext } from './formXIVMPEmploymentCard';
 
 describe('Form X hint vs Form X_RJ Employment Card', () => {
@@ -143,6 +155,90 @@ describe('Form XIII AP clean workbook clone', () => {
     expect(String(worksheet.getCell(5, 9).value || '')).toBe('');
     expect(String(worksheet.getCell(5, 2).value)).toMatch(/VAYONA ENERGY PRIVATE LIMITED/i);
     expect(String(worksheet.getCell(9, 2).value)).toMatch(/AP-Gurvepalli/i);
+    expect(merges).toEqual(expect.arrayContaining(['J5:K5', 'J6:K8', 'J9:K12']));
+    expect(merges).not.toEqual(expect.arrayContaining(['J5:K8']));
+    expect(String(worksheet.getCell(5, 10).value || '')).toMatch(
+      /establishemnt in\/ under which contract is carried on/i
+    );
+    expect(String(worksheet.getCell(5, 10).value || '')).not.toMatch(/VAYONA|Gurvepalli/i);
+  });
+
+  it('copies Principal Employer value below the establishment heading', async () => {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form XIII-Register of Workmen');
+    ws.getCell(3, 1).value = 'FORM - XIII REGISTER OF WORKMEN EMPLOYED BY CONTRACTOR';
+    ws.getCell(4, 1).value =
+      '[Vide Rule 75 Contract Labour (Regulation and Abolition) Central/A.P Rules)';
+    ws.getCell(5, 2).value = 'Name and Address of Contractor. : VAYONA ENERGY PRIVATE LIMITED';
+    ws.getCell(9, 2).value = 'Nature and location of work. : AP-Tadipatri';
+    ws.getCell(5, 9).value = 'Name and address of Establishemnt in/ under which contract is carried on:';
+    ws.getCell(9, 10).value =
+      'Name and address of Principal Employer : Vibrant greentech India PVT LTD (HCL) & Traditional Customers, M/S VIBRANT';
+    ws.getCell(13, 1).value = 'S.No';
+    ws.getCell(13, 2).value = 'Name and Surname of Workmen';
+
+    const { worksheet } = cloneFormXIIIAPWorksheetClean(ws, 'Form XIII-Register of Workmen');
+    expect(String(worksheet.getCell(5, 10).value || '')).toMatch(
+      /establishemnt in\/ under which contract is carried on/i
+    );
+    expect(String(worksheet.getCell(5, 10).value || '')).not.toMatch(/Vibrant/i);
+    expect(String(worksheet.getCell(6, 10).value || '')).toMatch(/Vibrant greentech India PVT LTD \(HCL\)/i);
+    expect(String(worksheet.getCell(6, 10).value || '')).not.toMatch(/Principal Employer/i);
+    expect(String(worksheet.getCell(9, 10).value || '')).toMatch(/Name and address of Principal Employer/i);
+    expect(String(worksheet.getCell(9, 10).value || '')).toMatch(/Vibrant greentech/i);
+    const merges = Array.isArray(worksheet.model?.merges) ? worksheet.model.merges : [];
+    expect(merges).toEqual(expect.arrayContaining(['J6:K8', 'J9:K12']));
+  });
+
+  it('writes headerFormData Principal Employer below the establishment heading on download', async () => {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form XIII-Register of Workmen');
+    ws.getCell(3, 1).value = 'FORM - XIII REGISTER OF WORKMEN EMPLOYED BY CONTRACTOR';
+    ws.getCell(4, 1).value =
+      '[Vide Rule 75 Contract Labour (Regulation and Abolition) Central/A.P Rules)';
+    ws.getCell(5, 2).value = 'Name and Address of Contractor. : VAYONA ENERGY PRIVATE LIMITED';
+    ws.getCell(9, 2).value = 'Nature and location of work. : AP-Tadipatri';
+    ws.getCell(5, 10).value = 'Name and address of Establishemnt in/ under which contract is carried on:';
+    ws.getCell(9, 10).value = 'Name and address of Principal Employer :';
+    ws.getCell(13, 1).value = 'S.No';
+    ws.getCell(13, 2).value = 'Name and Surname of Workmen';
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+    const pe =
+      'Vibrant greentech India PVT LTD (HCL) & Traditional Customers, M/S VIBRANT';
+    const { blob } = await buildFormXIIIAPWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [],
+      headersToUse: ['S.No', 'Name and Surname of Workmen'],
+      parsedHeaderRowIndex: 12,
+      parsedDataStartIndex: 14,
+      parsedFormHeader: {
+        fields: [
+          {
+            key: 'form_xiii_establishment',
+            label: 'Name and address of Establishemnt in/ under which contract is carried on',
+            value: ''
+          },
+          {
+            key: 'statutory_principal_employer',
+            label: 'Name and address of Principal Employer',
+            value: pe
+          }
+        ]
+      },
+      headerFormData: { statutory_principal_employer: pe }
+    });
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const outWs = outWb.worksheets[0];
+    expect(String(outWs.getCell(5, 10).value || '')).toMatch(
+      /establishemnt in\/ under which contract is carried on/i
+    );
+    expect(String(outWs.getCell(5, 10).value || '')).not.toMatch(/Vibrant/i);
+    expect(String(outWs.getCell(6, 10).value || '')).toBe(pe);
+    expect(String(outWs.getCell(9, 10).value || '')).toMatch(/Name and address of Principal Employer/i);
+    expect(String(outWs.getCell(9, 10).value || '')).toMatch(/Vibrant/);
   });
 });
 
@@ -232,6 +328,9 @@ describe('Form XX AP Register of Deductions NIL columns', () => {
     expect(isFormXXAPDeductionNilHeader('No. of Installment')).toBe(true);
     expect(isFormXXAPDeductionNilHeader('First installment')).toBe(true);
     expect(isFormXXAPDeductionNilHeader('Last installment')).toBe(true);
+    // Short child labels under Date of recovery
+    expect(isFormXXAPDeductionNilHeader('First')).toBe(true);
+    expect(isFormXXAPDeductionNilHeader('Last')).toBe(true);
     expect(
       isFormXXAPDeductionNilHeader(
         'Whether work man showed cause against deduction Amount of deduction imposed'
@@ -239,6 +338,8 @@ describe('Form XX AP Register of Deductions NIL columns', () => {
     ).toBe(true);
     expect(isFormXXAPDeductionNilHeader('Name of workmen')).toBe(false);
     expect(isFormXXAPDeductionNilHeader('S.No')).toBe(false);
+    expect(isFormXXAPDeductionNilHeader('First Name')).toBe(false);
+    expect(isFormXXAPDeductionNilHeader('Last Name')).toBe(false);
   });
 
   it('fills blank damage / recovery columns with NIL', () => {
@@ -254,6 +355,41 @@ describe('Form XX AP Register of Deductions NIL columns', () => {
     expect(rows[0]['First instalment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
     expect(rows[0]['Last instalment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
     expect(rows[0]['Remarks']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+  });
+
+  it('puts NIL on short First / Last recovery child headers', () => {
+    const rows = applyFormXXAPDeductionsNilToMappedRows(
+      [{ 'Name of workmen': 'Ravi', First: '01-01-2026', Last: '01-03-2026' }],
+      ['Name of workmen', 'First', 'Last'],
+      undefined,
+      { overwrite: true }
+    );
+    expect(rows[0]['Name of workmen']).toBe('Ravi');
+    expect(rows[0].First).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+    expect(rows[0].Last).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+  });
+
+  it('expands Date of recovery child First/Last into instalment leaf headers', () => {
+    const rows = [
+      [
+        'S.No',
+        'Name of workmen',
+        'Date of recovery',
+        'Date of recovery',
+        'Date of recovery',
+        'Remarks',
+      ],
+      ['', '', 'No. of instalments', 'First', 'Last', ''],
+    ];
+    const labels = resolveFormXXAPLeafHeaders(rows, [], 0, 0, 6);
+    expect(labels).toEqual([
+      'S.No',
+      'Name of workmen',
+      'No. of instalments',
+      'First instalment',
+      'Last instalment',
+      'Remarks',
+    ]);
   });
 
   it('overwrites People-fetched names with NIL on download', () => {
@@ -289,5 +425,164 @@ describe('Form XX AP Register of Deductions NIL columns', () => {
     expect(rows[0]['No. of Installment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
     expect(rows[0]['First installment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
     expect(rows[0]['Last installment']).toBe(FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT);
+  });
+});
+
+describe('Form XX AP Father / Designation export headers', () => {
+  const duplicatedUiHeaders = [
+    'S.No',
+    'Name of Workmen',
+    "Father's/Husband's Name_Father's/Husband's Name",
+    'Nature of employement /Designation_Nature of employement /Designation',
+    'Particulars of Damage or Loss',
+    'Remarks',
+  ];
+
+  const layoutHeaders = [
+    'S.No',
+    'Name of Workmen',
+    "Father's/Husband's Name",
+    'Nature of employment /Designation',
+    'Particulars of Damage or Loss',
+    'Remarks',
+  ];
+
+  it('dedupes concatenated modal headers', () => {
+    expect(
+      dedupeFormXXAPConcatenatedHeader(
+        "Father's/Husband's Name_Father's/Husband's Name"
+      )
+    ).toBe("Father's/Husband's Name");
+    expect(
+      dedupeFormXXAPConcatenatedHeader(
+        'Nature of employement /Designation_Nature of employement /Designation'
+      )
+    ).toBe('Nature of employement /Designation');
+  });
+
+  it('prefers UI headers when Father and Designation are present', () => {
+    const picked = pickFormXXAPExportHeaders(duplicatedUiHeaders, layoutHeaders);
+    expect(picked).toEqual(normalizeFormXXAPExportHeaders(duplicatedUiHeaders));
+    expect(picked.some((h) => /father|husband/i.test(h))).toBe(true);
+    expect(picked.some((h) => /nature\s+of\s+employ|designat/i.test(h))).toBe(true);
+  });
+
+  it('exports Father and Designation from duplicated UI row keys', () => {
+    const row = {
+      'Name of Workmen': 'Pulu Venkata Raman',
+      "Father's/Husband's Name_Father's/Husband's Name": 'pulu nagaiah',
+      'Nature of employement /Designation_Nature of employement /Designation': 'Senior Engineer',
+    };
+    const values = exportFormXXAPRowValuesByHeaders(row, duplicatedUiHeaders);
+    expect(values[1]).toBe('Pulu Venkata Raman');
+    expect(values[2]).toBe('pulu nagaiah');
+    expect(values[3]).toBe('Senior Engineer');
+  });
+});
+
+describe('Form XXI AP Register of Fines NIL columns', () => {
+  const headers = [
+    'S.No',
+    'Name of workmen',
+    'Father/Husband',
+    'Act/Omission for which fine imposed',
+    'Date of Offence',
+    'Whether workman showed cause against fine',
+    "Name of Person in whose presence Employee's explanation was heard",
+    'Wage - period and wages payable',
+    'Amount of fine Imposed',
+    'Date on which fine realised',
+  ];
+
+  it('recognizes fine / offence / wage-period columns for NIL', () => {
+    expect(isFormXXIAPFineNilHeader('Act/Omission for which fine imposed')).toBe(true);
+    expect(isFormXXIAPFineNilHeader('Date of Offence')).toBe(true);
+    expect(isFormXXIAPFineNilHeader('Whether workman showed cause against fine')).toBe(true);
+    expect(
+      isFormXXIAPFineNilHeader(
+        "Name of Person in whose presence Employee's explanation was heard"
+      )
+    ).toBe(true);
+    expect(isFormXXIAPFineNilHeader('Wage - period and wages payable')).toBe(true);
+    expect(isFormXXIAPFineNilHeader('Amount of fine Imposed')).toBe(true);
+    expect(isFormXXIAPFineNilHeader('Date on which fine realised')).toBe(true);
+    expect(isFormXXIAPFineNilHeader('Name of workmen')).toBe(false);
+    expect(isFormXXIAPFineNilHeader('S.No')).toBe(false);
+  });
+
+  it('fills listed Form XXI fine columns with NIL', () => {
+    const rows = applyFormXXIAPFinesNilToMappedRows(
+      [
+        {
+          'Name of workmen': 'Ravi',
+          'Act/Omission for which fine imposed': '',
+          'Wage - period and wages payable': '12500',
+          "Name of Person in whose presence Employee's explanation was heard": 'Karthick',
+        },
+      ],
+      headers,
+      undefined,
+      { overwrite: true }
+    );
+    expect(rows[0]['Name of workmen']).toBe('Ravi');
+    expect(rows[0]['Act/Omission for which fine imposed']).toBe(FORM_XXI_AP_FINE_COLUMN_NIL_TEXT);
+    expect(rows[0]['Date of Offence']).toBe(FORM_XXI_AP_FINE_COLUMN_NIL_TEXT);
+    expect(rows[0]['Whether workman showed cause against fine']).toBe(
+      FORM_XXI_AP_FINE_COLUMN_NIL_TEXT
+    );
+    expect(rows[0]["Name of Person in whose presence Employee's explanation was heard"]).toBe(
+      FORM_XXI_AP_FINE_COLUMN_NIL_TEXT
+    );
+    expect(rows[0]['Wage - period and wages payable']).toBe(FORM_XXI_AP_FINE_COLUMN_NIL_TEXT);
+    expect(rows[0]['Amount of fine Imposed']).toBe(FORM_XXI_AP_FINE_COLUMN_NIL_TEXT);
+    expect(rows[0]['Date on which fine realised']).toBe(FORM_XXI_AP_FINE_COLUMN_NIL_TEXT);
+  });
+});
+
+describe('Form XX AP download table borders', () => {
+  it('applies full box borders on data rows 15–16 like the template model', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form XX');
+    // Rich-text title (previously broke String(cell.value) detection).
+    ws.getCell(2, 1).value = {
+      richText: [
+        { text: 'FORM - XX REGISTER OF DEDUCTIONS FOR DAMAGE OR LOSS' },
+      ],
+    };
+    ws.getCell(13, 1).value = 'S.No';
+    ws.getCell(13, 2).value = 'Name of Workmen';
+    ws.getCell(13, 3).value = "Father's/Husband's Name";
+    ws.getCell(13, 4).value = 'Nature of employment /Designation';
+    ws.getCell(13, 5).value = 'Particulars of Damage or Loss';
+    ws.getCell(13, 6).value = 'Date of Damage or Loss';
+    ws.getCell(13, 7).value = 'Whether workman showed cause against';
+    ws.getCell(13, 8).value = "Name of Person in whose presence Employee's explanation was heard";
+    ws.getCell(13, 9).value = 'Amount of deduction imposed';
+    ws.getCell(13, 10).value = 'Date of recovery';
+    ws.getCell(13, 11).value = 'Date of recovery';
+    ws.getCell(13, 12).value = 'Date of recovery';
+    ws.getCell(13, 13).value = 'Remarks';
+    ws.getCell(14, 10).value = 'No. of instalments';
+    ws.getCell(14, 11).value = 'First instalment';
+    ws.getCell(14, 12).value = 'Last instalment';
+
+    ws.getCell(15, 1).value = 1;
+    ws.getCell(15, 2).value = 'Polu Venkata Ramana';
+    for (let c = 5; c <= 13; c += 1) ws.getCell(15, c).value = 'NIL';
+    ws.getCell(16, 1).value = 2;
+    ws.getCell(16, 2).value = 'Arun Kumar Krishnan';
+    for (let c = 5; c <= 13; c += 1) ws.getCell(16, c).value = 'NIL';
+
+    reapplyFormXXAPDownloadTableBordersFromWorksheet(ws);
+
+    for (const row of [15, 16]) {
+      for (let c = 1; c <= 13; c += 1) {
+        expect(excelJSCellHasFullBoxBorder(ws.getCell(row, c))).toBe(true);
+      }
+      expect(ws.getCell(row, 1).alignment?.horizontal).toBe('center');
+      expect(ws.getCell(row, 2).alignment?.horizontal).toBe('left');
+      expect(ws.getCell(row, 5).alignment?.horizontal).toBe('center');
+      expect(ws.getCell(row, 5).alignment?.vertical).toBe('middle');
+    }
   });
 });

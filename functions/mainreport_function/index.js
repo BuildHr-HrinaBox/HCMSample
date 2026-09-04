@@ -148,6 +148,16 @@ function getActCategoryFromIndustryLabel(industry) {
   return getActCategoryFromStatutoryRow({ Sector: industry || '' });
 }
 
+function reportRowMatchesSiteRowIndustry(row, siteRow, siteName) {
+  const wantCat = getActCategoryForSiteRow(siteRow, siteName);
+  if (!wantCat || wantCat === 'other') return true;
+  const formCat = getActCategoryFromStatutoryRow(row);
+  if (formCat && formCat !== 'other') return formCat === wantCat;
+  const fromSector = getActCategoryFromIndustryLabel(getSectorFromAnyRow(row));
+  if (fromSector && fromSector !== 'other') return fromSector === wantCat;
+  return true;
+}
+
 /** Same site-name → act bucket as Statutory.js for Delphi URLs when Industry does not map. */
 function getActCategoryFromSiteNameFallback(siteName) {
   const s = String(siteName || '')
@@ -163,7 +173,9 @@ function getActCategoryFromSiteNameFallback(siteName) {
  * Act category for a Site row: Industry first, then known site-name aliases.
  */
 function getActCategoryForSiteRow(siteRow, siteNameParam) {
-  const industry = siteRow ? String(siteRow.Industry || siteRow.industry || '').trim() : '';
+  const industry = siteRow
+    ? String(siteRow.Industry || siteRow.industry || siteRow.Act || siteRow.act || '').trim()
+    : '';
   let cat = getActCategoryFromIndustryLabel(industry);
   if (cat && cat !== 'other') return cat;
   const fallback = getActCategoryFromSiteNameFallback(siteNameParam);
@@ -175,6 +187,25 @@ function normStateToken(v) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, ' ');
+}
+
+function normalizeStateCompareKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function statesMatchLoose(a, b) {
+  const ka = normalizeStateCompareKey(a);
+  const kb = normalizeStateCompareKey(b);
+  if (!ka || !kb) return false;
+  if (ka === kb) return true;
+  if (ka.length >= 3 && kb.length >= 3 && (ka.includes(kb) || kb.includes(ka))) return true;
+  if ((ka === 'ap' && kb === 'andhrapradesh') || (kb === 'ap' && ka === 'andhrapradesh')) return true;
+  if ((ka === 'mp' && kb === 'madhyapradesh') || (kb === 'mp' && ka === 'madhyapradesh')) return true;
+  if ((ka === 'tn' && kb === 'tamilnadu') || (kb === 'tn' && ka === 'tamilnadu')) return true;
+  return false;
 }
 
 /** Same rules as app `statesFieldMatchesInchargeSiteStates` (strict state when Incharge sites have SiteState). */
@@ -192,7 +223,7 @@ function rowStatesMatchInchargeScope(rowStateField, stateLabels) {
     .filter((t) => t.length > 0);
   if (tokens.length === 0) return false;
   const allowed = stateLabels.map(normStateToken).filter(Boolean);
-  return tokens.some((tok) => allowed.some((a) => a === tok || tok.includes(a) || a.includes(tok)));
+  return tokens.some((tok) => allowed.some((a) => statesMatchLoose(tok, a) || a === tok || tok.includes(a) || a.includes(tok)));
 }
 
 function filterRowsForInchargeLocation(rows, stateLabels, siteNamesLower) {
@@ -249,23 +280,40 @@ async function getInchargeReportScope(catalyst, userEmail) {
 }
 
 async function findSiteRowByName(catalyst, siteName) {
+  const rows = await findAllSiteRowsByName(catalyst, siteName);
+  return rows.length ? rows[0] : null;
+}
+
+async function findAllSiteRowsByName(catalyst, siteName) {
   const want = String(siteName || '')
     .trim()
     .toLowerCase();
-  if (!want) return null;
+  if (!want) return [];
   try {
     const rows = await catalyst.datastore().table('Site').getAllRows();
+    const out = [];
     for (const raw of rows) {
       const r = normalizeSiteRowForReport(raw);
       const n = String(r?.SiteName || '')
         .trim()
         .toLowerCase();
-      if (n === want) return r;
+      if (n === want) out.push(r);
     }
+    return out;
   } catch (err) {
-    console.warn('findSiteRowByName:', err?.message || err);
+    console.warn('findAllSiteRowsByName:', err?.message || err);
+    return [];
   }
-  return null;
+}
+
+function collectActCategoriesForSiteRows(siteRows, siteNameParam) {
+  const cats = new Set();
+  for (const row of siteRows || []) {
+    const cat = getActCategoryForSiteRow(row, siteNameParam);
+    if (cat && cat !== 'other') cats.add(cat);
+  }
+  if (cats.size === 0) cats.add('other');
+  return [...cats];
 }
 
 function filterRowsByActCategoryScope(rows, allowedActCategories) {
@@ -467,35 +515,29 @@ function findStatutoryMatchForReport(meta, formKey, statutoryRows, month, year, 
   let candidates = statutoryRows.filter((r) => formKeysMatchForReport(meta, r, formKey));
 
   if (siteLower) {
-    const siteMatches = candidates.filter(
+    candidates = candidates.filter(
       (r) =>
         String(r.Site || r.site || '')
           .trim()
           .toLowerCase() === siteLower
     );
-    const noSite = candidates.filter((r) => !String(r.Site || r.site || '').trim());
-    candidates = siteMatches.length ? siteMatches : noSite;
   }
+
+  if (!candidates.length) return null;
 
   const monthYearMatches = candidates.filter(
     (r) => statutoryRowMatchesMonth(r, month) && statutoryRowMatchesYear(r, year)
   );
   if (monthYearMatches.length) return pickBestStatutoryRow(monthYearMatches);
 
-  const withDraft = candidates.filter((r) => {
+  const withDraftInPeriod = candidates.filter((r) => {
     if (!hasStatutoryDraftFromRow(r)) return false;
-    if (statutoryRowMatchesMonth(r, month) && statutoryRowMatchesYear(r, year)) return true;
     const sub = getDraftDateFromStatutoryRow(r);
     if (sub && submittedDateMatchesMonth(sub, month) && statutoryRowMatchesYear(r, year)) return true;
     const appr = getApprovalDateFromStatutoryRow(r);
     return appr && submittedDateMatchesMonth(appr, month) && statutoryRowMatchesYear(r, year);
   });
-  if (withDraft.length) return pickBestStatutoryRow(withDraft);
-
-  const approvedRows = candidates.filter(
-    (r) => isStatutoryTransactionApproved(r) && statutoryRowMatchesYear(r, year)
-  );
-  if (approvedRows.length) return pickBestStatutoryRow(approvedRows);
+  if (withDraftInPeriod.length) return pickBestStatutoryRow(withDraftInPeriod);
 
   return null;
 }
@@ -636,6 +678,7 @@ function buildStatutoryDraftRow(stRow) {
     act,
     description,
     sector,
+    site: String(stRow.Site || stRow.site || '').trim(),
     state: getStateFromAnyRow(stRow),
     monthFilter,
     draftFile: approved ? draftFile : null,
@@ -802,6 +845,34 @@ function findSectorByFormNameLoose(formName, bulkRows, statutoryRows) {
   return '';
 }
 
+/** Pick checklistbulk Sector for an approved site/form (state-aware; avoids first global bulk match). */
+function findBulkSectorForSiteForm(bulkRows, reportRow, statutoryRow) {
+  const source = statutoryRow || reportRow || {};
+  const formKey = getMasterKeyFromAnyRow(source);
+  const formName = getFormNameFromAnyRow(source);
+  const siteState =
+    getStateFromAnyRow(statutoryRow) ||
+    String(reportRow?.state || '').trim() ||
+    '';
+  let candidates = (bulkRows || []).filter((r) => getMasterKeyFromAnyRow(r) === formKey);
+  if (!candidates.length && formName) {
+    const want = normalizeFormKey(formName);
+    candidates = (bulkRows || []).filter((r) => normalizeFormKey(getFormNameFromAnyRow(r)) === want);
+  }
+  if (siteState && candidates.length > 1) {
+    const stateMatches = candidates.filter((r) => rowStateMatchesSiteState(r, siteState));
+    if (stateMatches.length) candidates = stateMatches;
+  }
+  if (candidates.length) {
+    return getSectorFromAnyRow(candidates[0]);
+  }
+  return (
+    String(reportRow?.sector || '').trim() ||
+    getSectorFromAnyRow(statutoryRow) ||
+    ''
+  );
+}
+
 function findStatutoryMatchForReturned(row, statutoryRows) {
   if (!Array.isArray(statutoryRows) || statutoryRows.length === 0) return null;
   const formKey = getMasterKeyFromAnyRow(row);
@@ -844,7 +915,7 @@ function normalizeSiteRowForReport(row) {
     ...base,
     SiteName: base.SiteName ?? base.siteName ?? '',
     SiteState: base.SiteState ?? base.siteState ?? base.State ?? base.state ?? '',
-    Industry: base.Industry ?? base.industry ?? ''
+    Industry: base.Industry ?? base.industry ?? base.Act ?? base.act ?? ''
   };
 }
 
@@ -1065,20 +1136,24 @@ function ensureUniqueZipName(baseName, usedNames) {
 }
 
 /** Shared report rows builder for /entries and /consolidated-zip. */
-async function buildMainReportEntries(catalyst, { year, month, userEmail, siteParam }) {
+async function buildMainReportEntries(catalyst, { year, month, userEmail, siteParam, siteRow: siteRowHint }) {
   const inchargeScope = await getInchargeReportScope(catalyst, userEmail);
   const allowedActCategories = inchargeScope.actCategories;
 
   let narrowActCategories = allowedActCategories;
   let siteRow = null;
   if (siteParam) {
-    siteRow = await findSiteRowByName(catalyst, siteParam);
-    if (!siteRow) {
+    const siteRowsForParam = siteRowHint
+      ? [siteRowHint]
+      : await findAllSiteRowsByName(catalyst, siteParam);
+    if (!siteRowsForParam.length) {
       const siteNames = await getAllSiteNames(catalyst, allowedActCategories, '', inchargeScope.siteNamesLower);
       return { rows: [], siteNames };
     }
-    const siteCat = getActCategoryForSiteRow(siteRow, siteParam);
-    const siteCats = [siteCat];
+    siteRow = siteRowsForParam[0];
+    const siteCats = siteRowHint
+      ? [getActCategoryForSiteRow(siteRow, siteParam)]
+      : collectActCategoriesForSiteRows(siteRowsForParam, siteParam);
     if (Array.isArray(allowedActCategories) && allowedActCategories.length > 0) {
       const intersection = siteCats.filter((c) => allowedActCategories.includes(c));
       if (intersection.length === 0) {
@@ -1130,7 +1205,7 @@ async function buildMainReportEntries(catalyst, { year, month, userEmail, sitePa
         const site = String(r.Site || r.site || '')
           .trim()
           .toLowerCase();
-        return !site || site === want;
+        return site === want;
       });
     }
     return pool;
@@ -1665,4 +1740,336 @@ app.get('/mainreport/file/:fileId', async (req, res) => {
   }
 });
 
+function isYetToCompleteStatusText(stLower) {
+  return (
+    String(stLower || '').includes('yet to complete') ||
+    String(stLower || '').includes('yet to submit') ||
+    (String(stLower || '').includes('yet') && String(stLower || '').includes('complete')) ||
+    (String(stLower || '').includes('yet') && String(stLower || '').includes('submit')) ||
+    String(stLower || '').includes('not started') ||
+    String(stLower || '').includes('nostart') ||
+    String(stLower || '').includes('incomplete') ||
+    String(stLower || '').includes('not complete')
+  );
+}
+
+function rowHasStoredDraft(row) {
+  if (row?.hasStatutoryDraftStored === true) return true;
+  const id = row?.draftFileId ?? row?.draftFile;
+  return id != null && String(id).trim() !== '' && String(id).toLowerCase() !== 'null';
+}
+
+function rowSendForApprovalIsSent(row) {
+  return /^sent$/i.test(String(row?.sendForApproval ?? row?.SendForApproval ?? '').trim());
+}
+
+/**
+ * Pending / Approved / Returned only when a statutoryreg_function row exists for the month.
+ * Checklistbulk forms with no statutory match → Yet to Complete (dashboard: Yet to Submit).
+ */
+function getMainReportStatusLabel(row) {
+  if (row?.statutoryRowId == null) return 'Yet to Complete';
+
+  const st = String(row?.statutoryStatus || row?.status || '').trim();
+  const stLower = st.toLowerCase();
+  const appr = String(row?.approval || '').trim().toLowerCase();
+
+  if (appr === 'rejected' || appr === 'reject' || stLower.includes('reject')) return 'Rejected';
+  if (stLower === 'returned' || appr === 'returned') return 'Rejected';
+  if (stLower === 'approved' || stLower === 'approve' || appr === 'approved' || appr === 'approve') {
+    return 'Approved';
+  }
+  if (rowSendForApprovalIsSent(row)) return 'Pending';
+
+  const hasDraft = rowHasStoredDraft(row);
+  if (!hasDraft) return 'Yet to Complete';
+  if (st === '' || st === '-' || st === '—') {
+    return rowSendForApprovalIsSent(row) ? 'Pending' : 'Yet to Complete';
+  }
+  if (stLower === 'pending') {
+    return rowSendForApprovalIsSent(row) ? 'Pending' : 'Yet to Complete';
+  }
+  if (isYetToCompleteStatusText(stLower)) {
+    return rowSendForApprovalIsSent(row) ? 'Pending' : 'Yet to Complete';
+  }
+  return st || 'Yet to Complete';
+}
+
+/**
+ * CHRO email cards: same rows as GET /mainreport/entries (Reports page, all sites).
+ * Returned card uses the Returned Report for that month.
+ */
+async function buildChroRollupFromReports(catalyst, year, month) {
+  const { rows, siteNames } = await buildMainReportEntries(catalyst, {
+    year,
+    month,
+    userEmail: '',
+    siteParam: ''
+  });
+
+  let approvedCount = 0;
+  let pendingCount = 0;
+  let yetToCompleteCount = 0;
+  let rejectedCount = 0;
+  for (const row of rows) {
+    const status = getMainReportStatusLabel(row);
+    if (status === 'Approved') approvedCount += 1;
+    else if (status === 'Pending') pendingCount += 1;
+    else if (status === 'Yet to Complete') yetToCompleteCount += 1;
+    else if (status === 'Rejected') rejectedCount += 1;
+  }
+
+  let returnedRows = [];
+  try {
+    const loaded = await loadScopedReturnedRows(catalyst, '', '');
+    returnedRows = (loaded.rows || [])
+      .filter((r) => returnedRowMatchesMonth(r, month))
+      .filter((r) => returnedRowMatchesYear(r, year));
+  } catch (err) {
+    console.warn('buildChroRollupFromReports: Returned table:', err?.message || err);
+  }
+  const returnedCount = returnedRows.length + rejectedCount;
+
+  const siteInfoByName = await buildSiteInfoByNameMap(catalyst);
+
+  const approvedForms = [];
+  const seenApprovedKeys = new Set();
+
+  const addApprovedForm = ({ siteName, stateHint, industryHint, formNumber, formName, statutoryRowId }) => {
+    const site = String(siteName || '').trim();
+    const number = String(formNumber || '').trim();
+    const name = String(formName || '').trim();
+    if (!site || (!number && !name)) return;
+    const dedupeKey =
+      statutoryRowId != null
+        ? `id:${statutoryRowId}`
+        : `${site.toLowerCase()}|${number.toLowerCase()}|${name.toLowerCase()}`;
+    if (seenApprovedKeys.has(dedupeKey)) return;
+    seenApprovedKeys.add(dedupeKey);
+    const info = siteInfoByName.get(site.toLowerCase());
+    const industry = String(industryHint || '').trim();
+    approvedForms.push({
+      siteName: site,
+      label: site,
+      state: stateHint || (info && info.state) || '—',
+      industry: industry || '—',
+      formNumber: number || '—',
+      formName: name || '—',
+      statutoryRowId: statutoryRowId != null ? String(statutoryRowId) : null
+    });
+  };
+
+  /** Form Number = Statutory FormName; Form Name = Statutory Description (same as Reports page). */
+  const statutoryFormNumber = (stRow, reportRow) =>
+    String(getFormNameFromAnyRow(stRow) || getFormNameFromAnyRow(reportRow) || '').trim();
+
+  const statutoryFormTitle = (stRow, reportRow) => {
+    const desc = getDescriptionFromAnyRow(stRow) || String(reportRow?.description || '').trim();
+    if (desc) return desc;
+    return statutoryFormNumber(stRow, reportRow);
+  };
+
+  /** Industry column: Statutory table Sector (same field as statutoryreg_function). */
+  const statutoryIndustryLabel = (stRow, reportRow) =>
+    String(getSectorFromAnyRow(stRow) || String(reportRow?.sector || '').trim() || '').trim();
+
+  const statutoryById = new Map();
+  try {
+    const statutoryAll = await catalyst.datastore().table('Statutory').getAllRows();
+    for (const raw of statutoryAll) {
+      const st = unwrapCatalystTableRow(raw, 'Statutory') || raw;
+      if (st?.ROWID != null) statutoryById.set(String(st.ROWID), st);
+    }
+  } catch (err) {
+    console.warn('buildChroRollupFromReports: Statutory read failed:', err?.message || err);
+  }
+
+  for (const row of rows) {
+    if (getMainReportStatusLabel(row) !== 'Approved') continue;
+    const st = row.statutoryRowId != null ? statutoryById.get(String(row.statutoryRowId)) : null;
+    const siteName = String(st?.Site || st?.site || row.site || row.Site || '').trim();
+    const formNumber = statutoryFormNumber(st, row);
+    const formName = statutoryFormTitle(st, row);
+    if (!siteName || (!formNumber && !formName)) continue;
+    addApprovedForm({
+      siteName,
+      stateHint: getStateFromAnyRow(st) || row.state,
+      industryHint: statutoryIndustryLabel(st, row),
+      formNumber,
+      formName,
+      statutoryRowId: row.statutoryRowId
+    });
+  }
+
+  approvedForms.sort((a, b) => {
+    const siteCmp = String(a.siteName).localeCompare(String(b.siteName), undefined, { sensitivity: 'base' });
+    if (siteCmp !== 0) return siteCmp;
+    return String(a.formName).localeCompare(String(b.formName), undefined, { sensitivity: 'base' });
+  });
+
+  const approvedSites = approvedForms;
+  const activeCount = Array.isArray(siteNames) ? siteNames.length : 0;
+  const totalForms = Array.isArray(rows) ? rows.length : 0;
+  const complianceScore = totalForms ? Math.round((approvedCount / totalForms) * 100) : 0;
+
+  console.log('buildChroRollupFromReports', {
+    year,
+    month,
+    reportRows: rows.length,
+    approvedCount,
+    pendingCount,
+    yetToCompleteCount,
+    returnedCount,
+    activeCount,
+    approvedSites: approvedSites.map((s) => `${s.label}: ${s.formName}`)
+  });
+
+  return {
+    approvedSites,
+    approvedCount,
+    pendingCount,
+    returnedCount,
+    activeCount,
+    complianceScore,
+    yetToCompleteCount,
+    reportRowCount: totalForms
+  };
+}
+
+function getReportFormNumber(row) {
+  return String(row?.formName || row?.formNumber || '').trim() || '—';
+}
+
+function getReportFormName(row) {
+  const desc = String(row?.description || '').trim();
+  if (desc) return desc;
+  return String(row?.formName || '').trim() || '—';
+}
+
+function getReportState(row) {
+  return String(row?.state || row?.zState || '').trim() || '—';
+}
+
+function getReportIndustry(row) {
+  const sector = String(row?.sector || '').trim();
+  if (sector && sector !== '—') return sector;
+  const act = String(row?.act || '').trim();
+  if (act && act !== '—') return act;
+  return '—';
+}
+
+function getReportSiteName(row) {
+  return String(row?.site || row?.Site || '').trim();
+}
+
+async function buildPendingRollupFromReports(catalyst, year, month) {
+  const siteNames = await getAllSiteNames(catalyst, null, '', null);
+  const siteInfoByName = await buildSiteInfoByNameMap(catalyst);
+  const pendingSites = [];
+  const seenKeys = new Set();
+
+  let approvedCount = 0;
+  let pendingCount = 0;
+  let yetToCompleteCount = 0;
+  let totalForms = 0;
+
+  for (const siteName of siteNames) {
+    const { rows } = await buildMainReportEntries(catalyst, {
+      year,
+      month,
+      userEmail: '',
+      siteParam: siteName
+    });
+
+    totalForms += rows.length;
+
+    for (const row of rows) {
+      const status = getMainReportStatusLabel(row);
+      if (status === 'Approved') approvedCount += 1;
+      else if (status === 'Pending') pendingCount += 1;
+      else if (status === 'Yet to Complete') yetToCompleteCount += 1;
+
+      if (status !== 'Pending' && status !== 'Yet to Complete') continue;
+
+      const formNumber = getReportFormNumber(row);
+      const formName = getReportFormName(row);
+      if (formNumber === '—' && formName === '—') continue;
+
+      const dedupeKey = `${siteName.toLowerCase()}|${row.bulkRowId || ''}|${row.statutoryRowId || ''}|${formNumber.toLowerCase()}|${formName.toLowerCase()}|${status}`;
+      if (seenKeys.has(dedupeKey)) continue;
+      seenKeys.add(dedupeKey);
+
+      const info = siteInfoByName.get(siteName.toLowerCase());
+      const state = getReportState(row);
+      const resolvedState = state !== '—' ? state : (info && info.state) || '—';
+      pendingSites.push({
+        siteName,
+        siteKey: siteName.toLowerCase(),
+        label: siteName,
+        state: resolvedState,
+        industry: getReportIndustry(row),
+        formNumber,
+        formName,
+        status,
+        reportRowId: row.statutoryRowId || row.bulkRowId || null
+      });
+    }
+  }
+
+  pendingSites.sort((a, b) => {
+    const siteCmp = String(a.siteName).localeCompare(String(b.siteName), undefined, { sensitivity: 'base' });
+    if (siteCmp !== 0) return siteCmp;
+    const statusCmp = String(a.status).localeCompare(String(b.status), undefined, { sensitivity: 'base' });
+    if (statusCmp !== 0) return statusCmp;
+    return String(a.formName).localeCompare(String(b.formName), undefined, { sensitivity: 'base' });
+  });
+
+  const sitesWithPending = new Set(pendingSites.map((row) => row.siteKey)).size;
+  const activeCount = siteNames.length;
+  const complianceScore = totalForms ? Math.round((approvedCount / totalForms) * 100) : 0;
+
+  console.log('buildPendingRollupFromReports', {
+    year,
+    month,
+    activeSites: activeCount,
+    sitesWithPending,
+    reportRowsScanned: totalForms,
+    pendingCount,
+    yetToCompleteCount,
+    pendingFormRows: pendingSites.length
+  });
+
+  return {
+    pendingSites,
+    approvedCount,
+    pendingCount,
+    yetToCompleteCount,
+    activeCount,
+    sitesWithPending,
+    complianceScore,
+    reportRowCount: totalForms
+  };
+}
+
+app.get('/mainreport/chro-rollup', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const year = req.query.year;
+    const month = req.query.month;
+    if (year == null || year === '' || month == null || month === '') {
+      return res.status(400).json({ status: 'failure', message: 'year and month query parameters are required.' });
+    }
+    const { catalyst } = res.locals;
+    const data = await buildChroRollupFromReports(catalyst, year, month);
+    res.status(200).json({ status: 'success', data });
+  } catch (err) {
+    console.error('mainreport/chro-rollup:', err);
+    res.status(500).json({ status: 'failure', message: err.message || 'Failed to load CHRO rollup.' });
+  }
+});
+
 module.exports = app;
+module.exports.buildChroRollupFromReports = buildChroRollupFromReports;
+module.exports.buildPendingRollupFromReports = buildPendingRollupFromReports;
+module.exports.buildMainReportEntries = buildMainReportEntries;
+module.exports.getMainReportStatusLabel = getMainReportStatusLabel;

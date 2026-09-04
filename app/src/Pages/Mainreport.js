@@ -88,23 +88,30 @@ const rowHasStoredDraft = (row) => {
   return id != null && String(id).trim() !== '' && String(id).toLowerCase() !== 'null';
 };
 
-/** Match Statutory.js `getStatutoryRowDisplayStatus` for KPI cards and table STATUS column. */
+/** Match Statutory.js / dashboard: statutoryreg statuses vs checklistbulk-only → Yet to Complete. */
 const getStatusLabel = (row) => {
-  const hasDraftStored = rowHasStoredDraft(row);
-  if (!hasDraftStored) return 'Yet to Complete';
+  if (row?.statutoryRowId == null) return 'Yet to Complete';
 
   const st = String(row?.statutoryStatus || row?.status || '').trim();
   const stLower = st.toLowerCase();
   const appr = String(row?.approval || '').trim().toLowerCase();
+  const sendForApproval = String(row?.sendForApproval ?? row?.SendForApproval ?? '')
+    .trim()
+    .toLowerCase();
+  const sentForApproval = sendForApproval === 'sent';
+  const hasDraftStored = rowHasStoredDraft(row);
 
   if (appr === 'rejected' || appr === 'reject' || stLower.includes('reject')) return 'Rejected';
+  if (stLower === 'returned' || appr === 'returned') return 'Rejected';
   if (stLower === 'approved' || stLower === 'approve') return 'Approved';
   if (appr === 'approved' || appr === 'approve') return 'Approved';
-  if (st === '' || st === '-' || st === '—') return 'Pending';
-  if (stLower === 'pending') return 'Pending';
-  if (isYetToCompleteStatusText(stLower)) return 'Yet to Complete';
+  if (sentForApproval) return 'Pending';
+  if (!hasDraftStored) return 'Yet to Complete';
+  if (st === '' || st === '-' || st === '—') return sentForApproval ? 'Pending' : 'Yet to Complete';
+  if (stLower === 'pending') return sentForApproval ? 'Pending' : 'Yet to Complete';
+  if (isYetToCompleteStatusText(stLower)) return sentForApproval ? 'Pending' : 'Yet to Complete';
 
-  return st || 'Pending';
+  return st || 'Yet to Complete';
 };
 
 const getSectorGroupLabel = (row) => {

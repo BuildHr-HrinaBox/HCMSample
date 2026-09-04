@@ -54,6 +54,9 @@ export function isFormXIXRajasthanOvertimeRegisterContext(
     .join(' ')
     .toLowerCase();
 
+  // Form_XIX_RJ.xlsx identity wins even if company/site text mentions another state.
+  if (/form[\s._-]*xix[\s._-]*rj/i.test(parts) || /\bxix_rj\b/i.test(parts)) return true;
+
   if (/wage\s+slip/i.test(parts)) return false;
   // Other states' Form XIX wage-slip files must not match via siteState=Rajasthan alone.
   if (
@@ -62,8 +65,6 @@ export function isFormXIXRajasthanOvertimeRegisterContext(
   ) {
     return false;
   }
-
-  if (/form[\s._-]*xix[\s._-]*rj/i.test(parts) || /\bxix_rj\b/i.test(parts)) return true;
 
   if (/register\s+of\s+over[\s-]*time|over[\s-]*time\s+register/i.test(parts) && matchesFormXIXHint(parts)) {
     return /rajasthan/i.test(parts) || /form[\s._-]*xix(?![a-z])/i.test(parts);
@@ -210,6 +211,16 @@ export const FORM_XIX_AP_FIELD_GROUPS = [
   { id: 'footer', title: 'Certification' }
 ];
 
+/**
+ * Andhra Pradesh printed Form XIX — fixed value columns beside labels (1-based Excel).
+ * Nature/location → D (same row as label), period ending → L, workman name → N.
+ */
+export const FORM_XIX_AP_HEADER_VALUE_COLS = {
+  form_xix_ap_nature_location: 4, // D
+  form_xix_ap_period_ending: 12, // L
+  form_xix_ap_workman: 14, // N
+};
+
 export const FORM_XIX_AP_TEMPLATE_SPECS = [
   {
     key: 'form_xix_ap_contractor',
@@ -301,6 +312,28 @@ const isNarrativeBlob = (raw) => {
   );
 };
 
+const isDottedPlaceholderText = (txt) => {
+  const t = String(txt || '').trim();
+  return t.length > 0 && /^[.\u2026…_\-\s]+$/.test(t);
+};
+
+/** True when cell text is another Form XIX heading (not a fill-in value). */
+export function isFormXIXAPTemplateLabelText(raw, excludeKey = null) {
+  const text = String(raw || '').trim();
+  if (!text || isDottedPlaceholderText(text)) return false;
+  const stripped = text.replace(/[:.\u2026…_]+$/g, '').replace(/\s+/g, ' ').trim();
+  const norm = formXIXAPHeaderNorm(stripped);
+  if (!norm) return false;
+  return FORM_XIX_AP_TEMPLATE_SPECS.some((spec) => {
+    if (excludeKey && spec.key === excludeKey) return false;
+    if (spec.match && (spec.match.test(text) || spec.match.test(norm) || spec.match.test(stripped))) {
+      return true;
+    }
+    const labelNorm = formXIXAPHeaderNorm(String(spec.label || '').replace(/:+$/, ''));
+    return !!labelNorm && (norm === labelNorm || (norm.length >= 18 && labelNorm.length >= 18 && norm === labelNorm));
+  });
+}
+
 const buildTemplateField = (spec, coords = {}) => ({
   label: spec.label,
   value: coords.value || '',
@@ -316,19 +349,28 @@ const buildTemplateField = (spec, coords = {}) => ({
 
 const readValueBelowOrBesideLabel = (getMergedAwareCellText, labelRow, labelCol, effectiveSheetCols) => {
   const maxC = Math.max(20, effectiveSheetCols || 0);
+  let dottedBeside = null;
   for (let c = labelCol + 1; c < Math.min(labelCol + 14, maxC); c += 1) {
     const v = String(getMergedAwareCellText(labelRow, c) || '').trim();
-    if (v && !isNarrativeBlob(v)) {
-      return { value: v, valueCol: c, valueRow: labelRow };
+    if (!v || isNarrativeBlob(v) || isFormXIXAPTemplateLabelText(v)) continue;
+    if (isDottedPlaceholderText(v)) {
+      if (!dottedBeside) dottedBeside = { value: '', valueCol: c, valueRow: labelRow };
+      continue;
     }
+    return { value: v, valueCol: c, valueRow: labelRow };
   }
+  if (dottedBeside) return dottedBeside;
   for (let r = labelRow + 1; r <= Math.min(labelRow + 6, labelRow + 12); r += 1) {
     const v = String(getMergedAwareCellText(r, labelCol) || '').trim();
-    if (v && !isNarrativeBlob(v)) {
-      return { value: v, valueCol: labelCol, valueRow: r };
+    if (!v || isNarrativeBlob(v) || isFormXIXAPTemplateLabelText(v)) continue;
+    if (isDottedPlaceholderText(v)) {
+      return { value: '', valueCol: labelCol, valueRow: r };
     }
+    return { value: v, valueCol: labelCol, valueRow: r };
   }
-  return { value: '', valueCol: labelCol + 1, valueRow: labelRow };
+  // Original AP template is two-column: neighboring H-column cells are other headings.
+  // Default the value cell under the label so export does not overwrite those headings.
+  return { value: '', valueCol: labelCol, valueRow: labelRow + 1 };
 };
 
 const findHeaderLabelCell = (getMergedAwareCellText, matchRe, effectiveSheetCols, maxRows = 120) => {
@@ -500,6 +542,15 @@ export function buildFormXIXAPTemplateFields(getMergedAwareCellText = null, effe
         findNumberedLabelCell(getMergedAwareCellText, spec.match, effectiveSheetCols) ||
         findHeaderLabelCell(getMergedAwareCellText, spec.match, effectiveSheetCols) ||
         {};
+    }
+    // AP printed slip: pin nature → D, period ending → L, workman → N (0-based valueCol).
+    const fixedExcelCol = FORM_XIX_AP_HEADER_VALUE_COLS[spec.key];
+    if (fixedExcelCol != null && coords.labelRow != null) {
+      coords = {
+        ...coords,
+        valueCol: fixedExcelCol - 1,
+        valueRow: coords.labelRow,
+      };
     }
     return buildTemplateField(spec, coords);
   });
@@ -720,18 +771,119 @@ export function writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, headerFormData
     worksheet.getCell(row, col).value = text;
   };
 
+  const cellMaster = (row, col) => {
+    try {
+      const cell = worksheet.getCell(row, col);
+      const master = cell?.master;
+      if (master && typeof master.row === 'number' && typeof master.col === 'number') {
+        return { row: master.row, col: master.col };
+      }
+    } catch (_err) {
+      /* ignore */
+    }
+    return { row, col };
+  };
+
+  const isSameMergedCell = (r1, c1, r2, c2) => {
+    const a = cellMaster(r1, c1);
+    const b = cellMaster(r2, c2);
+    return a.row === b.row && a.col === b.col;
+  };
+
+  const cellWouldClobberLabel = (row, col, fieldKey) => {
+    const existing = excelCellValueToString(worksheet.getCell(row, col)?.value);
+    if (isFormXIXAPTemplateLabelText(existing, fieldKey)) return true;
+    const master = cellMaster(row, col);
+    if (master.row !== row || master.col !== col) {
+      const masterText = excelCellValueToString(worksheet.getCell(master.row, master.col)?.value);
+      if (isFormXIXAPTemplateLabelText(masterText, fieldKey)) return true;
+    }
+    return false;
+  };
+
+  const fillPeriodEndingOnLabel = (labelRow, labelCol, value) => {
+    const raw = excelCellValueToString(worksheet.getCell(labelRow, labelCol)?.value);
+    if (!/week.*fortnight.*month\s+ending/i.test(raw)) return false;
+    const heading = String(raw)
+      .replace(/[.\u2026…]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/:+$/, '')
+      .trim();
+    worksheet.getCell(labelRow, labelCol).value = `${heading} ${value}`.replace(/\s+/g, ' ').trim();
+    return true;
+  };
+
+  // AP printed template: nature → D, period ending → L, workman → N (same row as label).
+  const isApPrintedLayout =
+    !!(parsedFormHeader?.formXIXAPTableLayout || parsedFormHeader?.formXIXAPHeaderFieldLayout) &&
+    !(parsedFormHeader?.formXIXMPTableLayout && !parsedFormHeader?.formXIXAPTableLayout);
+
+  const writeApFixedHeaderValue = (labelRow, fieldKey, value) => {
+    if (!isApPrintedLayout || labelRow == null) return false;
+    const col = FORM_XIX_AP_HEADER_VALUE_COLS[fieldKey];
+    if (!col) return false;
+    if (cellWouldClobberLabel(labelRow, col, fieldKey)) return false;
+    writeAt(labelRow, col, value);
+    return true;
+  };
+
+  /** Keep printed headings; put values under/beside the label (two-column AP wage slip). */
+  const writePreservingLabel = (labelRow, labelCol, value, fieldKey) => {
+    if (writeApFixedHeaderValue(labelRow, fieldKey, value)) return true;
+    // Non-AP / fallback: append period ending onto the dotted label text.
+    if (
+      !isApPrintedLayout &&
+      fieldKey === 'form_xix_ap_period_ending' &&
+      fillPeriodEndingOnLabel(labelRow, labelCol, value)
+    ) {
+      return true;
+    }
+    // Prefer same-row cells to the right before dropping values under the label column
+    // (under-column writes put nature/location into A14 on the AP template).
+    for (let c = labelCol + 1; c <= Math.min(labelCol + 14, maxScanCols); c += 1) {
+      if (isSameMergedCell(labelRow, c, labelRow, labelCol)) continue;
+      if (cellWouldClobberLabel(labelRow, c, fieldKey)) continue;
+      const existing = excelCellValueToString(worksheet.getCell(labelRow, c)?.value);
+      if (isPlaceholderCell(existing)) {
+        writeAt(labelRow, c, value);
+        return true;
+      }
+    }
+    for (let r = labelRow + 1; r <= Math.min(labelRow + 3, maxScanRows); r += 1) {
+      if (isSameMergedCell(r, labelCol, labelRow, labelCol)) continue;
+      if (cellWouldClobberLabel(r, labelCol, fieldKey)) continue;
+      const existing = excelCellValueToString(worksheet.getCell(r, labelCol)?.value);
+      if (isPlaceholderCell(existing)) {
+        writeAt(r, labelCol, value);
+        return true;
+      }
+    }
+    if (fieldKey === 'form_xix_ap_workman') {
+      const raw = excelCellValueToString(worksheet.getCell(labelRow, labelCol)?.value).replace(/:+$/, '');
+      if (/workman/i.test(raw)) {
+        worksheet.getCell(labelRow, labelCol).value = `${raw}\n${value}`.trim();
+        return true;
+      }
+    }
+    return false;
+  };
+
   /** Template stores wage values on dotted lines in cols H–L; avoid writing into empty B–G. */
-  const pickValueCol = (row, labelCol, preferValueBand) => {
+  const pickValueCol = (row, labelCol, preferValueBand, fieldKey = null) => {
     let bestCol = null;
     let bestScore = -1;
     const scanEnd = Math.min(labelCol + 14, Math.max(maxScanCols + 4, 14));
     for (let nc = labelCol + 1; nc <= scanEnd; nc += 1) {
+      if (isSameMergedCell(row, nc, row, labelCol)) continue;
+      if (cellWouldClobberLabel(row, nc, fieldKey)) continue;
       const neighbor = excelCellValueToString(worksheet.getCell(row, nc)?.value);
       if (!isPlaceholderCell(neighbor)) continue;
       let score = 10;
       if (isDottedPlaceholder(neighbor)) score += 100;
-      if (nc >= 8 && nc <= 14) score += preferValueBand ? 80 : 40;
+      if (preferValueBand && nc >= 8 && nc <= 14) score += 80;
       if (preferValueBand && nc < 8) score -= 60;
+      // Header fields: do not prefer the right-hand heading column (workman / period ending).
+      if (!preferValueBand && nc >= 8) score -= 20;
       if (score > bestScore) {
         bestScore = score;
         bestCol = nc;
@@ -746,21 +898,35 @@ export function writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, headerFormData
 
   fields.forEach((field) => {
     const val = headerFormData[field.key];
-    if (val == null || String(val).trim() === '') return;
+    const valText = String(val ?? '').trim();
+    if (!valText || isDottedPlaceholderText(valText)) return;
 
     const spec = FORM_XIX_AP_TEMPLATE_SPECS.find((s) => s.key === field.key);
     const isWageField = (field.group || spec?.group) === 'wages';
 
     // Header/footer fields may use parsed coords; wage particulars always locate dotted value band.
-    if (!isWageField && field.labelRow != null && field.valueCol != null) {
-      const targetRow = (field.valueRow ?? field.labelRow) + 1;
-      // Gujarat/MP stacked: keep contractor (and other headers) in column E.
-      const col =
-        stackedHeaderValueCol != null && field.key === 'form_xix_ap_contractor'
-          ? stackedHeaderValueCol
-          : field.valueCol + 1;
-      writeAt(targetRow, col, val);
-      return;
+    if (!isWageField && field.labelRow != null) {
+      const labelExcelRow = field.labelRow + 1;
+      const labelExcelCol = field.labelCol != null ? field.labelCol + 1 : 1;
+      // AP printed slip: nature → D, period → L, workman → N on the label row.
+      if (writeApFixedHeaderValue(labelExcelRow, field.key, valText)) return;
+      if (field.valueCol != null) {
+        const targetRow = (field.valueRow ?? field.labelRow) + 1;
+        // Gujarat/MP stacked: keep contractor (and other headers) in column E.
+        const col =
+          stackedHeaderValueCol != null && field.key === 'form_xix_ap_contractor'
+            ? stackedHeaderValueCol
+            : field.valueCol + 1;
+        if (stackedHeaderValueCol != null && field.key === 'form_xix_ap_contractor') {
+          writeAt(targetRow, col, valText);
+          return;
+        }
+        if (!cellWouldClobberLabel(targetRow, col, field.key)) {
+          writeAt(targetRow, col, valText);
+          return;
+        }
+        if (writePreservingLabel(labelExcelRow, labelExcelCol, valText, field.key)) return;
+      }
     }
 
     const labelNorm = normalize(String(field.label || spec?.label || '').replace(/:+$/, ''));
@@ -773,25 +939,29 @@ export function writeFormXIXAPFieldsToExcelJsWorksheet(worksheet, headerFormData
         const score = labelMatchScore(labelNorm, rawNorm);
         const regexHit = matchRe && (matchRe.test(raw) || matchRe.test(rawNorm));
         if (score < 45 && !regexHit) continue;
+        if (writeApFixedHeaderValue(r, field.key, valText)) return;
         // Stacked MP/GJ: do not let pickValueCol prefer the AP H–L band for header fields.
         if (stackedHeaderValueCol != null && !isWageField) {
-          writeAt(r, stackedHeaderValueCol, val);
+          writeAt(r, stackedHeaderValueCol, valText);
           return;
         }
-        const col = pickValueCol(r, c, isWageField);
-        if (col != null) {
-          writeAt(r, col, val);
+        const col = pickValueCol(r, c, isWageField, field.key);
+        if (col != null && !cellWouldClobberLabel(r, col, field.key)) {
+          writeAt(r, col, valText);
           return;
         }
+        if (!isWageField && writePreservingLabel(r, c, valText, field.key)) return;
         // Fall back: first placeholder in the H–L value band on this / next rows.
         for (let r2 = r; r2 <= Math.min(r + 2, maxScanRows); r2 += 1) {
-          const bandCol = pickValueCol(r2, 7, true);
-          if (bandCol != null && bandCol >= 8) {
-            writeAt(r2, bandCol, val);
+          const bandCol = pickValueCol(r2, 7, true, field.key);
+          if (bandCol != null && bandCol >= 8 && !cellWouldClobberLabel(r2, bandCol, field.key)) {
+            writeAt(r2, bandCol, valText);
             return;
           }
         }
-        writeAt(r, Math.min(Math.max(c + 7, 8), maxScanCols), val);
+        if (isWageField) {
+          writeAt(r, Math.min(Math.max(c + 7, 8), maxScanCols), valText);
+        }
         return;
       }
     }

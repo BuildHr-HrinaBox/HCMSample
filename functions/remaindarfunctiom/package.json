@@ -1,0 +1,10 @@
+{
+	"name": "remaindarfunctiom",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "zohoadmin@vayonaenergy.com",
+	"dependencies": {
+		"pdfkit": "^0.17.2",
+		"zcatalyst-sdk-node": "latest"
+	}
+}

@@ -1,7 +1,10 @@
 import {
   applyForm10UnmatchedPayrollAmountsNil,
   buildForm10EmployeeDisplayName,
+  buildForm10PayrollMatchIdentity,
+  buildFormTamilNaduPayrollRowResolver,
   collectForm10RowNameParts,
+  findForm10EmployeeByFirstAndLastName,
   findForm10PayrollRowByFirstAndLastName,
   form10FirstAndLastNamesMatch,
   form10HasFirstAndLastName,
@@ -127,5 +130,38 @@ describe('Form 10 Tamil Nadu firstname + lastname payroll mapping', () => {
     expect(row['Normal earnings']).toBe('Nil');
     expect(row['Total earnings']).toBe('Nil');
     expect(row['Overtime earnings']).toBe('Nil');
+  });
+
+  test('buildForm10PayrollMatchIdentity prefers row First/Last over People record', () => {
+    const headers = ['First Name', 'Last Name'];
+    const identity = buildForm10PayrollMatchIdentity(
+      { FirstName: 'Wrong', LastName: 'Person' },
+      { 'First Name': 'Selva', 'Last Name': 'P' },
+      headers
+    );
+    expect(identity.FirstName).toBe('Selva');
+    expect(identity.LastName).toBe('P');
+    expect(identity.employee_name).toBe('Selva P');
+  });
+
+  test('findForm10EmployeeByFirstAndLastName locates People by row name parts', () => {
+    const employees = [{ FirstName: 'Selva', LastName: 'P' }, { FirstName: 'Ravi', LastName: 'S' }];
+    const hit = findForm10EmployeeByFirstAndLastName(employees, {
+      firstName: 'Selva',
+      lastName: 'P',
+      fullName: 'Selva P',
+    });
+    expect(hit).toEqual({ FirstName: 'Selva', LastName: 'P' });
+  });
+
+  test('buildFormTamilNaduPayrollRowResolver matches strict first+last only', () => {
+    const payroll = [
+      { first_name: 'Selva', last_name: 'Kumar', employee_name: 'Selva Kumar' },
+      { first_name: 'Selva', last_name: 'P', employee_name: 'Selva P' },
+    ];
+    const resolve = buildFormTamilNaduPayrollRowResolver(payroll);
+    const hit = resolve({ FirstName: 'Selva', LastName: 'P' });
+    expect(hit).toEqual(payroll[1]);
+    expect(resolve({ FirstName: 'Selva', LastName: 'P' })).toBeNull();
   });
 });

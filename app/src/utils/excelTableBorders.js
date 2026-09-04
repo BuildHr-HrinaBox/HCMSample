@@ -53,12 +53,29 @@ export const EXCELJS_THIN_BLACK_BOX_BORDER = {
   right: { style: 'thin', color: { argb: 'FF000000' } }
 };
 
+export const EXCELJS_MEDIUM_BLACK_BOX_BORDER = {
+  top: { style: 'medium', color: { argb: 'FF000000' } },
+  left: { style: 'medium', color: { argb: 'FF000000' } },
+  bottom: { style: 'medium', color: { argb: 'FF000000' } },
+  right: { style: 'medium', color: { argb: 'FF000000' } }
+};
+
 const DEFAULT_ALL_BORDERS = EXCELJS_THIN_BLACK_BOX_BORDER;
 
-/** Apply a full thin box border to every cell in [rowFrom..rowTo] × [colFrom..colTo] (1-based). */
+function buildExcelJSFullBoxBorder(borderStyle = 'thin') {
+  const style = borderStyle === 'medium' ? 'medium' : 'thin';
+  return {
+    top: { style, color: { argb: 'FF000000' } },
+    left: { style, color: { argb: 'FF000000' } },
+    bottom: { style, color: { argb: 'FF000000' } },
+    right: { style, color: { argb: 'FF000000' } }
+  };
+}
+
+/** Apply a full box border to every cell in [rowFrom..rowTo] × [colFrom..colTo] (1-based). */
 export function applyExcelJSFullBoxBordersToRange(
   worksheet,
-  { rowFrom, rowTo, colFrom, colTo } = {}
+  { rowFrom, rowTo, colFrom, colTo, borderStyle = 'thin' } = {}
 ) {
   if (!worksheet) return;
   const r0 = Math.max(1, Number(rowFrom) || 1);
@@ -69,12 +86,7 @@ export function applyExcelJSFullBoxBordersToRange(
     for (let c = c0; c <= c1; c += 1) {
       const cell = worksheet.getCell(r, c);
       // Fresh border object every cell — ExcelJS shares style refs if reused.
-      const box = {
-        top: { style: 'thin', color: { argb: 'FF000000' } },
-        left: { style: 'thin', color: { argb: 'FF000000' } },
-        bottom: { style: 'thin', color: { argb: 'FF000000' } },
-        right: { style: 'thin', color: { argb: 'FF000000' } }
-      };
+      const box = buildExcelJSFullBoxBorder(borderStyle);
       // Set both ways so borders survive ExcelJS writeBuffer after SheetJS round-trips.
       cell.border = box;
       try {
@@ -332,6 +344,38 @@ export function clearExcelJSTrailingTableCells(
       cell.border = {};
     }
   }
+}
+
+/**
+ * Form XXI AP: last real table column is Remarks (usually L). Used to strip M–W boxes.
+ */
+export function findExcelJSRemarksOrLastHeaderCol(
+  worksheet,
+  { headerRow = 1, startCol = 1, scanCols = 40 } = {}
+) {
+  if (!worksheet) return 0;
+  const hr = Math.max(1, Number(headerRow) || 1);
+  const c0 = Math.max(1, Number(startCol) || 1);
+  const cMax = Math.max(c0, Number(scanCols) || 40);
+  let remarksCol = 0;
+  let lastLabelCol = 0;
+  for (let r = Math.max(1, hr - 1); r <= hr + 2; r += 1) {
+    for (let c = c0; c <= cMax; c += 1) {
+      const raw = worksheet.getCell(r, c)?.value;
+      let text = '';
+      if (raw == null) text = '';
+      else if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
+        text = String(raw).trim();
+      } else if (typeof raw === 'object') {
+        if (Array.isArray(raw.richText)) text = raw.richText.map((p) => p?.text || '').join('').trim();
+        else if (raw.text != null) text = String(raw.text).trim();
+      }
+      if (!text) continue;
+      lastLabelCol = Math.max(lastLabelCol, c);
+      if (/^remarks?$/i.test(text)) remarksCol = Math.max(remarksCol, c);
+    }
+  }
+  return remarksCol || lastLabelCol || 0;
 }
 
 /** Count contiguous template body rows that have borders or values in [colFrom, colTo]. */

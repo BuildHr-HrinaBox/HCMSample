@@ -302,6 +302,116 @@ describe('Form XIX AP payroll autofill rules', () => {
     expect(String(ws.getCell(12, 2).value || '')).toBe('');
   });
 
+  it('keeps original AP two-column headings and writes workman/period data beside them', async () => {
+    const ExcelJS = require('exceljs');
+    const {
+      writeFormXIXAPFieldsToExcelJsWorksheet,
+      applyFormXIXAPExportWageRulesToHeaderData,
+      mergeFormXIXAPWageTableRowIntoHeaderData,
+    } = require('./formXIXAPWageSlip');
+    const workbook = new ExcelJS.Workbook();
+    const ws = workbook.addWorksheet('XIX-Wage Slip');
+    ws.getCell(1, 6).value = 'FORM XIX';
+    ws.getCell(2, 6).value = 'WAGE SLIP';
+    ws.getCell(3, 6).value = '[Rule 78(1)(b)]';
+    ws.getCell(5, 1).value = 'Name and address of contractor';
+    ws.getCell(5, 9).value = "Name and Father's/Husband's Name of the workman";
+    ws.getCell(8, 1).value = 'Nature and location of work';
+    ws.getCell(8, 9).value = 'For the week/Fortnight/Month ending………..';
+    ws.getCell(12, 1).value = '1. No. of days worked';
+    ws.getCell(12, 9).value = '........................................................................';
+    ws.getCell(15, 1).value = '3. Rate of daily wages/piece-rate';
+    ws.getCell(15, 9).value = '........................................................................';
+    ws.getCell(16, 1).value = '4. Amount of overtime wages';
+    ws.getCell(16, 9).value = '........................................................................';
+    ws.getCell(17, 1).value = '5. Gross wages payable';
+    ws.getCell(17, 9).value = '........................................................................';
+    ws.getCell(18, 1).value = '6. Deductions, if any';
+    ws.getCell(18, 9).value = '........................................................................';
+    ws.getCell(19, 1).value = '7. Net amount of wages paid';
+    ws.getCell(19, 9).value = '........................................................................';
+    ws.getCell(23, 11).value = 'Initials of the contractor or his representative';
+
+    const merged = applyFormXIXAPExportWageRulesToHeaderData(
+      mergeFormXIXAPWageTableRowIntoHeaderData(
+        {
+          form_xix_ap_contractor: 'VAYONA ENERGY PRIVATE LIMITED',
+          form_xix_ap_nature_location: 'AP-Tadipatri',
+          form_xix_ap_period_ending: '31-05-2026',
+        },
+        {
+          "Name and Father's/Husband's Name of the workman": 'Arun Kumar Krishnan\nKrishnan A',
+          '1. No. of days worked': '30',
+          '3. Rate of daily wages/piece-rate': '718.1',
+          '5. Gross wages payable': '89110',
+          '7. Net amount of wages paid': '86325',
+        },
+        FORM_XIX_AP_WAGE_TABLE_HEADERS
+      )
+    );
+
+    writeFormXIXAPFieldsToExcelJsWorksheet(ws, merged, {
+      formXIXAPTableLayout: true,
+      formXIXAPHeaderFieldLayout: true,
+      fields: [
+        {
+          key: 'form_xix_ap_contractor',
+          label: 'Name and address of contractor',
+          group: 'header',
+          labelRow: 4,
+          labelCol: 0,
+          valueCol: 0,
+          valueRow: 5,
+        },
+        {
+          key: 'form_xix_ap_workman',
+          label: "Name and Father's/Husband's Name of the workman",
+          group: 'header',
+          labelRow: 4,
+          labelCol: 8,
+          valueCol: 13,
+          valueRow: 4,
+        },
+        {
+          key: 'form_xix_ap_nature_location',
+          label: 'Nature and location of work',
+          group: 'header',
+          labelRow: 7,
+          labelCol: 0,
+          valueCol: 3,
+          valueRow: 7,
+        },
+        {
+          key: 'form_xix_ap_period_ending',
+          label: 'For the week/Fortnight/Month ending',
+          group: 'header',
+          labelRow: 7,
+          labelCol: 8,
+          valueCol: 11,
+          valueRow: 7,
+        },
+      ],
+    });
+
+    const workmanHeading = String(ws.getCell(5, 9).value || '');
+    const periodHeading = String(ws.getCell(8, 9).value || '');
+    expect(workmanHeading).toMatch(/Name and Father's\/Husband's Name of the workman/i);
+    expect(workmanHeading).not.toBe('VAYONA ENERGY PRIVATE LIMITED');
+    expect(periodHeading).toMatch(/week\/Fortnight\/Month ending/i);
+    expect(periodHeading).not.toBe('AP-Tadipatri');
+    expect(periodHeading).not.toMatch(/31-05-2026/);
+
+    // AP printed layout: nature → D8, period ending → L8, workman → N5
+    expect(String(ws.getCell(8, 4).value)).toBe('AP-Tadipatri');
+    expect(String(ws.getCell(8, 12).value)).toBe('31-05-2026');
+    expect(String(ws.getCell(5, 14).value)).toMatch(/Arun Kumar Krishnan/);
+    expect(String(ws.getCell(14, 1).value || '')).not.toBe('AP-Tadipatri');
+    expect(String(ws.getCell(11, 9).value || '')).not.toBe('31-05-2026');
+
+    expect(String(ws.getCell(12, 9).value)).toBe('30');
+    expect(String(ws.getCell(16, 9).value)).toBe('NIL');
+  });
+
   it('writes Gujarat Form XIX contractor name/address to stacked column E (not H)', async () => {
     const ExcelJS = require('exceljs');
     const { writeFormXIXAPFieldsToExcelJsWorksheet } = require('./formXIXAPWageSlip');

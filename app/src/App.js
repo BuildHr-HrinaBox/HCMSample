@@ -374,7 +374,7 @@ function MainApp({ userRole, userEmail, userName }) {
   const isRestrictedUser = userEmail === 'afrindinu29@gmail.com';
   // Audit-only user: sidebar shows only Home, Audit, Audit Report, and site-wise audit links.
   const isAuditOnlyUser = userEmail === 'afrindinu14@gmail.com';
-  const auditOnlyAllowedPaths = ['/', '/rule-book/main-audit', '/audit-report', '/mainreport', '/returned-report', '/rule-book/statutory', '/settings'];
+  const auditOnlyAllowedPaths = ['/', '/rule-book/main-audit', '/audit-report', '/mainreport', '/returned-report', '/rule-book/statutory', '/settings', '/pending-notification'];
 
   const shouldShowOnlySiteManagement = false;
 
@@ -417,6 +417,9 @@ function MainApp({ userRole, userEmail, userName }) {
   const isReturnedReportHcmShell = location.pathname === '/returned-report';
   const isSettingsHcmShell = location.pathname === '/settings';
   const isSetupHcmShell = location.pathname === '/setup';
+  const isChroNotificationHcmShell = location.pathname === '/chro-notification';
+  const isPendingNotificationHcmShell = location.pathname === '/pending-notification';
+  const isReminderNotificationHcmShell = location.pathname === '/reminder-notification';
   const isPeopleHcmShell = location.pathname === '/rule-book/people';
   const isAttendanceHcmShell = location.pathname === '/rule-book/attendance';
   const isLeaveHcmShell = location.pathname === '/rule-book/leave';
@@ -441,6 +444,9 @@ function MainApp({ userRole, userEmail, userName }) {
     isReturnedReportHcmShell ||
     isSettingsHcmShell ||
     isSetupHcmShell ||
+    isChroNotificationHcmShell ||
+    isPendingNotificationHcmShell ||
+    isReminderNotificationHcmShell ||
     isPeopleHcmShell ||
     isAttendanceHcmShell ||
     isLeaveHcmShell ||
@@ -506,7 +512,7 @@ function MainApp({ userRole, userEmail, userName }) {
               : isAuditOnlyUser
                 ? auditOnlyAllowedPaths
                 : isRestrictedUser 
-                  ? ['/', '/new-dashboard', '/hcm-dashboard', '/rule-book/company-details', '/rule-book/site-management', '/rule-book/se-master', '/rule-book/formmaster', '/rule-book/actsbulk', '/rule-book/act-descriptions', '/rule-book/regulationsbulk', '/rule-book/regulations', '/rule-book/statutory', '/rule-book/checklist', '/rule-book/checklistbulk', '/rule-book/people', '/rule-book/attendance', '/rule-book/leave', '/rule-book/newleave', '/rule-book/approved-leaves', '/rule-book/payroll', '/rule-book/sample-payroll', '/rule-book/clra', '/rule-book/todo-list', '/rule-book/calendarbulk', '/rule-book/statutory-master', '/rule-book/statutorymasterfactory', '/form-builder', '/calendar-picker', '/compliance', '/certificate', '/mainreport', '/returned-report', '/settings', '/setup', '/assessments/assessment-report', '/assessments/vendor-view', '/assessments/face-sheets', '/assessments/category-score'] 
+                  ? ['/', '/new-dashboard', '/hcm-dashboard', '/rule-book/company-details', '/rule-book/site-management', '/rule-book/se-master', '/rule-book/formmaster', '/rule-book/actsbulk', '/rule-book/act-descriptions', '/rule-book/regulationsbulk', '/rule-book/regulations', '/rule-book/statutory', '/rule-book/checklist', '/rule-book/checklistbulk', '/rule-book/people', '/rule-book/attendance', '/rule-book/leave', '/rule-book/newleave', '/rule-book/approved-leaves', '/rule-book/payroll', '/rule-book/sample-payroll', '/rule-book/clra', '/rule-book/todo-list', '/rule-book/calendarbulk', '/rule-book/statutory-master', '/rule-book/statutorymasterfactory', '/form-builder', '/calendar-picker', '/compliance', '/certificate', '/mainreport', '/returned-report', '/settings', '/setup', '/chro-notification', '/pending-notification', '/reminder-notification', '/assessments/assessment-report', '/assessments/vendor-view', '/assessments/face-sheets', '/assessments/category-score'] 
                   : ['*']
           }>
             <Routes>
@@ -829,6 +835,7 @@ function MainApp({ userRole, userEmail, userName }) {
                     userRole={userRole || 'App User'}
                     userInitials={dashboardInitials}
                     userEmail={userEmail}
+                    mainExtraClassName="nd-content--viewport-scroll"
                   >
                     <Settings />
                   </HcmDashboardPageShell>
@@ -848,6 +855,9 @@ function MainApp({ userRole, userEmail, userName }) {
                   </HcmDashboardPageShell>
                 }
               />
+              <Route path="/chro-notification" element={<Navigate to="/settings" replace />} />
+              <Route path="/pending-notification" element={<Navigate to="/settings" replace />} />
+              <Route path="/reminder-notification" element={<Navigate to="/settings" replace />} />
               <Route
                 path="/returned-report"
                 element={

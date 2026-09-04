@@ -1,9 +1,11 @@
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import {
+  applyExcelJSFullBoxBordersToRange,
   clearExcelJSTrailingTableCells,
   countExcelJSTemplateBodyRows,
   ensureExcelJSDataRowsWithBorders,
+  excelJSCellHasBorder,
   resetExcelJsWorkbookActiveSheet,
 } from '../../utils/excelTableBorders';
 import { yieldToMain } from '../../utils/statutoryAutofillCache';
@@ -499,6 +501,20 @@ export function hasFormTSEKarnatakaMonthDefaultPayrollContext(emp, monthCandidat
   );
 }
 
+export const FORM_T_KA_RULE_CITATION =
+  '[See Rule 24(9-B) of Karnataka Shops & Commercial Establishment Rules, 1963]';
+
+export const FORM_T_KA_SUBTITLE = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+
+/** CLRA / Minimum Wages / Payment of Wages / ISMW "in lieu of" lines — Form T KA rows 4–8. */
+export const FORM_T_KA_CLRA_IN_LIEU_LINES = [
+  'in lieu of',
+  '1. Form I, II of Rule 22(4); Form IV of Rule 29(2); Forms V & VII of Rule 29(1) & (5) of Karnataka Minimum Wages Rules, 1958',
+  '2. Form I of Rules 3(1) of Karnataka Payment of Wages Rules, 1963',
+  '3. Form XIII of Rules 75; Form XV, XVII, XX, XXI, XXII, XXIII of 78(1)(a)(i), (ii) & (iii) of Karnataka Contract Labour (Regulation & Abolition) Rules, 1974',
+  '4. Form XIII of Rule 43; Forms XVII, XVIII, XIX, XX, XXI, XXII of Rule 46(2)(a),(c) & (d) of Inter-state Migrant Workmen (Regulation of Employment and conditions of service) Karnataka Rules, 1981',
+];
+
 export const FORM_T_KARNATAKA_HEADER_SPECS = [
   {
     key: 'form_t_month_year',
@@ -507,19 +523,743 @@ export const FORM_T_KARNATAKA_HEADER_SPECS = [
   },
   {
     key: 'form_t_establishment_name_address',
-    // Templates use either "Name and address…" or "Address of the Establishment".
+    // Official KA label; older CLRA templates still say "Name and address of contractor".
     label: 'Name and address of the Establishment',
-    match: /(?:name\s+and\s+)?address\s+of\s+the\s+establishment/i,
+    match:
+      /(?:name\s+and\s+)?address\s+of\s+the\s+establishment|name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i,
   },
   {
     key: 'form_t_employer',
+    // Official KA label; older CLRA templates still say "Nature of work and location of work".
     label: 'Name and Address of employer',
-    match: /name\s+and\s+address\s+of\s+(?:the\s+)?employer/i,
+    match:
+      /name\s+and\s+address\s+of\s+(?:the\s+)?employer|nature\s+of\s+work\s+and\s+location\s+of\s+work/i,
   },
 ];
 
 /** Header value boxes span identity columns A–I (ATTENDANCE band starts at J). */
 export const FORM_T_KARNATAKA_HEADER_BOX_END_COL = 9;
+
+/** Month / Year, Establishment, Employer header box rows on the KA template. */
+export const FORM_T_KARNATAKA_HEADER_BOX_ROWS = [9, 10, 11];
+
+/** Obsolete CLRA title/rule block rows (replaced by a single Rule 24(9-B) line). */
+export const FORM_T_KA_OBSOLETE_TITLE_ROW_FROM = 3;
+export const FORM_T_KA_OBSOLETE_TITLE_ROW_TO = 8;
+
+/** Empty bordered grid on old templates: columns L–AN (12–40), rows 1–11. */
+export const FORM_T_KA_OBSOLETE_SIDE_BOX_COL_FROM = 12;
+export const FORM_T_KA_OBSOLETE_SIDE_BOX_COL_TO = 40;
+
+const FORM_T_KA_NO_CELL_BORDER = {};
+
+function stripExcelJSCellBorder(cell) {
+  if (!cell) return;
+  cell.border = FORM_T_KA_NO_CELL_BORDER;
+  try {
+    const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+    prev.border = FORM_T_KA_NO_CELL_BORDER;
+    cell.style = prev;
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+/**
+ * Strip obsolete Form T KA header boxes:
+ * - bordered cells on rows 3–8 (CLRA text restored separately)
+ * - empty L–AN (cols 12–40) boxes above the table (rows 1–11)
+ * Does not touch the attendance/wage table grid starting at row 12.
+ */
+export function clearFormTSEKarnatakaObsoleteHeaderBoxes(
+  worksheet,
+  {
+    obsoleteRowFrom = FORM_T_KA_OBSOLETE_TITLE_ROW_FROM,
+    obsoleteRowTo = FORM_T_KA_OBSOLETE_TITLE_ROW_TO,
+    sideBoxColFrom = FORM_T_KA_OBSOLETE_SIDE_BOX_COL_FROM,
+    sideBoxColTo = FORM_T_KA_OBSOLETE_SIDE_BOX_COL_TO,
+    headerRowTo = 11,
+    clearObsoleteText = false,
+  } = {}
+) {
+  if (!worksheet) return;
+  const r0 = Math.max(1, Number(obsoleteRowFrom) || FORM_T_KA_OBSOLETE_TITLE_ROW_FROM);
+  const r1 = Math.max(r0, Number(obsoleteRowTo) || FORM_T_KA_OBSOLETE_TITLE_ROW_TO);
+  const sideC0 = Math.max(1, Number(sideBoxColFrom) || FORM_T_KA_OBSOLETE_SIDE_BOX_COL_FROM);
+  const sideC1 = Math.max(sideC0, Number(sideBoxColTo) || FORM_T_KA_OBSOLETE_SIDE_BOX_COL_TO);
+  const headerEnd = Math.max(r1, Number(headerRowTo) || 11);
+  const clearThroughCol = Math.max(sideC1, 80);
+
+  // Unmerge any box merges that sit entirely in the obsolete title band or L–AN header strip.
+  const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
+  merges.forEach((label) => {
+    const parts = String(label || '').split(':');
+    if (parts.length !== 2) return;
+    try {
+      const tl = worksheet.getCell(parts[0]);
+      const br = worksheet.getCell(parts[1]);
+      if (!tl || !br) return;
+      const inObsoleteRows = br.row >= r0 && tl.row <= r1 && br.row < FORM_T_KA_TABLE_BORDER_START_ROW;
+      const inSideBoxes =
+        br.col >= sideC0 &&
+        tl.col <= sideC1 &&
+        br.row <= headerEnd &&
+        tl.row >= 1 &&
+        br.row < FORM_T_KA_TABLE_BORDER_START_ROW;
+      if (!inObsoleteRows && !inSideBoxes) return;
+      worksheet.unMergeCells(label);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+
+  // Strip borders on rows 3–8; clear spilled B–AN copies; optionally wipe all text.
+  for (let r = r0; r <= r1; r += 1) {
+    for (let c = 1; c <= clearThroughCol; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      stripExcelJSCellBorder(cell);
+      if (clearObsoleteText && (r > r0 || c > 1)) {
+        try {
+          cell.value = null;
+        } catch (_) {
+          /* ignore */
+        }
+      } else if (c > 1) {
+        try {
+          cell.value = null;
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  // Clear L–AN header-side boxes on rows 1–11 (never the table from row 12).
+  for (let r = 1; r <= headerEnd; r += 1) {
+    for (let c = sideC0; c <= sideC1; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      stripExcelJSCellBorder(cell);
+      if (r < FORM_T_KA_TABLE_BORDER_START_ROW) {
+        try {
+          cell.value = null;
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Clear borders on Month/Year, Establishment, Employer rows — table borders start at row 12.
+ * Unmerges header-band cells first so hidden merge slaves do not keep template box lines.
+ */
+export function clearFormTSEKarnatakaHeaderBandBorders(
+  worksheet,
+  {
+    rowFrom = 9,
+    rowTo = 11,
+    colFrom = 1,
+    colTo = 80,
+    remergeHeaderBoxes = true,
+  } = {}
+) {
+  if (!worksheet) return;
+  const r0 = Math.max(1, Number(rowFrom) || 9);
+  const r1 = Math.max(r0, Number(rowTo) || 11);
+  const c0 = Math.max(1, Number(colFrom) || 1);
+  const c1 = Math.max(c0, Number(colTo) || c0, FORM_T_KARNATAKA_HEADER_BOX_END_COL);
+  const mergeEnd = FORM_T_KARNATAKA_HEADER_BOX_END_COL;
+
+  const savedRows = [];
+  if (remergeHeaderBoxes) {
+    for (let r = r0; r <= r1; r += 1) {
+      const cell = worksheet.getCell(r, 1);
+      savedRows.push({
+        row: r,
+        value: cell.value,
+        alignment: cell.alignment ? { ...cell.alignment } : undefined,
+        height: worksheet.getRow(r)?.height,
+      });
+    }
+  }
+
+  const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
+  merges.forEach((label) => {
+    const parts = String(label || '').split(':');
+    if (parts.length !== 2) return;
+    try {
+      const tl = worksheet.getCell(parts[0]);
+      const br = worksheet.getCell(parts[1]);
+      if (!tl || !br || br.row < r0 || tl.row > r1) return;
+      worksheet.unMergeCells(label);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+
+  for (let r = r0; r <= r1; r += 1) {
+    for (let c = c0; c <= c1; c += 1) {
+      stripExcelJSCellBorder(worksheet.getCell(r, c));
+    }
+  }
+
+  if (!remergeHeaderBoxes) return;
+
+  savedRows.forEach(({ row, value, alignment, height }) => {
+    try {
+      worksheet.mergeCells(row, 1, row, mergeEnd);
+    } catch (_) {
+      /* already merged */
+    }
+    const cell = worksheet.getCell(row, 1);
+    if (value !== undefined) cell.value = value;
+    stripExcelJSCellBorder(cell);
+    if (alignment) {
+      cell.alignment = { ...alignment, wrapText: alignment.wrapText !== false };
+    } else {
+      cell.alignment = {
+        ...(cell.alignment || {}),
+        wrapText: true,
+        vertical: 'middle',
+        horizontal: 'left',
+      };
+    }
+    if (height != null) {
+      const wsRow = worksheet.getRow(row);
+      if (wsRow) wsRow.height = height;
+    }
+  });
+}
+
+/** Thin full box on Month/Year, Establishment, and Employer header value rows (A–I). */
+export function applyFormTSEKarnatakaHeaderValueBoxBorders(
+  worksheet,
+  endCol = FORM_T_KARNATAKA_HEADER_BOX_END_COL
+) {
+  if (!worksheet) return;
+  const mergeEnd = Math.max(1, Number(endCol) || FORM_T_KARNATAKA_HEADER_BOX_END_COL);
+  FORM_T_KARNATAKA_HEADER_BOX_ROWS.forEach((row) => {
+    applyExcelJSFullBoxBordersToRange(worksheet, {
+      rowFrom: row,
+      rowTo: row,
+      colFrom: 1,
+      colTo: mergeEnd,
+    });
+  });
+}
+
+/**
+ * Infer the bordered table rectangle from row 12 through the last body row and
+ * rightmost populated column (attendance days, wage bands, merges).
+ */
+export function inferFormTSEKarnatakaExportBorderRange(worksheet, hints = {}) {
+  const startRow = FORM_T_KA_TABLE_BORDER_START_ROW;
+  let colTo = Math.max(Number(hints.colTo) || 0, FORM_T_KARNATAKA_HEADER_BOX_END_COL);
+  let tableLastRow = Math.max(Number(hints.tableLastRow) || 0, startRow);
+
+  if (!worksheet) {
+    return {
+      tableHeaderRow: startRow,
+      tableLastRow: Math.max(tableLastRow, startRow + 2),
+      colFrom: 1,
+      colTo: Math.max(colTo, 40),
+    };
+  }
+
+  const merges = Array.isArray(worksheet.model?.merges) ? worksheet.model.merges : [];
+  merges.forEach((label) => {
+    const parts = String(label || '').split(':');
+    if (parts.length !== 2) return;
+    try {
+      const br = worksheet.getCell(parts[1]);
+      if (br.row >= startRow) colTo = Math.max(colTo, br.col);
+    } catch (_) {
+      /* ignore bad merge ref */
+    }
+  });
+
+  for (let r = startRow; r <= startRow + 4; r += 1) {
+    for (let c = 1; c <= 80; c += 1) {
+      const t = formTSEExcelJsCellText(worksheet, r, c);
+      if (t) colTo = Math.max(colTo, c);
+      try {
+        if (excelJSCellHasBorder(worksheet.getCell(r, c))) colTo = Math.max(colTo, c);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
+  let footerRow = 0;
+  for (let r = startRow; r <= 150; r += 1) {
+    const a = formTSEExcelJsCellText(worksheet, r, 1).toLowerCase();
+    let line = a;
+    for (let c = 2; c <= 4; c += 1) {
+      const t = formTSEExcelJsCellText(worksheet, r, c).toLowerCase();
+      if (t) line += ` ${t}`;
+    }
+    if (/^date\s*:?$/.test(a) || /^date\s*:/.test(a) || /system\s+generated\s+document/.test(line)) {
+      footerRow = r;
+      break;
+    }
+  }
+
+  const bodyScanEnd = footerRow > startRow ? footerRow - 1 : 120;
+  let lastContentRow = startRow;
+  for (let r = startRow; r <= bodyScanEnd; r += 1) {
+    for (let c = 1; c <= Math.max(colTo, 80); c += 1) {
+      const t = formTSEExcelJsCellText(worksheet, r, c);
+      if (t) {
+        lastContentRow = Math.max(lastContentRow, r);
+        colTo = Math.max(colTo, c);
+      }
+    }
+  }
+
+  tableLastRow = Math.max(tableLastRow, lastContentRow);
+  tableLastRow = Math.max(tableLastRow, lastContentRow + 2, startRow + 2);
+  if (footerRow > startRow) {
+    tableLastRow = Math.min(tableLastRow, footerRow - 1);
+  }
+
+  return {
+    tableHeaderRow: startRow,
+    tableLastRow,
+    colFrom: 1,
+    colTo,
+  };
+}
+
+/**
+ * Full thin box borders on the export grid from row 12 — column headers, index strip,
+ * data rows, and empty template body rows (matches the official Form T_KA model sheet).
+ */
+export function applyFormTSEKarnatakaFullExportBorders(
+  worksheet,
+  {
+    tableHeaderRow = FORM_T_KA_TABLE_BORDER_START_ROW,
+    tableLastRow = 18,
+    colFrom = 1,
+    colTo = 40,
+    headerBoxEndCol = FORM_T_KARNATAKA_HEADER_BOX_END_COL,
+    includeHeaderBoxes = false,
+  } = {}
+) {
+  if (!worksheet) return;
+  const r0 = Math.max(
+    FORM_T_KA_TABLE_BORDER_START_ROW,
+    Number(tableHeaderRow) || FORM_T_KA_TABLE_BORDER_START_ROW
+  );
+  const r1 = Math.max(r0, Number(tableLastRow) || r0);
+  const c0 = Math.max(1, Number(colFrom) || 1);
+  const c1 = Math.max(c0, Number(colTo) || c0);
+  if (includeHeaderBoxes) {
+    applyFormTSEKarnatakaHeaderValueBoxBorders(worksheet, headerBoxEndCol);
+  } else {
+    // Strip template/header-band borders so only row 12+ shows the table grid.
+    clearFormTSEKarnatakaHeaderBandBorders(worksheet, { colTo: c1 });
+  }
+  applyExcelJSFullBoxBordersToRange(worksheet, {
+    rowFrom: r0,
+    rowTo: r1,
+    colFrom: c0,
+    colTo: c1,
+  });
+  if (!includeHeaderBoxes) {
+    // Re-strip header band after table paint — template merge slaves can keep box lines.
+    clearFormTSEKarnatakaHeaderBandBorders(worksheet, { colTo: c1, remergeHeaderBoxes: true });
+  }
+}
+
+export const FORM_T_KA_TITLE_COL_FROM = 1;
+/** Title/rule lines span A–K (same as Form F) — avoids breaking multi-row template merges. */
+export const FORM_T_KA_TITLE_COL_TO = 11;
+export const FORM_T_KA_SYSTEM_GENERATED_NOTE = 'This is a System Generated Document';
+
+function formTSETitleLineNorm(text) {
+  return String(text || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function looksLikeFormTSEKarnatakaFormTitle(text) {
+  return /^form\s*t\b/i.test(formTSETitleLineNorm(text));
+}
+
+function looksLikeFormTSEKarnatakaMainSubtitle(text) {
+  const t = formTSETitleLineNorm(text).toLowerCase();
+  return /combined\s+muster|muster\s+roll\s+cum\s+register|register\s+of\s+wages/.test(t);
+}
+
+function looksLikeFormTSEKarnatakaRuleCitation(text) {
+  const t = formTSETitleLineNorm(text).toLowerCase();
+  if (!t || t.length > 240) return false;
+  return (
+    /see\s+rule|\[see\s+rule|vide\s+rule|in\s+lieu\s+of|shops\s*&\s*commercial|minimum\s+wages|payment\s+of\s+wages|contract\s+labour|inter-?state\s+migrant/.test(
+      t
+    )
+  );
+}
+
+function formTSEUnmergeCovering(worksheet, r1, c1, r2, c2) {
+  const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
+  merges.forEach((label) => {
+    const parts = String(label || '').split(':');
+    if (parts.length !== 2) return;
+    try {
+      const tl = worksheet.getCell(parts[0]);
+      const br = worksheet.getCell(parts[1]);
+      if (!tl || !br || br.row < r1 || tl.row > r2 || br.col < c1 || tl.col > c2) return;
+      worksheet.unMergeCells(label);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+}
+
+/** Unmerge only single-row bands — never split vertical template merges on rows 1–8. */
+function formTSEUnmergeHorizontalRowBand(worksheet, row, colFrom, colTo) {
+  const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
+  merges.forEach((label) => {
+    const parts = String(label || '').split(':');
+    if (parts.length !== 2) return;
+    try {
+      const tl = worksheet.getCell(parts[0]);
+      const br = worksheet.getCell(parts[1]);
+      if (!tl || !br || tl.row !== br.row || tl.row !== row) return;
+      if (br.col < colFrom || tl.col > colTo) return;
+      worksheet.unMergeCells(label);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+}
+
+function formTSECaptureRowTextDeep(worksheet, row, matcher, scanCols = 28) {
+  let best = formTSECaptureRowText(worksheet, row, matcher, scanCols);
+  const merges = Array.isArray(worksheet.model?.merges) ? worksheet.model.merges : [];
+  merges.forEach((label) => {
+    const parts = String(label || '').split(':');
+    if (parts.length !== 2) return;
+    try {
+      const tl = worksheet.getCell(parts[0]);
+      const br = worksheet.getCell(parts[1]);
+      if (!tl || !br || tl.row > row || br.row < row) return;
+      const t = formTSEExcelJsCellText(worksheet, tl.row, tl.col);
+      if (matcher(t) && t.length > best.length) best = t;
+    } catch (_) {
+      /* ignore */
+    }
+  });
+  return best;
+}
+
+function formTSECaptureRowText(worksheet, row, matcher, scanCols = 28) {
+  let best = '';
+  for (let c = 1; c <= scanCols; c += 1) {
+    const t = formTSEExcelJsCellText(worksheet, row, c);
+    if (!t) continue;
+    if (matcher(t) && t.length >= best.length) best = t;
+  }
+  return best;
+}
+
+function formTSEWriteLeftTitleBand(
+  worksheet,
+  row,
+  text,
+  colFrom,
+  colTo,
+  { bold = false, size = 11 } = {}
+) {
+  if (!worksheet || row < 1 || !text) return;
+  const c0 = Math.max(1, colFrom);
+  const c1 = Math.max(c0, colTo);
+  formTSEUnmergeHorizontalRowBand(worksheet, row, c0, c1);
+  try {
+    worksheet.mergeCells(row, c0, row, c1);
+  } catch (_) {
+    /* overlap — still write left cell */
+  }
+  const cell = worksheet.getCell(row, c0);
+  cell.value = text;
+  const alignment = {
+    horizontal: 'left',
+    vertical: 'middle',
+    wrapText: true,
+    indent: 0,
+    textRotation: 0,
+  };
+  cell.alignment = alignment;
+  try {
+    const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+    cell.style = { ...prev, alignment: { ...(prev.alignment || {}), ...alignment } };
+  } catch (_) {
+    /* alignment property is enough on most ExcelJS builds */
+  }
+  cell.font = {
+    ...(cell.font || {}),
+    bold: bold ?? cell.font?.bold ?? false,
+    size: cell.font?.size || size,
+  };
+  const wsRow = worksheet.getRow(row);
+  if (wsRow) {
+    const len = String(text).length;
+    const needed = len > 120 ? 36 : len > 80 ? 28 : len > 40 ? 22 : 16;
+    wsRow.height = needed;
+  }
+}
+
+export function resolveFormTSEKarnatakaTitleSpanCol(worksheet, hints = {}) {
+  void worksheet;
+  void hints;
+  return FORM_T_KA_TITLE_COL_TO;
+}
+
+/**
+ * Write CLRA "in lieu of" rule lines into rows 4–8 (column A, left-aligned, no boxes).
+ */
+export function writeFormTSEKarnatakaClraInLieuLines(worksheet, options = {}) {
+  if (!worksheet) return false;
+  const colFrom = FORM_T_KA_TITLE_COL_FROM;
+  const colTo = resolveFormTSEKarnatakaTitleSpanCol(worksheet, options);
+  const lines = Array.isArray(options.lines) ? options.lines : FORM_T_KA_CLRA_IN_LIEU_LINES;
+  lines.forEach((text, index) => {
+    const row = 4 + index;
+    if (row > FORM_T_KA_OBSOLETE_TITLE_ROW_TO) return;
+    formTSEWriteLeftTitleBand(worksheet, row, text, colFrom, colTo, {
+      bold: false,
+      size: index === 0 ? 10 : 9,
+    });
+    try {
+      const wsRow = worksheet.getRow(row);
+      if (wsRow) {
+        wsRow.hidden = false;
+        const needed = String(text).length > 120 ? 36 : String(text).length > 80 ? 28 : 18;
+        wsRow.height = Math.max(Number(wsRow.height) || 0, needed);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  });
+  return true;
+}
+
+/**
+ * Ensure rows 4–8 are visible with the CLRA in-lieu text (not collapsed).
+ */
+export function expandFormTSEKarnatakaClraTitleRows(worksheet) {
+  if (!worksheet) return;
+  for (let r = 4; r <= FORM_T_KA_OBSOLETE_TITLE_ROW_TO; r += 1) {
+    try {
+      const wsRow = worksheet.getRow(r);
+      if (!wsRow) continue;
+      wsRow.hidden = false;
+      wsRow.height = Math.max(Number(wsRow.height) || 0, 18);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  [1, 2, 3].forEach((r) => {
+    try {
+      const wsRow = worksheet.getRow(r);
+      if (!wsRow) return;
+      wsRow.hidden = false;
+      const text = formTSEExcelJsCellText(worksheet, r, 1);
+      const needed = r === 3 ? 28 : r === 2 ? 22 : 18;
+      wsRow.height = Math.max(Number(wsRow.height) || 0, text.length > 80 ? needed + 8 : needed);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+  FORM_T_KARNATAKA_HEADER_BOX_ROWS.forEach((r) => {
+    try {
+      const wsRow = worksheet.getRow(r);
+      if (!wsRow) return;
+      wsRow.hidden = false;
+      wsRow.height = Math.max(Number(wsRow.height) || 0, 22);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+}
+
+/** @deprecated CLRA rows 4–8 stay visible — delegates to expandFormTSEKarnatakaClraTitleRows. */
+export function collapseFormTSEKarnatakaObsoleteTitleRows(worksheet) {
+  expandFormTSEKarnatakaClraTitleRows(worksheet);
+}
+
+/**
+ * Left-align FORM T / muster subtitle / Rule 24(9-B) / CLRA "in lieu of" lines.
+ * Rows 3 = Rule citation; rows 4–8 = in-lieu legal references (no boxes). L–AN boxes cleared.
+ */
+export function ensureFormTSEKarnatakaTitleLayout(worksheet, options = {}) {
+  if (!worksheet || !looksLikeFormTSEKarnatakaWorksheet(worksheet)) return false;
+  const colFrom = FORM_T_KA_TITLE_COL_FROM;
+  const colTo = resolveFormTSEKarnatakaTitleSpanCol(worksheet, options);
+
+  const colA = worksheet.getColumn(1);
+  colA.hidden = false;
+  colA.width = Math.max(Number(colA.width) || 0, 18);
+
+  // Capture title/subtitle before clearing the obsolete band.
+  let formTitle = '';
+  let subtitle = '';
+  for (let r = 1; r <= 8; r += 1) {
+    if (!formTitle) {
+      formTitle = formTSECaptureRowTextDeep(worksheet, r, looksLikeFormTSEKarnatakaFormTitle);
+    }
+    if (!subtitle) {
+      subtitle = formTSECaptureRowTextDeep(worksheet, r, looksLikeFormTSEKarnatakaMainSubtitle);
+    }
+  }
+  formTitle = formTitle || 'FORM T';
+  subtitle = subtitle || FORM_T_KA_SUBTITLE;
+
+  clearFormTSEKarnatakaObsoleteHeaderBoxes(worksheet, { clearObsoleteText: true });
+
+  formTSEWriteLeftTitleBand(worksheet, 1, formTitle, colFrom, colTo, { bold: true, size: 14 });
+  formTSEWriteLeftTitleBand(worksheet, 2, subtitle, colFrom, colTo, { bold: true, size: 12 });
+  formTSEWriteLeftTitleBand(worksheet, 3, FORM_T_KA_RULE_CITATION, colFrom, colTo, {
+    bold: false,
+    size: 10,
+  });
+  writeFormTSEKarnatakaClraInLieuLines(worksheet, { colTo });
+  expandFormTSEKarnatakaClraTitleRows(worksheet);
+
+  return true;
+}
+
+/** Center the footer note across the full Form T table width. */
+export function ensureFormTSEKarnatakaSystemGeneratedNoteCentered(
+  worksheet,
+  colTo = FORM_T_KARNATAKA_HEADER_BOX_END_COL
+) {
+  if (!worksheet) return false;
+  const spanTo = Math.max(
+    FORM_T_KARNATAKA_HEADER_BOX_END_COL,
+    Number(colTo) || FORM_T_KARNATAKA_HEADER_BOX_END_COL
+  );
+  let noteRow = 0;
+  for (let r = 1; r <= 150; r += 1) {
+    for (let c = 1; c <= 8; c += 1) {
+      const t = formTSEExcelJsCellText(worksheet, r, c);
+      if (
+        /this\s+is\s+a\s+system\s+generated\s+document|system\s+generated\s+document|stem\s+generated\s+document/i.test(
+          t
+        )
+      ) {
+        noteRow = r;
+        break;
+      }
+    }
+    if (noteRow > 0) break;
+  }
+  if (noteRow < 1) return false;
+
+  for (let c = 1; c <= spanTo + 8; c += 1) {
+    const t = formTSEExcelJsCellText(worksheet, noteRow, c);
+    if (
+      /this\s+is\s+a\s+system\s+generated\s+document|system\s+generated\s+document|stem\s+generated\s+document/i.test(
+        t
+      ) &&
+      c !== 1
+    ) {
+      worksheet.getCell(noteRow, c).value = '';
+    }
+  }
+
+  formTSEUnmergeCovering(worksheet, noteRow, 1, noteRow, spanTo);
+  try {
+    worksheet.mergeCells(noteRow, 1, noteRow, spanTo);
+  } catch (_) {
+    /* overlap — write A cell only */
+  }
+
+  const cell = worksheet.getCell(noteRow, 1);
+  cell.value = FORM_T_KA_SYSTEM_GENERATED_NOTE;
+  const alignment = { horizontal: 'center', vertical: 'middle', wrapText: false, indent: 0 };
+  cell.alignment = alignment;
+  try {
+    const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+    cell.style = { ...prev, alignment: { ...(prev.alignment || {}), ...alignment } };
+  } catch (_) {
+    /* ignore */
+  }
+  return true;
+}
+
+/** True when the active sheet is Karnataka Form T (Combined Muster Roll). */
+export function looksLikeFormTSEKarnatakaWorksheet(worksheet) {
+  if (!worksheet || typeof worksheet.getCell !== 'function') return false;
+  let hasFormT = false;
+  let hasMuster = false;
+  for (let r = 1; r <= 8; r += 1) {
+    for (let c = 1; c <= 8; c += 1) {
+      const t = formTSEExcelJsCellText(worksheet, r, c).toLowerCase();
+      if (!t) continue;
+      if (/^form\s*t\b/.test(t)) hasFormT = true;
+      if (/combined\s+muster|muster\s+roll\s+cum\s+register/.test(t)) hasMuster = true;
+      if (hasFormT && hasMuster) return true;
+    }
+  }
+  const monthRow = formTSEExcelJsCellText(worksheet, 9, 1).toLowerCase();
+  const nameHeader = formTSEExcelJsCellText(worksheet, 12, 2).toLowerCase();
+  if (/month\s*\/?\s*year/.test(monthRow) && /name\s+of\s+employee/.test(nameHeader)) {
+    return true;
+  }
+  return false;
+}
+
+/** Row-12+ table borders, title band, and centered footer — every Form T download pass. */
+export function finalizeFormTSEKarnatakaWorksheetExportBorders(worksheet, hints = {}) {
+  if (!worksheet || !looksLikeFormTSEKarnatakaWorksheet(worksheet)) return;
+  const range = inferFormTSEKarnatakaExportBorderRange(worksheet, hints);
+  ensureFormTSEKarnatakaTitleLayout(worksheet, { colTo: range.colTo });
+  renameFormTSEKarnatakaHeaderLabels(worksheet);
+  applyFormTSEKarnatakaFullExportBorders(worksheet, {
+    ...range,
+    includeHeaderBoxes: hints.includeHeaderBoxes === true,
+  });
+  // Template merge slaves can keep L–AN / rows 3–8 box lines after table paint.
+  clearFormTSEKarnatakaObsoleteHeaderBoxes(worksheet);
+  ensureFormTSEKarnatakaTitleLayout(worksheet, { colTo: range.colTo });
+  renameFormTSEKarnatakaHeaderLabels(worksheet);
+  expandFormTSEKarnatakaClraTitleRows(worksheet);
+  ensureFormTSEKarnatakaSystemGeneratedNoteCentered(worksheet, range.colTo);
+}
+
+/** Apply row-12+ full box borders to every worksheet in a Form T workbook buffer. */
+export async function applyFormTSEKarnatakaExportBordersToBuffer(arrayBuffer, hints = {}) {
+  if (!arrayBuffer || arrayBuffer.byteLength < 32) return arrayBuffer;
+  try {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(arrayBuffer);
+    const sheets = workbook.worksheets || [];
+    if (sheets.length === 0) return arrayBuffer;
+    const headerFormData =
+      hints.headerFormData && typeof hints.headerFormData === 'object' ? hints.headerFormData : null;
+    const parsedFormHeader = hints.parsedFormHeader || null;
+    sheets.forEach((worksheet) => {
+      if (!looksLikeFormTSEKarnatakaWorksheet(worksheet) && hints.force !== true) return;
+      finalizeFormTSEKarnatakaWorksheetExportBorders(worksheet, hints);
+      // Stamp Establishment/Employer onto rows 10–11 after title-band cleanup.
+      if (headerFormData) {
+        writeFormTSEHeaderFieldsToWorksheet(worksheet, headerFormData, parsedFormHeader);
+        expandFormTSEHeaderValueBoxes(worksheet, FORM_T_KARNATAKA_HEADER_BOX_END_COL);
+        writeFormTSEKarnatakaClraInLieuLines(worksheet);
+        expandFormTSEKarnatakaClraTitleRows(worksheet);
+      }
+    });
+    resetExcelJsWorkbookActiveSheet(workbook);
+    return workbook.xlsx.writeBuffer();
+  } catch (err) {
+    console.warn('Form T Karnataka export borders failed:', err);
+    return arrayBuffer;
+  }
+}
 
 const formTSEHeaderNorm = (txt) =>
   String(txt || '')
@@ -898,15 +1638,24 @@ function resolveFormTHeaderExportValue(headerFormData, spec, parsedFields = []) 
       'form_f_establishment_name_address',
       'form_h_establishment_name_address',
       'form25_establishment',
+      'form_xv_establishment_contract_carried',
+      'form_xviii_establishment',
+      // Legacy CLRA modal keys sometimes still hold the site establishment line.
+      'form_xv_contractor',
+      'form25_contractor',
+      'form_xviii_contractor',
     ]);
     if (direct) return direct;
   } else if (spec.key === 'form_t_employer') {
     const direct = tryKeys([
       'form_t_employer',
       'form_q_ka_employer',
+      'statutory_employer_name_address',
       'statutory_principal_employer',
       'form25_principal_employer',
       'form_xviii_principal_employer',
+      'form_xvii_principal_employer',
+      'form_xv_principal_employer',
     ]);
     if (direct) return direct;
   } else {
@@ -925,17 +1674,25 @@ function resolveFormTHeaderExportValue(headerFormData, spec, parsedFields = []) 
 function formTLabelMatchesSpec(raw, spec) {
   const labelOnly = String(raw || '').split(':')[0].trim();
   if (!labelOnly) return false;
+  // Row-3 CLRA leftover — not the Establishment / Employer value boxes on rows 10–11.
+  if (/establ(?:ishment|ishemnt)\s+in\s*\/?\s*under\s+which\s+contract/i.test(labelOnly)) {
+    return false;
+  }
   if (spec.match.test(labelOnly)) return true;
   const norm = formTSEHeaderNorm(labelOnly);
   if (spec.key === 'form_t_month_year') return /^month\s+year$/.test(norm);
   if (spec.key === 'form_t_establishment_name_address') {
     return (
       /name\s+and\s+address\s+of\s+the\s+establishment/.test(norm) ||
-      /^address\s+of\s+the\s+establishment$/.test(norm)
+      /^address\s+of\s+the\s+establishment$/.test(norm) ||
+      /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/.test(norm)
     );
   }
   if (spec.key === 'form_t_employer') {
-    return /name\s+and\s+address\s+of\s+(?:the\s+)?employer/.test(norm);
+    return (
+      /name\s+and\s+address\s+of\s+(?:the\s+)?employer/.test(norm) ||
+      /nature\s+of\s+work\s+and\s+location\s+of\s+work/.test(norm)
+    );
   }
   return false;
 }
@@ -977,6 +1734,31 @@ export function applyFormTSEKarnatakaAutofillFromSite(headerData, context = {}, 
   assign('form_t_month_year', monthYearText);
   assign('form_t_establishment_name_address', establishmentText);
   assign('form_t_employer', employerText);
+
+  // Lift from sibling statutory keys when site context did not supply a value.
+  if (!String(out.form_t_establishment_name_address ?? '').trim()) {
+    assign(
+      'form_t_establishment_name_address',
+      out.statutory_establishment_name_address ||
+        out.form_q_establishment ||
+        out.form25_establishment ||
+        out.form_f_establishment_name_address ||
+        out.form_xv_contractor ||
+        out.form25_contractor ||
+        ''
+    );
+  }
+  if (!String(out.form_t_employer ?? '').trim()) {
+    assign(
+      'form_t_employer',
+      out.statutory_employer_name_address ||
+        out.statutory_principal_employer ||
+        out.form_q_ka_employer ||
+        out.form25_principal_employer ||
+        out.form_xviii_principal_employer ||
+        ''
+    );
+  }
   return out;
 }
 
@@ -1077,6 +1859,51 @@ export function expandFormTSEHeaderValueBoxes(
       wsRow.height = Math.max(Number(wsRow.height) || 0, needed);
     }
   });
+  clearFormTSEKarnatakaHeaderBandBorders(worksheet, {
+    colTo: mergeEnd,
+    remergeHeaderBoxes: true,
+  });
+}
+
+/** Rename legacy CLRA header labels on rows 9–11 to the official Form T KA wording. */
+export function renameFormTSEKarnatakaHeaderLabels(worksheet) {
+  if (!worksheet) return false;
+  let touched = false;
+  const getMergeTopLeft = buildFormTSEMergeTopLeftResolver(worksheet);
+  for (let r = 9; r <= 11; r += 1) {
+    for (let c = 1; c <= 8; c += 1) {
+      const tl = getMergeTopLeft(r, c);
+      if (tl.r !== r || tl.c !== c) continue;
+      const raw = readFormTSEMergedCellText(worksheet, getMergeTopLeft, r, c);
+      if (!raw) continue;
+      const parts = raw.split(':');
+      const labelOnly = parts[0].trim();
+      const valuePart = parts.length > 1 ? parts.slice(1).join(':').trim() : '';
+      let nextLabel = '';
+      if (/name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i.test(labelOnly)) {
+        nextLabel = 'Name and address of the Establishment';
+      } else if (/nature\s+of\s+work\s+and\s+location\s+of\s+work/i.test(labelOnly)) {
+        nextLabel = 'Name and Address of employer';
+      } else if (
+        /address\s+of\s+the\s+establishment/i.test(labelOnly) &&
+        !/name\s+and\s+address\s+of\s+the\s+establishment/i.test(labelOnly)
+      ) {
+        nextLabel = 'Name and address of the Establishment';
+      }
+      if (!nextLabel) continue;
+      const cell = worksheet.getCell(tl.r, tl.c);
+      cell.value = valuePart ? `${nextLabel} : ${valuePart}` : nextLabel;
+      cell.alignment = {
+        ...(cell.alignment || {}),
+        wrapText: true,
+        vertical: 'middle',
+        horizontal: 'left',
+      };
+      touched = true;
+      break;
+    }
+  }
+  return touched;
 }
 
 /** Write Form T header values into the header boxes (rows 9–11), Label : value in the widened merge. */
@@ -1085,6 +1912,7 @@ export function writeFormTSEHeaderFieldsToWorksheet(worksheet, headerFormData = 
   const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
   // Widen boxes first so Label : value is not clipped in A:D.
   expandFormTSEHeaderValueBoxes(worksheet, FORM_T_KARNATAKA_HEADER_BOX_END_COL);
+  renameFormTSEKarnatakaHeaderLabels(worksheet);
   const getMergeTopLeft = buildFormTSEMergeTopLeftResolver(worksheet);
 
   const styleHeaderCell = (cell, text = '') => {
@@ -1108,39 +1936,23 @@ export function writeFormTSEHeaderFieldsToWorksheet(worksheet, headerFormData = 
     }
   };
 
-  const writeAt = (row, col, value) => {
+  const writeAt = (row, col, value, preferredLabel = '') => {
     const text = String(value ?? '').trim();
     if (!text || row < 1 || col < 1) return;
-    const valueTl = getMergeTopLeft(row, col);
-    const labelTl = getMergeTopLeft(row, 1);
-    // Prefer Label : value inside the header box (expanded A:I merge).
-    if (valueTl.r === labelTl.r && valueTl.c === labelTl.c) {
-      const valueCol = Math.max(col, FORM_T_KARNATAKA_VALUE_COL);
-      const freeTl = getMergeTopLeft(row, valueCol);
-      if (freeTl.r === labelTl.r && freeTl.c === labelTl.c) {
-        const existing = readFormTSEMergedCellText(worksheet, getMergeTopLeft, row, 1);
-        const labelOnly = existing.split(':')[0].trim();
-        const combined = labelOnly ? `${labelOnly} : ${text}` : text;
-        const cell = worksheet.getCell(valueTl.r, valueTl.c);
-        cell.value = combined;
-        styleHeaderCell(cell, combined);
-        return;
-      }
-      const freeCell = worksheet.getCell(freeTl.r, freeTl.c);
-      freeCell.value = text;
-      styleHeaderCell(freeCell, text);
-      return;
+    // Always stamp Label : value on the row-A merge master (A–I). Do not rely on adjacent B
+    // cells — when the A:I merge is missing, B-only writes leave column A looking empty.
+    try {
+      worksheet.mergeCells(row, 1, row, FORM_T_KARNATAKA_HEADER_BOX_END_COL);
+    } catch (_) {
+      /* already merged / overlap */
     }
-    const cell = worksheet.getCell(valueTl.r, valueTl.c);
-    cell.value = text;
-    styleHeaderCell(cell, text);
-    if (valueTl.r !== row || valueTl.c !== col) {
-      try {
-        worksheet.getCell(row, col).value = text;
-      } catch (_) {
-        // ignore write to non-master merge cell
-      }
-    }
+    const existing = excelCellValueToString(worksheet.getCell(row, 1)?.value).trim();
+    const existingLabel = existing.split(':')[0].trim();
+    const labelOnly = preferredLabel || existingLabel || '';
+    const combined = labelOnly ? `${labelOnly} : ${text}` : text;
+    const cell = worksheet.getCell(row, 1);
+    cell.value = combined;
+    styleHeaderCell(cell, combined);
   };
 
   const resolveValueCol = (parsedField, labelCol1Based = 1) => {
@@ -1157,33 +1969,37 @@ export function writeFormTSEHeaderFieldsToWorksheet(worksheet, headerFormData = 
     const parsedField = parsedFields.find(
       (field) => field?.key === spec.key || formTLabelMatchesSpec(field?.label, spec)
     );
+    // Form T value boxes are only rows 9–11. Never write into the title/rule band (1–8).
     if (parsedField?.labelRow != null) {
       const valueRow =
         parsedField.valueRow != null ? Number(parsedField.valueRow) + 1 : Number(parsedField.labelRow) + 1;
-      const labelCol1Based =
-        parsedField.labelCol != null ? Number(parsedField.labelCol) + 1 : FORM_T_KARNATAKA_VALUE_COL - 1;
-      writeAt(valueRow, resolveValueCol(parsedField, labelCol1Based), val);
-      return;
-    }
-
-    for (let r = 1; r <= 25; r += 1) {
-      for (let c = 1; c <= 8; c += 1) {
-        const tl = getMergeTopLeft(r, c);
-        if (tl.r !== r || tl.c !== c) continue;
-        const raw = readFormTSEMergedCellText(worksheet, getMergeTopLeft, r, c);
-        if (!raw) continue;
-        const rawLabel = raw.split(':')[0].trim();
-        if (!formTLabelMatchesSpec(rawLabel, spec) && !fieldLabelMatchesCell(spec.label, rawLabel)) {
-          continue;
+      if (valueRow >= 9 && valueRow <= 11) {
+        writeAt(valueRow, resolveValueCol(parsedField, (parsedField.labelCol ?? 0) + 1), val, spec.label);
+      }
+    } else {
+      let matched = false;
+      for (let r = 9; r <= 11; r += 1) {
+        for (let c = 1; c <= 8; c += 1) {
+          const tl = getMergeTopLeft(r, c);
+          if (tl.r !== r || tl.c !== c) continue;
+          const raw = readFormTSEMergedCellText(worksheet, getMergeTopLeft, r, c);
+          if (!raw) continue;
+          const rawLabel = raw.split(':')[0].trim();
+          if (!formTLabelMatchesSpec(rawLabel, spec) && !fieldLabelMatchesCell(spec.label, rawLabel)) {
+            continue;
+          }
+          writeAt(r, resolveValueCol(parsedField, c), val, spec.label);
+          matched = true;
+          break;
         }
-        writeAt(r, resolveValueCol(parsedField, c), val);
-        return;
+        if (matched) break;
       }
     }
 
+    // Always re-stamp the canonical fallback row so Establishment/Employer cannot stay label-only.
     const fallbackRow = FORM_T_KARNATAKA_FALLBACK_ROWS[specIndex];
     if (fallbackRow) {
-      writeAt(fallbackRow, FORM_T_KARNATAKA_VALUE_COL, val);
+      writeAt(fallbackRow, FORM_T_KARNATAKA_VALUE_COL, val, spec.label);
     }
   });
 }
@@ -2023,6 +2839,9 @@ export function repairFormTSETableHeadersFromWorkbook(workbook, parsed = {}) {
 export const FORM_T_KA_IDENTITY_START_COL0 = 0;
 export const FORM_T_KA_ATTENDANCE_START_COL0 = 9; // column J
 
+/** Table grid borders start on Excel row 12 (column headers) on the KA template. */
+export const FORM_T_KA_TABLE_BORDER_START_ROW = 12;
+
 function formTSEExcelJsCellText(worksheet, r, c) {
   const cell = worksheet?.getCell(r, c);
   if (!cell) return '';
@@ -2035,8 +2854,13 @@ function formTSEExcelJsCellText(worksheet, r, c) {
       if (v.result != null) return String(v.result).trim();
     }
   }
-  if (typeof cell.text === 'string' && cell.text.trim() && cell.text !== '[object Object]') {
-    return cell.text.trim();
+  try {
+    const text = cell.text;
+    if (typeof text === 'string' && text.trim() && text !== '[object Object]') {
+      return text.trim();
+    }
+  } catch (_) {
+    /* merge slave cells throw when reading .text */
   }
   return '';
 }
@@ -2302,7 +3126,9 @@ export function resetFormTSEWorksheetOpenAtColumnA(worksheet) {
     col.hidden = false;
     const width = Number(col.width);
     if (!Number.isFinite(width) || width < 4) {
-      col.width = c === 2 ? 24 : 14;
+      col.width = c === 1 ? 18 : c === 2 ? 24 : 14;
+    } else if (c === 1 && width < 16) {
+      col.width = 18;
     }
   }
   worksheet.views = [
@@ -2337,11 +3163,12 @@ export async function applyFormTSEWorkbookOpenAtColumnA(arrayBuffer) {
 /**
  * Shift J-dumped identity back to A–I when needed, then open the sheet at column A.
  */
-export async function prepareFormTSEWorkbookForDownload(arrayBuffer) {
+export async function prepareFormTSEWorkbookForDownload(arrayBuffer, borderHints = {}) {
   if (!arrayBuffer || arrayBuffer.byteLength < 32) return arrayBuffer;
   // Always run J→A repair. A false "already aligned" check was leaving names under J.
   const repaired = await repairFormTSEWorkbookColumnAlignment(arrayBuffer);
-  return applyFormTSEWorkbookOpenAtColumnA(repaired);
+  const opened = await applyFormTSEWorkbookOpenAtColumnA(repaired);
+  return applyFormTSEKarnatakaExportBordersToBuffer(opened, borderHints);
 }
 
 /**
@@ -3154,6 +3981,8 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
     headerFormData: headerValues,
     parsedFormHeader,
+    // Rows 1–8 are title / Rule 24 citation — never dump Establishment into row 3.
+    headerRowStart: 9,
     headerRowEnd: headerScanEnd,
     maxScanCols: 80,
     colRightBound: FORM_T_KARNATAKA_HEADER_BOX_END_COL,
@@ -3161,14 +3990,29 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   });
   writeFormTSEHeaderFieldsToWorksheet(worksheet, headerValues, parsedFormHeader);
   expandFormTSEHeaderValueBoxes(worksheet, FORM_T_KARNATAKA_HEADER_BOX_END_COL);
+  // Re-apply after expand/finalize-bound merges so Label : value survives on rows 10–11.
+  writeFormTSEHeaderFieldsToWorksheet(worksheet, headerValues, parsedFormHeader);
   shiftFormTSEWorksheetIdentityFromJToA(worksheet);
 
   await yieldToMain();
   resetFormTSEWorksheetOpenAtColumnA(worksheet);
   resetExcelJsWorkbookActiveSheet(workbook);
   let out = await workbook.xlsx.writeBuffer();
-  // Shift any leftover J-dumped identity back to A–I, then open at column A.
-  out = await prepareFormTSEWorkbookForDownload(out);
+  // Shift any leftover J-dumped identity back to A–I, open at column A, and paint row-12+ borders.
+  const tableHeaderRow = FORM_T_KA_TABLE_BORDER_START_ROW;
+  let tableLastRow =
+    startRow + Math.max(bodyRowsToPaint, sourcePrimary.length, templateBodyRows, 1) - 1;
+  if (dateFooterRow > tableHeaderRow) {
+    tableLastRow = Math.min(tableLastRow, dateFooterRow - 1);
+  }
+  tableLastRow = Math.max(tableLastRow, startRow);
+  out = await prepareFormTSEWorkbookForDownload(out, {
+    colTo: tableColMax,
+    tableLastRow,
+    force: true,
+    headerFormData: headerValues,
+    parsedFormHeader,
+  });
   const outName =
     formFileName ||
     currentItem?.formName?.replace(/[^a-zA-Z0-9]/g, '_') ||

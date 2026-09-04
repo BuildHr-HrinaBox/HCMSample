@@ -5,10 +5,12 @@ let memoryCache = null;
 let inflightRequest = null;
 
 function normalizeSettingsPayload(data) {
+  const statusRaw = String(data?.notificationStatus || data?.status || 'Active').trim().toLowerCase();
   return {
     companyName: String(data?.companyName || ''),
     logoName: String(data?.logoName || ''),
-    dueDate: String(data?.dueDate || '')
+    dueDate: String(data?.dueDate || ''),
+    notificationStatus: statusRaw === 'paused' ? 'Paused' : 'Active',
   };
 }
 

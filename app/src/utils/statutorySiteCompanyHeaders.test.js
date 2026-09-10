@@ -228,7 +228,7 @@ describe('resolveCompanyRecordForStatutory', () => {
         company,
         formHeaderFields: [
           { label: 'Name and Address of the Employer:', key: 'statutory_employer_name_address' },
-          { label: 'Name and Address of employer', key: 'form_t_employer' },
+          { label: 'Name.', key: 'form_t_employer' },
         ],
       }
     );

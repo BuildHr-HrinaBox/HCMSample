@@ -2591,44 +2591,61 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
 
   if (Number(formCRajasthanTitleAnchorCol) > 0) {
     const targetCol = Math.max(1, Number(formCRajasthanTitleAnchorCol));
-    for (let row = 1; row <= 3; row += 1) {
-      let sourceCol = 0;
-      for (let col = 1; col <= 12; col += 1) {
-        const value = excelCellValueToString(worksheet.getCell(row, col)?.value).trim();
-        if (/^form\s*c$/i.test(value)) {
-          sourceCol = col;
-          break;
-        }
-      }
-      if (!sourceCol || sourceCol === targetCol) continue;
-      const source = worksheet.getCell(row, sourceCol);
-      const target = worksheet.getCell(row, targetCol);
-      if (target.isMerged) {
-        const merges = Array.isArray(worksheet?.model?.merges) ? worksheet.model.merges : [];
-        merges.forEach((range) => {
-          const match = String(range || '').match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
-          if (!match || Number(match[2]) !== row || Number(match[4]) !== row) return;
-          const toNumber = (letters) =>
-            String(letters)
-              .toUpperCase()
-              .split('')
-              .reduce((total, letter) => total * 26 + letter.charCodeAt(0) - 64, 0);
-          const start = toNumber(match[1]);
-          const end = toNumber(match[3]);
-          if (sourceCol >= start && sourceCol <= end || targetCol >= start && targetCol <= end) {
-            try {
-              worksheet.unMergeCells(range);
-            } catch (_) {
-              // Keep the template merge when ExcelJS cannot remove it.
-            }
+    const colLettersToNumber = (letters) =>
+      String(letters)
+        .toUpperCase()
+        .split('')
+        .reduce((total, letter) => total * 26 + letter.charCodeAt(0) - 64, 0);
+    const isFormCHeadingCell = (raw) => {
+      const value = String(raw || '')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!value) return false;
+      // "FORM C" title (keep short so establishment lines are not moved).
+      if (/^form\s*c\b/i.test(value) && value.length <= 48) return true;
+      // Register subtitle — Loan/Recoveries (GJ) or Deductions (RJ/CLRA).
+      if (/register\s+of\s+(loan|recover|deduction)/i.test(value)) return true;
+      return false;
+    };
+    const unmergeRowCols = (row, colA, colB) => {
+      const merges = Array.isArray(worksheet?.model?.merges) ? worksheet.model.merges : [];
+      merges.forEach((range) => {
+        const match = String(range || '').match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+        if (!match || Number(match[2]) !== row || Number(match[4]) !== row) return;
+        const start = colLettersToNumber(match[1]);
+        const end = colLettersToNumber(match[3]);
+        if (
+          (colA >= start && colA <= end) ||
+          (colB >= start && colB <= end)
+        ) {
+          try {
+            worksheet.unMergeCells(range);
+          } catch (_) {
+            // Keep the template merge when ExcelJS cannot remove it.
           }
-        });
+        }
+      });
+    };
+    // Move FORM C + Register… headings to column F (left edge of title band).
+    for (let row = 1; row <= 4; row += 1) {
+      for (let col = 1; col <= 16; col += 1) {
+        if (col === targetCol) continue;
+        const source = worksheet.getCell(row, col);
+        const value = excelCellValueToString(source.value).trim();
+        if (!isFormCHeadingCell(value)) continue;
+        unmergeRowCols(row, col, targetCol);
+        const moved = worksheet.getCell(row, targetCol);
+        moved.value = source.value;
+        moved.style = { ...source.style };
+        moved.alignment = {
+          ...(moved.alignment || {}),
+          horizontal: 'left',
+          vertical: 'middle',
+          wrapText: true,
+        };
+        source.value = '';
       }
-      const moved = worksheet.getCell(row, targetCol);
-      moved.value = source.value;
-      moved.style = { ...source.style };
-      source.value = '';
-      break;
     }
   }
 

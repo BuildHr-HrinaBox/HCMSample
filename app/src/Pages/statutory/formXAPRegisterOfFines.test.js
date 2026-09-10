@@ -17,6 +17,7 @@ import {
   pickFormXXAPExportHeaders,
   exportFormXXAPRowValuesByHeaders,
   reapplyFormXXAPDownloadTableBordersFromWorksheet,
+  buildFormXXAPWorkbookWithTemplateStyles,
   isFormXXIAPFineNilHeader,
   applyFormXXIAPFinesNilToMappedRows,
 } from './formXAPRegisterOfFines';
@@ -584,5 +585,88 @@ describe('Form XX AP download table borders', () => {
       expect(ws.getCell(row, 5).alignment?.horizontal).toBe('center');
       expect(ws.getCell(row, 5).alignment?.vertical).toBe('middle');
     }
+  });
+});
+
+describe('Form C title band column F anchor', () => {
+  it('moves FORM C and Register of Loan/Recoveries headings to column F', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form C');
+    ws.getCell(1, 2).value = 'FORM C';
+    ws.getCell(2, 5).value =
+      'Register of Loan/ Recoveries/ Damage/ Loss/ Fine/ Advance/ Absences';
+    ws.getCell(4, 1).value = 'Name of Establishment : Test Site';
+    ws.getCell(13, 1).value = 'Sr. Number in Employee / Workman / Worker Register';
+    ws.getCell(13, 2).value = 'Name';
+    ws.getCell(13, 3).value = 'Recovery type (Damage/Loss/fine/ Advance/Loans/Absence)';
+    ws.getCell(13, 4).value = 'Particulars';
+    ws.getCell(13, 5).value = 'Date Of Damage/ Loss/ Absence';
+    ws.getCell(13, 6).value = 'Amount';
+    ws.getCell(13, 7).value = 'Whether Show cause issued';
+    ws.getCell(13, 8).value = 'Explanation heard in presence of';
+    ws.getCell(13, 9).value = 'Number of instalments';
+    ws.getCell(13, 10).value = 'First Month/ Year';
+    ws.getCell(13, 11).value = 'Last Month/ Year';
+    ws.getCell(13, 12).value = 'Date of Complete Recovery';
+    ws.getCell(13, 13).value = 'Remarks';
+    ws.getCell(14, 1).value = 'VE0731';
+    ws.getCell(14, 2).value = 'Rajanish Kumar Maurya';
+    for (let c = 3; c <= 13; c += 1) ws.getCell(14, c).value = 'NIL';
+
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+    const headers = [
+      'Sr. Number in Employee / Workman / Worker Register',
+      'Name',
+      'Recovery type (Damage/Loss/fine/ Advance/Loans/Absence)',
+      'Particulars',
+      'Date Of Damage/ Loss/ Absence',
+      'Amount',
+      'Whether Show cause issued',
+      'Explanation heard in presence of',
+      'Number of instalments',
+      'First Month/ Year',
+      'Last Month/ Year',
+      'Date of Complete Recovery',
+      'Remarks',
+    ];
+    const { blob } = await buildFormXXAPWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [
+        {
+          'Sr. Number in Employee / Workman / Worker Register': 'VE0731',
+          Name: 'Rajanish Kumar Maurya',
+        },
+      ],
+      headersToUse: headers,
+      parsedHeaderRowIndex: 12,
+      parsedDataStartIndex: 13,
+      parsedTableStartCol: 0,
+      parsedFormHeader: {
+        title: 'FORM C',
+        subtitle: 'Register of Loan/ Recoveries/ Damage/ Loss/ Fine/ Advance/ Absences',
+      },
+      headerFormData: {},
+      formFileName: 'Form_C_GJ.xlsx',
+      sheetNameHint: 'Form C',
+      formCRajasthanTitleAnchorCol: 6,
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const outWs = outWb.getWorksheet('Form C') || outWb.worksheets[0];
+    const cellText = (row, col) => {
+      const val = outWs.getCell(row, col)?.value;
+      if (val == null) return '';
+      if (typeof val === 'string' || typeof val === 'number') return String(val).trim();
+      if (typeof val === 'object' && Array.isArray(val.richText)) {
+        return val.richText.map((rt) => rt?.text || '').join('').trim();
+      }
+      return String(val.text || val.result || '').trim();
+    };
+
+    expect(cellText(1, 6)).toMatch(/^FORM\s*C$/i);
+    expect(cellText(2, 6)).toMatch(/Register of Loan\/ Recoveries/i);
+    expect(cellText(1, 2)).toBe('');
+    expect(cellText(2, 5)).toBe('');
   });
 });

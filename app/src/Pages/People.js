@@ -51,6 +51,7 @@ function collectColumnKeys(records) {
 
 const People = ({ userRole, userEmail }) => {
   const [data, setData] = useState(null);
+  const [meta, setMeta] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [progress, setProgress] = useState('');
@@ -60,14 +61,17 @@ const People = ({ userRole, userEmail }) => {
     setError('');
     setProgress('Loading employees…');
     setData(null);
+    setMeta(null);
     try {
       const result = await fetchPeopleData({ force: true });
       const merged = flattenZohoPeopleEmployees({ data: result.data });
       setData(result.data);
+      setMeta(result.meta || null);
       setProgress(`Loaded ${merged.length} employees`);
     } catch (err) {
       setError(err.message || 'Failed to fetch people data');
       setData(null);
+      setMeta(null);
     } finally {
       setLoading(false);
       setProgress('');
@@ -141,8 +145,11 @@ const People = ({ userRole, userEmail }) => {
               </div>
             </div>
           )}
+          {meta?.warning ? <div className="people-error">{meta.warning}</div> : null}
           <p className="people-meta">
-            Fetched {records.length} record(s).
+            Fetched {records.length} record(s)
+            {meta?.formName ? ` from form ${meta.formName}` : ''}
+            {meta?.viewName ? ` / view ${meta.viewName}` : ''}.
           </p>
         </div>
       )}

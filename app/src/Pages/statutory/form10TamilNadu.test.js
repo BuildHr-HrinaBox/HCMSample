@@ -3,15 +3,18 @@ import {
   buildForm10EmployeeDisplayName,
   buildForm10PayrollMatchIdentity,
   buildFormTamilNaduPayrollRowResolver,
+  buildKarnatakaPayrollRowResolver,
   collectForm10RowNameParts,
   findForm10EmployeeByFirstAndLastName,
   findForm10PayrollRowByFirstAndLastName,
+  findKarnatakaPayrollRowByFirstAndLastName,
   form10FirstAndLastNamesMatch,
   form10HasFirstAndLastName,
   form10PayrollRowAgreesWithEmployeeNames,
   isForm10CombinedNameHeader,
   isForm10FirstNameHeader,
   isForm10LastNameHeader,
+  karnatakaFirstAndLastNamesMatch,
   readForm10PersonNameParts,
 } from './form10TamilNadu';
 
@@ -163,5 +166,16 @@ describe('Form 10 Tamil Nadu firstname + lastname payroll mapping', () => {
     const hit = resolve({ FirstName: 'Selva', LastName: 'P' });
     expect(hit).toEqual(payroll[1]);
     expect(resolve({ FirstName: 'Selva', LastName: 'P' })).toBeNull();
+  });
+
+  test('Karnataka matches People FirstName that already contains payroll first+last', () => {
+    const emp = { FirstName: 'Umesh S O', Father_s_Name: 'Shivaputrappa oli' };
+    const pay = { first_name: 'Umesh', last_name: 'S O', paid_days: 26, gross_pay: 50000 };
+    expect(karnatakaFirstAndLastNamesMatch(emp, pay)).toBe(true);
+    expect(findKarnatakaPayrollRowByFirstAndLastName(emp, [pay])).toEqual(pay);
+    const resolve = buildKarnatakaPayrollRowResolver([pay, { first_name: 'Selva', last_name: 'Kumar' }]);
+    expect(resolve(emp)).toEqual(pay);
+    expect(resolve({ FirstName: 'Selva' })).toBeNull();
+    expect(form10FirstAndLastNamesMatch(emp, pay)).toBe(false);
   });
 });

@@ -220,6 +220,89 @@ export function findForm10PayrollRowByFirstAndLastName(employeeOrRow, payrollRow
   return hits[0];
 }
 
+/**
+ * Karnataka payroll match: Sample Payroll must have first_name AND last_name.
+ * People often stores the workman name only in FirstName (e.g. "Umesh S O") with
+ * father in a separate field — still match payroll first+last against that name.
+ * Never match first-name-only.
+ */
+export function karnatakaFirstAndLastNamesMatch(employeeOrRow, payrollRow, extraParts = null) {
+  const pay = readForm10PersonNameParts(payrollRow);
+  if (!pay.firstName || !pay.lastName) return false;
+  const payCombo = `${pay.firstName} ${pay.lastName}`.trim();
+  if (!payCombo) return false;
+
+  const emp = readForm10PersonNameParts(employeeOrRow);
+  const extra = extraParts && typeof extraParts === 'object' ? extraParts : {};
+  const firstName = emp.firstName || extra.firstName || '';
+  const lastName = emp.lastName || extra.lastName || '';
+  const fullName = emp.fullName || extra.fullName || `${firstName} ${lastName}`.trim();
+
+  if (form10NameTokensMatch(firstName, pay.firstName) && form10NameTokensMatch(lastName, pay.lastName)) {
+    return true;
+  }
+  const empCombo = `${firstName} ${lastName}`.trim();
+  if (empCombo && form10NameTokensMatch(empCombo, payCombo)) return true;
+  if (firstName && form10NameTokensMatch(firstName, payCombo)) return true;
+  if (fullName && form10NameTokensMatch(fullName, payCombo)) return true;
+  if (fullName && form10FullNamesMatchExact(fullName, payCombo)) return true;
+
+  const empTokens = normForm10Name(firstName || fullName)
+    .split(' ')
+    .filter(Boolean);
+  const payFirstTokens = normForm10Name(pay.firstName).split(' ').filter(Boolean);
+  const payLastTokens = normForm10Name(pay.lastName).split(' ').filter(Boolean);
+  if (empTokens.length >= 2 && payFirstTokens.length && payLastTokens.length) {
+    const empHead = empTokens.slice(0, payFirstTokens.length).join(' ');
+    const empTail = empTokens.slice(-payLastTokens.length).join(' ');
+    if (empHead === normForm10Name(pay.firstName) && empTail === normForm10Name(pay.lastName)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function findKarnatakaPayrollRowByFirstAndLastName(employeeOrRow, payrollRows, extraParts = null) {
+  const rows = (Array.isArray(payrollRows) ? payrollRows : []).filter(
+    (row) => row && typeof row === 'object' && row.fetch_error !== true
+  );
+  if (rows.length === 0) return null;
+  const hits = rows.filter((row) => karnatakaFirstAndLastNamesMatch(employeeOrRow, row, extraParts));
+  if (hits.length === 0) return null;
+  return hits[0];
+}
+
+export function formatPayrollFirstAndLastName(payrollRow) {
+  if (!payrollRow || payrollRow.fetch_error) return '';
+  const { firstName, lastName } = readForm10PersonNameParts(payrollRow);
+  if (firstName && lastName) return `${firstName} ${lastName}`.trim();
+  return '';
+}
+
+export function buildKarnatakaPayrollRowResolver(payrollRows, options = {}) {
+  const rows = (Array.isArray(payrollRows) ? payrollRows : []).filter(
+    (row) => row && typeof row === 'object' && row.fetch_error !== true
+  );
+  const getExtraParts =
+    typeof options.getExtraParts === 'function' ? options.getExtraParts : () => null;
+  const usedKeys = new Set();
+  return (emp, formRow) => {
+    const extraParts = formRow != null ? getExtraParts(emp, formRow) : null;
+    const available = rows.filter((row) => {
+      const key = form10PayrollRowIdentityKey(row);
+      return !key || !usedKeys.has(key);
+    });
+    const hit = findKarnatakaPayrollRowByFirstAndLastName(
+      emp,
+      available.length > 0 ? available : rows,
+      extraParts
+    );
+    const hitKey = form10PayrollRowIdentityKey(hit);
+    if (hit && hitKey) usedKeys.add(hitKey);
+    return hit;
+  };
+}
+
 export function buildForm10EmployeeDisplayName(emp) {
   const { firstName, lastName, fullName } = readForm10PersonNameParts(emp);
   if (firstName && lastName) return `${firstName} ${lastName}`.trim();

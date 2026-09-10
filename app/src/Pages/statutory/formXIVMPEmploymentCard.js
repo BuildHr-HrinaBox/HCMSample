@@ -17,6 +17,7 @@ import {
 import { fetchPayrollTableRowsForMonths } from '../../utils/payrollTable';
 import { filterFormXIXMPEligiblePayrollRows } from './formXIXMPWageSlip';
 import { personNamesMatch } from './formFKarnataka';
+import { formatPayrollFirstAndLastName } from './form10TamilNadu';
 import { isAprilPayrollMonthCandidates } from './formQKarnataka';
 import { resolveFormXXIIIMPAprilDefaultNormalRate } from './formXXIIIMP';
 import {
@@ -105,8 +106,13 @@ export function isFormXRajasthanEmploymentCardContext(formHeader, rowItem, fileN
 
 const FORM_XIV_KARNATAKA_IDENTITY_RE =
   /karnataka|form[\s._-]*xiv[\s._-]*ka|form_xiv[\s._-]*karnataka/;
+const FORM_XIV_GUJARAT_IDENTITY_RE =
+  /gujarat|xiv[\s._-]*gj|form[\s._-]*xiv[\s._-]*gj|central\s*&\s*gujarat|gujarat\s+rules/;
+const FORM_XIV_MP_IDENTITY_RE =
+  /madhya[\s._-]*pradesh|\bform[\s._-]*xiv[\s._-]*mp\b|\bxiv[\s._-]*mp\b|form_xiv_mp/;
 
-const collectFormXIVVariantIdentity = (formHeader, rowItem, fileName) =>
+/** Form / state / title only — ignore linked template filename (often wrong across states). */
+const collectFormXIVFormStateIdentity = (formHeader, rowItem) =>
   [
     rowItem?.state,
     rowItem?.State,
@@ -114,13 +120,8 @@ const collectFormXIVVariantIdentity = (formHeader, rowItem, fileName) =>
     rowItem?.SiteState,
     rowItem?.formName,
     rowItem?.FormName,
-    rowItem?.formFileName,
-    rowItem?.FormFileName,
-    rowItem?.fileName,
-    rowItem?.FileName,
     rowItem?.description,
     rowItem?.Description,
-    fileName,
     formHeader?.title,
     formHeader?.subtitle,
     formHeader?.reference,
@@ -129,10 +130,27 @@ const collectFormXIVVariantIdentity = (formHeader, rowItem, fileName) =>
     .join(' ')
     .toLowerCase();
 
+const collectFormXIVVariantIdentity = (formHeader, rowItem, fileName) =>
+  [
+    collectFormXIVFormStateIdentity(formHeader, rowItem),
+    rowItem?.formFileName,
+    rowItem?.FormFileName,
+    rowItem?.fileName,
+    rowItem?.FileName,
+    fileName,
+  ]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+
 /** Karnataka CLRA Form XIV — Employment Card (stacked MP/Karnataka layout). */
 export function isFormXIVKarnatakaContext(formHeader, rowItem, fileName, sheetText = '') {
+  const formState = collectFormXIVFormStateIdentity(formHeader, rowItem);
+  // Form name / state wins over a wrongly linked Gujarat/MP template filename.
+  if (matchesFormXIVHint(formState) && FORM_XIV_KARNATAKA_IDENTITY_RE.test(formState)) {
+    return true;
+  }
   const identity = collectFormXIVVariantIdentity(formHeader, rowItem, fileName);
-  // Form name / file / state wins over sheet body (which may mention other states).
   if (matchesFormXIVHint(identity) && FORM_XIV_KARNATAKA_IDENTITY_RE.test(identity)) {
     return true;
   }
@@ -212,28 +230,19 @@ export function hasFormXIVKarnatakaMonthDefaultWageRateContext(emp, monthCandida
 export function isFormXIVMadhyaPradeshContext(formHeader, rowItem, fileName, sheetText = '') {
   if (!isFormXIVMPEmploymentCardContext(formHeader, rowItem, fileName, sheetText)) return false;
   if (isFormXIVKarnatakaContext(formHeader, rowItem, fileName, sheetText)) return false;
-  const parts = [
-    rowItem?.state,
-    rowItem?.State,
-    rowItem?.siteState,
-    rowItem?.SiteState,
-    rowItem?.formName,
-    rowItem?.FormName,
-    fileName,
-    formHeader?.title,
-    formHeader?.subtitle,
-    sheetText,
-  ]
+  const formState = collectFormXIVFormStateIdentity(formHeader, rowItem);
+  // Form name / state is authoritative — a wrongly linked GJ template must not force Gujarat.
+  if (FORM_XIV_GUJARAT_IDENTITY_RE.test(formState)) return false;
+  if (FORM_XIV_MP_IDENTITY_RE.test(formState)) return true;
+  const identity = collectFormXIVVariantIdentity(formHeader, rowItem, fileName);
+  if (FORM_XIV_GUJARAT_IDENTITY_RE.test(identity)) return false;
+  if (FORM_XIV_MP_IDENTITY_RE.test(identity)) return true;
+  const parts = [identity, sheetText]
     .filter((x) => x != null && String(x).trim() !== '')
     .join(' ')
     .toLowerCase();
-  if (/gujarat|xiv[\s._-]*gj/i.test(parts)) return false;
-  return (
-    /madhya[\s._-]*pradesh/.test(parts) ||
-    /\bform[\s._-]*xiv[\s._-]*mp\b/.test(parts) ||
-    /\bxiv[\s._-]*mp\b/.test(parts) ||
-    /form_xiv_mp/.test(parts)
-  );
+  if (FORM_XIV_GUJARAT_IDENTITY_RE.test(parts)) return false;
+  return FORM_XIV_MP_IDENTITY_RE.test(parts);
 }
 
 export function buildFormXIVMPWageRateHints(helpers = {}) {
@@ -287,6 +296,7 @@ export function headersIndicateFormXIVMPTable(tableHeaders) {
 }
 
 export function resolveFormXIVVariant(formHeader, rowItem, fileName, sheetText = '', tableHeaders = null) {
+  const formState = collectFormXIVFormStateIdentity(formHeader, rowItem);
   const identity = collectFormXIVVariantIdentity(formHeader, rowItem, fileName);
   const parts = [identity, sheetText]
     .filter((x) => x != null && String(x).trim() !== '')
@@ -295,18 +305,21 @@ export function resolveFormXIVVariant(formHeader, rowItem, fileName, sheetText =
   if (isFormXRajasthanEmploymentCardContext(formHeader, rowItem, fileName, sheetText)) {
     return 'rj';
   }
-  // Karnataka identity (form name / file / state) wins over Gujarat words in sheet text.
+  // Karnataka / MP form+state identity wins over Gujarat words in a wrongly linked sheet/file.
   if (isFormXIVKarnatakaContext(formHeader, rowItem, fileName, sheetText)) return 'ka';
+  if (isFormXIVMadhyaPradeshContext(formHeader, rowItem, fileName, sheetText)) return 'mp';
+  if (FORM_XIV_GUJARAT_IDENTITY_RE.test(formState)) return 'gj';
+  if (FORM_XIV_GUJARAT_IDENTITY_RE.test(parts)) return 'gj';
+  if (headersIndicateFormXIVGJTable(tableHeaders) && !FORM_XIV_MP_IDENTITY_RE.test(formState)) {
+    return 'gj';
+  }
   if (
-    /gujarat/.test(parts) ||
-    /xiv[\s._-]*gj/i.test(parts) ||
-    /central\s*&\s*gujarat/.test(parts) ||
-    /gujarat\s+rules/.test(parts)
+    /entry\s+into\s+service/.test(parts) &&
+    /employment\s+card/.test(parts) &&
+    !FORM_XIV_MP_IDENTITY_RE.test(formState)
   ) {
     return 'gj';
   }
-  if (headersIndicateFormXIVGJTable(tableHeaders)) return 'gj';
-  if (/entry\s+into\s+service/.test(parts) && /employment\s+card/.test(parts)) return 'gj';
   return 'mp';
 }
 
@@ -354,17 +367,29 @@ const orderFormXIVMPWorkmanTableHeaders = (headers) => {
 export function resolveFormXIVMPTableHeaders(tableHeaders, hints = {}) {
   const headers = Array.isArray(tableHeaders) ? tableHeaders : [];
   const trimmed = headers.map((h) => String(h || '').trim()).filter(Boolean);
-  if (headersIndicateFormXIVGJTable(trimmed) || headersIndicateFormXIVMPTable(trimmed)) {
-    return orderFormXIVMPWorkmanTableHeaders(trimmed);
-  }
-  const variant = resolveFormXIVVariant(
+  const variant = resolveFormXIVExportVariant(
     hints.formHeader || null,
     hints.item || null,
     hints.fileName || hints.formFileName || '',
     hints.sheetText || '',
     trimmed
   );
-  return variant === 'gj' ? [...FORM_XIV_GJ_CANONICAL_TABLE_HEADERS] : [...FORM_XIV_MP_CANONICAL_TABLE_HEADERS];
+  // Gujarat / Karnataka / RJ identity wins over whatever column headers the (wrong) sheet scanned.
+  if (variant === 'gj') return orderFormXIVMPWorkmanTableHeaders([...FORM_XIV_GJ_CANONICAL_TABLE_HEADERS]);
+  if (variant === 'ka') {
+    return headersIndicateFormXIVMPTable(trimmed)
+      ? orderFormXIVMPWorkmanTableHeaders(trimmed)
+      : [...FORM_XIV_MP_CANONICAL_TABLE_HEADERS];
+  }
+  if (variant === 'rj') {
+    return headersIndicateFormXIVMPTable(trimmed) && trimmed.length > 0
+      ? orderFormXIVMPWorkmanTableHeaders(trimmed)
+      : [...FORM_XIV_MP_CANONICAL_TABLE_HEADERS];
+  }
+  if (headersIndicateFormXIVGJTable(trimmed) || headersIndicateFormXIVMPTable(trimmed)) {
+    return orderFormXIVMPWorkmanTableHeaders(trimmed);
+  }
+  return [...FORM_XIV_MP_CANONICAL_TABLE_HEADERS];
 }
 
 export function isFormXIVMPWorkmanNameHeader(h) {
@@ -896,7 +921,9 @@ export function applyFormXIVMPAutofillFromSite(headerData, siteContext = {}, opt
   return out;
 }
 
-export function formatFormXIVMPWorkmanName(emp = {}) {
+export function formatFormXIVMPWorkmanName(emp = {}, payrollRow = null) {
+  const payrollName = formatPayrollFirstAndLastName(payrollRow);
+  if (payrollName) return payrollName;
   const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || emp['First Name'] || '').trim();
   const ln = String(emp.LastName || emp['LastName'] || emp.lastName || emp['Last Name'] || '').trim();
   if (fn && ln) return `${fn} ${ln}`;
@@ -931,6 +958,52 @@ export function resolveFormXIVMPDesignation(emp = {}) {
       emp['Nature of employment'] ||
       ''
   ).trim();
+}
+
+/** Gujarat Nature-of-work box: site location + workman designation (e.g. GJ-Amreli / Junior Engineer). */
+export function resolveFormXIVDesignationFromMappedRow(row = null, headers = null) {
+  if (!row || typeof row !== 'object') return '';
+  if (Array.isArray(headers)) {
+    const designationHeader = headers.find(isFormXIVMPNatureDesignationHeader);
+    if (designationHeader) {
+      const fromHeader = String(row[designationHeader] ?? '').trim();
+      if (fromHeader) return fromHeader;
+    }
+  }
+  return resolveFormXIVMPDesignation(row);
+}
+
+export function buildFormXIVGJNatureLocationWithDesignation(
+  natureLocationText = '',
+  employeeRow = null,
+  headers = null
+) {
+  const location = String(natureLocationText || '').trim();
+  const designation = resolveFormXIVDesignationFromMappedRow(employeeRow, headers);
+  if (!designation) return location;
+  if (!location) return designation;
+  const locNorm = location.replace(/\s+/g, ' ').toLowerCase();
+  const desNorm = designation.replace(/\s+/g, ' ').toLowerCase();
+  if (locNorm.includes(desNorm)) return location;
+  return `${location}\n${designation}`;
+}
+
+export function withFormXIVGJNatureLocationDesignation(
+  headerFormData = {},
+  employeeRow = null,
+  headers = null,
+  variant = ''
+) {
+  if (String(variant || '').toLowerCase() !== 'gj') return headerFormData || {};
+  const base = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+  return {
+    ...base,
+    form_xiv_mp_nature_location: buildFormXIVGJNatureLocationWithDesignation(
+      base.form_xiv_mp_nature_location,
+      employeeRow,
+      headers
+    ),
+  };
 }
 
 export function readFormXIVMPPayrollGrossPay(payrollRow) {
@@ -1031,6 +1104,30 @@ export function resolveFormXIVMPWageRate(emp = {}, payrollRow = null, options = 
     return FORM_XIV_GJ_FIXED_THARUN_WAGE_RATE;
   }
 
+  const preferNetPay = options.variant === 'gj' || options.preferNetPay === true;
+  if (payrollRow && !payrollRow.fetch_error) {
+    if (preferNetPay) {
+      const fromNet = readFormXIVMPPayrollNetPay(payrollRow);
+      if (fromNet !== '') {
+        const n = Number(String(fromNet).replace(/,/g, '').trim());
+        if (Number.isFinite(n) && n > 0) return String(n);
+        return String(fromNet).trim();
+      }
+    }
+    const fromPayroll = readFormXIVMPPayrollGrossPay(payrollRow);
+    if (fromPayroll !== '') {
+      const n = Number(String(fromPayroll).replace(/,/g, '').trim());
+      if (Number.isFinite(n) && n > 0) return String(n);
+      return String(fromPayroll).trim();
+    }
+    const fromNet = readFormXIVMPPayrollNetPay(payrollRow);
+    if (fromNet !== '') {
+      const n = Number(String(fromNet).replace(/,/g, '').trim());
+      if (Number.isFinite(n) && n > 0) return String(n);
+      return String(fromNet).trim();
+    }
+  }
+
   const monthDefault = resolveFormXIVKarnatakaMonthDefaultWageRate(
     emp,
     options.monthCandidates,
@@ -1045,29 +1142,6 @@ export function resolveFormXIVMPWageRate(emp = {}, payrollRow = null, options = 
   );
   if (mpMonthDefault) return mpMonthDefault;
 
-  const preferNetPay = options.variant === 'gj' || options.preferNetPay === true;
-  if (preferNetPay && payrollRow) {
-    const fromNet = readFormXIVMPPayrollNetPay(payrollRow);
-    if (fromNet !== '') {
-      const n = Number(String(fromNet).replace(/,/g, '').trim());
-      if (Number.isFinite(n) && n > 0) return String(n);
-      return String(fromNet).trim();
-    }
-  }
-  const fromPayroll = readFormXIVMPPayrollGrossPay(payrollRow);
-  if (fromPayroll !== '') {
-    const n = Number(String(fromPayroll).replace(/,/g, '').trim());
-    if (Number.isFinite(n) && n > 0) return String(n);
-    return String(fromPayroll).trim();
-  }
-  if (payrollRow) {
-    const fromNet = readFormXIVMPPayrollNetPay(payrollRow);
-    if (fromNet !== '') {
-      const n = Number(String(fromNet).replace(/,/g, '').trim());
-      if (Number.isFinite(n) && n > 0) return String(n);
-      return String(fromNet).trim();
-    }
-  }
   const fromEmp = emp.MonthlySalary || emp['Monthly Salary'] || emp.BasicSalary || emp['Basic Salary'] || '';
   if (fromEmp != null && String(fromEmp).trim() !== '') return String(fromEmp).trim();
   return '';
@@ -1198,7 +1272,7 @@ export function applyFormXIVMPEmployeeToRow(row, emp, headers, helpers = {}) {
       return;
     }
     if (isFormXIVMPWorkmanNameHeader(header)) {
-      out[header] = sanitizeValue(formatFormXIVMPWorkmanName(emp));
+      out[header] = sanitizeValue(formatFormXIVMPWorkmanName(emp, payrollRow));
       return;
     }
     if (isFormXIVMPSerialNumberHeader(header)) {
@@ -1267,19 +1341,10 @@ export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpe
   mappedData.forEach((row, rowIndex) => {
     const empItem = employees[rowIndex];
     const emp = empItem?.Employee || empItem?.employee || empItem;
-    const monthDefault =
-      resolveFormXIVKarnatakaMonthDefaultWageRate(emp, monthCandidates, wageRateHints) ||
-      resolveFormXIVMadhyaPradeshMonthDefaultWageRate(emp, monthCandidates, wageRateHints);
-    if (monthDefault && (overwrite || !String(row?.[wageRateHeader] ?? '').trim())) {
-      row[wageRateHeader] = sanitizeValue(monthDefault);
-      hits += 1;
-      return;
-    }
     if (!overwrite && String(row?.[wageRateHeader] ?? '').trim()) return;
-    if (typeof resolvePayrollRow !== 'function') return;
-    const payrollRow = resolvePayrollRow(emp, row, rowIndex);
-    if (!payrollRow || payrollRow.fetch_error) return;
-    const rate = resolveFormXIVMPWageRate(emp, payrollRow, {
+    const payrollRow =
+      typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, row, rowIndex) : null;
+    const rate = resolveFormXIVMPWageRate(emp, payrollRow && !payrollRow.fetch_error ? payrollRow : null, {
       variant,
       monthCandidates,
       ...wageRateHints,
@@ -1538,9 +1603,49 @@ export function allocateUniqueFormXIVMPDownloadFileName(baseName, usedNames, var
   const count = usedNames.get(root) || 0;
   usedNames.set(root, count + 1);
   const suffix = count > 0 ? `_${count + 1}` : '';
+  const v = String(variant || 'mp').toLowerCase();
   const prefix =
-    variant === 'rj' ? 'Form_X_RJ' : variant === 'ka' ? 'Form_XIV_KA' : 'Form_XIV_MP';
+    v === 'rj'
+      ? 'Form_X_RJ'
+      : v === 'ka'
+        ? 'Form_XIV_KA'
+        : v === 'gj'
+          ? 'Form_XIV_GJ'
+          : 'Form_XIV_MP';
   return `${prefix}_${root}${suffix}.xlsx`;
+}
+
+/**
+ * Prefer live state/form identity (gj/ka/rj/mp) over a stale formXIVVariant stamp
+ * (e.g. callers that only branched on Karnataka / Rajasthan, or a prior GJ session).
+ */
+export function resolveFormXIVExportVariant(
+  formHeader,
+  rowItem,
+  fileName,
+  sheetText = '',
+  tableHeaders = null
+) {
+  const resolved = resolveFormXIVVariant(formHeader, rowItem, fileName, sheetText, tableHeaders);
+  const existing = String(formHeader?.formXIVVariant || '').toLowerCase();
+  if (
+    resolved === 'rj' ||
+    existing === 'rj' ||
+    isFormXRajasthanEmploymentCardContext(formHeader, rowItem, fileName, sheetText)
+  ) {
+    return 'rj';
+  }
+  // Live ka/gj always wins over a stale 'mp' stamp.
+  if (resolved === 'ka' || resolved === 'gj') return resolved;
+  // Live Madhya Pradesh identity wins over a stale 'gj'/'ka' stamp from a wrong template link.
+  if (
+    resolved === 'mp' &&
+    isFormXIVMadhyaPradeshContext(formHeader, rowItem, fileName, sheetText)
+  ) {
+    return 'mp';
+  }
+  if (existing === 'ka' || existing === 'gj') return existing;
+  return resolved || existing || 'mp';
 }
 
 const formXIVMPExcelCellValueToString = (val) => {
@@ -2959,6 +3064,7 @@ const shouldApplyFormXIVMPExportAlignment = (worksheet, parsedFormHeader = null)
   if (worksheetLooksLikeFormAEmployeeRegister(worksheet)) return false;
   if (isFormXIVKarnatakaExport(worksheet, parsedFormHeader)) return false;
   if (detectFormXRajasthanWorksheetLayout(worksheet)) return false;
+  if (detectFormXIVGJEmploymentCardWorksheet(worksheet)) return false;
   const variant = String(parsedFormHeader?.formXIVVariant || '').toLowerCase();
   if (variant === 'ka' || variant === 'gj' || variant === 'rj') return false;
   // Only rewrite when this is explicitly MP Form XIV, or the sheet is a stacked Employment Card.
@@ -3022,9 +3128,253 @@ const detectFormXIVMPColumnCWorkmanLayout = (worksheet) => {
   return colCHits >= 2 && splitOrdinalHits < 3;
 };
 
+/** Gujarat Form XIV boxed card — must never be rewritten as MP even-row stacked layout. */
+const detectFormXIVGJEmploymentCardWorksheet = (worksheet, maxScanRow = 40) => {
+  if (!worksheet) return false;
+  let gujaratMarker = false;
+  let entryIntoService = false;
+  let signatureContractor = false;
+  let boxedWorkmanOrdinal = false;
+  for (let r = 1; r <= maxScanRow; r += 1) {
+    for (let c = 1; c <= 14; c += 1) {
+      const raw = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      const n = formXIVMPHeaderNorm(raw);
+      if (/central\s*&\s*gujarat|gujarat\s+rules|xiv[\s._-]*gj/.test(n)) gujaratMarker = true;
+      if (/vide\s+rule\s+76/.test(n) && /(?:gujarat|contract\s+labou?r)/.test(n)) {
+        gujaratMarker = true;
+      }
+      if (/entry\s+into\s+service/.test(n)) entryIntoService = true;
+      if (/signature\s+of\s+the\s+contractor/.test(n)) signatureContractor = true;
+      if (/^\d+[\.\)]\s+name\s+of\s+the\s+workman/.test(n)) boxedWorkmanOrdinal = true;
+    }
+  }
+  // GJ template: Vide Rule 76 Central & Gujarat Rules and/or field "Date of entry into service".
+  return (
+    gujaratMarker ||
+    entryIntoService ||
+    (signatureContractor && boxedWorkmanOrdinal)
+  );
+};
+
+const FORM_XIV_GJ_OFFICIAL_THIN_BORDER = { style: 'thin', color: { argb: 'FF000000' } };
+const FORM_XIV_GJ_OFFICIAL_WORKMAN_LABELS = [
+  '1. Name of the Workman',
+  '2. S.No. in the Register of Workmen Employed',
+  '3. Nature of Employment /Designation',
+  '4. Date of entry into service',
+  '5. Wage rate (With particulars of unit in case of piece - work)',
+  '6. Wage period',
+  '7. Tenure of Employment',
+  '8. Remarks',
+];
+
+const applyFormXIVGJBoxBorders = (worksheet, top, left, bottom, right) => {
+  for (let r = top; r <= bottom; r += 1) {
+    for (let c = left; c <= right; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      cell.border = {
+        top: r === top ? FORM_XIV_GJ_OFFICIAL_THIN_BORDER : undefined,
+        bottom: r === bottom ? FORM_XIV_GJ_OFFICIAL_THIN_BORDER : undefined,
+        left: c === left ? FORM_XIV_GJ_OFFICIAL_THIN_BORDER : undefined,
+        right: c === right ? FORM_XIV_GJ_OFFICIAL_THIN_BORDER : undefined,
+      };
+    }
+  }
+};
+
+/**
+ * Rebuild official Gujarat Form XIV Employment Card (boxed 2×2 header + numbered 1–8 fields).
+ * Used when Form XIV GJ is requested but the linked template is an MP stacked Sheet1 card.
+ */
+export function stampFormXIVGJOfficialBoxedLayout(worksheet) {
+  if (!worksheet) return false;
+  try {
+    if (typeof worksheet.name === 'string' && worksheet.name !== 'FORM XIV') {
+      worksheet.name = 'FORM XIV';
+    }
+  } catch (_) {
+    /* ignore locked sheet name */
+  }
+
+  // Clear MP stacked residue (titles in F, truncated B labels, values in C/E).
+  for (let r = 1; r <= 40; r += 1) {
+    for (let c = 1; c <= 14; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      cell.value = null;
+      cell.border = {};
+      cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+      cell.font = { name: 'Calibri', size: 11, bold: false, italic: false };
+    }
+  }
+  parseExcelJsMergeRanges(worksheet).forEach((m) => {
+    unmergeFormXIVRange(worksheet, m.top, m.left, m.bottom, m.right);
+  });
+
+  const centerTitle = (row, text, opts = {}) => {
+    try {
+      worksheet.mergeCells(row, 1, row, 13);
+    } catch (_) {
+      /* ignore */
+    }
+    const cell = worksheet.getCell(row, 1);
+    cell.value = text;
+    cell.font = {
+      name: 'Calibri',
+      size: opts.size || 12,
+      bold: !!opts.bold,
+      italic: !!opts.italic,
+    };
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  };
+
+  centerTitle(2, 'FORM XIV', { bold: true, size: 14 });
+  centerTitle(3, 'EMPLOYMENT CARD', { bold: true, size: 13 });
+  centerTitle(4, '(Vide Rule 76 of Contract Labour (R&A) Central & Gujarat Rules)', {
+    size: 10,
+  });
+
+  const headerBoxes = [
+    {
+      labelRow: 7,
+      labelCol: 1,
+      label: 'Name and Address of the Contractor',
+      box: { top: 9, left: 1, bottom: 11, right: 6 },
+    },
+    {
+      labelRow: 7,
+      labelCol: 7,
+      label: 'Name and Address of the Establishment in/under which Contract is carried on:',
+      box: { top: 9, left: 7, bottom: 11, right: 13 },
+    },
+    {
+      labelRow: 13,
+      labelCol: 1,
+      label: 'Nature of work and location of work:',
+      box: { top: 15, left: 1, bottom: 17, right: 6 },
+    },
+    {
+      labelRow: 13,
+      labelCol: 7,
+      label: 'Name and address of Principal Employer:',
+      box: { top: 15, left: 7, bottom: 17, right: 13 },
+    },
+  ];
+  headerBoxes.forEach((item) => {
+    worksheet.getCell(item.labelRow, item.labelCol).value = item.label;
+    worksheet.getCell(item.labelRow, item.labelCol).font = {
+      name: 'Calibri',
+      size: 11,
+      bold: false,
+    };
+    worksheet.getCell(item.labelRow, item.labelCol).alignment = {
+      horizontal: 'left',
+      vertical: 'middle',
+      wrapText: true,
+    };
+    try {
+      worksheet.mergeCells(item.box.top, item.box.left, item.box.bottom, item.box.right);
+    } catch (_) {
+      /* ignore */
+    }
+    applyFormXIVGJBoxBorders(
+      worksheet,
+      item.box.top,
+      item.box.left,
+      item.box.bottom,
+      item.box.right
+    );
+  });
+
+  FORM_XIV_GJ_OFFICIAL_WORKMAN_LABELS.forEach((label, i) => {
+    const row = 21 + i;
+    worksheet.getCell(row, 1).value = label;
+    worksheet.getCell(row, 1).font = { name: 'Calibri', size: 11, bold: false };
+    worksheet.getCell(row, 1).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+    try {
+      worksheet.mergeCells(row, 2, row, 6);
+    } catch (_) {
+      /* ignore */
+    }
+    applyFormXIVGJBoxBorders(worksheet, row, 2, row, 6);
+  });
+
+  worksheet.getCell(32, 7).value = 'Signature of the Contractor';
+  worksheet.getCell(32, 7).alignment = { horizontal: 'center', vertical: 'middle' };
+  for (let c = 1; c <= 13; c += 1) {
+    worksheet.getColumn(c).width = c === 1 ? 42 : 12;
+  }
+  return true;
+};
+
+/**
+ * Rebuild official MP Form XIV stacked card when Form Master linked a Gujarat boxed template.
+ */
+export function stampFormXIVMPOfficialStackedLayout(worksheet) {
+  if (!worksheet) return false;
+
+  for (let r = 1; r <= 40; r += 1) {
+    for (let c = 1; c <= 14; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      cell.value = null;
+      cell.border = {};
+      cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: false };
+      cell.font = { name: 'Calibri', size: 12, bold: false, italic: false };
+    }
+  }
+  parseExcelJsMergeRanges(worksheet).forEach((m) => {
+    unmergeFormXIVRange(worksheet, m.top, m.left, m.bottom, m.right);
+  });
+
+  [
+    { row: 2, text: 'FORM XIV', italic: false },
+    { row: 3, text: '(See rule 76)', italic: true },
+    { row: 4, text: 'Employment Card', italic: false },
+  ].forEach((spec) => {
+    const cell = worksheet.getCell(spec.row, FORM_XIV_MP_TITLE_COL);
+    cell.value = spec.text;
+    cell.font = { name: 'Calibri', size: 12, bold: false, italic: !!spec.italic };
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: false };
+  });
+
+  FORM_XIV_MP_HEADER_OFFICIAL.forEach((spec, index) => {
+    const row = FORM_XIV_MP_OFFICIAL_HEADER_ROWS[index];
+    worksheet.getCell(row, FORM_XIV_MP_HEADER_LABEL_COL).value = spec.text;
+    styleFormXIVMPSingleLineLabelCell(worksheet.getCell(row, FORM_XIV_MP_HEADER_LABEL_COL));
+  });
+
+  FORM_XIV_MP_WORKMAN_FIELD_SPECS.forEach((spec, index) => {
+    const row = FORM_XIV_MP_OFFICIAL_WORKMAN_ROWS[index];
+    worksheet.getCell(row, FORM_XIV_MP_OFFICIAL_WORKMAN_COL).value = `${index + 1} ${spec.label}`;
+    styleFormXIVMPSingleLineLabelCell(worksheet.getCell(row, FORM_XIV_MP_OFFICIAL_WORKMAN_COL));
+  });
+
+  applyFormXIVMPOfficialColumnWidths(worksheet, false);
+  return true;
+}
+
+/** When Form XIV MP is requested but the linked file is a Gujarat boxed card, rebuild MP. */
+const ensureFormXIVMPStackedWorksheetLayout = (worksheet, parsedFormHeader = null) => {
+  const variant = String(parsedFormHeader?.formXIVVariant || '').toLowerCase();
+  if (variant !== 'mp') return false;
+  if (detectFormXRajasthanWorksheetLayout(worksheet)) return false;
+  if (isFormXIVKarnatakaExport(worksheet, parsedFormHeader)) return false;
+  if (!detectFormXIVGJEmploymentCardWorksheet(worksheet)) return false;
+  return stampFormXIVMPOfficialStackedLayout(worksheet);
+};
+
+const ensureFormXIVGJBoxedWorksheetLayout = (worksheet, parsedFormHeader = null) => {
+  const variant = String(parsedFormHeader?.formXIVVariant || '').toLowerCase();
+  if (variant !== 'gj') return false;
+  if (detectFormXIVGJEmploymentCardWorksheet(worksheet)) return false;
+  return stampFormXIVGJOfficialBoxedLayout(worksheet);
+};
+
 /** Official MP card: titles in F and even-row header labels, unless ordinals are split in A. */
 const detectFormXIVMPOfficialEvenRowCard = (worksheet) => {
   if (!worksheet) return false;
+  // Never treat Gujarat boxed Employment Card as MP official even-row layout.
+  if (detectFormXIVGJEmploymentCardWorksheet(worksheet)) return false;
   if (detectFormXIVMPColumnCWorkmanLayout(worksheet)) return true;
   let splitOrdinalHits = 0;
   for (let r = 12; r <= 28; r += 1) {
@@ -3293,6 +3643,9 @@ const ensureFormXIVStackedColumnAlignment = (worksheet, parsedFormHeader = null)
 export function finalizeFormXIVMadhyaPradeshWorksheet(worksheet, parsedFormHeader = null) {
   if (!worksheet) return false;
   if (worksheetLooksLikeFormAEmployeeRegister(worksheet)) return false;
+  const variant = String(parsedFormHeader?.formXIVVariant || '').toLowerCase();
+  if (variant === 'gj' || variant === 'ka' || variant === 'rj') return false;
+  if (detectFormXIVGJEmploymentCardWorksheet(worksheet)) return false;
   if (detectFormXIVMPOfficialEvenRowCard(worksheet)) {
     ensureFormXIVMadhyaPradeshColumnAlignment(worksheet);
     applyFormXIVMPOfficialColumnWidths(worksheet, false);
@@ -3558,10 +3911,10 @@ const findFormXIVGJHeaderLabelPosition = (worksheet, spec, parsedFields = []) =>
     }
   }
   const canonicalByKey = {
-    form_xiv_mp_contractor: { row: 5, col: 1 },
-    form_xiv_mp_establishment: { row: 5, col: 8 },
-    form_xiv_mp_nature_location: { row: 14, col: 1 },
-    form_xiv_mp_principal_employer: { row: 14, col: 8 },
+    form_xiv_mp_contractor: { row: 7, col: 1 },
+    form_xiv_mp_establishment: { row: 7, col: 7 },
+    form_xiv_mp_nature_location: { row: 13, col: 1 },
+    form_xiv_mp_principal_employer: { row: 13, col: 7 },
   };
   return canonicalByKey[spec.key] || null;
 };
@@ -3774,6 +4127,11 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
   const workmanSpecs =
     variant === 'gj' ? FORM_XIV_GJ_WORKMAN_FIELD_SPECS : FORM_XIV_MP_WORKMAN_FIELD_SPECS;
   const gjBoxedLayout = variant === 'gj';
+  if (gjBoxedLayout) {
+    ensureFormXIVGJBoxedWorksheetLayout(worksheet, parsedFormHeader);
+  } else if (variant === 'mp') {
+    ensureFormXIVMPStackedWorksheetLayout(worksheet, parsedFormHeader);
+  }
   const rjBoxedLayout = variant === 'rj' || detectFormXRajasthanWorksheetLayout(worksheet);
   // Stamp official MP card before filling so truncated B labels cannot pull values into C.
   if (
@@ -3957,14 +4315,27 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
 }
 
 export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers, parsedFormHeader = null) {
-  const hdrs = resolveFormXIVMPTableHeaders(headers);
-  const workmanSpecs = resolveFormXIVWorkmanFieldSpecsFromHeaders(hdrs);
-  const variant = resolveFormXIVMPWorkmanVariantFromSpecs(workmanSpecs);
+  const hdrs = resolveFormXIVMPTableHeaders(headers, {
+    formHeader: parsedFormHeader,
+    fileName: parsedFormHeader?.title || '',
+  });
+  const explicitVariant = String(parsedFormHeader?.formXIVVariant || '').toLowerCase();
+  const workmanSpecs =
+    explicitVariant === 'gj'
+      ? FORM_XIV_GJ_WORKMAN_FIELD_SPECS
+      : resolveFormXIVWorkmanFieldSpecsFromHeaders(hdrs);
+  const variant =
+    explicitVariant === 'gj' || explicitVariant === 'rj' || explicitVariant === 'ka'
+      ? explicitVariant
+      : resolveFormXIVMPWorkmanVariantFromSpecs(workmanSpecs);
   // MP/KA cards always use stacked value columns (E for MP, F for Karnataka).
+  // Gujarat boxed card must never fall into stacked MP layout.
   const stackedLayout =
+    variant !== 'gj' &&
+    variant !== 'rj' &&
     isFormXIVStackedVariant(variant) &&
     (detectFormXIVStackedWorkmanLayout(worksheet) || !detectFormXRajasthanWorksheetLayout(worksheet));
-  const kaInline = isFormXIVKarnatakaExport(worksheet, parsedFormHeader);
+  const kaInline = variant !== 'gj' && isFormXIVKarnatakaExport(worksheet, parsedFormHeader);
   const stackedValueCol = resolveFormXIVStackedValueCol(worksheet, parsedFormHeader);
   const valueCol = stackedLayout
     ? stackedValueCol
@@ -4012,16 +4383,29 @@ export function resolveFormXIVMPWorkmanFieldPositions(worksheet, headers, parsed
         const headerKey = hdrs.find((h) => spec.rowTest(h)) || hdrs[si];
         let targetRow = r;
         let targetCol = resolveTargetCol(r, c);
+        // GJ wage-rate label often wraps to a continuation line ("case of piece - work)").
+        // Prefer the value box on the "5." label row; only use the next row when that
+        // line is a continuation AND the ordinal row has no box to the right.
         if (variant === 'gj' && ordinal === 5 && isFormXIVMPWageRateHeader(cellStr)) {
-          const nextRowCol = resolveTargetCol(r + 1, c);
-          const thisRowCol = resolveTargetCol(r, c);
-          const nextHasValue = formXIVMPExcelCellValueToString(worksheet.getCell(r + 1, nextRowCol)?.value).trim();
-          if (!nextHasValue || isFormXIVPlaceholderCell(nextHasValue)) {
-            targetRow = r + 1;
-            targetCol = nextRowCol;
-          } else {
+          const thisPos = findGJWorkmanValueMergeOnRow(worksheet, r, c);
+          const nextRaw = formXIVMPExcelCellValueToString(worksheet.getCell(r + 1, c)?.value).trim();
+          const nextIsContinuation =
+            !!nextRaw &&
+            !/^\d+[\.\)]\s*/.test(nextRaw) &&
+            !isFormXIVMPWagePeriodHeader(nextRaw) &&
+            !isFormXIVMPTenureHeader(nextRaw) &&
+            (/(?:^case\s+of|piece|particular|work\))/i.test(nextRaw) ||
+              (cellStr.includes('(') && !String(cellStr).includes(')')));
+          const thisHasBox = thisPos.col > c;
+          if (thisHasBox) {
             targetRow = r;
-            targetCol = thisRowCol;
+            targetCol = thisPos.col;
+          } else if (nextIsContinuation) {
+            const nextPos = findGJWorkmanValueMergeOnRow(worksheet, r + 1, c);
+            if (nextPos.col > c) {
+              targetRow = r + 1;
+              targetCol = nextPos.col;
+            }
           }
         }
         positions.push({
@@ -4153,10 +4537,16 @@ export function writeFormXIVMPWorkmanFieldsToWorksheet(
 ) {
   if (!worksheet || !row || typeof row !== 'object') return;
   const explicitVariant = String(parsedFormHeader?.formXIVVariant || '').toLowerCase();
+  if (explicitVariant === 'gj') {
+    ensureFormXIVGJBoxedWorksheetLayout(worksheet, parsedFormHeader);
+  } else if (explicitVariant === 'mp') {
+    ensureFormXIVMPStackedWorksheetLayout(worksheet, parsedFormHeader);
+  }
   const layout =
     cachedLayout || resolveFormXIVMPWorkmanFieldPositions(worksheet, headers, parsedFormHeader);
   const kaInline =
     explicitVariant !== 'mp' &&
+    explicitVariant !== 'gj' &&
     (layout.kaInline || isFormXIVKarnatakaExport(worksheet, parsedFormHeader));
   const mpOfficialCard =
     explicitVariant !== 'ka' &&
@@ -4174,7 +4564,9 @@ export function writeFormXIVMPWorkmanFieldsToWorksheet(
     const headerRows = findFormXIVKAHeaderLabelRows(worksheet);
     const start = (headerRows[headerRows.length - 1]?.row || 9) + 2;
     const labelCol = resolveFormXIVKABodyLabelCol(worksheet);
-    const hdrs = resolveFormXIVMPTableHeaders(headers);
+    const hdrs = resolveFormXIVMPTableHeaders(headers, {
+      formHeader: parsedFormHeader,
+    });
     FORM_XIV_KA_WORKMAN_OFFICIAL.forEach((official, i) => {
       writeFormXIVKASerialAndLabel(
         worksheet,
@@ -4189,13 +4581,14 @@ export function writeFormXIVMPWorkmanFieldsToWorksheet(
     return;
   }
   const workmanSpecs = layout.workmanSpecs || resolveFormXIVWorkmanFieldSpecsFromHeaders(headers);
-  if (!cachedLayout && layout.variant !== 'gj' && layout.variant !== 'rj') {
+  const effectiveVariant = explicitVariant === 'gj' ? 'gj' : layout.variant || 'mp';
+  if (!cachedLayout && effectiveVariant !== 'gj' && effectiveVariant !== 'rj') {
     applyFormXIVMPOfficialTemplateLabels(worksheet);
   }
   if (!cachedLayout) {
-    if (layout.variant === 'gj') {
-      layout.positions.forEach(({ row, labelCol }) => {
-        if (row >= 1) clearFormXIVGJWorkmanValueBand(worksheet, row, labelCol ?? 1);
+    if (effectiveVariant === 'gj') {
+      layout.positions.forEach(({ row: posRow, labelCol }) => {
+        if (posRow >= 1) clearFormXIVGJWorkmanValueBand(worksheet, posRow, labelCol ?? 1);
       });
     } else if (layout.kaInline) {
       // Label + dotted value stay in the same cell; do not wipe the merged line.
@@ -4206,17 +4599,17 @@ export function writeFormXIVMPWorkmanFieldsToWorksheet(
     }
   } else {
     clearFormXIVMPWorkmanFieldPositions(worksheet, layout.positions, {
-      variant: layout.variant || 'mp',
+      variant: effectiveVariant,
       kaInline: layout.kaInline,
     });
   }
   writeFormXIVMPWorkmanFieldsViaPositions(worksheet, row, layout.positions, {
-    variant: layout.variant || 'mp',
+    variant: effectiveVariant,
     kaInline: layout.kaInline,
   });
   if (layout.kaInline) {
     ensureFormXIVStackedColumnAlignment(worksheet, { formXIVVariant: 'ka' });
-  } else if (layout.variant !== 'gj' && layout.variant !== 'rj') {
+  } else if (effectiveVariant !== 'gj' && effectiveVariant !== 'rj') {
     ensureFormXIVStackedColumnAlignment(worksheet, { formXIVVariant: 'mp' });
   }
 }
@@ -4309,25 +4702,20 @@ export async function buildFormXIVMPWorkbookWithTemplateStyles({
   const hdrs = resolveFormXIVMPTableHeaders(headersToUse, {
     formHeader: parsedFormHeader,
     fileName: formFileName,
+    item: rowItem,
+    sheetText,
   });
-  const resolvedVariant = resolveFormXIVVariant(
+  const resolvedVariant = resolveFormXIVExportVariant(
     parsedFormHeader,
     rowItem,
     formFileName,
     sheetText,
     hdrs
   );
-  const isRajasthanTableLayout =
-    String(parsedFormHeader?.formXIVVariant || '').toLowerCase() === 'rj' ||
-    resolvedVariant === 'rj' ||
-    isFormXRajasthanEmploymentCardContext(parsedFormHeader, rowItem, formFileName, sheetText);
+  const isRajasthanTableLayout = resolvedVariant === 'rj';
   const parsedFormHeaderWithVariant = {
     ...(parsedFormHeader || {}),
-    formXIVVariant: isRajasthanTableLayout
-      ? 'rj'
-      : resolvedVariant === 'ka'
-        ? 'ka'
-        : parsedFormHeader?.formXIVVariant || resolvedVariant,
+    formXIVVariant: resolvedVariant,
   };
 
   const isolatedBuffer = await isolateFormXIVEmploymentCardTemplateBuffer(templateArrayBuffer, {
@@ -4355,7 +4743,13 @@ export async function buildFormXIVMPWorkbookWithTemplateStyles({
   );
   const employeeRow = sourceRows.length === 1 ? sourceRows[0] : sourceRows[0] || null;
 
-  writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData, parsedFormHeaderWithVariant);
+  const headerFormDataForWrite = withFormXIVGJNatureLocationDesignation(
+    headerFormData,
+    employeeRow,
+    hdrs,
+    resolvedVariant
+  );
+  writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormDataForWrite, parsedFormHeaderWithVariant);
   if (employeeRow) {
     if (isRajasthanTableLayout) {
       const tableLayout = resolveFormXRJTableExportLayout(worksheet, hdrs);
@@ -4376,14 +4770,18 @@ export async function buildFormXIVMPWorkbookWithTemplateStyles({
   ensureFormXIVStackedColumnAlignment(worksheet, parsedFormHeaderWithVariant);
 
   const out = await workbook.xlsx.writeBuffer();
+  const variantTag =
+    resolvedVariant === 'rj'
+      ? 'Form_X_RJ'
+      : resolvedVariant === 'ka'
+        ? 'Form_XIV_KA'
+        : resolvedVariant === 'gj'
+          ? 'Form_XIV_GJ'
+          : 'Form_XIV_MP';
   const fileName =
     formFileName ||
     parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
-    (isRajasthanTableLayout
-      ? `Form_X_RJ_${Date.now()}.xlsx`
-      : parsedFormHeaderWithVariant.formXIVVariant === 'ka'
-        ? `Form_XIV_KA_${Date.now()}.xlsx`
-        : `Form_XIV_MP_${Date.now()}.xlsx`);
+    `${variantTag}_${Date.now()}.xlsx`;
   const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   return { blob, fileName, buffer: out };
 }
@@ -4450,25 +4848,20 @@ async function prepareFormXIVMPFastZipTemplate({
   const hdrs = resolveFormXIVMPTableHeaders(headersToUse, {
     formHeader: parsedFormHeader,
     fileName: formFileName,
+    item: rowItem,
+    sheetText,
   });
-  const resolvedVariant = resolveFormXIVVariant(
+  const resolvedVariant = resolveFormXIVExportVariant(
     parsedFormHeader,
     rowItem,
     formFileName,
     sheetText,
     hdrs
   );
-  const isRajasthanTableLayout =
-    String(parsedFormHeader?.formXIVVariant || '').toLowerCase() === 'rj' ||
-    resolvedVariant === 'rj' ||
-    isFormXRajasthanEmploymentCardContext(parsedFormHeader, rowItem, formFileName, sheetText);
+  const isRajasthanTableLayout = resolvedVariant === 'rj';
   const parsedFormHeaderWithVariant = {
     ...(parsedFormHeader || {}),
-    formXIVVariant: isRajasthanTableLayout
-      ? 'rj'
-      : resolvedVariant === 'ka'
-        ? 'ka'
-        : parsedFormHeader?.formXIVVariant || resolvedVariant,
+    formXIVVariant: resolvedVariant,
   };
 
   const isolatedBuffer = await isolateFormXIVEmploymentCardTemplateBuffer(templateArrayBuffer, {
@@ -4571,6 +4964,32 @@ async function prepareFormXIVMPFastZipTemplate({
     });
     ensureFormXIVStackedColumnAlignment(worksheet, parsedFormHeaderWithVariant);
   }
+
+  // Gujarat: reinject Nature + Designation per employee (site location alone is on the static sheet).
+  if (String(parsedFormHeaderWithVariant.formXIVVariant || '').toLowerCase() === 'gj') {
+    const natureSpec = FORM_XIV_MP_HEADER_SPECS.find((s) => s.key === 'form_xiv_mp_nature_location');
+    if (natureSpec) {
+      const labelPos = findFormXIVGJHeaderLabelPosition(
+        worksheet,
+        natureSpec,
+        Array.isArray(parsedFormHeaderWithVariant?.fields)
+          ? parsedFormHeaderWithVariant.fields
+          : []
+      );
+      if (labelPos) {
+        const area = resolveFormXIVGJHeaderBoxArea(worksheet, labelPos.row, labelPos.col);
+        positions = [
+          ...positions,
+          {
+            cellRef: formXIVMPToCellRef(area.valueRow, area.valueCol),
+            gjNatureLocation: true,
+            baseNatureText: String(headerFormData?.form_xiv_mp_nature_location || '').trim(),
+          },
+        ];
+      }
+    }
+  }
+
   const preparedBuffer = await workbook.xlsx.writeBuffer();
   const templateZip = await JSZip.loadAsync(preparedBuffer);
   const sheetEntry = resolveFormXIVMPWorksheetEntry(templateZip.files);
@@ -4621,26 +5040,20 @@ export async function buildFormXIVMPPerEmployeeDownload({
   const hdrs = resolveFormXIVMPTableHeaders(headersToUse, {
     formHeader: parsedFormHeader,
     fileName: formFileName,
+    item: rowItem,
+    sheetText,
   });
-  const resolvedVariant = resolveFormXIVVariant(
+  const resolvedVariant = resolveFormXIVExportVariant(
     parsedFormHeader,
     rowItem,
     formFileName,
     sheetText,
     hdrs
   );
-  // Prefer live RJ detection over a stale formXIVVariant (e.g. cached 'mp' on Form_X_RJ).
-  const isRajasthanTableLayout =
-    String(parsedFormHeader?.formXIVVariant || '').toLowerCase() === 'rj' ||
-    resolvedVariant === 'rj' ||
-    isFormXRajasthanEmploymentCardContext(parsedFormHeader, rowItem, formFileName, sheetText);
+  const isRajasthanTableLayout = resolvedVariant === 'rj';
   const parsedFormHeaderWithVariant = {
     ...(parsedFormHeader || {}),
-    formXIVVariant: isRajasthanTableLayout
-      ? 'rj'
-      : resolvedVariant === 'ka'
-        ? 'ka'
-        : parsedFormHeader?.formXIVVariant || resolvedVariant,
+    formXIVVariant: resolvedVariant,
   };
   const exportRows = (Array.isArray(mappedData) ? mappedData : []).filter((row) =>
     rowHasMeaningfulFormXIVMPExportData(row, hdrs)
@@ -4656,11 +5069,14 @@ export async function buildFormXIVMPPerEmployeeDownload({
     sheetText,
   };
   const isKarnatakaCardLayout = parsedFormHeaderWithVariant.formXIVVariant === 'ka';
+  const isGujaratCardLayout = parsedFormHeaderWithVariant.formXIVVariant === 'gj';
   const zipFilePrefix = isRajasthanTableLayout
     ? 'Form_X_RJ'
     : isKarnatakaCardLayout
       ? 'Form_XIV_KA'
-      : 'Form_XIV_MP';
+      : isGujaratCardLayout
+        ? 'Form_XIV_GJ'
+        : 'Form_XIV_MP';
 
   // Form X RJ and Karnataka Form XIV: always ZIP (one employment card per employee).
   // MP/GJ keep a single .xlsx only when there is at most one workman row.
@@ -4735,12 +5151,21 @@ export async function buildFormXIVMPPerEmployeeDownload({
           let sheetXml = baseSheetXml;
           for (let pi = 0; pi < positions.length; pi += 1) {
             const pos = positions[pi];
-            const rawValue = Number.isInteger(pos.specIndex)
-              ? getFormXIVKAWorkmanFieldValue(exportRow, hdrs, pos.specIndex)
-              : getFormXIVMPRowValueForHeader(exportRow, pos.headerKey);
-            const injectValue = pos.kaInline
-              ? formatFormXIVKAFilledLine(pos.inlineLabel || '', rawValue, true)
-              : rawValue;
+            let injectValue = '';
+            if (pos.gjNatureLocation) {
+              injectValue = buildFormXIVGJNatureLocationWithDesignation(
+                pos.baseNatureText,
+                exportRow,
+                hdrs
+              );
+            } else {
+              const rawValue = Number.isInteger(pos.specIndex)
+                ? getFormXIVKAWorkmanFieldValue(exportRow, hdrs, pos.specIndex)
+                : getFormXIVMPRowValueForHeader(exportRow, pos.headerKey);
+              injectValue = pos.kaInline
+                ? formatFormXIVKAFilledLine(pos.inlineLabel || '', rawValue, true)
+                : rawValue;
+            }
             sheetXml = formXIVMPUpsertInlineStrCell(
               sheetXml,
               pos.cellRef,

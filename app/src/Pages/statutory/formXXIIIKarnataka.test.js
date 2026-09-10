@@ -7,6 +7,7 @@ import {
   isFormXXIIIKarnatakaOvertimeEarningsHeader,
   isFormXXIIIKarnatakaOtWagesPaidDateHeader,
 } from './formXXIIIKarnataka';
+import { buildKarnatakaPayrollRowResolver } from './form10TamilNadu';
 
 describe('Form XXIII Karnataka overtime NIL columns', () => {
   const headers = [
@@ -83,5 +84,17 @@ describe('Form XXIII Karnataka overtime NIL columns', () => {
     expect(rows[0]['Overtime rate of wages']).toBe(FORM_XXIII_KA_OT_NIL);
     expect(rows[0]['Overtime earnings']).toBe(FORM_XXIII_KA_OT_NIL);
     expect(rows[0]['Date on which overtime wages paid']).toBe(FORM_XXIII_KA_OT_NIL);
+  });
+
+  it('matches payroll by first name and last name, including People FirstName-only records', () => {
+    const payroll = [
+      { first_name: 'Ashok', last_name: 'Kumar', net_pay: 100 },
+      { first_name: 'Ashok', last_name: 'Jangamashetti', net_pay: 200 },
+      { first_name: 'Naveen', last_name: 'K M', net_pay: 300 },
+    ];
+    const resolve = buildKarnatakaPayrollRowResolver(payroll);
+    expect(resolve({ FirstName: 'Ashok', LastName: 'Jangamashetti' })).toEqual(payroll[1]);
+    expect(resolve({ FirstName: 'Naveen K M' })).toEqual(payroll[2]);
+    expect(resolve({ FirstName: 'Ashok' })).toBeNull();
   });
 });

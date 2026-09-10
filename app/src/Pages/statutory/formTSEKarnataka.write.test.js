@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import {
   buildFormTSEWorkbookWithTemplateStyles,
   prepareFormTSEExportRows,
@@ -16,6 +17,7 @@ import {
   looksLikeFormTSEEmployeeNameCell,
   applyFormTSEWorkbookOpenAtColumnA,
   prepareFormTSEWorkbookForDownload,
+  prepareFormTSEDownloadHeaderData,
   computeFormTSEKarnatakaTotalDeductions,
   FORM_T_KA_DEFAULT_PAYMENT_MODE,
   FORM_T_KA_OT_HOURS_NIL,
@@ -30,6 +32,11 @@ import {
   resolveFormTSEDownloadWriteHeaders,
   FORM_T_KA_ATTENDANCE_START_COL0,
   FORM_T_KARNATAKA_HEADER_BOX_END_COL,
+  getFormTSEKarnatakaEmployeeNameFromRow,
+  applyFormTSEKarnatakaEmployeeToRow,
+  forceFormTSEIdentityCellsInSheetXml,
+  sanitizeFormTSEAttendanceMark,
+  overlayFormTSEPayrollOntoRowsByName,
 } from './formTSEKarnataka';
 import { excelJSCellHasFullBoxBorder, excelJSCellHasBorder } from '../../utils/excelTableBorders';
 
@@ -184,6 +191,465 @@ describe('Form T Karnataka workbook write', () => {
     expect(excelJSCellHasFullBoxBorder(ws.getCell(15, 1))).toBe(true);
     expect(excelJSCellHasFullBoxBorder(ws.getCell(15, 8))).toBe(true);
     expect(excelJSCellHasFullBoxBorder(ws.getCell(16, 2))).toBe(true);
+  });
+
+  it('writes the last employee name (not Father) when the Date row has a Name+Father merge', async () => {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(await buildMinimalFormTTemplateBuffer());
+    const templateWs = wb.getWorksheet('Form T');
+    // Template Date: row sits at Excel 20. A B:C merge makes ExcelJS write Father into Name.
+    templateWs.mergeCells(20, 2, 20, 3);
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+
+    const sixRows = [
+      {
+        'S.NO': 1,
+        'Name of Employee': 'Vinay Kumar',
+        "Father / Husband's Name": 'Kadesh j kamble',
+        Gender: 'Male',
+        'Designation / Department': 'Engineer',
+        'Date of Joining': '17 Aug 2026',
+      },
+      {
+        'S.NO': 2,
+        'Name of Employee': 'Issac Kanagaraj',
+        "Father / Husband's Name": 'abc',
+        Gender: 'Male',
+        'Designation / Department': 'Assistant Manager',
+        'Date of Joining': '01 Dec 2025',
+      },
+      {
+        'S.NO': 3,
+        'Name of Employee': 'Saravanan',
+        "Father / Husband's Name": 'abc',
+        Gender: 'Male',
+        'Designation / Department': 'Engineer',
+        'Date of Joining': '01 Dec 2025',
+      },
+      {
+        'S.NO': 4,
+        'Name of Employee': 'Ameerkhan',
+        "Father / Husband's Name": 'abc',
+        Gender: 'Male',
+        'Designation / Department': 'Engineer',
+        'Date of Joining': '01 Dec 2025',
+      },
+      {
+        'S.NO': 5,
+        'Name of Employee': 'Rajesh',
+        "Father / Husband's Name": 'abc',
+        Gender: 'Male',
+        'Designation / Department': 'Engineer',
+        'Date of Joining': '01 Dec 2025',
+      },
+      {
+        'S.NO': 6,
+        'Name of Employee': 'Ashok',
+        "Father / Husband's Name": 'abc',
+        Gender: 'Male',
+        'Designation / Department': 'Junior Engineer',
+        'Date of Joining': '01 Dec 2025',
+      },
+    ];
+
+    expect(getFormTSEKarnatakaEmployeeNameFromRow(sixRows[5], modalHeaders)).toBe('Ashok');
+
+    const { blob } = await buildFormTSEWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: sixRows,
+      headersToUse: modalHeaders,
+      parsedHeaderRowIndex: 11,
+      parsedDataStartIndex: 14,
+      parsedTableStartCol: 0,
+      parsedFormHeader: { title: 'Form T' },
+      headerFormData: {
+        form_t_month_year: 'April 2026',
+        form_t_establishment_name_address: 'Babaleshwar Hero Site Karnataka',
+        form_t_employer: 'M/s Clean Wind Power Bableshwar Pvt Ltd',
+      },
+      formFileName: 'Form_T_KA.xlsx',
+      sheetNameHint: 'Form T',
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const ws = outWb.getWorksheet('Form T');
+    expect(String(ws.getCell(15, 2).value ?? '')).toMatch(/Vinay Kumar/i);
+    expect(String(ws.getCell(20, 1).value ?? '').trim()).toBe('6');
+    expect(String(ws.getCell(20, 2).value ?? '')).toMatch(/Ashok/i);
+    expect(String(ws.getCell(20, 2).value ?? '')).not.toMatch(/^abc$/i);
+    expect(String(ws.getCell(20, 3).value ?? '')).toMatch(/^abc$/i);
+    expect(String(ws.getCell(20, 5).value ?? '')).toMatch(/Junior Engineer/i);
+    let dateRow = 0;
+    for (let r = 20; r <= 28; r += 1) {
+      if (/^date\s*:/i.test(String(ws.getCell(r, 1).value ?? '').trim())) {
+        dateRow = r;
+        break;
+      }
+    }
+    expect(dateRow).toBeGreaterThan(20);
+  });
+
+  it('writes the 6th employee name when column B is labelled principal employer', async () => {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(await buildMinimalFormTTemplateBuffer());
+    const templateWs = wb.getWorksheet('Form T');
+    templateWs.getCell(12, 2).value = 'Name and address of principal employer';
+    templateWs.mergeCells(20, 2, 20, 3);
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+
+    const clraHeaders = [
+      'S.NO',
+      'Name and address of principal employer',
+      "Father / Husband's Name",
+      'Gender',
+      'Designation / Department',
+      'Date of Joining',
+    ];
+    const people = ['Vinay Kumar', 'Issac Kanagaraj', 'Saravanan', 'Ameerkhan', 'Rajesh', 'Ashok'];
+    const sixRows = people.map((name, i) => ({
+      'S.NO': i + 1,
+      'Name and address of principal employer': name,
+      "Father / Husband's Name": i === 0 ? 'Kadesh j kamble' : 'abc',
+      Gender: 'Male',
+      'Designation / Department': i === 5 ? 'Junior Engineer' : 'Engineer',
+      'Date of Joining': '01 Dec 2025',
+    }));
+
+    expect(getFormTSEKarnatakaEmployeeNameFromRow(sixRows[5], clraHeaders)).toBe('Ashok');
+
+    const { blob } = await buildFormTSEWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: sixRows,
+      headersToUse: clraHeaders,
+      parsedHeaderRowIndex: 11,
+      parsedDataStartIndex: 14,
+      parsedTableStartCol: 0,
+      parsedFormHeader: { title: 'Form T' },
+      headerFormData: {
+        form_t_month_year: 'April 2026',
+        form_t_establishment_name_address: 'Babaleshwar Hero Site Karnataka',
+        form_t_employer: 'M/s Clean Wind Power Bableshwar Pvt Ltd',
+      },
+      formFileName: 'Form_T_KA.xlsx',
+      sheetNameHint: 'Form T',
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const ws = outWb.getWorksheet('Form T');
+    expect(String(ws.getCell(12, 2).value ?? '')).toMatch(/Name of Employee/i);
+    expect(String(ws.getCell(12, 2).value ?? '')).not.toMatch(/principal employer/i);
+    expect(String(ws.getCell(11, 1).value ?? '')).toMatch(/Clean Wind/i);
+    expect(String(ws.getCell(20, 1).value ?? '').trim()).toBe('6');
+    expect(String(ws.getCell(20, 2).value ?? '')).toMatch(/Ashok/i);
+    expect(String(ws.getCell(20, 2).value ?? '')).not.toMatch(/^abc$/i);
+    expect(String(ws.getCell(20, 3).value ?? '')).toMatch(/^abc$/i);
+  });
+
+  it('writes Ashok (not Father abc) on serial 6 when official template has empty row 14 and Date B:C merge', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(3, 1).value =
+      '[See Rule 24(9-B) of Karnataka Shops & Commercial Establishment Rules, 1963]';
+    ws.getCell(9, 1).value = 'Month / Year : April 2026';
+    ws.getCell(10, 1).value = 'Address of the Establishment : Karjol Village';
+    ws.getCell(11, 1).value = 'Name and Address of the Employer';
+    [
+      'S.NO',
+      'Name of Employee',
+      "Father / Husband's Name",
+      'Gender',
+      'Designation / Department',
+      'Date of Joining',
+      'ESI No.',
+      'UAN No.',
+      'Wages fixed including VDA',
+    ].forEach((h, i) => {
+      ws.getCell(12, i + 1).value = h;
+    });
+    for (let c = 1; c <= 7; c += 1) ws.getCell(13, c).value = c;
+    ws.getCell(20, 1).value = 'Date:';
+    ws.mergeCells(20, 2, 20, 3);
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+
+    const sixRows = [
+      'Vinay Kumar',
+      'Issac Kanagaraj',
+      'Saravanan',
+      'Ameerkhan',
+      'Rajesh',
+      'Ashok',
+    ].map((name, i) => ({
+      'S.NO': i + 1,
+      'Name of Employee': name,
+      "Father / Husband's Name": i === 0 ? 'Kadesh j kamble' : 'abc',
+      Gender: 'Male',
+      'Designation / Department': i === 5 ? 'Junior Engineer' : 'Engineer',
+      'Date of Joining': '01 Dec 2025',
+    }));
+
+    const { blob } = await buildFormTSEWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: sixRows,
+      headersToUse: modalHeaders,
+      parsedHeaderRowIndex: 11,
+      parsedDataStartIndex: 14,
+      parsedTableStartCol: 0,
+      parsedFormHeader: { title: 'Form T' },
+      headerFormData: {
+        form_t_month_year: 'April 2026',
+        form_t_establishment_name_address: 'Babaleshwar Hero Site Karnataka',
+        form_t_employer: 'M/s Clean Wind Power Bableshwar Pvt Ltd',
+      },
+      formFileName: 'Form_T_KA.xlsx',
+      sheetNameHint: 'Form T',
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const out = outWb.getWorksheet('Form T');
+    let serialSix = 0;
+    for (let r = 14; r <= 28; r += 1) {
+      if (String(out.getCell(r, 1).value ?? '').trim() === '6') {
+        serialSix = r;
+        break;
+      }
+    }
+    expect(serialSix).toBeGreaterThan(0);
+    expect(String(out.getCell(serialSix, 2).value ?? '')).toMatch(/Ashok/i);
+    expect(String(out.getCell(serialSix, 2).value ?? '')).not.toMatch(/^abc$/i);
+    expect(String(out.getCell(serialSix, 3).value ?? '')).toMatch(/^abc$/i);
+    expect(String(out.getCell(serialSix, 5).value ?? '')).toMatch(/Junior Engineer/i);
+  });
+
+  it('writes Ponnusamy on serial 6 when more employees follow (row 20 merge is not the last row)', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(3, 1).value =
+      '[See Rule 24(9-B) of Karnataka Shops & Commercial Establishment Rules, 1963]';
+    ws.getCell(9, 1).value = 'Month / Year : July 2026';
+    ws.getCell(11, 1).value = 'Name and Address of the Employer';
+    [
+      'S.NO',
+      'Name of Employee',
+      "Father / Husband's Name",
+      'Gender',
+      'Designation / Department',
+      'Date of Joining',
+    ].forEach((h, i) => {
+      ws.getCell(12, i + 1).value = h;
+    });
+    for (let c = 1; c <= 7; c += 1) ws.getCell(14, c).value = c;
+    ws.getCell(20, 1).value = 'Date:';
+    ws.mergeCells(20, 2, 20, 3);
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+
+    const people = [
+      ['Prakash', 'Lokappa', 'Engineer'],
+      ['Umesh', 'Shivaputrappa oli', 'Senior Technician'],
+      ['Naveen', 'Manjappa K', 'Engineer'],
+      ['Vinayak P', 'Parashuram V hadapad', 'Junior Engineer'],
+      ['Bharat', 'Vasudev kolkar', 'Junior Engineer'],
+      ['Ponnusamy', 'abc', 'Senior Engineer'],
+      ['Eliza', 'abc', 'Engineer'],
+      ['Basavaraj', 'abc', 'Senior Engineer'],
+      ['Manoj', 'Duraiswamy H', 'Deputy Manager'],
+      ['PrabakaranKumar', 'Jeyakumar P', 'Associate Master Technician'],
+      ['Sureshkumar', 'Ranganathan', 'Assistant Manager'],
+    ];
+    const rows = people.map((p, i) => ({
+      'S.NO': i + 1,
+      'Name of Employee': p[0],
+      "Father / Husband's Name": p[1],
+      Gender: 'Male',
+      'Designation / Department': p[2],
+      'Date of Joining': '01 Dec 2025',
+    }));
+
+    const { blob } = await buildFormTSEWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: rows,
+      headersToUse: modalHeaders,
+      parsedHeaderRowIndex: 11,
+      parsedDataStartIndex: 14,
+      parsedTableStartCol: 0,
+      parsedFormHeader: { title: 'Form T' },
+      formFileName: 'Form_T_KA.xlsx',
+      sheetNameHint: 'Form T',
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const out = outWb.getWorksheet('Form T') || outWb.worksheets[0];
+    let serialSix = 0;
+    for (let r = 14; r <= 40; r += 1) {
+      if (String(out.getCell(r, 1).value ?? '').trim() === '6') {
+        serialSix = r;
+        break;
+      }
+    }
+    expect(serialSix).toBeGreaterThan(0);
+    expect(String(out.getCell(serialSix, 2).value ?? '')).toMatch(/Ponnusamy/i);
+    expect(String(out.getCell(serialSix, 2).value ?? '')).not.toMatch(/^abc$/i);
+    expect(String(out.getCell(serialSix, 3).value ?? '')).toMatch(/^abc$/i);
+    expect(String(out.getCell(serialSix, 5).value ?? '')).toMatch(/Senior Engineer/i);
+    expect(out.getCell(serialSix, 3).alignment?.horizontal || 'center').toBe('center');
+    const sampleFatherAlign = out.getCell(serialSix > 15 ? serialSix - 1 : serialSix + 1, 3)
+      .alignment?.horizontal;
+    if (sampleFatherAlign) {
+      expect(out.getCell(serialSix, 3).alignment?.horizontal).toBe(sampleFatherAlign);
+    }
+
+    const zip = await JSZip.loadAsync(await new Response(blob).arrayBuffer());
+    const sheetPath = Object.keys(zip.files).find((p) => /xl\/worksheets\/sheet\d+\.xml$/i.test(p));
+    const xml = await zip.file(sheetPath).async('string');
+    expect(xml).not.toMatch(/ref="B20:C20"/i);
+    expect(xml).toMatch(/Ponnusamy/i);
+    const b20 = xml.match(/<c\b(?=[^>]*\br=["']B20["'])[^>]*>[\s\S]*?<\/c>/i);
+    expect(b20 && b20[0]).toMatch(/Ponnusamy/i);
+    expect(b20 && b20[0]).not.toMatch(/>abc</i);
+    const c19open = xml.match(/<c\b(?=[^>]*\br=["']C19["'])[^>]*>/i);
+    const c20open = xml.match(/<c\b(?=[^>]*\br=["']C20["'])[^>]*>/i);
+    const s19 = c19open && c19open[0].match(/\bs="([^"]+)"/i);
+    const s20 = c20open && c20open[0].match(/\bs="([^"]+)"/i);
+    if (s19) expect(s20 && s20[1]).toBe(s19[1]);
+  });
+
+  it('XML last-pass writes Ponnusamy into B20 even when ExcelJS stored abc as t=s with s before r', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(12, 1).value = 'S.NO';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    ws.getCell(12, 3).value = "Father / Husband's Name";
+    ws.getCell(20, 1).value = 6;
+    ws.getCell(20, 2).value = 'abc';
+    ws.mergeCells(20, 2, 20, 3);
+    const buf = await wb.xlsx.writeBuffer();
+    const zip0 = await JSZip.loadAsync(buf);
+    const sheetPath = Object.keys(zip0.files).find((p) => /xl\/worksheets\/sheet[^/]*\.xml$/i.test(p));
+    let xml = await zip0.file(sheetPath).async('string');
+    xml = xml.replace(
+      /<c\b(?=[^>]*\br=["']B20["'])[^>]*>[\s\S]*?<\/c>|<c\b(?=[^>]*\br=["']B20["'])[^>]*\/>/i,
+      '<c s="5" r="B20" t="s"><v>0</v></c>'
+    );
+    zip0.file(sheetPath, xml);
+    const dirty = await zip0.generateAsync({ type: 'arraybuffer' });
+
+    const people = [
+      ['Prakash', 'Lokappa'],
+      ['Umesh', 'Shivaputrappa oli'],
+      ['Naveen', 'Manjappa K'],
+      ['Vinayak P', 'Parashuram V hadapad'],
+      ['Bharat', 'Vasudev kolkar'],
+      ['Ponnusamy', 'abc'],
+      ['Eliza', 'abc'],
+    ].map((p, i) => ({
+      'S.NO': i + 1,
+      'Name of Employee': p[0],
+      "Father / Husband's Name": p[1],
+    }));
+
+    const patched = await forceFormTSEIdentityCellsInSheetXml(dirty, people, modalHeaders, []);
+    const zip1 = await JSZip.loadAsync(patched);
+    const xml1 = await zip1.file(sheetPath).async('string');
+    expect(xml1).not.toMatch(/ref="B20:C20"/i);
+    const b20 = xml1.match(/<c\b(?=[^>]*\br=["']B20["'])[^>]*>[\s\S]*?<\/c>/i);
+    expect(b20 && b20[0]).toMatch(/Ponnusamy/i);
+    expect(b20 && b20[0]).not.toMatch(/>abc</i);
+
+    const second = await prepareFormTSEWorkbookForDownload(patched, {
+      force: true,
+      mappedData: people,
+      headers: modalHeaders,
+    });
+    const zip2 = await JSZip.loadAsync(second);
+    const sheetPath2 = Object.keys(zip2.files).find((p) => /xl\/worksheets\/sheet[^/]*\.xml$/i.test(p));
+    const xml2 = await zip2.file(sheetPath2).async('string');
+    expect(xml2).not.toMatch(/ref="B20:C20"/i);
+    const b20b = xml2.match(/<c\b(?=[^>]*\br=["']B20["'])[^>]*>[\s\S]*?<\/c>/i);
+    expect(b20b && b20b[0]).toMatch(/Ponnusamy/i);
+    expect(b20b && b20b[0]).not.toMatch(/>abc</i);
+  });
+
+  it('overwrites leaked Father abc in Name when Autofill applies People Ashok', () => {
+    const row = {
+      'S.NO': 6,
+      'Name of Employee': 'abc',
+      "Father / Husband's Name": 'abc',
+      Gender: 'Male',
+      'Designation / Department': 'Junior Engineer',
+    };
+    applyFormTSEKarnatakaEmployeeToRow(
+      row,
+      { FirstName: 'Ashok', Father_s_Name: 'abc', Sex: 'Male', Designation: 'Junior Engineer' },
+      modalHeaders,
+      { onlyEmpty: true }
+    );
+    expect(row['Name of Employee']).toMatch(/Ashok/i);
+    expect(row['Name of Employee']).not.toMatch(/^abc$/i);
+  });
+
+  it('restamps the 6th name from Autofill lookup when the saved sheet still has abc', async () => {
+    const dirty = new ExcelJS.Workbook();
+    await dirty.xlsx.load(await buildMinimalFormTTemplateBuffer());
+    const dirtyWs = dirty.getWorksheet('Form T');
+    dirtyWs.getCell(12, 2).value = 'Name of Employee';
+    dirtyWs.mergeCells(20, 2, 20, 3);
+    dirtyWs.getCell(15, 1).value = 1;
+    dirtyWs.getCell(15, 2).value = 'Vinay Kumar';
+    dirtyWs.getCell(15, 3).value = 'Kadesh j kamble';
+    dirtyWs.getCell(16, 1).value = 2;
+    dirtyWs.getCell(16, 2).value = 'Issac Kanagaraj';
+    dirtyWs.getCell(16, 3).value = 'abc';
+    dirtyWs.getCell(17, 1).value = 3;
+    dirtyWs.getCell(17, 2).value = 'Saravanan';
+    dirtyWs.getCell(17, 3).value = 'abc';
+    dirtyWs.getCell(18, 1).value = 4;
+    dirtyWs.getCell(18, 2).value = 'Ameerkhan';
+    dirtyWs.getCell(18, 3).value = 'abc';
+    dirtyWs.getCell(19, 1).value = 5;
+    dirtyWs.getCell(19, 2).value = 'Rajesh';
+    dirtyWs.getCell(19, 3).value = 'abc';
+    dirtyWs.getCell(20, 1).value = 6;
+    dirtyWs.getCell(20, 2).value = 'abc';
+    dirtyWs.getCell(20, 4).value = 'Male';
+    dirtyWs.getCell(20, 5).value = 'Junior Engineer';
+    const dirtyBuf = await dirty.xlsx.writeBuffer();
+
+    const liveRows = [
+      { 'S.NO': 1, 'Name of Employee': 'Vinay Kumar', "Father / Husband's Name": 'Kadesh j kamble' },
+      { 'S.NO': 2, 'Name of Employee': 'Issac Kanagaraj', "Father / Husband's Name": 'abc' },
+      { 'S.NO': 3, 'Name of Employee': 'Saravanan', "Father / Husband's Name": 'abc' },
+      { 'S.NO': 4, 'Name of Employee': 'Ameerkhan', "Father / Husband's Name": 'abc' },
+      { 'S.NO': 5, 'Name of Employee': 'Rajesh', "Father / Husband's Name": 'abc' },
+      {
+        'S.NO': 6,
+        'Name of Employee': 'abc',
+        "Father / Husband's Name": '',
+        Gender: 'Male',
+        'Designation / Department': 'Junior Engineer',
+        __employeeLookupName: 'Ashok',
+      },
+    ];
+    expect(getFormTSEKarnatakaEmployeeNameFromRow(liveRows[5], modalHeaders)).toBe('Ashok');
+
+    const ready = await prepareFormTSEWorkbookForDownload(dirtyBuf, {
+      force: true,
+      mappedData: liveRows,
+      headers: modalHeaders,
+      employees: [{ FirstName: 'Ashok' }],
+    });
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(ready);
+    const ws = outWb.getWorksheet('Form T') || outWb.worksheets[0];
+    expect(String(ws.getCell(20, 2).value ?? '')).toMatch(/Ashok/i);
+    expect(String(ws.getCell(20, 2).value ?? '')).not.toMatch(/^abc$/i);
   });
 
   it('left-aligns title rows 2–3 starting in column A with full text', async () => {
@@ -460,6 +926,22 @@ describe('Form T Karnataka workbook write', () => {
     expect(String(out.getCell(11, 1).value ?? '')).toMatch(/employer\s*:\s*M\/s Clean Wind/i);
   });
 
+  it('prepareFormTSEDownloadHeaderData keeps modal Establishment/Employer over empty site overlay', () => {
+    const out = prepareFormTSEDownloadHeaderData(
+      {
+        form_t_month_year: 'June 2026',
+        form_t_establishment_name_address:
+          'Babaleshwar Hero Site, 33/220KV Substation, Survey No: 132',
+        form_t_employer:
+          'M/s Clean Wind Power Bableshwar Pvt Ltd, 33/220KV Substation, Survey No: 132, Karjol Village, Bijapur Dist - 586113',
+      },
+      null,
+      { monthYearText: '', establishmentText: '', employerText: '' }
+    );
+    expect(out.form_t_establishment_name_address).toMatch(/Babaleshwar Hero Site/);
+    expect(out.form_t_employer).toMatch(/Clean Wind Power/);
+  });
+
   it('writes Establishment/Employer to rows 10–11 even when row 3 has contract-carried label', () => {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Form T');
@@ -598,6 +1080,196 @@ describe('Form T Karnataka workbook write', () => {
     expect(cols[9]).toBe(FORM_T_KA_ATTENDANCE_START_COL0); // J day 1
     expect(cols[10]).toBe(FORM_T_KA_ATTENDANCE_START_COL0 + 1); // K day 2
     expect(cols[11]).toBe(FORM_T_KA_ATTENDANCE_START_COL0 + 9); // day 10
+  });
+
+  it('does not put payroll into empty attendance days when the employee joined mid-month', async () => {
+    expect(sanitizeFormTSEAttendanceMark('31')).toBe('');
+    expect(sanitizeFormTSEAttendanceMark('NIL')).toBe('');
+    expect(sanitizeFormTSEAttendanceMark('18563')).toBe('');
+    expect(sanitizeFormTSEAttendanceMark('P')).toBe('P');
+    expect(sanitizeFormTSEAttendanceMark('WO')).toBe('WO');
+
+    const identity = [
+      'S.NO',
+      'Name of Employee',
+      "Father / Husband's Name",
+      'Gender',
+      'Designation / Department',
+      'Date of Joining',
+      'ESI No.',
+      'UAN No.',
+      'Wages fixed including VDA',
+    ];
+    const attendance = Array.from({ length: 31 }, (_, i) => `ATTENDANCE_${i + 1}`);
+    const exportHeaders = [
+      ...identity,
+      ...attendance,
+      'No. of payable days',
+      'Total OT hours',
+      'Basic',
+    ];
+    const row = {
+      'S.NO': 1,
+      'Name of Employee': 'Prakash',
+      "Father / Husband's Name": 'Lokappa',
+      Gender: 'Male',
+      'Designation / Department': 'Engineer',
+      'Date of Joining': '15 Jul 2026',
+      ATTENDANCE_15: 'P',
+      ATTENDANCE_16: 'WO',
+      'No. of payable days': '31',
+      'Total OT hours': 'NIL',
+      Basic: '18563',
+    };
+    const prepared = prepareFormTSEExportRows([row], exportHeaders, exportHeaders);
+    expect(prepared[0]['ATTENDANCE_1']).toBe('');
+    expect(prepared[0]['ATTENDANCE_11']).toBe('');
+    expect(prepared[0]['ATTENDANCE_14']).toBe('');
+    expect(prepared[0]['ATTENDANCE_15']).toBe('P');
+    expect(prepared[0]['ATTENDANCE_16']).toBe('WO');
+    expect(String(prepared[0]['No. of payable days'])).toBe('31');
+    expect(prepared[0]['Total OT hours']).toBe('NIL');
+    expect(String(prepared[0].Basic)).toBe('18563');
+
+    const { blob } = await buildFormTSEWorkbookWithTemplateStyles({
+      templateArrayBuffer: await buildMinimalFormTTemplateBuffer(),
+      mappedData: [row],
+      headersToUse: exportHeaders,
+      parsedHeaderRowIndex: 11,
+      parsedDataStartIndex: 14,
+      parsedTableStartCol: 0,
+      parsedFormHeader: { title: 'Form T' },
+      formFileName: 'Form_T_KA.xlsx',
+      sheetNameHint: 'Form T',
+    });
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const ws = outWb.getWorksheet('Form T') || outWb.worksheets[0];
+    const day1Col = FORM_T_KA_ATTENDANCE_START_COL0 + 1;
+    expect(String(ws.getCell(15, day1Col).value ?? '').trim()).toBe('');
+    expect(String(ws.getCell(15, day1Col + 10).value ?? '').trim()).toBe('');
+    expect(String(ws.getCell(15, day1Col + 14).value ?? '')).toMatch(/^P$/i);
+    expect(String(ws.getCell(15, day1Col + 15).value ?? '')).toMatch(/^WO$/i);
+  });
+
+  it('puts payable days / Basic / HRA / Total / PF / PT on the row matching first and last name', () => {
+    const headers = [
+      'S.NO',
+      'Name of Employee',
+      "Father / Husband's Name",
+      'No. of payable days',
+      'Basic',
+      'HRA',
+      'Total (25)',
+      'PF',
+      'PT',
+    ];
+    const autofill = [
+      {
+        'Name of Employee': 'Umesh Shivaputrappa',
+        'No. of payable days': '31',
+        Basic: '100',
+        HRA: '50',
+        'Total (25)': '200',
+        PF: '12',
+        PT: '0',
+      },
+      {
+        'Name of Employee': 'Prakash Lokappa',
+        'No. of payable days': '16',
+        Basic: '18563',
+        HRA: '2228',
+        'Total (25)': '37126',
+        PF: '1800',
+        PT: '200',
+      },
+    ];
+    const target = [
+      { 'S.NO': 1, 'Name of Employee': 'Prakash Lokappa' },
+      { 'S.NO': 2, 'Name of Employee': 'Umesh Shivaputrappa' },
+    ];
+    const out = overlayFormTSEPayrollOntoRowsByName(target, headers, autofill);
+    expect(String(out[0]['No. of payable days'])).toBe('16');
+    expect(String(out[0].Basic)).toBe('18563');
+    expect(String(out[0].HRA)).toBe('2228');
+    expect(String(out[0]['Total (25)'])).toBe('37126');
+    expect(String(out[0].PF)).toBe('1800');
+    expect(String(out[0].PT)).toBe('200');
+    expect(String(out[1].Basic)).toBe('100');
+
+    const prepared = prepareFormTSEExportRows(target, headers, headers);
+    const named = overlayFormTSEPayrollOntoRowsByName(prepared, headers, autofill);
+    expect(String(named[0].Basic)).toBe('18563');
+    expect(String(named[0]['ATTENDANCE_1'] || '')).toBe('');
+  });
+
+  it('clears payable days / Basic / HRA / Total / PF / PT when the employee has no attendance that month', () => {
+    const attendance = Array.from({ length: 31 }, (_, i) => `ATTENDANCE_${i + 1}`);
+    const headers = [
+      'Name of Employee',
+      ...attendance,
+      'No. of payable days',
+      'Total OT hours',
+      'Basic',
+      'HRA',
+      'Total (25)',
+      'PF',
+      'PT',
+    ];
+    const row = {
+      'Name of Employee': 'Prakash Lokappa',
+      'No. of payable days': '31',
+      'Total OT hours': 'NIL',
+      Basic: '18563',
+      HRA: '2228',
+      'Total (25)': '37126',
+      PF: '1800',
+      PT: '200',
+    };
+    const prepared = prepareFormTSEExportRows([row], headers, headers);
+    expect(prepared[0]['No. of payable days']).toBe('');
+    expect(prepared[0].Basic).toBe('');
+    expect(prepared[0].HRA).toBe('');
+    expect(prepared[0]['Total (25)']).toBe('');
+    expect(prepared[0].PF).toBe('');
+    expect(prepared[0].PT).toBe('');
+    expect(prepared[0]['Total OT hours']).toBe('NIL');
+
+    const overlayTarget = {
+      'Name of Employee': 'Prakash Lokappa',
+      ATTENDANCE_1: '',
+      ATTENDANCE_26: '',
+    };
+    const overlayHeaders = [
+      'Name of Employee',
+      'ATTENDANCE_1',
+      'ATTENDANCE_26',
+      'No. of payable days',
+      'Basic',
+      'HRA',
+      'PF',
+      'PT',
+    ];
+    const out = overlayFormTSEPayrollOntoRowsByName(
+      [overlayTarget],
+      overlayHeaders,
+      [
+        {
+          'Name of Employee': 'Prakash Lokappa',
+          ATTENDANCE_1: 'P',
+          'No. of payable days': '31',
+          Basic: '18563',
+          HRA: '2228',
+          PF: '1800',
+          PT: '200',
+        },
+      ]
+    );
+    expect(String(out[0]['No. of payable days'] || '')).toBe('');
+    expect(String(out[0].Basic || '')).toBe('');
+    expect(String(out[0].HRA || '')).toBe('');
+    expect(String(out[0].PF || '')).toBe('');
+    expect(String(out[0].PT || '')).toBe('');
   });
 
   it('maps row values when live keys lack statutory (N) suffixes but export headers have them', () => {

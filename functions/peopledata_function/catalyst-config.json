@@ -3,7 +3,12 @@
 		"name": "peopledata_function",
 		"stack": "node20",
 		"type": "advancedio",
-		"env_variables": {}
+		"env_variables": {
+			"ZOHO_CLIENT_ID": "1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA",
+			"ZOHO_CLIENT_SECRET": "b6d3935145d59974934b981d6291b40af69a3ab150",
+			"ZOHO_PEOPLE_REFRESH_TOKEN": "1000.704677e6ac4277dbfaeff78ae2204da0.da9592dac5ffa146fd5224f77e732276",
+			"ZOHO_PEOPLE_BASE_URL": "https://people.zoho.in/people/api"
+		}
 	},
 	"execution": {
 		"main": "index.js"

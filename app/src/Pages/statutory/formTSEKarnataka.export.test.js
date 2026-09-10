@@ -62,6 +62,38 @@ describe('Form T Karnataka export row resolution', () => {
     expect(rows[0]['Name of Employee']).toBe('Ameerkhan');
   });
 
+  it('fills the 6th name from People when Autofill shows lookup name but Name cell is abc', () => {
+    const live = [
+      { 'S.NO': 1, 'Name of Employee': 'Vinay Kumar', "Father / Husband's Name": 'Kadesh j kamble', Gender: 'Male' },
+      { 'S.NO': 2, 'Name of Employee': 'Issac Kanagaraj', "Father / Husband's Name": 'abc', Gender: 'Male' },
+      { 'S.NO': 3, 'Name of Employee': 'Saravanan', "Father / Husband's Name": 'abc', Gender: 'Male' },
+      { 'S.NO': 4, 'Name of Employee': 'Ameerkhan', "Father / Husband's Name": 'abc', Gender: 'Male' },
+      { 'S.NO': 5, 'Name of Employee': 'Rajesh', "Father / Husband's Name": 'abc', Gender: 'Male' },
+      {
+        'S.NO': 6,
+        'Name of Employee': 'abc',
+        "Father / Husband's Name": '',
+        Gender: 'Male',
+        'Designation / Department': 'Junior Engineer',
+        __employeeLookupName: 'Ashok',
+      },
+    ];
+    const rows = resolveFormTSERowsForExport({
+      liveRows: live,
+      headers,
+      employees: [
+        { FirstName: 'Vinay', LastName: 'Kumar' },
+        { FirstName: 'Issac', LastName: 'Kanagaraj' },
+        { FirstName: 'Saravanan' },
+        { FirstName: 'Ameerkhan' },
+        { FirstName: 'Rajesh' },
+        { FirstName: 'Ashok', Designation: 'Junior Engineer' },
+      ],
+    });
+    expect(rows[5]['Name of Employee']).toMatch(/Ashok/i);
+    expect(rows[5]['Name of Employee']).not.toMatch(/^abc$/i);
+  });
+
   it('buildFormTSERowsFromEmployees fills serial and name', () => {
     const rows = buildFormTSERowsFromEmployees(
       [{ FirstName: 'Rajesh', Sex: 'Male' }],

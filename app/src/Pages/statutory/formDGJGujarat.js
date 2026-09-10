@@ -1,7 +1,12 @@
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import { headersIndicateFormAGJEmployeeRegisterTable } from './formCGJGujarat';
-import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
+import {
+  applyExcelJSFullBoxBordersToRange,
+  countExcelJSTemplateBodyRows,
+  ensureExcelJSDataRowsWithBorders,
+  excelJSCellHasBorder,
+} from '../../utils/excelTableBorders';
 import { flattenPayrollEarningColumns, readPayrollScalar } from '../../utils/payrollEarnings';
 import {
   enrichEstablishmentPrincipalEmployerHeaderFields,
@@ -19,6 +24,262 @@ export const FORM_DGJ_GJ_CANONICAL_TABLE_HEADERS = [
   'Remarks No. of Hours',
   'Signature of Register Keeper*',
 ];
+
+/** Legal notes painted outside the Form D bordered box (Excel + PDF). */
+export const FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1 =
+  '*Not necessary in case of electronic format';
+export const FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2 =
+  '**Not necessary in case of electronic format';
+export const FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE =
+  'By order and in the name of the Governor of Gujarat';
+export const FORM_DGJ_GJ_OUTER_FOOTNOTES = [
+  FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1,
+  FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2,
+  FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE,
+];
+
+export function isFormDGJGujaratOuterFootnoteText(text) {
+  const norm = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/elecrtonic/g, 'electronic');
+  if (!norm) return false;
+  if (/^\*{1,2}\s*not\s+necessary\s+in\s+case\s+of\s+electronic\s+format\.?$/.test(norm)) {
+    return true;
+  }
+  if (/^by\s+order\s+and\s+in\s+the\s+name\s+of\s+the\s+governor\s+of\s+gujarat\.?$/.test(norm)) {
+    return true;
+  }
+  return false;
+}
+
+function formDGJExcelCellText(worksheet, r, c) {
+  return excelCellValueToString(worksheet?.getCell(r, c)?.value).trim();
+}
+
+function clearFormDGJCellBorder(cell) {
+  if (!cell) return;
+  try {
+    cell.border = {};
+    const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+    cell.style = { ...prev, border: {} };
+  } catch (_) {
+    try {
+      cell.border = {};
+    } catch (__) {
+      /* ignore */
+    }
+  }
+}
+
+export function isFormDGJGujaratSystemGeneratedText(text) {
+  return /this\s+is\s+a\s+system\s+generated\s+document|system\s+generated\s+document/i.test(
+    String(text || '').trim()
+  );
+}
+
+/** Locate the template "System Generated" row below the muster table. */
+export function findFormDGJGujaratSystemGeneratedRow(
+  worksheet,
+  dataStartRow = 1,
+  colFrom = 1,
+  colTo = 6
+) {
+  if (!worksheet) return null;
+  const r0 = Math.max(1, Number(dataStartRow) || 1);
+  const c0 = Math.max(1, Number(colFrom) || 1);
+  const c1 = Math.max(c0, Number(colTo) || c0);
+  const maxRows = Math.max(worksheet.rowCount || 0, r0 + 80);
+  for (let r = r0; r <= maxRows; r += 1) {
+    for (let c = 1; c <= Math.max(c1 + 8, 12); c += 1) {
+      if (isFormDGJGujaratSystemGeneratedText(formDGJExcelCellText(worksheet, r, c))) {
+        return r;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Last bordered table-body row (before System Generated / outer footnotes).
+ * Keeps empty template body rows inside the box — matches the Form D model.
+ */
+export function findFormDGJGujaratTableBoxEndRow(
+  worksheet,
+  dataStartRow = 1,
+  colFrom = 1,
+  colTo = 6,
+  hints = {}
+) {
+  if (!worksheet) return Math.max(1, dataStartRow);
+  const r0 = Math.max(1, Number(dataStartRow) || 1);
+  const c0 = Math.max(1, Number(colFrom) || 1);
+  const c1 = Math.max(c0, Number(colTo) || c0);
+  const systemRow =
+    Number(hints.systemGeneratedRow) > 0
+      ? Number(hints.systemGeneratedRow)
+      : findFormDGJGujaratSystemGeneratedRow(worksheet, r0, c0, c1);
+  const scanEnd =
+    systemRow && systemRow > r0
+      ? systemRow - 1
+      : Math.max(worksheet.rowCount || 0, r0 + 40);
+
+  let lastBordered = r0;
+  for (let r = r0; r <= scanEnd; r += 1) {
+    let bordered = false;
+    let footnoteOrSystem = false;
+    for (let c = c0; c <= c1; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      const t = formDGJExcelCellText(worksheet, r, c);
+      if (isFormDGJGujaratOuterFootnoteText(t) || isFormDGJGujaratSystemGeneratedText(t)) {
+        footnoteOrSystem = true;
+      }
+      if (excelJSCellHasBorder(cell)) bordered = true;
+    }
+    if (footnoteOrSystem) break;
+    if (bordered) lastBordered = r;
+    else if (r > r0 && lastBordered >= r0) break;
+  }
+
+  const minEmptyAfterData = Number(hints.minEmptyAfterData);
+  const lastDataRow = Number(hints.lastDataRow);
+  let end = lastBordered;
+  if (Number.isFinite(lastDataRow) && lastDataRow >= r0) {
+    const withPadding =
+      lastDataRow + (Number.isFinite(minEmptyAfterData) ? Math.max(0, minEmptyAfterData) : 2);
+    end = Math.max(end, withPadding);
+  }
+  if (systemRow && systemRow > r0) end = Math.min(end, systemRow - 1);
+  return Math.max(r0, end);
+}
+
+function clearFormDGJRowOutsideBox(worksheet, row, colFrom, colTo) {
+  if (!worksheet || !row) return;
+  const c0 = Math.max(1, colFrom);
+  const c1 = Math.max(c0, colTo);
+  try {
+    worksheet.unMergeCells(row, c0, row, Math.max(c1, c0 + 8));
+  } catch (_) {
+    try {
+      worksheet.unMergeCells(row, c0, row, c1);
+    } catch (__) {
+      /* ignore */
+    }
+  }
+  for (let c = c0; c <= Math.max(c1, c0 + 8); c += 1) {
+    const cell = worksheet.getCell(row, c);
+    cell.value = '';
+    clearFormDGJCellBorder(cell);
+  }
+}
+
+/**
+ * Centered System Generated line directly under the table box (no borders).
+ */
+export function writeFormDGJGujaratSystemGeneratedNote(worksheet, options = {}) {
+  if (!worksheet) return null;
+  const {
+    afterRow,
+    startCol = 1,
+    endCol = 6,
+    text = 'This is a System Generated Document',
+  } = options;
+  const baseRow =
+    Number.isFinite(Number(afterRow)) && Number(afterRow) > 0 ? Number(afterRow) : null;
+  if (!baseRow) return null;
+  const row = baseRow + 1;
+  const colFrom = Math.max(1, Number(startCol) || 1);
+  const colTo = Math.max(colFrom, Number(endCol) || colFrom);
+
+  // Remove any other System Generated copies below the box.
+  const scanEnd = Math.max(worksheet.rowCount || 0, row + 20);
+  for (let r = row; r <= scanEnd; r += 1) {
+    for (let c = 1; c <= Math.max(colTo + 8, 12); c += 1) {
+      if (!isFormDGJGujaratSystemGeneratedText(formDGJExcelCellText(worksheet, r, c))) continue;
+      clearFormDGJRowOutsideBox(worksheet, r, 1, Math.max(colTo + 8, 12));
+      break;
+    }
+  }
+
+  clearFormDGJRowOutsideBox(worksheet, row, colFrom, colTo);
+  try {
+    worksheet.mergeCells(row, colFrom, row, colTo);
+  } catch (_) {
+    /* ignore */
+  }
+  const cell = worksheet.getCell(row, colFrom);
+  cell.value = text;
+  cell.font = { name: 'Arial', size: 9, bold: false, italic: false };
+  cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: false };
+  clearFormDGJCellBorder(cell);
+  for (let c = colFrom; c <= colTo; c += 1) clearFormDGJCellBorder(worksheet.getCell(row, c));
+  const excelRow = worksheet.getRow(row);
+  if (excelRow) excelRow.height = Math.max(Number(excelRow.height) || 0, 18);
+  return row;
+}
+
+/**
+ * Write Form D Gujarat legal footnotes below the register box / System Generated
+ * line, with no borders — matches the PDF outer notes.
+ */
+export function writeFormDGJGujaratOuterFootnotes(worksheet, options = {}) {
+  if (!worksheet) return null;
+  const {
+    afterRow,
+    startCol = 1,
+    endCol = 6,
+    footnotes = FORM_DGJ_GJ_OUTER_FOOTNOTES,
+  } = options;
+  const baseRow =
+    Number.isFinite(Number(afterRow)) && Number(afterRow) > 0 ? Number(afterRow) : null;
+  if (!baseRow) return null;
+
+  const colFrom = Math.max(1, Number(startCol) || 1);
+  const colTo = Math.max(colFrom, Number(endCol) || colFrom);
+  const lines = (Array.isArray(footnotes) ? footnotes : FORM_DGJ_GJ_OUTER_FOOTNOTES)
+    .map((t) => String(t || '').trim())
+    .filter(Boolean);
+  if (!lines.length) return null;
+
+  // Drop any prior copies of these notes so re-download stays clean.
+  const scanEnd = Math.max(worksheet.rowCount || 0, baseRow + 16);
+  for (let r = Math.max(1, baseRow - 2); r <= scanEnd; r += 1) {
+    for (let c = 1; c <= Math.max(colTo + 4, 12); c += 1) {
+      const existing = formDGJExcelCellText(worksheet, r, c);
+      if (!isFormDGJGujaratOuterFootnoteText(existing)) continue;
+      clearFormDGJRowOutsideBox(worksheet, r, colFrom, colTo);
+      break;
+    }
+  }
+
+  let firstWrittenRow = null;
+  lines.forEach((text, idx) => {
+    const row = baseRow + 1 + idx;
+    if (firstWrittenRow == null) firstWrittenRow = row;
+    clearFormDGJRowOutsideBox(worksheet, row, colFrom, colTo);
+    try {
+      worksheet.mergeCells(row, colFrom, row, colTo);
+    } catch (_) {
+      /* overlap — keep A-cell text */
+    }
+    const cell = worksheet.getCell(row, colFrom);
+    cell.value = text;
+    cell.font = { name: 'Arial', size: 9, italic: false, bold: false };
+    cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+    clearFormDGJCellBorder(cell);
+    for (let c = colFrom; c <= colTo; c += 1) clearFormDGJCellBorder(worksheet.getCell(row, c));
+    const excelRow = worksheet.getRow(row);
+    if (excelRow) excelRow.height = Math.max(Number(excelRow.height) || 0, 16);
+  });
+
+  return firstWrittenRow;
+}
+
+/** @deprecated use findFormDGJGujaratTableBoxEndRow */
+export function findFormDGJGujaratBoxEndRow(worksheet, dataStartRow = 1, colFrom = 1, colTo = 6) {
+  return findFormDGJGujaratTableBoxEndRow(worksheet, dataStartRow, colFrom, colTo);
+}
 
 export function formDGJGujaratHeaderNorm(txt) {
   return String(txt || '')
@@ -1066,10 +1327,70 @@ export async function buildFormDGJGujaratWorkbookWithTemplateStyles({
 
   const tableColMin = Math.min(...templateCols.map(({ col }) => col));
   const tableColMax = Math.max(...templateCols.map(({ col }) => col));
-  const clearToRow = Math.max(dataStartRow + rows.length + 10, dataStartRow + 15);
-  for (let r = dataStartRow; r <= clearToRow; r += 1) {
+
+  // Capture template box geometry before clearing values.
+  const templateSystemRow = findFormDGJGujaratSystemGeneratedRow(
+    worksheet,
+    dataStartRow,
+    tableColMin,
+    tableColMax
+  );
+  const templateBodyRows = countExcelJSTemplateBodyRows(
+    worksheet,
+    dataStartRow,
+    tableColMin,
+    tableColMax,
+    80
+  );
+  const templateBoxEndBeforeWrite = findFormDGJGujaratTableBoxEndRow(
+    worksheet,
+    dataStartRow,
+    tableColMin,
+    tableColMax,
+    { systemGeneratedRow: templateSystemRow }
+  );
+
+  const lastDataRow =
+    rows.length > 0 ? dataStartRow + rows.length - 1 : Math.max(1, dataStartRow - 1);
+  // Keep empty bordered rows under the data so the outer box matches the model.
+  let tableBoxEndRow = Math.max(
+    templateBoxEndBeforeWrite,
+    lastDataRow + 2,
+    dataStartRow + Math.max(templateBodyRows, rows.length + 2) - 1
+  );
+  if (templateSystemRow && templateSystemRow > dataStartRow) {
+    tableBoxEndRow = Math.min(tableBoxEndRow, templateSystemRow - 1);
+  }
+  tableBoxEndRow = Math.max(tableBoxEndRow, lastDataRow);
+
+  // Clear employee values inside the box only (keep structure for borders).
+  for (let r = dataStartRow; r <= tableBoxEndRow; r += 1) {
     for (let c = tableColMin; c <= tableColMax; c += 1) {
+      const text = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (isFormDGJGujaratSystemGeneratedText(text) || isFormDGJGujaratOuterFootnoteText(text)) {
+        worksheet.getCell(r, c).value = '';
+        continue;
+      }
       worksheet.getCell(r, c).value = '';
+    }
+  }
+
+  // Clear old System Generated / footnotes that sat below the template box.
+  const cleanupEnd = Math.max(
+    worksheet.rowCount || 0,
+    (templateSystemRow || tableBoxEndRow) + 20,
+    tableBoxEndRow + 20
+  );
+  for (let r = tableBoxEndRow + 1; r <= cleanupEnd; r += 1) {
+    for (let c = 1; c <= Math.max(tableColMax + 8, 12); c += 1) {
+      const text = formDGJExcelCellText(worksheet, r, c);
+      if (
+        isFormDGJGujaratSystemGeneratedText(text) ||
+        isFormDGJGujaratOuterFootnoteText(text)
+      ) {
+        clearFormDGJRowOutsideBox(worksheet, r, 1, Math.max(tableColMax + 8, 12));
+        break;
+      }
     }
   }
 
@@ -1093,16 +1414,37 @@ export async function buildFormDGJGujaratWorkbookWithTemplateStyles({
     });
   });
 
+  // Continuous full box from table header through empty body rows (model layout).
+  const borderFromRow = Math.max(1, layout.headerRow || dataStartRow);
+  applyExcelJSFullBoxBordersToRange(worksheet, {
+    rowFrom: borderFromRow,
+    rowTo: tableBoxEndRow,
+    colFrom: tableColMin,
+    colTo: tableColMax,
+    borderStyle: 'thin',
+  });
   if (rows.length > 0) {
     ensureExcelJSDataRowsWithBorders(worksheet, {
       dataStartRow,
-      dataRowCount: rows.length,
+      dataRowCount: Math.max(rows.length, tableBoxEndRow - dataStartRow + 1),
       colFrom: tableColMin,
       colTo: tableColMax,
       templateRow: dataStartRow,
-      templateBodyRows: 1,
+      templateBodyRows: Math.max(1, templateBodyRows),
     });
   }
+
+  // Outside the box (same as PDF model): System Generated, then legal footnotes.
+  const systemNoteRow = writeFormDGJGujaratSystemGeneratedNote(worksheet, {
+    afterRow: tableBoxEndRow,
+    startCol: tableColMin,
+    endCol: tableColMax,
+  });
+  writeFormDGJGujaratOuterFootnotes(worksheet, {
+    afterRow: systemNoteRow || tableBoxEndRow,
+    startCol: tableColMin,
+    endCol: tableColMax,
+  });
 
   const out = await workbook.xlsx.writeBuffer();
   const fileName =

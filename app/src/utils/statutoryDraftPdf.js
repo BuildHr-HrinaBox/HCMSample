@@ -29,6 +29,18 @@ import {
   normalizeFormXIXMPCLRAWageSlipPdfMatrix
 } from './stautoryDraftPdf.formXIX.MP.CLRA';
 import {
+  looksLikeFormXIXGJWageSlipPdfContext,
+  normalizeFormXIXGJWageSlipPdfMatrix
+} from './statutoryDraftPdf.formXIX.GJ';
+import {
+  looksLikeFormXIXKarnatakaPdfContext,
+  normalizeFormXIXKarnatakaWageSlipPdfMatrix
+} from './statutoryDraftPdf.formXIX.KA';
+import {
+  looksLikeFormXIVKarnatakaPdfContext,
+  normalizeFormXIVKarnatakaPdfMatrix
+} from './statutoryDraftPdf.formXIV.KA';
+import {
   getFormXVIAPHeaderTitles,
   isFormXVIIDateNumberRow,
   isFormXVIAPTableHeaderRow,
@@ -42,11 +54,20 @@ import {
   isFormXIIIPdfTitleRow,
   looksLikeFormXIIIAPPdfContext
 } from './statutoryDraftPdf.formXIII.AP';
+import {
+  applyFormTSEKarnatakaPdfNormalization,
+  extractFormTSEKarnatakaHeaderFields,
+  getFormTSEKarnatakaHeaderTitles,
+  isFormTSEKarnatakaAdminRowBlob,
+  isFormTSEKarnatakaTableHeaderRow,
+  looksLikeFormTSEKarnatakaPdfContext,
+  normalizeFormTSEKarnatakaPdfMatrix,
+} from './statutoryDraftPdf.formT.KA';
 import { isApPdfHeadingRow } from './statutoryDraftPdf.apHeaderTitles';
 import { buildFormXVAPServiceCertificatePdfBlob } from './statutoryDraftPdf.formXV.AP';
 const EXCEL_EXT_RE = /\.(xlsx|xls|xlsm|xlsb)$/i;
-/** Form XXVI TN needs ~44 leaf cols (9 identity + 31 days + 4 trailing). */
-const MAX_PDF_COLS = 64;
+/** Form T KA needs ~70 leaf cols (9 identity + 31 days + wage/deduction band). */
+const MAX_PDF_COLS = 80;
 const MAX_PDF_DATA_ROWS = 2500;
 const MAX_ZIP_EXCEL_FILES = 60;
 const MAX_TRAILING_EMPTY_AFTER_CONTENT = 2;
@@ -149,6 +170,195 @@ const isSystemGeneratedDocumentNoteRow = (row) => {
 const FORM_C_UNPAID_ACCUMULATIONS_FOOTNOTE =
   '*See definition of "Unpaid Accumulations" under Section 2(I) of the Tamil Nadu Labour Welfare Fund Act, 1972';
 const FORM_C_RJ_FOOTNOTE = '*Applicable only in case of damage/loss/fine';
+const FORM_C_GJ_WHEREVER_APPLICABLE_FOOTNOTE = '*Wherever applicable';
+
+/** Gujarat Form D — legal notes under the muster-roll box (outside the border). */
+const FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1 =
+  '*Not necessary in case of electronic format';
+const FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2 =
+  '**Not necessary in case of electronic format';
+const FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE =
+  'By order and in the name of the Governor of Gujarat';
+const FORM_DGJ_GJ_OUTER_FOOTNOTES = [
+  FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1,
+  FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2,
+  FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE,
+];
+
+/** Gujarat Form A — legal notes under the employee table (outside the border). */
+const FORM_AGJ_GJ_AGE_NOTE =
+  '# NOTE : in case the age is between 14 to 18 year, mention the nature of work, daily hours of work and intervals of rest in remarks Column';
+const FORM_AGJ_GJ_SKILL_NOTE = '* (Highly Skilled/Semi Skilled/ Un Skilled).';
+const FORM_AGJ_GJ_ELECTRONIC_NOTE = '**Not necessary in case of electronic format';
+const FORM_AGJ_GJ_WHEREVER_NOTE = '***Wherever applicable';
+const FORM_AGJ_GJ_OUTER_FOOTNOTES = [
+  FORM_AGJ_GJ_AGE_NOTE,
+  FORM_AGJ_GJ_SKILL_NOTE,
+  FORM_AGJ_GJ_ELECTRONIC_NOTE,
+  FORM_AGJ_GJ_WHEREVER_NOTE,
+];
+
+const normalizeFormAGJFootnoteCompare = (text) =>
+  String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/elecrtonic/g, 'electronic');
+
+const isFormAGJGujaratOuterFootnoteText = (text) => {
+  const norm = normalizeFormAGJFootnoteCompare(text);
+  if (!norm) return false;
+  if (/#?\s*note/.test(norm) && /14\s*to\s*18/.test(norm) && /remarks/.test(norm)) return true;
+  if (/highly\s*skilled/.test(norm) && /semi\s*skilled/.test(norm) && /un\s*skilled/.test(norm)) {
+    return true;
+  }
+  if (/^\*{1,2}\s*not\s+necessary\s+in\s+case\s+of\s+electronic\s+format\.?$/.test(norm)) {
+    return true;
+  }
+  if (/^\*{1,3}\s*wherever\s+applicable\.?$/.test(norm)) return true;
+  return false;
+};
+
+const isFormAGJGujaratOuterFootnoteRow = (row) => {
+  if (!Array.isArray(row)) return false;
+  const filled = row.map((c) => String(c || '').trim()).filter(Boolean);
+  if (!filled.length) return false;
+  const unique = [...new Set(filled)];
+  return unique.length === 1 && isFormAGJGujaratOuterFootnoteText(unique[0]);
+};
+
+const extractFormAGJGujaratOuterFootnoteText = (row) => {
+  if (!Array.isArray(row)) return '';
+  for (let i = 0; i < row.length; i += 1) {
+    const t = String(row[i] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!isFormAGJGujaratOuterFootnoteText(t)) continue;
+    const norm = normalizeFormAGJFootnoteCompare(t);
+    if (/14\s*to\s*18/.test(norm)) return FORM_AGJ_GJ_AGE_NOTE;
+    if (/highly\s*skilled/.test(norm)) return FORM_AGJ_GJ_SKILL_NOTE;
+    if (/not\s+necessary/.test(norm)) return FORM_AGJ_GJ_ELECTRONIC_NOTE;
+    if (/wherever\s+applicable/.test(norm)) return FORM_AGJ_GJ_WHEREVER_NOTE;
+    return t;
+  }
+  return '';
+};
+
+const looksLikeFormAGJGujaratPdfContext = (metaLines, rows, sheetName = '') => {
+  const blob = [...(metaLines || []), ...(rows || []).slice(0, 22).flat(), sheetName || '']
+    .join(' ')
+    .toLowerCase();
+  if (/rajasthan|\b_rj\b|form[\s._-]*a[\s._-]*rj|form_a_rj/.test(blob)) return false;
+  // Form B wage register must never inherit Form A footnotes / header pairing.
+  if (
+    /\bform\s*b\b|form[\s._-]*b[\s._-]|form_b_gj|format\s+of\s+wage\s+register/.test(blob) ||
+    (/wage\s+register/.test(blob) && /rate\s+of\s+(?:wage|minimum)/.test(blob))
+  ) {
+    return false;
+  }
+  const hasFormA = /\bform\s*a\b|form[\s._-]*a[\s._-]*gj|form_a_gj/.test(blob);
+  const hasEmployeeFormat =
+    /format\s+of\s+employee/.test(blob) ||
+    (/employee\s*\/\s*workman\s*\/\s*worker/.test(blob) &&
+      /date\s+of\s+birth|education\s+level|father/.test(blob) &&
+      !/register\s+of\s+wages|wage\s+register|rate\s+of\s+wage/.test(blob));
+  const hasGujarat = /gujarat|\b_gj\b|form[\s._-]*a[\s._-]*gj|form_a_gj/.test(blob);
+  if (hasGujarat && (hasFormA || hasEmployeeFormat)) return true;
+  if (hasFormA && hasEmployeeFormat) return true;
+  return false;
+};
+
+/** Stack Form A GJ header fields: Establishment, then NAME OF OWNER below (not same row). */
+const reorderFormAGJPdfHeaderFields = (fields) => {
+  const list = Array.isArray(fields) ? fields.map((f) => String(f || '').trim()).filter(Boolean) : [];
+  let est = '';
+  let owner = '';
+  const others = [];
+  list.forEach((f) => {
+    const t = f.toLowerCase();
+    if (!est && /name\s+of\s+establishment/.test(t) && !/principal/.test(t)) {
+      est = f;
+      return;
+    }
+    if (!owner && /name\s+of\s+owner/.test(t)) {
+      owner = f;
+      return;
+    }
+    others.push(f);
+  });
+  const out = [];
+  if (est) out.push(est);
+  if (owner) out.push(owner);
+  else if (est) out.push('NAME OF OWNER');
+  out.push(...others);
+  return out;
+};
+
+/** @deprecated Use reorderFormAGJPdfHeaderFields — owner must be below, not beside. */
+const buildFormAGJPdfSplitFieldRows = (fields) => {
+  const ordered = reorderFormAGJPdfHeaderFields(fields);
+  return { splitRows: [], remaining: ordered };
+};
+
+const normalizeFormDGJFootnoteCompare = (text) =>
+  String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/elecrtonic/g, 'electronic');
+
+const isFormDGJGujaratOuterFootnoteText = (text) => {
+  const norm = normalizeFormDGJFootnoteCompare(text);
+  if (!norm) return false;
+  if (/^\*{1,2}\s*not\s+necessary\s+in\s+case\s+of\s+electronic\s+format\.?$/.test(norm)) {
+    return true;
+  }
+  if (/^by\s+order\s+and\s+in\s+the\s+name\s+of\s+the\s+governor\s+of\s+gujarat\.?$/.test(norm)) {
+    return true;
+  }
+  return false;
+};
+
+const isFormDGJGujaratOuterFootnoteRow = (row) => {
+  if (!Array.isArray(row)) return false;
+  const filled = row.map((c) => String(c || '').trim()).filter(Boolean);
+  if (!filled.length) return false;
+  const unique = [...new Set(filled)];
+  return unique.length === 1 && isFormDGJGujaratOuterFootnoteText(unique[0]);
+};
+
+const extractFormDGJGujaratOuterFootnoteText = (row) => {
+  if (!Array.isArray(row)) return '';
+  for (let i = 0; i < row.length; i += 1) {
+    const t = String(row[i] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (isFormDGJGujaratOuterFootnoteText(t)) {
+      const norm = normalizeFormDGJFootnoteCompare(t);
+      if (/^\*\*\s*not\s+necessary/.test(norm)) return FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2;
+      if (/^\*\s*not\s+necessary/.test(norm)) return FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1;
+      if (/governor\s+of\s+gujarat/.test(norm)) return FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE;
+      return t;
+    }
+  }
+  return '';
+};
+
+const looksLikeFormDGJMusterRollPdfContext = (metaLines, rows, sheetName = '') => {
+  const blob = [...(metaLines || []), ...(rows || []).slice(0, 22).flat(), sheetName || '']
+    .join(' ')
+    .toLowerCase();
+  if (/rajasthan|\b_rj\b|form[\s._-]*d[\s._-]*rj|form_d_rj/.test(blob)) return false;
+  const hasFormD = /\bform\s*d\b|form[\s._-]*d[\s._-]/.test(blob);
+  const hasMuster =
+    /attendance\s*\/?\s*muster|muster-?roll\s+register|format\s+of\s+attendance|relay\s+or\s+set\s+work/.test(
+      blob
+    );
+  const hasGujarat = /gujarat|\b_gj\b|form[\s._-]*d[\s._-]*gj|form_d_gj/.test(blob);
+  if (hasGujarat && (hasFormD || hasMuster)) return true;
+  if (hasFormD && hasMuster) return true;
+  return false;
+};
 
 const isUnpaidAccumulationsFootnoteText = (text) => {
   const norm = String(text || '')
@@ -166,6 +376,51 @@ const isUnpaidAccumulationsFootnoteText = (text) => {
   return false;
 };
 
+const isFormCWhereverApplicableFootnoteText = (text) => {
+  const norm = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!norm) return false;
+  return /^\*?\s*wherever\s+applicable\.?$/.test(norm);
+};
+
+const isFormCDamageLossFineFootnoteText = (text) => {
+  const norm = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!norm) return false;
+  return /applicable\s+only\s+in\s+case\s+of\s+damage\s*\/?\s*loss\s*\/?\s*fine/.test(norm);
+};
+
+const isFormCWhereverApplicableFootnoteRow = (row) => {
+  if (!Array.isArray(row)) return false;
+  const filled = row.map((c) => String(c || '').trim()).filter(Boolean);
+  if (!filled.length) return false;
+  const unique = [...new Set(filled)];
+  return unique.length === 1 && isFormCWhereverApplicableFootnoteText(unique[0]);
+};
+
+const isFormCDamageLossFineFootnoteRow = (row) => {
+  if (!Array.isArray(row)) return false;
+  const filled = row.map((c) => String(c || '').trim()).filter(Boolean);
+  if (!filled.length) return false;
+  const unique = [...new Set(filled)];
+  return unique.length === 1 && isFormCDamageLossFineFootnoteText(unique[0]);
+};
+
+const extractFormCWhereverApplicableFootnoteText = (row) => {
+  if (!Array.isArray(row)) return '';
+  for (let i = 0; i < row.length; i += 1) {
+    const t = String(row[i] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (isFormCWhereverApplicableFootnoteText(t)) return t.startsWith('*') ? t : `*${t}`;
+  }
+  return '';
+};
+
 const isUnpaidAccumulationsFootnoteRow = (row) => {
   if (!Array.isArray(row)) return false;
   const filled = row.map((c) => String(c || '').trim()).filter(Boolean);
@@ -178,10 +433,19 @@ const looksLikeFormCRajasthanPdfContext = (metaLines, rows, sheetName = '') => {
   const blob = [...(metaLines || []), ...(rows || []).slice(0, 18).flat(), sheetName || '']
     .join(' ')
     .toLowerCase();
+  // Gujarat Form C (Loan/Recoveries) must not inherit the RJ damage/loss/fine footnote.
+  if (/gujarat|\b_gj\b|form[\s._-]*c[\s._-]*gj|form_c_gj/.test(blob)) return false;
+  if (
+    /register\s+of\s+(?:loan|recoveries|loan\s*\/\s*recoveries)/.test(blob) &&
+    !/rajasthan|\b_rj\b|form[\s._-]*c[\s._-]*rj|form_c_rj/.test(blob)
+  ) {
+    return false;
+  }
   return (
     /\bform\s*c\b|form[\s._-]*c[\s._-]/.test(blob) &&
-    /register\s+of\s+(?:loan|recoveries|loan\s*\/\s*recoveries)/.test(blob) &&
-    /rajasthan|damage\s*\/\s*loss\s*\/\s*fine/.test(blob)
+    (/rajasthan|\b_rj\b|form[\s._-]*c[\s._-]*rj|form_c_rj/.test(blob) ||
+      /register\s+of\s+deductions/.test(blob)) &&
+    /damage|loss|fine|deduction/.test(blob)
   );
 };
 
@@ -541,6 +805,11 @@ const isFormXIXAPWageSlipPdfContext = (metaLines, rows, sheetName = '') => {
   const blob = [...(metaLines || []), ...(rows || []).slice(0, 24).flat(), sheetName || '']
     .join(' ')
     .toLowerCase();
+  // Gujarat / Karnataka Form XIX have their own layouts — do not treat as AP.
+  if (looksLikeFormXIXGJWageSlipPdfContext(metaLines, rows, sheetName)) return false;
+  if (looksLikeFormXIXKarnatakaPdfContext(metaLines, rows, sheetName)) return false;
+  if (/gujarat|form[\s._-]*xix[\s._-]*gj|xix_gj|\bgj[-_\s]/.test(blob)) return false;
+  if (/karnataka|form[\s._-]*xix[\s._-]*ka\b|xix_ka/.test(blob)) return false;
   return (
     /form[\s._-]*xix\b/.test(blob) &&
     (/andhra\s+pradesh|\bap\b|form[\s._-]*xix[\s._-]*ap\b/.test(blob) ||
@@ -715,6 +984,40 @@ const normalizeFormXIXWageSlipPdfMatrix = (rows, colCount, tableStartRow = 0) =>
     colCount: 5,
     tableStartRow: headerRow
   };
+};
+
+const applyFormXIXKarnatakaPdfNormalization = (target, normalized) => {
+  if (!target || !normalized) return target;
+  target.rows = normalized.rows;
+  target.colCount = normalized.colCount;
+  target.tableStartRow = normalized.tableStartRow;
+  if (Array.isArray(normalized.metaLines)) target.metaLines = normalized.metaLines;
+  target.formXIXKarnatakaLayout = normalized.formXIXKarnatakaLayout === true;
+  target.formXIXKABottomSection = normalized.formXIXKABottomSection || null;
+  return target;
+};
+
+const normalizeFormXIXWageSlipPdfByState = (
+  rows,
+  colCount,
+  tableStartRow,
+  metaLines = [],
+  sheetName = '',
+  fileName = ''
+) => {
+  if (looksLikeFormXIXKarnatakaPdfContext(metaLines, rows, sheetName, fileName)) {
+    return normalizeFormXIXKarnatakaWageSlipPdfMatrix(rows, colCount, tableStartRow, metaLines);
+  }
+  if (looksLikeFormXIXGJWageSlipPdfContext(metaLines, rows, sheetName, fileName)) {
+    return normalizeFormXIXGJWageSlipPdfMatrix(rows, colCount, tableStartRow, metaLines);
+  }
+  if (looksLikeFormXIXMPCLRAPdfContext(metaLines, rows, sheetName)) {
+    return normalizeFormXIXMPCLRAWageSlipPdfMatrix(rows, colCount, tableStartRow, metaLines);
+  }
+  if (isFormXIXAPWageSlipPdfContext(metaLines, rows, sheetName)) {
+    return normalizeFormXIXAPWageSlipPdfMatrix(rows, colCount, tableStartRow, metaLines);
+  }
+  return normalizeFormXIXWageSlipPdfMatrix(rows, colCount, tableStartRow);
 };
 
 const FORM_XIX_AP_WAGE_LABEL_RE =
@@ -1301,34 +1604,83 @@ const matchFormXIVPdfHeaderFieldIndex = (text) => {
 };
 
 const FORM_XIV_PDF_STACKED_VALUE_COL_INDEX = 4; // Excel column E (1-based 5)
+/** Gujarat Form XIV 2×2 header: right-hand box starts at Excel column G (0-based 6). */
+const FORM_XIV_PDF_GJ_RIGHT_HALF_COL = 6;
 
 /**
  * Collapse sparse Employment Card Excel columns into a single label|value pair per row
  * so Download PDF does not paint empty table columns.
- * The four establishment header fields are always emitted as label|value rows (even if blank).
+ * Establishment header fields + signature stay outside the workman table box.
  */
 const normalizeFormXIVEmploymentCardPdfMatrix = (rows, colCount, tableStartRow = 0) => {
   const src = Array.isArray(rows) ? rows : [];
   if (!src.length) {
-    return { rows: src, colCount, tableStartRow, metaLines: null };
+    return { rows: src, colCount, tableStartRow, metaLines: null, formXIVFooterLines: [] };
   }
 
   // Horizontal Form X_RJ workman table — leave as-is.
   for (let r = 0; r < Math.min(src.length, 30); r += 1) {
     if (isFormXIVEmploymentCardTabularHeaderRow(src[r])) {
-      return { rows: src, colCount, tableStartRow, metaLines: null };
+      return { rows: src, colCount, tableStartRow, metaLines: null, formXIVFooterLines: [] };
     }
   }
 
-  // Already normalized (titles in meta + 2-col body) — do not rebuild/wipe header fields.
-  if (
-    Number(colCount) === 2 &&
-    src.some((row) => isFormXIVEmploymentCardWorkmanLabelText(String(row?.[0] || '')))
-  ) {
-    return { rows: src, colCount: 2, tableStartRow, metaLines: null };
-  }
-
   const cellAt = (row, c) => String(row?.[c] ?? '').trim();
+
+  const isFormXIVTitleLine = (text) => {
+    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!t) return false;
+    return (
+      /^form\s*xiv\b/i.test(t) ||
+      /^employment\s+card$/i.test(t) ||
+      /(?:see|vide)\s+rule\s*76/i.test(t) ||
+      (/central\s*&\s*gujarat|gujarat\s+rules/i.test(t) && /rule\s*76/i.test(t))
+    );
+  };
+
+  const isFormXIVPdfIgnorableValueText = (t) =>
+    !t ||
+    isFormXIVEmploymentCardHeaderLabelText(t) ||
+    isFormXIVEmploymentCardWorkmanLabelText(t) ||
+    /^\d{1,2}[\.\)]?$/.test(t) ||
+    /^\.+$/.test(t) ||
+    /^[_\s.-]{3,}$/.test(t) ||
+    /signature\s+of\s+(?:the\s+)?contractor/i.test(t);
+
+  /** Collect every header label on a row (GJ puts contractor|establishment on one row). */
+  const collectHeaderHits = (row) => {
+    const hits = [];
+    const cells = Array.isArray(row) ? row : [];
+    for (let c = 0; c < cells.length; c += 1) {
+      const t = cellAt(cells, c);
+      if (!t) continue;
+      const headerIndex = matchFormXIVPdfHeaderFieldIndex(t);
+      if (headerIndex < 0) continue;
+      hits.push({
+        col: c,
+        headerIndex,
+        half: c >= FORM_XIV_PDF_GJ_RIGHT_HALF_COL ? 'right' : 'left',
+      });
+    }
+    return hits;
+  };
+
+  /** Split a value row into left/right 2×2 box halves (never join both into one string). */
+  const splitRowHalves = (row) => {
+    const cells = Array.isArray(row) ? row : [];
+    const leftParts = [];
+    const rightParts = [];
+    for (let c = 0; c < cells.length; c += 1) {
+      const t = cellAt(cells, c);
+      if (isFormXIVPdfIgnorableValueText(t)) continue;
+      if (c >= FORM_XIV_PDF_GJ_RIGHT_HALF_COL) rightParts.push(t);
+      else leftParts.push(t);
+    }
+    return {
+      left: leftParts.join(' ').trim(),
+      right: rightParts.join(' ').trim(),
+    };
+  };
 
   const splitStackedRow = (row) => {
     const cells = Array.isArray(row) ? row : [];
@@ -1444,98 +1796,208 @@ const normalizeFormXIVEmploymentCardPdfMatrix = (rows, colCount, tableStartRow =
     return { left, value, kind: kind || 'other', headerIndex };
   };
 
-  const metaLines = [];
+  // Already-compacted 2-col card: still lift headers + signature out of the table box.
+  const looksCompact =
+    Number(colCount) === 2 &&
+    src.some((row) => isFormXIVEmploymentCardWorkmanLabelText(String(row?.[0] || '')));
+
+  const titleMeta = [];
   const headerValues = FORM_XIV_PDF_HEADER_FIELD_LABELS.map(() => '');
   const headerSeen = FORM_XIV_PDF_HEADER_FIELD_LABELS.map(() => false);
   const workmanRows = [];
-  const trailingRows = [];
+  const footerLines = [];
+  const consumed = new Set();
+  const pendingOrphanValues = [];
+
+  const takeAheadHalfValues = (fromRow) => {
+    let left = '';
+    let right = '';
+    for (let ar = fromRow + 1; ar < Math.min(src.length, fromRow + 8); ar += 1) {
+      if (consumed.has(ar)) continue;
+      const aheadRow = src[ar] || [];
+      const aheadFilled = aheadRow.map((c) => String(c || '').trim()).filter(Boolean);
+      if (!aheadFilled.length) continue;
+      if (collectHeaderHits(aheadRow).length) break;
+      if (
+        aheadFilled.some(
+          (t) =>
+            isFormXIVEmploymentCardWorkmanLabelText(t) ||
+            /^\d{1,2}[\.\)]\s+/.test(t) ||
+            isFormXIVTitleLine(t) ||
+            /signature\s+of\s+(?:the\s+)?contractor/i.test(t)
+        )
+      ) {
+        break;
+      }
+      const halves = splitRowHalves(aheadRow);
+      if (!halves.left && !halves.right) continue;
+      if (halves.left) left = left ? `${left} ${halves.left}` : halves.left;
+      if (halves.right) right = right ? `${right} ${halves.right}` : halves.right;
+      consumed.add(ar);
+    }
+    return { left, right };
+  };
+
+  const assignHeaderValue = (idx, value) => {
+    if (idx < 0 || idx >= headerValues.length) return;
+    headerSeen[idx] = true;
+    const text = String(value || '').trim();
+    if (text && !headerValues[idx]) headerValues[idx] = text;
+  };
 
   for (let r = 0; r < src.length; r += 1) {
+    if (consumed.has(r)) continue;
     const row = src[r] || [];
     const filled = row.map((c) => String(c || '').trim()).filter(Boolean);
     if (!filled.length) continue;
 
     const blob = filled.join(' ').toLowerCase();
     if (isSystemGeneratedDocumentNote(filled.join(' '))) {
-      trailingRows.push([filled[0], '']);
       continue;
     }
     if (/signature\s+of\s+(?:the\s+)?contractor/.test(blob)) {
-      trailingRows.push([filled.join(' '), '']);
+      footerLines.push('Signature of the Contractor');
+      continue;
+    }
+
+    // Compact 2-col rows already have label|value.
+    if (looksCompact) {
+      const left = String(row[0] || '').trim();
+      const right = String(row[1] || '').trim();
+      const hdrIdx = matchFormXIVPdfHeaderFieldIndex(left);
+      if (hdrIdx >= 0) {
+        assignHeaderValue(hdrIdx, right.replace(/^:\s*/, ''));
+        continue;
+      }
+      if (isFormXIVEmploymentCardWorkmanLabelText(left) || /^\d{1,2}[\.\)]/.test(left)) {
+        workmanRows.push([left, right]);
+        continue;
+      }
+      if (isFormXIVTitleLine(left)) {
+        titleMeta.push(left);
+        continue;
+      }
+      if (right && !isFormXIVTitleLine(right)) {
+        pendingOrphanValues.push(right);
+      } else if (left && !isFormXIVTitleLine(left)) {
+        pendingOrphanValues.push(left);
+      }
+      continue;
+    }
+
+    const headerHits = collectHeaderHits(row);
+    if (headerHits.length > 0) {
+      const sameRowHalves = splitRowHalves(row);
+      const aheadHalves = takeAheadHalfValues(r);
+      headerHits.forEach((hit) => {
+        const fromSame =
+          hit.half === 'right' ? sameRowHalves.right : sameRowHalves.left;
+        const fromAhead = hit.half === 'right' ? aheadHalves.right : aheadHalves.left;
+        let val = fromSame || fromAhead;
+        // Stacked MP/KA: single label per row, value often only in column E (left half).
+        if (!val && headerHits.length === 1) {
+          const pair = splitStackedRow(row);
+          val =
+            pair.value ||
+            (hit.half === 'right'
+              ? aheadHalves.right || aheadHalves.left
+              : aheadHalves.left || aheadHalves.right);
+        }
+        if (!val && pendingOrphanValues.length) val = pendingOrphanValues.shift();
+        assignHeaderValue(hit.headerIndex, val);
+      });
       continue;
     }
 
     const pair = splitStackedRow(row);
 
-    if (pair.kind === 'header' || pair.headerIndex >= 0) {
-      const idx =
-        pair.headerIndex >= 0 ? pair.headerIndex : matchFormXIVPdfHeaderFieldIndex(pair.left);
-      if (idx >= 0) {
-        headerSeen[idx] = true;
-        if (pair.value && !headerValues[idx]) headerValues[idx] = pair.value;
-      }
-      continue;
-    }
-
     if (pair.kind === 'workman') {
+      // Flush leftover orphans into remaining empty header slots before workman body.
+      while (pendingOrphanValues.length) {
+        const emptyIdx = headerValues.findIndex((v) => !String(v || '').trim());
+        if (emptyIdx < 0) break;
+        assignHeaderValue(emptyIdx, pendingOrphanValues.shift());
+      }
       workmanRows.push([pair.left, pair.value]);
       continue;
     }
 
-    // Titles / company / site — meta only.
-    if (workmanRows.length === 0) {
-      const titleLine = pair.left || filled.join(' ');
-      // Skip header-like leftovers that failed classification.
-      if (matchFormXIVPdfHeaderFieldIndex(titleLine) >= 0) {
-        const idx = matchFormXIVPdfHeaderFieldIndex(titleLine);
-        headerSeen[idx] = true;
-        if (pair.value && !headerValues[idx]) headerValues[idx] = pair.value;
-        continue;
-      }
-      if (
-        /^form\s*xiv\b/i.test(titleLine) ||
-        /employment\s+card/i.test(titleLine) ||
-        /see\s+rule\s*76/i.test(titleLine) ||
-        (titleLine.length < 120 &&
-          !isFormXIVEmploymentCardWorkmanLabelText(titleLine) &&
-          !/^\d{1,2}[\.\)]/.test(titleLine))
-      ) {
-        metaLines.push(titleLine);
-        continue;
-      }
-    }
-
-    if (workmanRows.length === 0) {
-      metaLines.push(pair.left || filled.join(' '));
+    const titleLine = pair.left || filled.join(' ');
+    if (isFormXIVTitleLine(titleLine)) {
+      titleMeta.push(titleLine);
       continue;
     }
 
-    trailingRows.push([pair.left || filled.join(' '), pair.value || '']);
+    // Orphan address / company text (GJ value boxes sit on rows without labels).
+    // Keep left/right halves separate so Establishment / Principal Employer are not dropped.
+    if (workmanRows.length === 0) {
+      const halves = splitRowHalves(row);
+      if (halves.left && halves.right) {
+        pendingOrphanValues.push(halves.left, halves.right);
+      } else {
+        const orphan = String(halves.left || halves.right || pair.value || pair.left || '').trim();
+        if (
+          orphan &&
+          !isFormXIVEmploymentCardHeaderLabelText(orphan) &&
+          !isFormXIVEmploymentCardWorkmanLabelText(orphan)
+        ) {
+          pendingOrphanValues.push(orphan);
+        }
+      }
+      continue;
+    }
+
+    // Anything after workman that isn't signature — ignore for PDF table.
   }
 
-  // Always show the four header fields as label|value rows (blank value if missing).
-  const headerRows = FORM_XIV_PDF_HEADER_FIELD_LABELS.map((label, idx) => [
-    `${label}:`,
-    headerValues[idx] || '',
-  ]);
-
-  const compact = [...headerRows, ...workmanRows, ...trailingRows];
-
-  let lastContent = -1;
-  for (let r = 0; r < compact.length; r += 1) {
-    if ((compact[r] || []).some((c) => String(c || '').trim())) lastContent = r;
+  while (pendingOrphanValues.length) {
+    const emptyIdx = headerValues.findIndex((v) => !String(v || '').trim());
+    if (emptyIdx < 0) break;
+    assignHeaderValue(emptyIdx, pendingOrphanValues.shift());
   }
-  const trimmed =
-    lastContent < 0
-      ? compact
-      : compact.slice(0, Math.min(compact.length, lastContent + 1 + MAX_TRAILING_EMPTY_AFTER_CONTENT));
+
+  const headerMetaLines = FORM_XIV_PDF_HEADER_FIELD_LABELS.map((label, idx) => {
+    // Keep designation on the Nature line — never let "\nJunior Engineer" become a title band.
+    const value = String(headerValues[idx] || '')
+      .replace(/\s*\r?\n+\s*/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return value ? `${label}: ${value}` : `${label}:`;
+  });
+
+  const metaOut = [...titleMeta, ...headerMetaLines]
+    .map((line) => String(line || '').replace(/\s*\r?\n+\s*/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const uniqueFooter = [];
+  footerLines.forEach((line) => {
+    const key = String(line || '').toLowerCase();
+    if (!key || uniqueFooter.some((x) => x.toLowerCase() === key)) return;
+    uniqueFooter.push(line);
+  });
+  if (!uniqueFooter.length) uniqueFooter.push('Signature of the Contractor');
 
   return {
-    rows: trimmed.length ? trimmed : headerRows,
+    rows: workmanRows.length ? workmanRows : [['1. Name of the Workman', '']],
     colCount: 2,
     tableStartRow: 0,
-    metaLines: metaLines.length ? metaLines : null,
+    metaLines: metaOut.length ? metaOut : null,
+    formXIVFooterLines: uniqueFooter,
   };
+};
+
+const applyFormXIVKarnatakaPdfNormalization = (target, normalized) => {
+  if (!target || !normalized) return target;
+  target.rows = normalized.rows;
+  target.colCount = normalized.colCount;
+  target.tableStartRow = normalized.tableStartRow;
+  if (Array.isArray(normalized.metaLines) && normalized.metaLines.length) {
+    target.metaLines = normalized.metaLines;
+  }
+  target.formXIVFooterLines = Array.isArray(normalized.formXIVFooterLines)
+    ? normalized.formXIVFooterLines
+    : [];
+  target.formXIVKALayout = true;
+  return target;
 };
 
 const looksLikeForm14RajasthanPdfContext = (metaLines, rows, sheetName = '') => {
@@ -2072,6 +2534,18 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
       padded.slice(0, Math.min(padded.length, 24)),
       sheetName
     );
+    const earlyFormBGJ =
+      looksLikeFormBGJGujaratPdfContext(
+        metaLines,
+        padded.slice(0, Math.min(padded.length, 24)),
+        sheetName
+      ) ||
+      (/form\s*b|form_b_gj|format\s+of\s+wage\s+register/i.test(
+        [...metaLines, sheetName || '', ...(padded[r] || [])].join(' ')
+      ) &&
+        /gujarat|_gj|wage\s+register|minimum\s+wages/i.test(
+          [sheetName || '', ...padded.slice(0, 12).flat()].join(' ')
+        ));
     if (
       (isFormXXAP || isFormXXIAP || isFormXVIIAP) &&
       (isFormXXAPAdministrativeRow(padded[r]) || isFormXVIIAdministrativeRow(padded[r]))
@@ -2087,15 +2561,53 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
       tableStartRow = r + 1;
       continue;
     }
+
+    // Form B GJ: Rate of Minimum Wages skill/value rows are header meta — never table start.
+    if (earlyFormBGJ && isFormBGJMinimumWagesBandRow(padded[r])) {
+      const unique = [];
+      filled.forEach((t) => {
+        if (!unique.includes(t)) unique.push(t);
+      });
+      unique.forEach((t) => {
+        expandStatutoryMetaSegments(t).forEach((seg) => metaLines.push(seg));
+      });
+      tableStartRow = r + 1;
+      continue;
+    }
+
+    // Form B GJ establishment / owner / LIN / principal / wage period (under min-wages box).
+    if (
+      earlyFormBGJ &&
+      !isFormBGJWageRegisterColHeaderBlob(blob) &&
+      (/name\s+of\s+(?:establishment|owner)|labour\s+identification|principal\s+employer|wage\s+period\s+from/i.test(
+        blob
+      ) ||
+        (filled.length <= 2 &&
+          filled.some((t) => t.length > 40 && /village|substation|pin\s*code|tal\.?|taluk/i.test(t))))
+    ) {
+      const unique = [];
+      filled.forEach((t) => {
+        if (!unique.includes(t)) unique.push(t);
+      });
+      unique.forEach((t) => {
+        expandStatutoryMetaSegments(t).forEach((seg) => metaLines.push(seg));
+      });
+      tableStartRow = r + 1;
+      continue;
+    }
+
     const isColHeader =
       (isFormXXAPTableHeaderRow(padded[r]) && filled.length >= 5) ||
       (isFormXVIAPTableHeaderRow(padded[r]) && filled.length >= 3) ||
       (isFormXVIAP && isFormXVIIDateNumberRow(padded[r])) ||
-      (isWageRegisterColHeaderBlob(blob) && filled.length >= 3) ||
+      (earlyFormBGJ
+        ? isFormBGJWageRegisterColHeaderBlob(blob) && filled.length >= 3
+        : isWageRegisterColHeaderBlob(blob) && filled.length >= 3) ||
       (isFormCLwfColHeaderBlob(blob) && filled.length >= 2) ||
       (isForm25TamilNaduColHeaderBlob(blob) && filled.length >= 3) ||
       (isForm14RajasthanColHeaderBlob(blob) && filled.length >= 2) ||
-      (isFormXIXWageSlipColHeaderBlob(blob) && filled.length >= 3);
+      (isFormXIXWageSlipColHeaderBlob(blob) && filled.length >= 3) ||
+      (isFormTSEKarnatakaTableHeaderRow(padded[r]) && filled.length >= 3);
     const isNumberRow =
       filled.filter((c) => /^\d{1,2}$/.test(c)).length >= Math.max(6, filled.length * 0.6);
 
@@ -2118,6 +2630,23 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
       filled.length <= 8 &&
       filled.every((t) => /^\d{1,2}$/.test(String(t || '').trim()))
     ) {
+      tableStartRow = r + 1;
+      continue;
+    }
+
+    // Form T KA: Month / Year, Establishment, Employer sit above the leaf header — keep as meta.
+    if (
+      looksLikeFormTSEKarnatakaPdfContext(metaLines, padded, sheetName) &&
+      isFormTSEKarnatakaAdminRowBlob(blob) &&
+      filled.length <= 4
+    ) {
+      const unique = [];
+      filled.forEach((t) => {
+        if (!unique.includes(t)) unique.push(t);
+      });
+      unique.forEach((t) => {
+        expandStatutoryMetaSegments(t).forEach((seg) => metaLines.push(seg));
+      });
       tableStartRow = r + 1;
       continue;
     }
@@ -2170,6 +2699,14 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
   let finalRows = padded;
   let formXIXAPLayout = false;
   let formXIXAPFooterLines = [];
+  let formXIXGJHeaderLines = [];
+  let formXIXGJLayout = false;
+  let formXIXGJBoxedLayout = false;
+  let formXIXKarnatakaLayout = false;
+  let formXIXKABottomSection = null;
+  let formXIVFooterLines = [];
+  let formXIVKALayout = false;
+  let formTKALayout = false;
   if (isForm25Tn) {
     finalRows = trimForm25TamilNaduPdfTrailingEmployeeRows(padded, tableStartRow);
   }
@@ -2212,31 +2749,73 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
       finalColCount
     );
   }
-  if (looksLikeFormXIXWageSlipPdfContext(metaLines, finalRows, sheetName)) {
-    const normalized = looksLikeFormXIXMPCLRAPdfContext(metaLines, finalRows, sheetName)
-      ? normalizeFormXIXMPCLRAWageSlipPdfMatrix(finalRows, finalColCount, tableStartRow, metaLines)
-      : isFormXIXAPWageSlipPdfContext(metaLines, finalRows, sheetName)
-        ? normalizeFormXIXAPWageSlipPdfMatrix(finalRows, finalColCount, tableStartRow, metaLines)
-        : normalizeFormXIXWageSlipPdfMatrix(finalRows, finalColCount, tableStartRow);
+  if (
+    looksLikeFormXIXKarnatakaPdfContext(metaLines, finalRows, sheetName) ||
+    looksLikeFormXIXGJWageSlipPdfContext(metaLines, finalRows, sheetName) ||
+    looksLikeFormXIXWageSlipPdfContext(metaLines, finalRows, sheetName)
+  ) {
+    const normalized = normalizeFormXIXWageSlipPdfByState(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines,
+      sheetName
+    );
     finalRows = normalized.rows;
     finalColCount = normalized.colCount;
     tableStartRow = normalized.tableStartRow;
     formXIXAPLayout = normalized.formXIXAPLayout === true;
     formXIXAPFooterLines = normalized.formXIXAPFooterLines || [];
+    formXIXGJHeaderLines = Array.isArray(normalized.formXIXGJHeaderLines)
+      ? normalized.formXIXGJHeaderLines
+      : [];
+    formXIXGJLayout = normalized.formXIXGJLayout === true;
+    formXIXGJBoxedLayout = normalized.formXIXGJBoxedLayout === true;
+    formXIXKarnatakaLayout = normalized.formXIXKarnatakaLayout === true;
+    formXIXKABottomSection = normalized.formXIXKABottomSection || null;
     if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
   }
   if (looksLikeFormXIVEmploymentCardPdfContext(metaLines, finalRows, sheetName)) {
-    const normalized = normalizeFormXIVEmploymentCardPdfMatrix(
-      finalRows,
-      finalColCount,
-      tableStartRow
-    );
+    const normalized = looksLikeFormXIVKarnatakaPdfContext(metaLines, finalRows, sheetName)
+      ? normalizeFormXIVKarnatakaPdfMatrix(finalRows, finalColCount, tableStartRow, metaLines)
+      : normalizeFormXIVEmploymentCardPdfMatrix(finalRows, finalColCount, tableStartRow);
     finalRows = normalized.rows;
     finalColCount = normalized.colCount;
     tableStartRow = normalized.tableStartRow;
     if (Array.isArray(normalized.metaLines) && normalized.metaLines.length) {
       metaLines = normalized.metaLines;
     }
+    if (Array.isArray(normalized.formXIVFooterLines)) {
+      formXIVFooterLines = normalized.formXIVFooterLines;
+    }
+    if (normalized.formXIVKALayout === true) {
+      formXIVKALayout = true;
+    }
+  }
+  if (looksLikeFormBGJGujaratPdfContext(metaLines, finalRows, sheetName)) {
+    const normalized = normalizeFormBGJGujaratPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = normalized.rows;
+    finalColCount = normalized.colCount;
+    tableStartRow = normalized.tableStartRow;
+    if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
+  }
+  if (looksLikeFormTSEKarnatakaPdfContext(metaLines, finalRows, sheetName)) {
+    const normalized = normalizeFormTSEKarnatakaPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = normalized.rows;
+    finalColCount = normalized.colCount;
+    tableStartRow = normalized.tableStartRow;
+    if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
+    formTKALayout = true;
   }
 
   return {
@@ -2246,7 +2825,15 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
     metaLines,
     tableStartRow,
     formXIXAPLayout,
-    formXIXAPFooterLines
+    formXIXAPFooterLines,
+    formXIXGJHeaderLines,
+    formXIXGJLayout,
+    formXIXGJBoxedLayout,
+    formXIXKarnatakaLayout,
+    formXIXKABottomSection,
+    formXIVFooterLines,
+    formXIVKALayout,
+    formTKALayout
   };
 };
 
@@ -2266,17 +2853,21 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
       // Form XIV Employment Card is already compacted to label|value — never enrich by
       // Excel row index (that maps title/header rows onto workman rows and drops fields).
       const formXIVAlreadyNormalized =
-        looksLikeFormXIVEmploymentCardPdfContext(matrix.metaLines, matrix.rows, matrix.name) &&
-        Number(matrix.colCount) === 2 &&
-        matrix.rows.some(
-          (row) =>
-            matchFormXIVPdfHeaderFieldIndex(String(row?.[0] || '')) >= 0 ||
-            isFormXIVEmploymentCardWorkmanLabelText(String(row?.[0] || ''))
-        );
+        matrix.formXIVKALayout === true ||
+        (looksLikeFormXIVEmploymentCardPdfContext(matrix.metaLines, matrix.rows, matrix.name) &&
+          Number(matrix.colCount) === 2 &&
+          matrix.rows.some(
+            (row) =>
+              matchFormXIVPdfHeaderFieldIndex(String(row?.[0] || '')) >= 0 ||
+              isFormXIVEmploymentCardWorkmanLabelText(String(row?.[0] || ''))
+          ));
       if (formXIVAlreadyNormalized) {
         return;
       }
-      if (matrix.formXIXAPLayout === true) {
+      if (matrix.formXIXAPLayout === true || matrix.formXIXKarnatakaLayout === true) {
+        return;
+      }
+      if (matrix.formTKALayout === true) {
         return;
       }
 
@@ -2380,50 +2971,74 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
       }
 
       // Form XIX Wage Slip: collapse sparse merges into the Excel 5-column band.
-      if (looksLikeFormXIXWageSlipPdfContext(matrix.metaLines, matrix.rows, matrix.name)) {
-        const normalized = looksLikeFormXIXMPCLRAPdfContext(matrix.metaLines, matrix.rows, matrix.name)
-          ? normalizeFormXIXMPCLRAWageSlipPdfMatrix(
+      // Gujarat XIX: headers above box, wage 1–7 inside, initials below.
+      // Karnataka XIX: boxed label. value header + 5-col wage table (image-1 model).
+      if (
+        looksLikeFormXIXKarnatakaPdfContext(
+          matrix.metaLines,
+          matrix.rows,
+          matrix.name,
+          matrix.fileName
+        ) ||
+        looksLikeFormXIXGJWageSlipPdfContext(matrix.metaLines, matrix.rows, matrix.name) ||
+        looksLikeFormXIXWageSlipPdfContext(matrix.metaLines, matrix.rows, matrix.name)
+      ) {
+        const normalized = normalizeFormXIXWageSlipPdfByState(
+          matrix.rows,
+          matrix.colCount,
+          matrix.tableStartRow || 0,
+          matrix.metaLines,
+          matrix.name,
+          matrix.fileName
+        );
+        if (normalized.formXIXKarnatakaLayout === true) {
+          applyFormXIXKarnatakaPdfNormalization(matrix, normalized);
+        } else {
+          matrix.rows = normalized.rows;
+          matrix.colCount = normalized.colCount;
+          matrix.tableStartRow = normalized.tableStartRow;
+          matrix.formXIXAPLayout = normalized.formXIXAPLayout === true;
+          matrix.formXIXAPFooterLines = normalized.formXIXAPFooterLines || [];
+          matrix.formXIXGJHeaderLines = Array.isArray(normalized.formXIXGJHeaderLines)
+            ? normalized.formXIXGJHeaderLines
+            : [];
+          matrix.formXIXGJLayout = normalized.formXIXGJLayout === true;
+          matrix.formXIXGJBoxedLayout = normalized.formXIXGJBoxedLayout === true;
+          if (Array.isArray(normalized.metaLines)) matrix.metaLines = normalized.metaLines;
+        }
+      }
+
+      // Form XIV Employment Card: single label|value columns (no empty table cells).
+      if (looksLikeFormXIVEmploymentCardPdfContext(matrix.metaLines, matrix.rows, matrix.name)) {
+        const normalized = looksLikeFormXIVKarnatakaPdfContext(
+          matrix.metaLines,
+          matrix.rows,
+          matrix.name,
+          matrix.fileName
+        )
+          ? normalizeFormXIVKarnatakaPdfMatrix(
               matrix.rows,
               matrix.colCount,
               matrix.tableStartRow || 0,
               matrix.metaLines
             )
-          : isFormXIXAPWageSlipPdfContext(
-                matrix.metaLines,
-                matrix.rows,
-                matrix.name
-              )
-            ? normalizeFormXIXAPWageSlipPdfMatrix(
-                matrix.rows,
-                matrix.colCount,
-                matrix.tableStartRow || 0,
-                matrix.metaLines
-              )
-            : normalizeFormXIXWageSlipPdfMatrix(
-                matrix.rows,
-                matrix.colCount,
-                matrix.tableStartRow || 0
-              );
-        matrix.rows = normalized.rows;
-        matrix.colCount = normalized.colCount;
-        matrix.tableStartRow = normalized.tableStartRow;
-        matrix.formXIXAPLayout = normalized.formXIXAPLayout === true;
-        matrix.formXIXAPFooterLines = normalized.formXIXAPFooterLines || [];
-        if (Array.isArray(normalized.metaLines)) matrix.metaLines = normalized.metaLines;
-      }
-
-      // Form XIV Employment Card: single label|value columns (no empty table cells).
-      if (looksLikeFormXIVEmploymentCardPdfContext(matrix.metaLines, matrix.rows, matrix.name)) {
-        const normalized = normalizeFormXIVEmploymentCardPdfMatrix(
-          matrix.rows,
-          matrix.colCount,
-          matrix.tableStartRow || 0
-        );
-        matrix.rows = normalized.rows;
-        matrix.colCount = normalized.colCount;
-        matrix.tableStartRow = normalized.tableStartRow;
-        if (Array.isArray(normalized.metaLines) && normalized.metaLines.length) {
-          matrix.metaLines = normalized.metaLines;
+          : normalizeFormXIVEmploymentCardPdfMatrix(
+              matrix.rows,
+              matrix.colCount,
+              matrix.tableStartRow || 0
+            );
+        if (normalized.formXIVKALayout === true) {
+          applyFormXIVKarnatakaPdfNormalization(matrix, normalized);
+        } else {
+          matrix.rows = normalized.rows;
+          matrix.colCount = normalized.colCount;
+          matrix.tableStartRow = normalized.tableStartRow;
+          if (Array.isArray(normalized.metaLines) && normalized.metaLines.length) {
+            matrix.metaLines = normalized.metaLines;
+          }
+          if (Array.isArray(normalized.formXIVFooterLines)) {
+            matrix.formXIVFooterLines = normalized.formXIVFooterLines;
+          }
         }
       }
 
@@ -2614,6 +3229,8 @@ const isWageDeductionGroupLabel = (text) => {
   if (!t) return false;
   const n = t.toLowerCase();
   if (/^deductions?$/.test(n)) return true;
+  if (/earned\s+wages?\s+and\s+other\s+allowances/.test(n)) return true;
+  if (/^earned\s+wages?$/.test(n)) return true;
   if (/^advances?$/.test(n)) return true;
   if (/^damages?\s*\/\s*fines?$/.test(n) || /^damages?\s+or\s+fines?$/.test(n)) return true;
   // Short "Leave Wages" group only — not the long leaf "Leave Wages (Earned…)".
@@ -2635,15 +3252,244 @@ const isFormBRajasthanWageRateGroupLabel = (text) => {
   return /^rate\s+of\s+minimum\s+wages\s+and\s+since\s+the\s+date\b/.test(normalized);
 };
 
+const looksLikeFormBGJGujaratPdfContext = (metaLines, rows, sheetName = '') => {
+  const blob = [...(metaLines || []), ...(rows || []).slice(0, 22).flat(), sheetName || '']
+    .join(' ')
+    .toLowerCase();
+  if (/rajasthan|\b_rj\b|form[\s._-]*b[\s._-]*rj|form_b_rj/.test(blob)) return false;
+  const hasFormB = /\bform\s*b\b|form[\s._-]*b[\s._-]|form_b_gj/.test(blob);
+  const hasWageRegister =
+    /format\s+of\s+wage\s+register/.test(blob) ||
+    (/wage\s+register/.test(blob) && /rate\s+of\s+wage|net\s+payment/.test(blob));
+  const hasGujarat = /gujarat|\b_gj\b|form[\s._-]*b[\s._-]*gj|form_b_gj/.test(blob);
+  if (hasGujarat && (hasFormB || hasWageRegister)) return true;
+  if (hasFormB && hasWageRegister) return true;
+  return false;
+};
+
 const looksLikeFormBRajasthanPdfContext = (metaLines, rows, sheetName = '') => {
   const blob = [...(metaLines || []), ...(rows || []).slice(0, 16).flat(), sheetName || '']
     .join(' ')
     .toLowerCase();
+  if (/gujarat|\b_gj\b|form[\s._-]*b[\s._-]*gj|form_b_gj/.test(blob)) return false;
   return (
     /\bform\s*b\b|form[\s._-]*b[\s._-]/.test(blob) &&
     /format\s+of\s+wage\s+register/.test(blob) &&
     (/rajasthan|minimum\s+wages/.test(blob) || /rate\s+of\s+minimum\s+wages/.test(blob))
   );
+};
+
+/** Excel-style Rate of Minimum Wages box (Form B GJ / RJ header, centered under titles). */
+const extractFormBGJMinimumWagesBox = (metaLines = [], rows = [], tableStart = 0) => {
+  const skillHeaders = ['Highly Skilled', 'Skilled', 'Semi-Skilled', 'Un-Skilled'];
+  const rowLabels = ['Minimum Basic', 'DA', 'Overtime'];
+  const box = {
+    title: 'Rate of Minimum Wages',
+    skills: skillHeaders,
+    rows: rowLabels.map((label) => ({ label, values: ['', '', '', ''] })),
+  };
+
+  const sourceRows = [
+    ...(Array.isArray(metaLines) ? metaLines.map((line) => [line]) : []),
+    ...(Array.isArray(rows) ? rows.slice(0, Math.max(0, Number(tableStart) || 0) + 8) : []),
+  ];
+
+  let title = '';
+  let skills = null;
+  const dataRows = [];
+
+  sourceRows.forEach((row) => {
+    const cells = (Array.isArray(row) ? row : [row])
+      .map((c) => String(c || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    if (!cells.length) return;
+    const blob = cells.join(' ').toLowerCase();
+    if (/rate\s+of\s+minimum\s+wages/.test(blob)) {
+      title = cells.find((c) => /rate\s+of\s+minimum\s+wages/i.test(c)) || cells[0];
+      return;
+    }
+    const skillHits = cells.filter((c) =>
+      /^(highly\s*skilled|skilled|semi[-\s]?skilled|un[-\s]?skilled)$/i.test(c)
+    );
+    if (skillHits.length >= 3 && !skills) {
+      skills = ['Highly Skilled', 'Skilled', 'Semi-Skilled', 'Un-Skilled'];
+      return;
+    }
+    const labelIdx = cells.findIndex((c) =>
+      /^(minimum\s+basic|da|dearness|overtime)$/i.test(c)
+    );
+    if (labelIdx >= 0) {
+      const labelRaw = cells[labelIdx];
+      let label = 'Minimum Basic';
+      if (/^da\b|dearness/i.test(labelRaw)) label = 'DA';
+      else if (/overtime/i.test(labelRaw)) label = 'Overtime';
+      const values = cells.slice(labelIdx + 1, labelIdx + 5);
+      while (values.length < 4) values.push('');
+      dataRows.push({ label, values: values.slice(0, 4) });
+    }
+  });
+
+  if (title) box.title = title;
+  if (skills) box.skills = skills;
+  if (dataRows.length) {
+    box.rows = rowLabels.map((label) => {
+      const found = dataRows.find((r) => r.label === label);
+      return found || { label, values: ['', '', '', ''] };
+    });
+  }
+  return box;
+};
+
+const isFormBGJMinimumWagesMetaText = (text) => {
+  const t = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!t) return false;
+  if (/rate\s+of\s+minimum\s+wages/.test(t)) return true;
+  if (/^(highly\s*skilled|skilled|semi[-\s]?skilled|un[-\s]?skilled)$/.test(t)) return true;
+  if (/^(minimum\s+basic|da|overtime)$/.test(t)) return true;
+  return false;
+};
+
+/** True when a dense row is the Form B min-wages skill/value band (not the wage table). */
+const isFormBGJMinimumWagesBandRow = (row) => {
+  if (!Array.isArray(row)) return false;
+  const cells = row.map((c) => String(c || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (!cells.length) return false;
+  const blob = cells.join(' ').toLowerCase();
+  if (/rate\s+of\s+minimum\s+wages/.test(blob)) return true;
+  const skillHits = cells.filter((c) =>
+    /^(highly\s*skilled|skilled|semi[-\s]?skilled|un[-\s]?skilled)$/i.test(c)
+  ).length;
+  if (skillHits >= 3) return true;
+  if (
+    cells.length <= 6 &&
+    /^(minimum\s+basic|da|dearness|overtime)$/i.test(cells[0]) &&
+    !/rate\s+of\s+wage|net\s+payment|sr\.?\s*no/i.test(blob)
+  ) {
+    return true;
+  }
+  return false;
+};
+
+/** Form B wage table header — not the Rate of Minimum Wages skill band. */
+const isFormBGJWageRegisterColHeaderBlob = (blob) => {
+  const t = String(blob || '').toLowerCase();
+  if (!t) return false;
+  if (/rate\s+of\s+minimum\s+wages|highly\s*skilled/.test(t) && !/sr\.?\s*no|rate\s+of\s+wage\b/.test(t)) {
+    return false;
+  }
+  return (
+    /sr\.?\s*no|s\.?\s*no/.test(t) &&
+    (/employer|workman|worker|register|name|rate\s+of\s+wage|net\s+payment|days\s+worked/.test(t) ||
+      /basic|hra|pf|esic/.test(t))
+  );
+};
+
+/** Excel order for Form B Gujarat wage-register header fields (below min-wages box). */
+const FORM_BGJ_PDF_FIELD_RANK = (text) => {
+  const t = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!t) return 99;
+  if (/name\s+of\s+establishment/.test(t) && !/principal/.test(t)) return 0;
+  if (/name\s+of\s+owner/.test(t)) return 1;
+  if (/labour\s+identification\s+no/.test(t) && /principal\s+employer/.test(t)) return 4;
+  if (/labour\s+identification\s+no/.test(t)) return 2;
+  if (/principal\s+employer/.test(t)) return 3;
+  if (/wage\s+period/.test(t)) return 5;
+  return 50;
+};
+
+const reorderFormBGJPdfHeaderFields = (fields) => {
+  const list = Array.isArray(fields) ? fields.map((f) => String(f || '').trim()).filter(Boolean) : [];
+  const seen = new Set();
+  const unique = [];
+  list.forEach((f) => {
+    const key = f.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    unique.push(f);
+  });
+  return unique.sort((a, b) => FORM_BGJ_PDF_FIELD_RANK(a) - FORM_BGJ_PDF_FIELD_RANK(b));
+};
+
+/**
+ * Pull Form B GJ Rate-of-Minimum-Wages + establishment bands out of the wage table
+ * so they paint as header (box + unboxed fields below), matching Excel.
+ */
+const normalizeFormBGJGujaratPdfMatrix = (rows, colCount, tableStartRow = 0, metaLines = []) => {
+  const src = Array.isArray(rows) ? rows.map((r) => (Array.isArray(r) ? [...r] : [])) : [];
+  const meta = Array.isArray(metaLines) ? [...metaLines] : [];
+  if (!src.length) {
+    return { rows: src, colCount, tableStartRow, metaLines: meta };
+  }
+
+  const isEstablishmentHeaderBlob = (blob) =>
+    /name\s+of\s+(?:establishment|owner)|labour\s+identification|principal\s+employer|wage\s+period\s+from/i.test(
+      String(blob || '')
+    );
+
+  let start = Math.max(0, Number(tableStartRow) || 0);
+  const promoted = [];
+  let sawEstablishment = false;
+  while (start < src.length) {
+    const row = src[start] || [];
+    const filled = row.map((c) => String(c || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    if (!filled.length) {
+      start += 1;
+      continue;
+    }
+    const blob = filled.join(' ');
+    if (isFormBGJWageRegisterColHeaderBlob(blob) && filled.length >= 3) {
+      break;
+    }
+    if (isFormBGJMinimumWagesBandRow(row)) {
+      filled.forEach((t) => {
+        expandStatutoryMetaSegments(t).forEach((seg) => {
+          if (seg && !promoted.includes(seg) && !meta.includes(seg)) promoted.push(seg);
+        });
+      });
+      start += 1;
+      continue;
+    }
+    if (isEstablishmentHeaderBlob(blob)) {
+      sawEstablishment = true;
+      filled.forEach((t) => {
+        expandStatutoryMetaSegments(t).forEach((seg) => {
+          if (seg && !promoted.includes(seg) && !meta.includes(seg)) promoted.push(seg);
+        });
+      });
+      start += 1;
+      continue;
+    }
+    // Address continuation under establishment (no label) — only after a labeled est. row.
+    if (
+      sawEstablishment &&
+      filled.length <= 2 &&
+      filled[0].length > 24 &&
+      /village|substation|pin\s*code|tal\.?|taluk/i.test(blob) &&
+      !/sr\.?\s*no|rate\s+of\s+wage|net\s+payment/i.test(blob)
+    ) {
+      filled.forEach((t) => {
+        expandStatutoryMetaSegments(t).forEach((seg) => {
+          if (seg && !promoted.includes(seg) && !meta.includes(seg)) promoted.push(seg);
+        });
+      });
+      start += 1;
+      continue;
+    }
+    break;
+  }
+
+  return {
+    rows: src,
+    colCount,
+    tableStartRow: start,
+    metaLines: [...meta, ...promoted],
+  };
 };
 
 /**
@@ -3607,7 +4453,7 @@ const isStatutoryTitleMetaLine = (line) => {
   if (!t || isSystemGeneratedDocumentNote(t)) return false;
   const lower = t.toLowerCase();
   if (/^form\s*(?:no\.?\s*)?[-–.]?\s*[a-z0-9xivlc.]+\b/i.test(t) && t.length < 48) return true;
-  if (/see\s+(?:sub-)?rule|\[see\s+|^\(see\s+/i.test(lower)) return true;
+  if (/see\s+(?:sub-)?rule|\[see\s+|^\(see\s+|^\(?vide\s+rule/i.test(lower)) return true;
   if (/^\(?prescribed\s+under\b|^\[prescribed\s+under\b/i.test(t)) return true;
   if (/^register of\b/i.test(t)) return true;
   if (/^overtime\s+muster\s+roll\b|^muster\s+roll\b/i.test(t)) return true;
@@ -3641,9 +4487,44 @@ const isStatutoryFieldMetaLine = (line) => {
   ) {
     return true;
   }
+  // Form C GJ / Loan-Recoveries register — LIN rows are fields (not title bands).
+  if (/labour\s+identification\s+no/i.test(lower)) return true;
+  // Form A GJ header labels
+  if (/^name\s+of\s+owner\b/i.test(t)) return true;
+  if (/^name\s+of\s+establishment\b/i.test(t)) return true;
   // Generic "Label : value" administrative lines
   if (/^[^:]{3,80}:\s*\S/.test(t)) return true;
   return false;
+};
+
+/** Excel order for Form C Gujarat Loan/Recoveries header fields. */
+const FORM_C_GJ_PDF_FIELD_RANK = (text) => {
+  const t = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!t) return 99;
+  if (/name\s+of\s+establishment/.test(t) && !/principal/.test(t)) return 0;
+  if (/labour\s+identification\s+no/.test(t) && /principal\s+employer/.test(t)) return 3;
+  if (/labour\s+identification\s+no/.test(t)) return 1;
+  if (/principal\s+employer/.test(t)) return 2;
+  return 50;
+};
+
+const looksLikeFormCGJLoanRecoveriesPdfContext = (metaLines, rows, sheetName = '') => {
+  const blob = [...(metaLines || []), ...(rows || []).slice(0, 18).flat(), sheetName || '']
+    .join(' ')
+    .toLowerCase();
+  return (
+    (/\bform\s*c\b|form[\s._-]*c[\s._-]/.test(blob) || /form_c_gj|form[\s._-]*c[\s._-]*gj/.test(blob)) &&
+    /register\s+of\s+(?:loan|recoveries|loan\s*\/\s*recoveries)/.test(blob)
+  );
+};
+
+const reorderFormCGJPdfHeaderFields = (fields) => {
+  const list = Array.isArray(fields) ? fields.filter((f) => String(f || '').trim()) : [];
+  if (list.length < 2) return list;
+  return [...list].sort((a, b) => FORM_C_GJ_PDF_FIELD_RANK(a) - FORM_C_GJ_PDF_FIELD_RANK(b));
 };
 
 const extractFormXXAPAdministrativeRows = (rows, tableStart, metaLines = []) => {
@@ -3873,7 +4754,33 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     ? scrubForm15Part1MetaLines(metaLines)
     : metaLines;
 
-  const isFormXIIIAP = looksLikeFormXIIIAPPdfContext(effectiveMetaLines, rows, sheetName);
+  const isFormTKA = looksLikeFormTSEKarnatakaPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName,
+    fileName
+  );
+  if (isFormTKA) {
+    return {
+      titles: getFormTSEKarnatakaHeaderTitles(effectiveMetaLines, rows, tableStart),
+      fields: extractFormTSEKarnatakaHeaderFields(effectiveMetaLines, rows, tableStart),
+      rightFields: [],
+      formTKA: true,
+      hasSystemNote: (effectiveMetaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
+      isFormXXVI: false,
+      isFormW: false,
+      isFormXXVIIRegister: false,
+      titleBoxFullBorder: false,
+      hideRightBandSplit: false
+    };
+  }
+
+  const isFormXIIIAP = looksLikeFormXIIIAPPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName,
+    fileName
+  );
   if (isFormXIIIAP) {
     return {
       titles: getFormXIIIAPHeaderTitles(effectiveMetaLines, rows, tableStart),
@@ -4085,12 +4992,43 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     list.push(raw);
   };
 
-  (effectiveMetaLines || []).forEach((raw) => {
+  const isFormXIVEmploymentCardMeta = looksLikeFormXIVEmploymentCardPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName
+  );
+  // Form XIV GJ: Nature may include "GJ-Amreli\nJunior Engineer" — keep one field line.
+  const headerMetaSource = isFormXIVEmploymentCardMeta
+    ? (effectiveMetaLines || []).map((raw) =>
+        String(raw || '')
+          .replace(/\s*\r?\n+\s*/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+      )
+    : effectiveMetaLines;
+
+  headerMetaSource.forEach((raw) => {
     expandStatutoryMetaSegments(raw).forEach((line) => {
       if (!line) return;
       if (preferForm15Part1 && isStandaloneFormXTitle(line)) return;
       if (isSystemGeneratedDocumentNote(line)) {
         hasSystemNote = true;
+        return;
+      }
+      // Form C footnotes belong under the table (outside the box), not in the title band.
+      if (isFormCWhereverApplicableFootnoteText(line) || isFormCDamageLossFineFootnoteText(line)) {
+        return;
+      }
+      // Form D GJ footnotes belong under the muster-roll box, not in the title band.
+      if (isFormDGJGujaratOuterFootnoteText(line)) {
+        return;
+      }
+      // Form A GJ footnotes belong under the employee table, not in the title band.
+      if (isFormAGJGujaratOuterFootnoteText(line)) {
+        return;
+      }
+      // Form B GJ: Rate of Minimum Wages box is painted separately (Excel right-side model).
+      if (isFormBGJMinimumWagesMetaText(line)) {
         return;
       }
       // Festival holiday boxes on Form 25 are numbered 1–5 — never print as title rows.
@@ -4145,6 +5083,16 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
       }
       if (isStatutoryFieldMetaLine(line) || isFormMetaText(line)) {
         pushUnique(fields, line);
+        return;
+      }
+      // Form XIV: designation fragments (e.g. "Junior Engineer" after a Nature newline) are not titles.
+      if (
+        isFormXIVEmploymentCardMeta &&
+        !/:/.test(line) &&
+        !/^form\s*xiv\b/i.test(line) &&
+        !/^employment\s+card$/i.test(line) &&
+        !/(?:see|vide)\s+rule\s*76/i.test(line)
+      ) {
         return;
       }
       // Leftover meta — treat short lines as titles, longer as fields
@@ -4212,13 +5160,89 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
   // Last pass: never print Form X next to Form 15.
   finalTitles = finalTitles.filter((t) => !isStandaloneFormXTitle(t));
 
+  let finalFields =
+    fields.length === 0 && rightFields.length > 0
+      ? rightFields.map(() => '')
+      : fields;
+  // Form C GJ: Name of Establishment, then Labour Identification No. (not under title band).
+  if (looksLikeFormCGJLoanRecoveriesPdfContext(effectiveMetaLines, rows, sheetName)) {
+    finalFields = reorderFormCGJPdfHeaderFields(finalFields);
+    finalTitles = finalTitles.filter(
+      (t) => !/labour\s+identification\s+no/i.test(String(t || ''))
+    );
+  }
+
+  let formAGJSplitRows = [];
+  const isFormBGJ =
+    looksLikeFormBGJGujaratPdfContext(effectiveMetaLines, rows, sheetName) ||
+    looksLikeFormBRajasthanPdfContext(effectiveMetaLines, rows, sheetName);
+  if (looksLikeFormAGJGujaratPdfContext(effectiveMetaLines, rows, sheetName)) {
+    finalFields = reorderFormAGJPdfHeaderFields(finalFields);
+  }
+  if (isFormBGJ) {
+    // Keep establishment / owner / LIN / principal / wage period; drop wage-rate box scraps.
+    finalFields = finalFields.filter((f) => !isFormBGJMinimumWagesMetaText(f));
+    finalTitles = finalTitles.filter(
+      (t) =>
+        !isFormBGJMinimumWagesMetaText(t) &&
+        !/^(highly\s*skilled|skilled|semi[-\s]?skilled|un[-\s]?skilled)$/i.test(String(t || '').trim())
+    );
+    // Short labels without ":" can land in titles — move Form B admin lines into fields.
+    const moved = [];
+    finalTitles = finalTitles.filter((t) => {
+      const line = String(t || '').trim();
+      if (
+        /name\s+of\s+(?:establishment|owner)|labour\s+identification|principal\s+employer|wage\s+period/i.test(
+          line
+        )
+      ) {
+        moved.push(line);
+        return false;
+      }
+      return true;
+    });
+    if (moved.length) finalFields = [...finalFields, ...moved];
+    // Harvest establishment bands still sitting in early table rows.
+    const harvestUntil = Math.min(
+      Array.isArray(rows) ? rows.length : 0,
+      Math.max(0, Number(tableStart) || 0) + 12
+    );
+    for (let r = 0; r < harvestUntil; r += 1) {
+      const row = rows[r] || [];
+      const filled = row.map((c) => String(c || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+      if (!filled.length) continue;
+      const blob = filled.join(' ');
+      if (isFormBGJWageRegisterColHeaderBlob(blob)) break;
+      if (isFormBGJMinimumWagesMetaText(blob) || isFormBGJMinimumWagesBandRow(row)) continue;
+      if (
+        /name\s+of\s+(?:establishment|owner)|labour\s+identification|principal\s+employer|wage\s+period/i.test(
+          blob
+        )
+      ) {
+        filled.forEach((t) => {
+          if (!isFormBGJMinimumWagesMetaText(t)) finalFields.push(t);
+        });
+      }
+    }
+    finalFields = reorderFormBGJPdfHeaderFields(finalFields);
+  }
+
+  const formBGJMinWagesBox = looksLikeFormBGJGujaratPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName
+  )
+    ? extractFormBGJMinimumWagesBox(effectiveMetaLines, rows, tableStart)
+    : null;
+
   return {
     titles: finalTitles,
-    fields:
-      fields.length === 0 && rightFields.length > 0
-        ? rightFields.map(() => '')
-        : fields,
+    fields: finalFields,
     rightFields,
+    formAGJSplitRows,
+    formAGJGujarat: looksLikeFormAGJGujaratPdfContext(effectiveMetaLines, rows, sheetName),
+    formBGJGujarat: looksLikeFormBGJGujaratPdfContext(effectiveMetaLines, rows, sheetName),
+    formBGJMinWagesBox,
     genderBox,
     hasSystemNote,
     isFormXXVI: false,
@@ -4265,6 +5289,7 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
   const fields = Array.isArray(headerModel?.fields) ? headerModel.fields : [];
   const rightFields = Array.isArray(headerModel?.rightFields) ? headerModel.rightFields : [];
   const genderBox = headerModel?.genderBox || null;
+  const formBGJMinWagesBox = headerModel?.formBGJMinWagesBox || null;
   const formXXAPAdminRows = Array.isArray(headerModel?.formXXAPAdminRows)
     ? headerModel.formXXAPAdminRows
     : [];
@@ -4483,16 +5508,38 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
         const lower = String(seg).toLowerCase();
         const isFormName = /^form\s+/i.test(seg);
         const isRegister =
-          /^register of\b|^overtime\s+muster\s+roll\b|^muster\s+roll\b|^list of\b|^wage\s+slip\b|^letter\s+of\b|^notice\s+of\b|^combined\b/i.test(
+          /^register of\b|^overtime\s+muster\s+roll\b|^muster\s+roll\b|^list of\b|^wage\s+slip\b|^letter\s+of\b|^notice\s+of\b|^combined\b|^format\s+of\s+wage\s+register\b/i.test(
             seg
           );
         const isRule = /see\s+(?:sub-)?rule|prescribed\s+under/i.test(lower);
         const isActBanner = /^the\s+.+\b(act|rules)\b/i.test(seg);
         paintFullBand(seg, {
           bold: isFormName || isRegister || titlePaintIdx === 0,
-          size: isApForm ? 9 : isFormName ? 11 : isRegister ? 10 : isRule || isActBanner ? 8 : 9,
+          size: isApForm
+            ? 9
+            : headerModel?.formBGJGujarat
+              ? isFormName
+                ? 13
+                : isRegister
+                  ? 12
+                  : isRule || isActBanner
+                    ? 10
+                    : 11
+              : isFormName
+                ? 11
+                : isRegister
+                  ? 10
+                  : isRule || isActBanner
+                    ? 8
+                    : 9,
           align: 'center',
-          minH: isFormName || isRegister ? 20 : 16
+          minH: headerModel?.formBGJGujarat
+            ? isFormName || isRegister
+              ? 24
+              : 18
+            : isFormName || isRegister
+              ? 20
+              : 16
         });
         titlePaintIdx += 1;
       });
@@ -4545,21 +5592,115 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
     });
   }
 
-  if (headerModel?.formXVAPService && formXVAPFieldRows.length) {
+  // Form B GJ Excel model:
+  // 1) Rate of Minimum Wages box (centered under titles)
+  // 2) Establishment / owner / LIN / principal / wage period BELOW that box — outside any border
+  if (headerModel?.formBGJGujarat) {
+    const fieldSize = 11;
+    const skills = Array.isArray(formBGJMinWagesBox?.skills)
+      ? formBGJMinWagesBox.skills
+      : ['Highly Skilled', 'Skilled', 'Semi-Skilled', 'Un-Skilled'];
+    const dataRows = Array.isArray(formBGJMinWagesBox?.rows) ? formBGJMinWagesBox.rows : [];
+    const mwTitle = String(formBGJMinWagesBox?.title || 'Rate of Minimum Wages').trim();
+    const titleH = 22;
+    const skillH = 24;
+    const rowH = 18;
+    const boxH = formBGJMinWagesBox ? titleH + skillH + Math.max(dataRows.length, 3) * rowH : 0;
+    const boxW = Math.min(460, Math.max(300, usableWidth * 0.55));
+    const boxX = x0 + Math.max(0, (usableWidth - boxW) / 2);
+
+    // 1) Rate of Minimum Wages box centered under titles.
+    if (formBGJMinWagesBox) {
+      ensureSpace(boxH + 8);
+      const boxY = y;
+      doc.setDrawColor(0, 0, 0);
+      doc.setLineWidth(0.7);
+      doc.setTextColor(0, 0, 0);
+      doc.rect(boxX, boxY, boxW, boxH, 'S');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10);
+      const titleLines = doc.splitTextToSize(mwTitle, boxW - 10).slice(0, 2);
+      const titleTextH = titleLines.length * 11;
+      doc.text(titleLines, boxX + boxW / 2, boxY + (titleH - titleTextH) / 2 + 10, {
+        align: 'center',
+      });
+      doc.line(boxX, boxY + titleH, boxX + boxW, boxY + titleH);
+
+      const labelW = boxW * 0.28;
+      const skillW = (boxW - labelW) / 4;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      skills.forEach((skill, i) => {
+        const cx = boxX + labelW + i * skillW;
+        doc.line(cx, boxY + titleH, cx, boxY + boxH);
+        const wrapped = doc.splitTextToSize(String(skill || ''), Math.max(skillW - 3, 18)).slice(0, 2);
+        const skillTextH = wrapped.length * 10;
+        doc.text(wrapped, cx + skillW / 2, boxY + titleH + (skillH - skillTextH) / 2 + 9, {
+          align: 'center',
+        });
+      });
+      doc.line(boxX + labelW, boxY + titleH, boxX + labelW, boxY + boxH);
+      doc.line(boxX, boxY + titleH + skillH, boxX + boxW, boxY + titleH + skillH);
+
+      const paintRows =
+        dataRows.length >= 3
+          ? dataRows.slice(0, 3)
+          : [
+              { label: 'Minimum Basic', values: ['', '', '', ''] },
+              { label: 'DA', values: ['', '', '', ''] },
+              { label: 'Overtime', values: ['', '', '', ''] },
+            ];
+      paintRows.forEach((row, ri) => {
+        const ry = boxY + titleH + skillH + ri * rowH;
+        if (ri > 0) doc.line(boxX, ry, boxX + boxW, ry);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.text(String(row.label || ''), boxX + 4, ry + 12);
+        (row.values || []).slice(0, 4).forEach((val, vi) => {
+          const cx = boxX + labelW + vi * skillW;
+          const text = String(val || '').trim();
+          if (text) doc.text(text, cx + skillW / 2, ry + 12, { align: 'center' });
+        });
+      });
+      y += boxH + 10;
+    }
+
+    // 2) Establishment fields BELOW the min-wages box — plain text, no border.
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(fieldSize);
+    fields.forEach((field) => {
+      const line = String(field || '').trim();
+      if (!line) return;
+      const wrapped = doc.splitTextToSize(line, usableWidth - padX);
+      if (!wrapped.length) return;
+      const blockH = wrapped.length * (fieldSize + 2) + 3;
+      ensureSpace(blockH);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(fieldSize);
+      doc.setTextColor(0, 0, 0);
+      doc.text(wrapped, x0, y + fieldSize);
+      y += blockH;
+    });
+    y += 6;
+  } else if (headerModel?.formXVAPService && formXVAPFieldRows.length) {
     formXVAPFieldRows.forEach(([left, right]) => paintSplitBand(left, right, { minH: 22, size: 9 }));
-  } else fields.forEach((field, idx) => {
+  } else {
+    fields.forEach((field, idx) => {
     const right = rightFields[idx] || '';
     if (headerModel?.formXVAPService) {
       paintSplitBand(field, '', { minH: 22, size: 9 });
     } else if (useRightBand && idx < Math.max(rightFields.length, 2) && (right || idx < 2)) {
-      paintSplitBand(field, right, { minH: 16, size: headerModel?.formXVIAP ? 9 : 8 });
+      paintSplitBand(field, right, {
+        minH: 16,
+        size: headerModel?.formXVIAP ? 9 : headerModel?.formAGJGujarat ? 10 : 8,
+      });
     } else {
       const centerFormAPartA = isFormA && /\[?\s*part\s*[-\s]?a\s*:/i.test(String(field || ''));
       paintFullBand(field, {
         bold: false,
-        size: headerModel?.formXVIAP ? 9 : 8,
+        size: headerModel?.formXVIAP ? 9 : headerModel?.formAGJGujarat ? 10 : 8,
         align: centerFormAPartA ? 'center' : 'left',
-        minH: 16
+        minH: headerModel?.formAGJGujarat ? 20 : 16,
       });
     }
     // Place gender box after establishment / total band (Excel layout)
@@ -4575,7 +5716,7 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
       }
     }
   });
-
+  }
   if (genderBox && !paintedGenderBox) {
     paintFormWGenderBox();
   }
@@ -4602,6 +5743,32 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     fileName: pdfOpts.fileName || ''
   });
   if (matrix.formXIXAPLayout === true) headerModel.formXIXAP = true;
+  const isFormXIXKA = matrix.formXIXKarnatakaLayout === true;
+  if (isFormXIXKA) {
+    const kaTitles = [];
+    const kaFields = [];
+    (metaLines || []).forEach((raw) => {
+      const line = String(raw || '').replace(/\s+/g, ' ').trim();
+      if (!line) return;
+      if (/^form\s*xix\b/i.test(line) || /see\s+rule\s*78/i.test(line) || /^wages?\s+slip\b/i.test(line)) {
+        kaTitles.push(line);
+      } else {
+        kaFields.push(line);
+      }
+    });
+    headerModel.titles = kaTitles.length ? kaTitles : headerModel.titles;
+    headerModel.fields = kaFields;
+    headerModel.rightFields = [];
+    headerModel.titleBoxFullBorder = false;
+    headerModel.hideRightBandSplit = false;
+  }
+  const isFormXIVKALayout = matrix.formXIVKALayout === true;
+  if (isFormXIVKALayout) {
+    headerModel.fields = (headerModel.fields || []).filter((field) => {
+      const text = String(field || '');
+      return matchFormXIVPdfHeaderFieldIndex(text) < 0 && !isFormXIVEmploymentCardHeaderLabelText(text);
+    });
+  }
   const isFormXXAP = headerModel.formXXAP === true;
   const isFormXXIAP = headerModel.formXXIAP === true;
   const isFormXVIIAP = headerModel.formXVIIAP === true;
@@ -4624,6 +5791,9 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   }
   if (isFormXIXAP) {
     headerBandEnd = tableStart - 1;
+  }
+  if (isFormXIXKA) {
+    headerBandEnd = Math.min(rows.length - 1, tableStart + 1);
   }
   if (isFormXXAP) {
     headerBandEnd = Math.min(rows.length - 1, tableStart + 1);
@@ -4655,6 +5825,23 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     for (let r = tableStart; r < Math.min(rows.length, tableStart + 5); r += 1) {
       const blob = (rows[r] || []).join(' ').toLowerCase();
       if (/basic wage|dearness|house rent|deductions|net wages|s\.?\s*no/.test(blob)) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+    }
+  }
+  // Form T KA — group banners + day numbers + statutory column-index strip.
+  if (headerModel.formTKA === true || matrix.formTKALayout === true) {
+    for (let r = tableStart; r < Math.min(rows.length, tableStart + 6); r += 1) {
+      const blob = (rows[r] || []).join(' ').toLowerCase();
+      if (
+        /s\.?\s*no|attendance|earned\s+wages|deductions|wages\s+fixed|name of(?:\s+the)?\s+employee|father/.test(
+          blob
+        )
+      ) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+      const filled = (rows[r] || []).filter((c) => String(c || '').trim());
+      if (filled.filter((c) => /^\d{1,2}$/.test(String(c).trim())).length >= 8) {
         headerBandEnd = Math.max(headerBandEnd, r);
       }
     }
@@ -4809,6 +5996,18 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       }
     }
     const weight = statutoryHeaderColumnWeight(leafHeaders[c], maxDataLen || maxLen, colCount);
+    const hdrNorm = String(leafHeaders[c] || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    // Form A GJ: keep UAN / Aadhaar readable — same font size needs a wider column.
+    if (
+      looksLikeFormAGJGujaratPdfContext(metaLines, rows, matrix.name || '') &&
+      (/^uan\b/.test(hdrNorm) || /\buan\b/.test(hdrNorm) || /aadha?ar/.test(hdrNorm))
+    ) {
+      weights.push(Math.max(weight, 11));
+      continue;
+    }
     weights.push(
       (isFormXIXRajasthanOvertimeSheet || isFormASheet || isFormBRajasthanSheet) &&
         isPdfSerialNumberHeader(leafHeaders[c])
@@ -4829,9 +6028,23 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   });
   const colXs = [marginX];
   for (let i = 0; i < colWidths.length; i += 1) colXs.push(colXs[i] + colWidths[i]);
+  if (isFormXIVKALayout && colCount === 2) {
+    colWidths[0] = usableWidth * 0.44;
+    colWidths[1] = usableWidth - colWidths[0];
+    colXs.length = 0;
+    colXs.push(marginX, marginX + colWidths[0], marginX + usableWidth);
+  }
 
   const fontSize = isApForm
     ? 9
+    : looksLikeFormBGJGujaratPdfContext(metaLines, rows, matrix.name || '')
+      ? colCount > 22
+        ? 7.5
+        : 8.5
+    : looksLikeFormAGJGujaratPdfContext(metaLines, rows, matrix.name || '')
+      ? colCount > 22
+        ? 8
+        : 8.5
     : headerModel.isFormW
     ? colCount > 28
       ? 5.2
@@ -4854,7 +6067,10 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   let y = startY;
   let pendingSystemNote = false;
   let pendingUnpaidFootnote = '';
+  let pendingWhereverApplicableFootnote = '';
   const pendingForm14RjFootnotes = [];
+  const pendingFormDGJFootnotes = [];
+  const pendingFormAGJFootnotes = [];
 
   const looksLikeFormCLwfSheet = (() => {
     const blob = [...metaLines, ...(rows || []).slice(0, Math.min(rows.length, tableStart + 4)).flat(), matrix.name || '']
@@ -4871,7 +6087,27 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     rows,
     matrix.name || ''
   );
+  const looksLikeFormCGJSheet = looksLikeFormCGJLoanRecoveriesPdfContext(
+    metaLines,
+    rows,
+    matrix.name || ''
+  );
   const looksLikeForm14RjSheet = looksLikeForm14RajasthanPdfContext(
+    metaLines,
+    rows,
+    matrix.name || ''
+  );
+  const looksLikeFormDGJSheet = looksLikeFormDGJMusterRollPdfContext(
+    metaLines,
+    rows,
+    matrix.name || ''
+  );
+  const looksLikeFormAGJSheet = looksLikeFormAGJGujaratPdfContext(
+    metaLines,
+    rows,
+    matrix.name || ''
+  );
+  const looksLikeFormBGJSheet = looksLikeFormBGJGujaratPdfContext(
     metaLines,
     rows,
     matrix.name || ''
@@ -4891,6 +6127,35 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     );
     if (dayIdx >= 0) pendingForm14RjFootnotes.splice(dayIdx, 0, text);
     else pendingForm14RjFootnotes.push(text);
+  };
+
+  const pushFormDGJFootnote = (raw) => {
+    const text = extractFormDGJGujaratOuterFootnoteText(
+      Array.isArray(raw) ? raw : [String(raw || '').trim()]
+    ) || String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!text || !isFormDGJGujaratOuterFootnoteText(text)) return;
+    const key = normalizeFormDGJFootnoteCompare(text);
+    if (pendingFormDGJFootnotes.some((t) => normalizeFormDGJFootnoteCompare(t) === key)) return;
+    pendingFormDGJFootnotes.push(
+      /^\*\*/.test(text.trim())
+        ? FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2
+        : /^\*/.test(text.trim()) && /not\s+necessary/i.test(text)
+          ? FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1
+          : /governor/i.test(text)
+            ? FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE
+            : text
+    );
+  };
+
+  const pushFormAGJFootnote = (raw) => {
+    const text =
+      extractFormAGJGujaratOuterFootnoteText(
+        Array.isArray(raw) ? raw : [String(raw || '').trim()]
+      ) || String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!text || !isFormAGJGujaratOuterFootnoteText(text)) return;
+    const key = normalizeFormAGJFootnoteCompare(text);
+    if (pendingFormAGJFootnotes.some((t) => normalizeFormAGJFootnoteCompare(t) === key)) return;
+    pendingFormAGJFootnotes.push(text);
   };
 
   const paintMetaLine = (text, { bold = false, size = 9, align = 'left' } = {}) => {
@@ -5104,6 +6369,15 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         continue;
       }
 
+      if (isFormXIXKA) {
+        const kaLines = doc.splitTextToSize(raw, cellW).slice(0, 6);
+        const textH = kaLines.length * (fontSize + 1);
+        doc.text(kaLines, colXs[c] + colWidths[c] / 2, y + (rowH - textH) / 2 + fontSize, {
+          align: 'center'
+        });
+        continue;
+      }
+
       if (isFormXIIINumberRow && alignRight) {
         doc.text(raw, colXs[c] + colWidths[c] / 2, y + (rowH + fontSize) / 2 - 1, {
           align: 'center'
@@ -5155,7 +6429,29 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       }
 
       // Amounts / counts: single line, shrink font instead of mid-digit wrap.
+      // Form A GJ UAN / Aadhaar / long IDs: keep same Helvetica + fontSize as other cells.
       if (!isHeaderRow && alignRight) {
+        const hdr = String(leafHeaders[c] || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+        const keepFormAGJIdFont =
+          looksLikeFormAGJSheet &&
+          (/^uan\b/.test(hdr) ||
+            /\buan\b/.test(hdr) ||
+            /aadha?ar/.test(hdr) ||
+            /^esic/.test(hdr) ||
+            /^lwf\b/.test(hdr) ||
+            /bank\s*a\s*\/?\s*c|account/.test(hdr) ||
+            /^\d{10,}$/.test(String(raw || '').replace(/\D/g, '')));
+        if (keepFormAGJIdFont) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(fontSize);
+          const idLines = doc.splitTextToSize(raw, cellW).slice(0, 3);
+          const textH = idLines.length * (fontSize + 1);
+          doc.text(idLines, colXs[c] + 1.5, y + (rowH - textH) / 2 + fontSize);
+          continue;
+        }
         let size = fontSize;
         doc.setFontSize(size);
         while (!isApForm && size > 3.2 && doc.getTextWidth(raw) > cellW) {
@@ -5463,7 +6759,16 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     if (isUnpaidAccumulationsFootnoteText(line) && !pendingUnpaidFootnote) {
       pendingUnpaidFootnote = String(line).replace(/\s+/g, ' ').trim();
     }
+    if (isFormCWhereverApplicableFootnoteText(line) && !pendingWhereverApplicableFootnote) {
+      pendingWhereverApplicableFootnote = FORM_C_GJ_WHEREVER_APPLICABLE_FOOTNOTE;
+    }
     if (isForm14RajasthanFootnoteText(line)) pushForm14RjFootnote(line);
+    if (isFormDGJGujaratOuterFootnoteText(line) && !looksLikeFormAGJSheet && !looksLikeFormBGJSheet) {
+      pushFormDGJFootnote(line);
+    }
+    if (isFormAGJGujaratOuterFootnoteText(line) && !looksLikeFormBGJSheet) {
+      pushFormAGJFootnote(line);
+    }
   });
 
   for (let r = tableStart; r < rows.length; r += 1) {
@@ -5486,10 +6791,64 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       continue;
     }
 
+    // Form C GJ: keep "*Wherever applicable" outside the table box.
+    if (
+      isFormCWhereverApplicableFootnoteRow(row) ||
+      isFormCWhereverApplicableFootnoteText(row?.[0])
+    ) {
+      if (!pendingWhereverApplicableFootnote) {
+        pendingWhereverApplicableFootnote =
+          extractFormCWhereverApplicableFootnoteText(row) ||
+          FORM_C_GJ_WHEREVER_APPLICABLE_FOOTNOTE;
+      }
+      continue;
+    }
+
+    // Form C GJ: never print "*Applicable only in case of damage/loss/fine".
+    if (
+      isFormCDamageLossFineFootnoteRow(row) ||
+      isFormCDamageLossFineFootnoteText(row?.[0])
+    ) {
+      if (looksLikeFormCGJSheet || !looksLikeFormCRajasthanSheet) continue;
+      if (!pendingUnpaidFootnote) pendingUnpaidFootnote = FORM_C_RJ_FOOTNOTE;
+      continue;
+    }
+
     // Form 14 RJ footnotes — paint below the grid, above the system-generated note.
     if (isForm14RajasthanFootnoteRow(row) || isForm14RajasthanFootnoteText(row?.[0])) {
       const fn = extractForm14RajasthanFootnoteText(row) || String(row?.[0] || '').trim();
       if (fn) pushForm14RjFootnote(fn);
+      continue;
+    }
+
+    // Form D GJ: keep electronic-format / Governor notes outside the muster-roll box.
+    if (
+      !looksLikeFormAGJSheet &&
+      (isFormDGJGujaratOuterFootnoteRow(row) ||
+        isFormDGJGujaratOuterFootnoteText(row?.[0]))
+    ) {
+      pushFormDGJFootnote(row);
+      continue;
+    }
+
+    // Form A GJ: keep age / skill / electronic / wherever notes outside the employee box.
+    if (
+      !looksLikeFormBGJSheet &&
+      (isFormAGJGujaratOuterFootnoteRow(row) ||
+        isFormAGJGujaratOuterFootnoteText(row?.[0]))
+    ) {
+      pushFormAGJFootnote(row);
+      continue;
+    }
+
+    // Form B GJ: never paint Rate of Minimum Wages scraps inside the wage table.
+    if (
+      looksLikeFormBGJSheet &&
+      (isFormBGJMinimumWagesMetaText(row?.[0]) ||
+        (Array.isArray(row) &&
+          row.some((c) => isFormBGJMinimumWagesMetaText(c)) &&
+          row.filter((c) => String(c || '').trim()).length <= 6))
+    ) {
       continue;
     }
 
@@ -5521,8 +6880,64 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     });
   }
 
+  if (isFormXIXKA && matrix.formXIXKABottomSection) {
+    const section = matrix.formXIXKABottomSection;
+    const labels = Array.isArray(section.labels) ? section.labels : [];
+    const values = Array.isArray(section.values) ? section.values : [];
+    const colW = usableWidth / 3;
+    const paintKaFooterCells = (cells, { bold = false, size = 8 } = {}) => {
+      doc.setFont('helvetica', bold ? 'bold' : 'normal');
+      doc.setFontSize(size);
+      doc.setTextColor(0, 0, 0);
+      const wrapped = [0, 1, 2].map((i) =>
+        doc.splitTextToSize(String(cells[i] || ''), Math.max(colW - 8, 24))
+      );
+      const h = Math.max(14, Math.max(...wrapped.map((lines) => lines.length)) * (size + 2) + 4);
+      if (y + h > pageHeight - marginBottom) {
+        doc.addPage();
+        y = marginTop;
+      }
+      wrapped.forEach((lines, i) => {
+        if (!lines.length) return;
+        const cx = marginX + i * colW;
+        const textY = y + size + 2;
+        if (i === 0) doc.text(lines, cx, textY);
+        else if (i === 2) doc.text(lines, cx + colW, textY, { align: 'right' });
+        else doc.text(lines, cx + colW / 2, textY, { align: 'center' });
+      });
+      y += h;
+    };
+    y += 8;
+    paintKaFooterCells(labels, { size: 8 });
+    if (values.some((v) => String(v || '').trim())) {
+      paintKaFooterCells(values, { size: 9 });
+    }
+    y += 8;
+    paintMetaLine(
+      section.signatureText || 'Signature of the contractor or his Representative',
+      { size: 8, align: 'right' }
+    );
+  }
+
+  // Form XIV Employment Card: signature sits under the workman box, not inside it.
+  if (isFormXIVEmploymentCardSheet && Array.isArray(matrix.formXIVFooterLines)) {
+    matrix.formXIVFooterLines.forEach((line) => {
+      const text = String(line || '').trim();
+      if (!text) return;
+      y += 10;
+      paintMetaLine(text, { size: 9, align: 'right' });
+    });
+  }
+
   // Also catch a note that landed in the meta band or above the table start.
-  if (!pendingSystemNote || !pendingUnpaidFootnote || pendingForm14RjFootnotes.length < 2) {
+  if (
+    !pendingSystemNote ||
+    !pendingUnpaidFootnote ||
+    !pendingWhereverApplicableFootnote ||
+    pendingForm14RjFootnotes.length < 2 ||
+    pendingFormDGJFootnotes.length < FORM_DGJ_GJ_OUTER_FOOTNOTES.length ||
+    pendingFormAGJFootnotes.length < FORM_AGJ_GJ_OUTER_FOOTNOTES.length
+  ) {
     for (let r = 0; r < rows.length; r += 1) {
       if (!pendingSystemNote && isSystemGeneratedDocumentNoteRow(rows[r])) {
         pendingSystemNote = true;
@@ -5531,9 +6946,27 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         const fn = extractUnpaidAccumulationsFootnoteText(rows[r]);
         if (fn) pendingUnpaidFootnote = fn;
       }
+      if (!pendingWhereverApplicableFootnote) {
+        const whereverFn = extractFormCWhereverApplicableFootnoteText(rows[r]);
+        if (whereverFn) pendingWhereverApplicableFootnote = whereverFn;
+      }
       if (isForm14RajasthanFootnoteRow(rows[r]) || isForm14RajasthanFootnoteText(rows[r]?.[0])) {
         const fn = extractForm14RajasthanFootnoteText(rows[r]) || String(rows[r]?.[0] || '').trim();
         if (fn) pushForm14RjFootnote(fn);
+      }
+      if (
+        !looksLikeFormAGJSheet &&
+        (isFormDGJGujaratOuterFootnoteRow(rows[r]) ||
+          isFormDGJGujaratOuterFootnoteText(rows[r]?.[0]))
+      ) {
+        pushFormDGJFootnote(rows[r]);
+      }
+      if (
+        !looksLikeFormBGJSheet &&
+        (isFormAGJGujaratOuterFootnoteRow(rows[r]) ||
+          isFormAGJGujaratOuterFootnoteText(rows[r]?.[0]))
+      ) {
+        pushFormAGJFootnote(rows[r]);
       }
     }
   }
@@ -5545,8 +6978,18 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   if (looksLikeFormCLwfSheet) {
     pendingSystemNote = true;
   }
-  if (looksLikeFormCRajasthanSheet) {
+  if (looksLikeFormCRajasthanSheet && !looksLikeFormCGJSheet) {
     pendingUnpaidFootnote = FORM_C_RJ_FOOTNOTE;
+    pendingSystemNote = true;
+  }
+  // Form C GJ: always keep "*Wherever applicable" outside the table box; never RJ damage note.
+  if (looksLikeFormCGJSheet) {
+    if (!pendingWhereverApplicableFootnote) {
+      pendingWhereverApplicableFootnote = FORM_C_GJ_WHEREVER_APPLICABLE_FOOTNOTE;
+    }
+    if (isFormCDamageLossFineFootnoteText(pendingUnpaidFootnote)) {
+      pendingUnpaidFootnote = '';
+    }
     pendingSystemNote = true;
   }
 
@@ -5561,20 +7004,104 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     pendingSystemNote = true;
   }
 
-  if (pendingUnpaidFootnote) {
+  // Form D GJ: always keep electronic-format / Governor notes outside the muster-roll box.
+  if (looksLikeFormDGJSheet) {
+    FORM_DGJ_GJ_OUTER_FOOTNOTES.forEach((note) => pushFormDGJFootnote(note));
+    pendingSystemNote = true;
+  }
+
+  // Form A GJ: always keep age / skill / electronic / wherever notes outside the employee box.
+  if (looksLikeFormAGJSheet && !looksLikeFormBGJSheet) {
+    FORM_AGJ_GJ_OUTER_FOOTNOTES.forEach((note) => pushFormAGJFootnote(note));
+    pendingSystemNote = true;
+    // Prefer Form A ***Wherever applicable over Form C *Wherever applicable.
+    pendingWhereverApplicableFootnote = '';
+  }
+
+  // Form B GJ Excel model: system-generated note only (no Form A footnotes).
+  if (looksLikeFormBGJSheet) {
+    pendingFormAGJFootnotes.length = 0;
+    pendingWhereverApplicableFootnote = '';
+    pendingSystemNote = true;
+  }
+
+  if (pendingWhereverApplicableFootnote) {
     y += 8;
+    paintMetaLine(pendingWhereverApplicableFootnote, { bold: false, size: 8, align: 'left' });
+  }
+  if (pendingUnpaidFootnote) {
+    y += pendingWhereverApplicableFootnote ? 4 : 8;
     paintMetaLine(pendingUnpaidFootnote, { bold: false, size: 8, align: 'left' });
   }
   if (pendingForm14RjFootnotes.length) {
-    y += pendingUnpaidFootnote ? 4 : 8;
+    y += pendingUnpaidFootnote || pendingWhereverApplicableFootnote ? 4 : 8;
     pendingForm14RjFootnotes.forEach((fn, idx) => {
       if (idx > 0) y += 2;
       paintMetaLine(fn, { bold: false, size: 8, align: 'left' });
     });
   }
+  if (pendingFormDGJFootnotes.length) {
+    y +=
+      pendingUnpaidFootnote ||
+      pendingWhereverApplicableFootnote ||
+      pendingForm14RjFootnotes.length
+        ? 4
+        : 8;
+    // Keep * / ** / Governor order stable.
+    const ordered = FORM_DGJ_GJ_OUTER_FOOTNOTES.filter((canon) =>
+      pendingFormDGJFootnotes.some(
+        (t) => normalizeFormDGJFootnoteCompare(t) === normalizeFormDGJFootnoteCompare(canon)
+      )
+    );
+    const extras = pendingFormDGJFootnotes.filter(
+      (t) =>
+        !FORM_DGJ_GJ_OUTER_FOOTNOTES.some(
+          (canon) => normalizeFormDGJFootnoteCompare(t) === normalizeFormDGJFootnoteCompare(canon)
+        )
+    );
+    [...ordered, ...extras].forEach((fn, idx) => {
+      if (idx > 0) y += 2;
+      paintMetaLine(fn, { bold: false, size: 8, align: 'left' });
+    });
+  }
+  if (pendingFormAGJFootnotes.length) {
+    y +=
+      pendingUnpaidFootnote ||
+      pendingWhereverApplicableFootnote ||
+      pendingForm14RjFootnotes.length ||
+      pendingFormDGJFootnotes.length
+        ? 4
+        : 8;
+    const ordered = FORM_AGJ_GJ_OUTER_FOOTNOTES.filter((canon) =>
+      pendingFormAGJFootnotes.some(
+        (t) => normalizeFormAGJFootnoteCompare(t) === normalizeFormAGJFootnoteCompare(canon)
+      )
+    );
+    const extras = pendingFormAGJFootnotes.filter(
+      (t) =>
+        !FORM_AGJ_GJ_OUTER_FOOTNOTES.some(
+          (canon) => normalizeFormAGJFootnoteCompare(t) === normalizeFormAGJFootnoteCompare(canon)
+        )
+    );
+    [...ordered, ...extras].forEach((fn, idx) => {
+      if (idx > 0) y += 2;
+      paintMetaLine(fn, { bold: false, size: looksLikeFormAGJSheet ? 9 : 8, align: 'left' });
+    });
+  }
   if (pendingSystemNote) {
-    y += pendingUnpaidFootnote || pendingForm14RjFootnotes.length ? 4 : 8;
-    paintMetaLine(SYSTEM_GENERATED_DOCUMENT_NOTE, { bold: false, size: 9, align: 'center' });
+    y +=
+      pendingUnpaidFootnote ||
+      pendingWhereverApplicableFootnote ||
+      pendingForm14RjFootnotes.length ||
+      pendingFormDGJFootnotes.length ||
+      pendingFormAGJFootnotes.length
+        ? 4
+        : 8;
+    paintMetaLine(SYSTEM_GENERATED_DOCUMENT_NOTE, {
+      bold: false,
+      size: looksLikeFormBGJSheet ? 10 : 9,
+      align: 'center',
+    });
   }
 
   return y + 12;
@@ -5601,8 +7128,79 @@ export async function buildStatutoryDraftPdfBlob({
     try {
       const matrices = await collectWorkbookMatrices(file.arrayBuffer, file.label);
       matrices.forEach((m) => {
-        if (excelFiles.length > 1 && (!m.name || m.name === 'Sheet1')) {
+        // Prefer draft Excel / ZIP entry name so Form_XIX_GJ is visible to detectors
+        // even when the worksheet tab is still "Sheet1".
+        if (file.label && (!m.name || m.name === 'Sheet1' || looksLikeExcelSheetTabName(m.name))) {
           m.name = file.label;
+        }
+        m.fileName = file.label || fileName || m.fileName || '';
+        // Karnataka XIX: official dotted Excel → boxed wage-slip model (image 1).
+        if (
+          looksLikeFormXIXKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName) &&
+          m.formXIXKarnatakaLayout !== true
+        ) {
+          applyFormXIXKarnatakaPdfNormalization(
+            m,
+            normalizeFormXIXKarnatakaWageSlipPdfMatrix(
+              m.rows,
+              m.colCount,
+              m.tableStartRow || 0,
+              m.metaLines
+            )
+          );
+        }
+        // Gujarat XIX: force normalize using file name hint (Sheet1 alone is not enough).
+        if (
+          looksLikeFormXIXGJWageSlipPdfContext(m.metaLines, m.rows, m.name, m.fileName) &&
+          m.formXIXGJBoxedLayout !== true
+        ) {
+          const normalized = normalizeFormXIXGJWageSlipPdfMatrix(
+            m.rows,
+            m.colCount,
+            m.tableStartRow || 0,
+            m.metaLines
+          );
+          m.rows = normalized.rows;
+          m.colCount = normalized.colCount;
+          m.tableStartRow = normalized.tableStartRow;
+          m.formXIXAPLayout = normalized.formXIXAPLayout === true;
+          m.formXIXAPFooterLines = normalized.formXIXAPFooterLines || [];
+          m.formXIXGJHeaderLines = Array.isArray(normalized.formXIXGJHeaderLines)
+            ? normalized.formXIXGJHeaderLines
+            : [];
+          m.formXIXGJLayout = normalized.formXIXGJLayout === true;
+          m.formXIXGJBoxedLayout = normalized.formXIXGJBoxedLayout === true;
+          if (Array.isArray(normalized.metaLines)) m.metaLines = normalized.metaLines;
+        }
+        // Karnataka Form XIV: official dotted fill-in Excel → 2-column Employment Card.
+        if (
+          looksLikeFormXIVKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName) &&
+          m.formXIVKALayout !== true
+        ) {
+          applyFormXIVKarnatakaPdfNormalization(
+            m,
+            normalizeFormXIVKarnatakaPdfMatrix(
+              m.rows,
+              m.colCount,
+              m.tableStartRow || 0,
+              m.metaLines
+            )
+          );
+        }
+        // Karnataka Form T: combined muster — never Form XIII Register of Workmen.
+        if (
+          looksLikeFormTSEKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName) &&
+          m.formTKALayout !== true
+        ) {
+          applyFormTSEKarnatakaPdfNormalization(
+            m,
+            normalizeFormTSEKarnatakaPdfMatrix(
+              m.rows,
+              m.colCount,
+              m.tableStartRow || 0,
+              m.metaLines
+            )
+          );
         }
         allMatrices.push(m);
       });
@@ -5637,6 +7235,11 @@ export async function buildStatutoryDraftPdfBlob({
   const anyFormW = matricesForPdf.some((m) =>
     looksLikeFormWPdfContext(m.metaLines, m.rows, m.tableStartRow || 0)
   );
+  const anyFormTKA = matricesForPdf.some(
+    (m) =>
+      m.formTKALayout === true ||
+      looksLikeFormTSEKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName)
+  );
   const anyAccidentBook = matricesForPdf.some((m) => {
     const blob = [...(m.metaLines || []), ...(m.rows || []).slice(0, 8).flat(), m.name || '']
       .join(' ')
@@ -5661,16 +7264,22 @@ export async function buildStatutoryDraftPdfBlob({
   const wide =
     (!forcePortraitCard && maxCols > 8) ||
     anyFormW ||
+    anyFormTKA ||
     anyAccidentBook ||
     anyForm25 ||
     anyForm14Rj;
-  // Form W (~30 wage/deduction cols) needs A2 landscape so amounts stay on one line.
+  // Form W (~30 wage/deduction cols) and Form T KA (~40 identity/attendance/wage cols)
+  // need A2 landscape so amounts stay on one line.
   // Form 11 Accident Book (~18 cols with long headers) and other wide registers need A3.
   const veryWide =
-    anyFormW || anyAccidentBook || anyForm25 || (!forcePortraitCard && maxCols > 14);
+    anyFormW ||
+    anyFormTKA ||
+    anyAccidentBook ||
+    anyForm25 ||
+    (!forcePortraitCard && maxCols > 14);
   const doc = new jsPDF({
     unit: 'pt',
-    format: forcePortraitCard ? 'a4' : anyFormW ? 'a2' : veryWide ? 'a3' : 'a4',
+    format: forcePortraitCard ? 'a4' : anyFormW || anyFormTKA ? 'a2' : veryWide ? 'a3' : 'a4',
     orientation: forcePortraitCard ? 'portrait' : wide ? 'landscape' : 'portrait'
   });
 
@@ -5755,8 +7364,18 @@ export const statutoryDraftPdfTestUtils = {
   isFormXIXAPWageSlipPdfContext,
   normalizeFormXIXAPWageSlipPdfMatrix,
   normalizeFormXIXWageSlipPdfMatrix,
+  looksLikeFormXIXGJWageSlipPdfContext,
+  normalizeFormXIXGJWageSlipPdfMatrix,
+  looksLikeFormXIXKarnatakaPdfContext,
+  normalizeFormXIXKarnatakaWageSlipPdfMatrix,
   looksLikeFormXIVEmploymentCardPdfContext,
   normalizeFormXIVEmploymentCardPdfMatrix,
+  looksLikeFormXIVKarnatakaPdfContext,
+  normalizeFormXIVKarnatakaPdfMatrix,
+  looksLikeFormTSEKarnatakaPdfContext,
+  normalizeFormTSEKarnatakaPdfMatrix,
+  getFormTSEKarnatakaHeaderTitles,
+  extractFormTSEKarnatakaHeaderFields,
   isFormXIVEmploymentCardWorkmanLabelText,
   scrubForm11RajasthanTotalHoursPdfColumn,
   trimForm14RajasthanLeadingBlankPdfColumns,
@@ -5796,7 +7415,35 @@ export const statutoryDraftPdfTestUtils = {
   isUnpaidAccumulationsFootnoteRow,
   FORM_C_UNPAID_ACCUMULATIONS_FOOTNOTE,
   FORM_C_RJ_FOOTNOTE,
+  FORM_C_GJ_WHEREVER_APPLICABLE_FOOTNOTE,
+  FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1,
+  FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2,
+  FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE,
+  FORM_DGJ_GJ_OUTER_FOOTNOTES,
+  FORM_AGJ_GJ_AGE_NOTE,
+  FORM_AGJ_GJ_SKILL_NOTE,
+  FORM_AGJ_GJ_ELECTRONIC_NOTE,
+  FORM_AGJ_GJ_WHEREVER_NOTE,
+  FORM_AGJ_GJ_OUTER_FOOTNOTES,
   looksLikeFormCRajasthanPdfContext,
+  looksLikeFormCGJLoanRecoveriesPdfContext,
+  looksLikeFormDGJMusterRollPdfContext,
+  looksLikeFormAGJGujaratPdfContext,
+  looksLikeFormBGJGujaratPdfContext,
+  extractFormBGJMinimumWagesBox,
+  isFormBGJMinimumWagesMetaText,
+  normalizeFormBGJGujaratPdfMatrix,
+  reorderFormBGJPdfHeaderFields,
+  buildFormAGJPdfSplitFieldRows,
+  reorderFormAGJPdfHeaderFields,
+  reorderFormCGJPdfHeaderFields,
+  isStatutoryFieldMetaLine,
+  isFormCWhereverApplicableFootnoteText,
+  isFormCDamageLossFineFootnoteText,
+  isFormDGJGujaratOuterFootnoteText,
+  isFormDGJGujaratOuterFootnoteRow,
+  isFormAGJGujaratOuterFootnoteText,
+  isFormAGJGujaratOuterFootnoteRow,
   isForm14RajasthanOvertimeFootnoteText,
   isForm14RajasthanDayEntriesNoteText,
   isForm14RajasthanFootnoteText,

@@ -2,6 +2,7 @@ import {
   collectUniqueApHeaderLines,
   pickExclusiveApHeaderTitles
 } from './statutoryDraftPdf.apHeaderTitles';
+import { looksLikeFormTSEKarnatakaPdfContext } from './statutoryDraftPdf.formT.KA';
 
 const normalizeFormXIIIText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
@@ -28,18 +29,34 @@ const FORM_XIII_FIELD_SPECS = [
   },
 ];
 
-export const looksLikeFormXIIIAPPdfContext = (metaLines, rows, sheetName = '') => {
+export const looksLikeFormXIIIAPPdfContext = (
+  metaLines,
+  rows,
+  sheetName = '',
+  fileName = ''
+) => {
+  if (looksLikeFormTSEKarnatakaPdfContext(metaLines, rows, sheetName, fileName)) {
+    return false;
+  }
   const blob = [
     ...(metaLines || []),
     ...(rows || []).slice(0, 16).flat(),
     sheetName || '',
+    fileName || '',
   ]
     .map(normalizeFormXIIIText)
     .join(' ')
     .toLowerCase();
   if (!blob) return false;
+  // Numbered Form T "in lieu of" citations mention Form XIII — those are not this form.
+  if (/combined\s+muster\s+roll\s+cum\s+register\s+of\s+wages/.test(blob)) return false;
+  if (/rule\s+24\s*\(\s*9[\s-]*b/.test(blob)) return false;
+  const hasFormXiiiHeading =
+    /(?:^|[^0-9.\s])form\s*[-–]?\s*xiii\b/.test(blob) ||
+    /^form\s*[-–]?\s*xiii\b/.test(blob.trim());
+  const hasNumberedInLieuCitation = /\d+\.\s*form\s*xiii\s+of\s+rules?\s+\d+/.test(blob);
   return (
-    /form\s*[-–]?\s*xiii\b/.test(blob) ||
+    (hasFormXiiiHeading && !hasNumberedInLieuCitation) ||
     (/register\s+of\s+workmen\s+employed\s+by\s+contractor/.test(blob) &&
       /vide\s+rule\s*75/.test(blob))
   );

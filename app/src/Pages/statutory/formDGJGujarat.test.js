@@ -3,10 +3,18 @@ import {
   applyFormDGJGujaratPaidDaysToRows,
   computeFormDGJGujaratRemarksHours,
   FORM_DGJ_GJ_CANONICAL_TABLE_HEADERS,
+  FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1,
+  FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2,
+  FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE,
+  isFormDGJGujaratOuterFootnoteText,
   isFormDGJRemarksNoOfHoursHeader,
   isFormDGJSummaryNoOfDaysHeader,
   readFormDGJGujaratPaidDays,
+  writeFormDGJGujaratOuterFootnotes,
+  writeFormDGJGujaratSystemGeneratedNote,
 } from './formDGJGujarat';
+import ExcelJS from 'exceljs';
+import { excelJSCellHasBorder } from '../../utils/excelTableBorders';
 
 describe('Form D Gujarat Summary No. of Days ← Paid_days', () => {
   test('detects Summary / Summery No. of Days header', () => {
@@ -83,5 +91,64 @@ describe('Form D Gujarat Summary No. of Days ← Paid_days', () => {
     expect(hits).toBe(1);
     expect(rows[0]['Summery No. of Days']).toBe('28');
     expect(rows[0]['Remarks No. of Hours']).toBe('224');
+  });
+});
+
+describe('Form D Gujarat outer footnotes', () => {
+  test('recognizes electronic-format and Governor notes', () => {
+    expect(isFormDGJGujaratOuterFootnoteText(FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1)).toBe(true);
+    expect(isFormDGJGujaratOuterFootnoteText(FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2)).toBe(true);
+    expect(isFormDGJGujaratOuterFootnoteText(FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE)).toBe(true);
+    expect(
+      isFormDGJGujaratOuterFootnoteText('*Not necessary in case of elecrtonic format')
+    ).toBe(true);
+  });
+
+  test('keeps System Generated and footnotes outside the bordered table box', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM D');
+    // Simulate bordered table body rows 20–25 (empty padding under data).
+    for (let r = 20; r <= 25; r += 1) {
+      for (let c = 1; c <= 6; c += 1) {
+        ws.getCell(r, c).border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' },
+        };
+      }
+    }
+    ws.getCell(24, 2).value = 'Rajanish';
+    ws.getCell(30, 1).value = 'This is a System Generated Document';
+    ws.getCell(30, 1).border = {
+      top: { style: 'medium' },
+      left: { style: 'medium' },
+      bottom: { style: 'medium' },
+      right: { style: 'medium' },
+    };
+
+    const sysRow = writeFormDGJGujaratSystemGeneratedNote(ws, {
+      afterRow: 25,
+      startCol: 1,
+      endCol: 6,
+    });
+    expect(sysRow).toBe(26);
+    expect(String(ws.getCell(26, 1).value ?? '')).toBe('This is a System Generated Document');
+    expect(excelJSCellHasBorder(ws.getCell(26, 1))).toBe(false);
+
+    const first = writeFormDGJGujaratOuterFootnotes(ws, {
+      afterRow: sysRow,
+      startCol: 1,
+      endCol: 6,
+    });
+    expect(first).toBe(27);
+    expect(String(ws.getCell(27, 1).value ?? '')).toBe(FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1);
+    expect(String(ws.getCell(28, 1).value ?? '')).toBe(FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2);
+    expect(String(ws.getCell(29, 1).value ?? '')).toBe(FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE);
+    expect(excelJSCellHasBorder(ws.getCell(27, 1))).toBe(false);
+    // Table box rows keep borders.
+    expect(excelJSCellHasBorder(ws.getCell(25, 1))).toBe(true);
+    // Old far System Generated copy removed.
+    expect(String(ws.getCell(30, 1).value ?? '')).toBe('');
   });
 });

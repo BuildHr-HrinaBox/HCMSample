@@ -81,7 +81,7 @@ describe('Form XIX Wage Slip PDF layout', () => {
       ['Signature of the contractor or his Representative'],
     ];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const matrix = sheetToDenseMatrix(ws, 'Form_XIX_Karnataka');
+    const matrix = sheetToDenseMatrix(ws, 'Form_XIX_WageSlip');
 
     expect(
       looksLikeFormXIXWageSlipPdfContext(matrix.metaLines, matrix.rows, matrix.name)

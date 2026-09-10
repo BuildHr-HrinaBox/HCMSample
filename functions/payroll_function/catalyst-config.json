@@ -3,7 +3,13 @@
 		"name": "payroll_function",
 		"stack": "node20",
 		"type": "advancedio",
-		"env_variables": {}
+		"env_variables": {
+			"ZOHO_PAYROLL_CLIENT_ID": "1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA",
+			"ZOHO_PAYROLL_CLIENT_SECRET": "b6d3935145d59974934b981d6291b40af69a3ab150",
+			"ZOHO_PAYROLL_REFRESH_TOKEN": "1000.ab6fc119a4cba66c406d7e2de608ce69.32a06c8fa10a10f261099ac7ec537aa4",
+			"ZOHO_PAYROLL_API_BASE": "https://www.zohoapis.in/payroll/v1",
+			"ZOHO_PAYROLL_ACCOUNTS_URL": "https://accounts.zoho.in/oauth/v2/token"
+		}
 	},
 	"execution": {
 		"main": "index.js"

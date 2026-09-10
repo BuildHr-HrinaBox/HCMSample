@@ -1,18 +1,23 @@
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import {
+  FORM_XIV_GJ_CANONICAL_TABLE_HEADERS,
   FORM_XIV_MP_CANONICAL_TABLE_HEADERS,
+  allocateUniqueFormXIVMPDownloadFileName,
+  buildFormXIVGJNatureLocationWithDesignation,
   buildFormXIVMPPerEmployeeDownload,
   buildFormXIVMPWorkbookWithTemplateStyles,
   detectFormXIVKarnatakaWorksheetLayout,
   detectFormXIVStackedWorkmanLayout,
   finalizeFormXIVMadhyaPradeshWorksheet,
   isFormXIVKarnatakaContext,
+  resolveFormXIVExportVariant,
   resolveFormXIVMPWorkmanFieldPositions,
   resolveFormXIVVariant,
   writeFormXIVMPHeaderFieldsToWorksheet,
   writeFormXIVMPWorkmanFieldsToWorksheet,
 } from './formXIVMPEmploymentCard';
+import { buildKarnatakaPayrollRowResolver } from './form10TamilNadu';
 
 /** Mimic MP Employment Card: ordinals in A, labels in B, values intended for E. */
 async function buildSplitOrdinalStackedTemplate() {
@@ -945,6 +950,50 @@ describe('Form XIV Karnataka ZIP variant and corresponding employees', () => {
     ).toBe('mp');
   });
 
+  it('keeps Madhya Pradesh as mp even when a Gujarat template file/sheet is linked', () => {
+    expect(
+      resolveFormXIVVariant(
+        { title: 'FORM XIV', formXIVVariant: 'gj' },
+        { formName: 'Form XIV - Madhya Pradesh', state: 'Madhya Pradesh' },
+        'Form XIV GJ - Gujarat.xlsx',
+        'Employment Card (Vide Rule 76 of Contract Labour (R&A) Central & Gujarat Rules)'
+      )
+    ).toBe('mp');
+    expect(
+      resolveFormXIVExportVariant(
+        { title: 'FORM XIV', formXIVVariant: 'gj' },
+        { formName: 'Form XIV MP', state: 'Madhya Pradesh' },
+        'Form XIV GJ - Gujarat.xlsx',
+        'Central & Gujarat Rules Date of entry into service'
+      )
+    ).toBe('mp');
+  });
+
+  it('treats Form XIV GJ as gj and prefers live gj over a stale mp stamp', () => {
+    expect(
+      resolveFormXIVVariant(
+        { title: 'FORM XIV' },
+        { formName: 'Form XIV GJ - Gujarat', state: 'Gujarat' },
+        'Form XIV GJ - Gujarat.xlsx',
+        'Employment Card (Vide Rule 76 of Contract Labour (R&A) Central & Gujarat Rules)'
+      )
+    ).toBe('gj');
+    expect(
+      resolveFormXIVExportVariant(
+        { title: 'FORM XIV', formXIVVariant: 'mp' },
+        { formName: 'Form XIV GJ - Gujarat', state: 'Gujarat' },
+        'Form XIV GJ - Gujarat.xlsx',
+        'Central & Gujarat Rules'
+      )
+    ).toBe('gj');
+    expect(allocateUniqueFormXIVMPDownloadFileName('Aditya_Sharma', new Map(), 'gj')).toBe(
+      'Form_XIV_GJ_Aditya_Sharma.xlsx'
+    );
+    expect(allocateUniqueFormXIVMPDownloadFileName('Aditya_Sharma', new Map(), 'mp')).toBe(
+      'Form_XIV_MP_Aditya_Sharma.xlsx'
+    );
+  });
+
   it('zips one Karnataka card per employee with official left-aligned labels', async () => {
     const { wb } = await buildKarnatakaFormXIVTemplate();
     const templateArrayBuffer = await wb.xlsx.writeBuffer();
@@ -1034,5 +1083,321 @@ describe('Form XIV MP finalize must not rewrite Rajasthan Form A', () => {
     expect(String(ws.getCell(8, 3).value || '')).toBe('Suryakanta');
     expect(String(ws.getCell(8, 4).value || '')).toBe('Jana');
     expect(String(ws.getCell(2, 1).value || '')).toMatch(/^FORM A$/i);
+  });
+});
+
+/** Gujarat Form XIV — boxed Employment Card (Vide Rule 76 Central & Gujarat Rules). */
+async function buildGujaratFormXIVTemplate() {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('FORM XIV');
+  for (let c = 1; c <= 13; c += 1) ws.getColumn(c).width = 10;
+  ws.mergeCells(2, 1, 2, 13);
+  ws.getCell(2, 1).value = 'FORM XIV';
+  ws.mergeCells(3, 1, 3, 13);
+  ws.getCell(3, 1).value = 'EMPLOYMENT CARD';
+  ws.mergeCells(4, 1, 4, 13);
+  ws.getCell(4, 1).value = '(Vide Rule 76 of Contract Labour (R&A) Central & Gujarat Rules)';
+  ws.getCell(7, 1).value = 'Name and Address of the Contractor';
+  ws.getCell(7, 7).value = 'Name and Address of the Establishment in/under which Contract is carried on:';
+  ws.mergeCells(9, 1, 11, 6);
+  ws.mergeCells(9, 7, 11, 13);
+  ws.getCell(13, 1).value = 'Nature of work and location of work:';
+  ws.getCell(13, 7).value = 'Name and address of Principal Employer:';
+  ws.mergeCells(15, 1, 17, 6);
+  ws.mergeCells(15, 7, 17, 13);
+  const workman = [
+    [21, '1. Name of the Workman'],
+    [22, '2. S.No. in the Register of Workmen Employed'],
+    [23, '3. Nature of Employment /Designation'],
+    [24, '4. Date of entry into service'],
+    [25, '5. Wage rate (With particulars of unit in case of piece - work)'],
+    [26, '6. Wage period'],
+    [27, '7. Tenure of Employment'],
+    [28, '8. Remarks'],
+  ];
+  workman.forEach(([row, label]) => {
+    ws.getCell(row, 1).value = label;
+    ws.mergeCells(row, 2, row, 6);
+  });
+  ws.getCell(32, 7).value = 'Signature of the Contractor';
+  return { wb, ws };
+}
+
+describe('Form XIV Gujarat boxed download must not become MP', () => {
+  it('rebuilds MP stacked layout when Madhya Pradesh form is linked to a Gujarat template', async () => {
+    const { wb } = await buildGujaratFormXIVTemplate();
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+    const headers = [...FORM_XIV_MP_CANONICAL_TABLE_HEADERS];
+    const result = await buildFormXIVMPWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [
+        {
+          [headers[0]]: 'Laxminarayan Rathore',
+          [headers[1]]: 'VE0273',
+          [headers[2]]: 'Senior Engineer',
+          [headers[3]]: '92570',
+          [headers[4]]: 'July 2026',
+          [headers[5]]: 'From 01 Dec 2025',
+        },
+      ],
+      headersToUse: headers,
+      parsedFormHeader: { title: 'FORM XIV', formXIVVariant: 'gj', fields: [] },
+      formFileName: 'Form XIV - Madhya Pradesh.xlsx',
+      headerFormData: {
+        form_xiv_mp_contractor: 'VAYONA ENERGY PRIVATE LIMITED',
+        form_xiv_mp_establishment: 'Aditya Birla solar power limited',
+        form_xiv_mp_nature_location: 'MP-Aditya Birla Dhar',
+        form_xiv_mp_principal_employer: 'Aditya Birla solar power limited',
+      },
+      rowItem: { formName: 'Form XIV - Madhya Pradesh', state: 'Madhya Pradesh' },
+      sheetText: 'FORM XIV EMPLOYMENT CARD Central & Gujarat Rules',
+    });
+
+    expect(
+      resolveFormXIVExportVariant(
+        { title: 'FORM XIV', formXIVVariant: 'gj' },
+        { formName: 'Form XIV - Madhya Pradesh', state: 'Madhya Pradesh' },
+        'Form XIV GJ - Gujarat.xlsx',
+        'Central & Gujarat Rules'
+      )
+    ).toBe('mp');
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(result.buffer);
+    const ws = outWb.worksheets[0];
+    expect(String(ws.getCell(3, 3).value || '')).toMatch(/see\s+rule\s*76/i);
+    expect(String(ws.getCell(3, 3).value || '')).not.toMatch(/gujarat/i);
+    expect(String(ws.getCell(4, 1).value || '')).not.toMatch(/gujarat/i);
+    expect(String(ws.getCell(6, 2).value || '')).toMatch(/name and address of contractor/i);
+    expect(String(ws.getCell(8, 2).value || '')).toMatch(/establishment/i);
+    expect(String(ws.getCell(14, 2).value || '')).toMatch(/1\s+Name of the workman/i);
+    expect(String(ws.getCell(14, 3).value || '')).toMatch(/Laxminarayan Rathore/i);
+    expect(String(ws.getCell(7, 1).value || '')).not.toMatch(/Name and Address of the Contractor/i);
+    expect(allocateUniqueFormXIVMPDownloadFileName('Laxminarayan_Rathore', new Map(), 'mp')).toBe(
+      'Form_XIV_MP_Laxminarayan_Rathore.xlsx'
+    );
+  });
+
+  it('appends workman designation under Nature and location of work', async () => {
+    const headers = [...FORM_XIV_GJ_CANONICAL_TABLE_HEADERS];
+    expect(
+      buildFormXIVGJNatureLocationWithDesignation('GJ-Amreli', {
+        [headers[2]]: 'Junior Engineer',
+      }, headers)
+    ).toBe('GJ-Amreli\nJunior Engineer');
+
+    const { wb } = await buildGujaratFormXIVTemplate();
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+    const result = await buildFormXIVMPWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [
+        {
+          [headers[0]]: 'Aditya Sharma',
+          [headers[1]]: 'VE0536',
+          [headers[2]]: 'Junior Engineer',
+          [headers[3]]: '01 Dec 2025',
+          [headers[4]]: '59083',
+          [headers[5]]: 'June 2026',
+          [headers[6]]: 'From 01 Dec 2025',
+        },
+      ],
+      headersToUse: headers,
+      parsedFormHeader: { title: 'FORM XIV', formXIVVariant: 'gj', fields: [] },
+      formFileName: 'Form XIV GJ - Gujarat.xlsx',
+      headerFormData: {
+        form_xiv_mp_contractor: 'VAYONA ENERGY',
+        form_xiv_mp_establishment: 'Site A',
+        form_xiv_mp_nature_location: 'GJ-Amreli',
+        form_xiv_mp_principal_employer: 'Principal',
+      },
+      rowItem: { formName: 'Form XIV GJ - Gujarat', state: 'Gujarat' },
+      sheetText: 'FORM XIV EMPLOYMENT CARD Central & Gujarat Rules',
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(result.buffer);
+    const ws = outWb.worksheets[0];
+    const natureBox = String(ws.getCell(15, 1).value || '');
+    expect(natureBox).toMatch(/GJ-Amreli/i);
+    expect(natureBox).toMatch(/Junior Engineer/i);
+  });
+
+  it('keeps Gujarat boxed labels when download was stamped with stale mp variant', async () => {
+    const { wb } = await buildGujaratFormXIVTemplate();
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+    const headers = [...FORM_XIV_GJ_CANONICAL_TABLE_HEADERS];
+    const result = await buildFormXIVMPWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [
+        {
+          [headers[0]]: 'Aditya Sharma',
+          [headers[1]]: 'VE0536',
+          [headers[2]]: 'Engineer',
+          [headers[3]]: '01 Dec 2025',
+          [headers[4]]: '59083',
+          [headers[5]]: 'May 2026',
+          [headers[6]]: 'From 01 Dec 2025',
+        },
+      ],
+      headersToUse: headers,
+      // Reproduce the prior bug: caller hard-coded formXIVVariant to 'mp'.
+      parsedFormHeader: { title: 'FORM XIV', formXIVVariant: 'mp', fields: [] },
+      formFileName: 'Form XIV GJ - Gujarat.xlsx',
+      headerFormData: {
+        form_xiv_mp_contractor: 'VAYONA ENERGY',
+        form_xiv_mp_establishment: 'Site A',
+        form_xiv_mp_nature_location: 'Gujarat',
+        form_xiv_mp_principal_employer: 'Principal',
+      },
+      rowItem: { formName: 'Form XIV GJ - Gujarat', state: 'Gujarat' },
+      sheetText: 'FORM XIV EMPLOYMENT CARD Central & Gujarat Rules',
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(result.buffer);
+    const ws = outWb.worksheets[0];
+    expect(String(ws.getCell(2, 1).value || '')).toMatch(/^FORM XIV$/i);
+    expect(String(ws.getCell(3, 1).value || '')).toMatch(/EMPLOYMENT CARD/i);
+    expect(String(ws.getCell(4, 1).value || '')).toMatch(/Central\s*&\s*Gujarat/i);
+    expect(String(ws.getCell(7, 1).value || '')).toMatch(/Name and Address of the Contractor/i);
+    expect(String(ws.getCell(21, 1).value || '')).toMatch(/1\.\s*Name of the Workman/i);
+    expect(String(ws.getCell(24, 1).value || '')).toMatch(/Date of entry into service/i);
+    expect(String(ws.getCell(32, 7).value || '')).toMatch(/Signature of the Contractor/i);
+    // Must not rewrite into MP even-row stacked labels ("1 Name of the workman" in col B/C).
+    expect(String(ws.getCell(14, 2).value || '')).not.toMatch(/^1\s+Name of the workman/i);
+    expect(String(ws.getCell(14, 3).value || '')).not.toMatch(/Aditya Sharma/i);
+    expect(finalizeFormXIVMadhyaPradeshWorksheet(ws, { formXIVVariant: 'gj' })).toBe(false);
+  });
+
+  it('names multi-employee ZIP members Form_XIV_GJ_* not Form_XIV_MP_*', async () => {
+    const { wb } = await buildGujaratFormXIVTemplate();
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+    const headers = [...FORM_XIV_GJ_CANONICAL_TABLE_HEADERS];
+    const result = await buildFormXIVMPPerEmployeeDownload({
+      templateArrayBuffer,
+      mappedData: [
+        { [headers[0]]: 'Aditya Sharma', [headers[1]]: 'VE0536', [headers[6]]: 'From 01' },
+        { [headers[0]]: 'Ravi Kumar', [headers[1]]: 'VE0537', [headers[6]]: 'From 02' },
+      ],
+      headersToUse: headers,
+      parsedFormHeader: { title: 'FORM XIV', formXIVVariant: 'mp' },
+      formFileName: 'Form XIV GJ - Gujarat.xlsx',
+      headerFormData: { form_xiv_mp_contractor: 'VAYONA' },
+      rowItem: { formName: 'Form XIV GJ', state: 'Gujarat' },
+      sheetText: 'Central & Gujarat Rules',
+    });
+
+    expect(result.fileName).toMatch(/Form_XIV_GJ_-_Gujarat_Employees\.zip$/i);
+    const zip = await JSZip.loadAsync(result.blob);
+    const names = Object.keys(zip.files).filter((name) => /\.xlsx$/i.test(name));
+    expect(names).toHaveLength(2);
+    expect(names.every((name) => name.startsWith('Form_XIV_GJ_'))).toBe(true);
+    expect(names.some((name) => /Aditya_Sharma/i.test(name))).toBe(true);
+  });
+
+  it('rebuilds Gujarat boxed card when Form Master wrongly linked an MP Sheet1 template', async () => {
+    const { wb } = await buildSplitOrdinalStackedTemplate();
+    wb.worksheets[0].name = 'Sheet1';
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+    const headers = [...FORM_XIV_MP_CANONICAL_TABLE_HEADERS];
+    const result = await buildFormXIVMPWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [
+        {
+          'Name of the Workman': 'Laxminarayan Rathore',
+          'S.No. in the Register of Workmen Employed': 'VE0999',
+          'Nature of Employment /Designation': 'Engineer',
+          'Date of entry into service': '01 Dec 2025',
+          'Wage rate (With particulars of unit in case of piece - work)': '92570',
+          'Wage period': 'August 2026',
+          'Tenure of Employment': 'From 01 Dec 2025',
+        },
+      ],
+      headersToUse: headers,
+      parsedFormHeader: { title: 'FORM XIV', formXIVVariant: 'mp', fields: [] },
+      formFileName: 'Form XIV GJ.xlsx',
+      headerFormData: {
+        form_xiv_mp_contractor: 'VAYONA ENERGY',
+        form_xiv_mp_establishment: 'Site GJ',
+        form_xiv_mp_nature_location: 'Gujarat',
+        form_xiv_mp_principal_employer: 'Principal',
+      },
+      rowItem: { formName: 'Form XIV GJ', state: 'Gujarat' },
+      sheetText: '',
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(result.buffer);
+    const ws = outWb.worksheets[0];
+    expect(String(ws.name || '')).toMatch(/FORM XIV/i);
+    expect(String(ws.getCell(2, 1).value || '')).toMatch(/^FORM XIV$/i);
+    expect(String(ws.getCell(3, 1).value || '')).toMatch(/EMPLOYMENT CARD/i);
+    expect(String(ws.getCell(4, 1).value || '')).toMatch(/Central\s*&\s*Gujarat/i);
+    expect(String(ws.getCell(7, 1).value || '')).toMatch(/Name and Address of the Contractor/i);
+    expect(String(ws.getCell(21, 1).value || '')).toMatch(/1\.\s*Name of the Workman/i);
+    expect(String(ws.getCell(24, 1).value || '')).toMatch(/Date of entry into service/i);
+    expect(String(ws.getCell(32, 7).value || '')).toMatch(/Signature of the Contractor/i);
+    // MP stacked residue gone (truncated B labels / workman values parked in C).
+    expect(String(ws.getCell(6, 2).value || '')).not.toMatch(/^Name$/);
+    expect(String(ws.getCell(14, 3).value || '')).not.toMatch(/Laxminarayan/i);
+    expect(String(ws.getCell(21, 2).value || '')).toMatch(/Laxminarayan Rathore/i);
+  });
+
+  it('writes wage rate on the 5. label row even when the label wraps to a continuation line', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM XIV');
+    ws.getCell(2, 1).value = 'FORM XIV';
+    ws.getCell(3, 1).value = 'EMPLOYMENT CARD';
+    ws.getCell(4, 1).value = '(Vide Rule 76 of Contract Labour (R&A) Central & Gujarat Rules)';
+    ws.getCell(7, 1).value = 'Name and Address of the Contractor';
+    ws.mergeCells(9, 1, 11, 6);
+    const workman = [
+      [21, '1. Name of the Workman'],
+      [22, '2. S.No. in the Register of Workmen Employed'],
+      [23, '3. Nature of Employment /Designation'],
+      [24, '4. Date of entry into service'],
+      [25, '5. Wage rate (With particulars of unit in'],
+      [26, 'case of piece - work)'],
+      [27, '6. Wage period'],
+      [28, '7. Tenure of Employment'],
+      [29, '8. Remarks'],
+    ];
+    workman.forEach(([row, label]) => {
+      ws.getCell(row, 1).value = label;
+      // Continuation line has no value box; value merge stays on the "5." row only.
+      if (row !== 26) ws.mergeCells(row, 2, row, 6);
+    });
+
+    const headers = [...FORM_XIV_GJ_CANONICAL_TABLE_HEADERS];
+    writeFormXIVMPWorkmanFieldsToWorksheet(
+      ws,
+      {
+        [headers[0]]: 'Aditya Sharma',
+        [headers[4]]: '92570',
+        [headers[5]]: 'August 2026',
+      },
+      headers,
+      null,
+      { formXIVVariant: 'gj' }
+    );
+
+    expect(String(ws.getCell(25, 1).value || '')).toMatch(/5\.\s*Wage rate/i);
+    expect(String(ws.getCell(26, 1).value || '')).toMatch(/case of piece/i);
+    expect(String(ws.getCell(25, 2).value || '')).toBe('92570');
+    expect(String(ws.getCell(26, 2).value || '')).not.toBe('92570');
+    expect(String(ws.getCell(27, 2).value || '')).toMatch(/August 2026/i);
+  });
+});
+
+describe('Form XIV KA payroll name match', () => {
+  it('matches payroll by first name and last name, including People FirstName-only records', () => {
+    const payroll = [
+      { first_name: 'Ashok', last_name: 'Kumar', gross_pay: 100 },
+      { first_name: 'Ashok', last_name: 'Jangamashetti', gross_pay: 104761 },
+      { first_name: 'Umesh', last_name: 'S O', gross_pay: 71392 },
+    ];
+    const resolve = buildKarnatakaPayrollRowResolver(payroll);
+    expect(resolve({ FirstName: 'Ashok', LastName: 'Jangamashetti' })).toEqual(payroll[1]);
+    expect(resolve({ FirstName: 'Umesh S O' })).toEqual(payroll[2]);
+    expect(resolve({ FirstName: 'Ashok' })).toBeNull();
   });
 });

@@ -34,7 +34,22 @@ module.exports = async (req, res) => {
       return;
     }
 
-    const data = await fetchPeopleRecords({ accessToken, formName, limit, sIndex });
+    const source = await resolveEmployeeSource({ accessToken, formName });
+    const data = await fetchPeopleRecords({
+      accessToken,
+      formName: source.formName,
+      viewName: source.viewName,
+      limit,
+      sIndex,
+    });
+    const apiBase = data.__peopleApiBase || peopleApiBase();
+    const usedForm = data.__peopleForm || source.formName;
+    const usedView = data.__peopleView || source.viewName || '';
+    if (data && typeof data === 'object') {
+      delete data.__peopleApiBase;
+      delete data.__peopleForm;
+      delete data.__peopleView;
+    }
     const count = extractEmployeesFromZohoPage(data).length;
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -42,7 +57,16 @@ module.exports = async (req, res) => {
       JSON.stringify({
         success: true,
         data,
-        meta: { sIndex, limit, count, has_more: count >= limit },
+        meta: {
+          sIndex,
+          limit,
+          count,
+          has_more: count >= limit,
+          apiBase,
+          formName: usedForm,
+          viewName: usedView,
+          warning: smallOrgWarning(count),
+        },
       })
     );
   } catch (error) {
@@ -93,13 +117,9 @@ function sleep(ms) {
 let cachedPeopleAccessToken = null;
 let cachedPeopleAccessTokenExpiresAt = 0;
 
-const DEFAULT_PEOPLE_REFRESH = '1000.03fd78a2572d754881d44af913ae91ab.401c27b0dc0710de4395bbf9eb552bb6';
+const DEFAULT_PEOPLE_REFRESH = '1000.704677e6ac4277dbfaeff78ae2204da0.da9592dac5ffa146fd5224f77e732276';
 const DEFAULT_PEOPLE_CLIENT_ID = '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
 const DEFAULT_PEOPLE_CLIENT_SECRET = 'b6d3935145d59974934b981d6291b40af69a3ab150';
-/** Legacy Catalyst defaults (refresh + client must stay paired). */
-const LEGACY_PEOPLE_REFRESH = '1000.c3023ed55e6a598bfecd433320d55941.f27c9108bf6d8e858213a4336bb345ff';
-const LEGACY_PEOPLE_CLIENT_ID = '1000.ABC3VBH4REB9DC28WYZS3EY5AJD73B';
-const LEGACY_PEOPLE_CLIENT_SECRET = 'f2fca57c9b0436dcc6fe68d0f922015569bba642a8';
 
 function envOr(name, fallback = '') {
   const v = process.env[name];
@@ -107,44 +127,15 @@ function envOr(name, fallback = '') {
 }
 
 function peopleTokenProfiles() {
-  const envRefresh = envOr('ZOHO_PEOPLE_REFRESH_TOKEN', '') || envOr('ZOHO_REFRESH_TOKEN', '');
-  const envClientId = envOr('ZOHO_CLIENT_ID', '');
-  const envClientSecret = envOr('ZOHO_CLIENT_SECRET', '');
-  const profiles = [];
-
-  if (envRefresh && envClientId && envClientSecret) {
-    profiles.push({ refreshToken: envRefresh, clientId: envClientId, clientSecret: envClientSecret });
-  } else if (envRefresh) {
-    profiles.push({
-      refreshToken: envRefresh,
-      clientId: envClientId || DEFAULT_PEOPLE_CLIENT_ID,
-      clientSecret: envClientSecret || DEFAULT_PEOPLE_CLIENT_SECRET,
-    });
-    profiles.push({
-      refreshToken: envRefresh,
-      clientId: LEGACY_PEOPLE_CLIENT_ID,
-      clientSecret: LEGACY_PEOPLE_CLIENT_SECRET,
-    });
-  }
-
-  profiles.push({
-    refreshToken: DEFAULT_PEOPLE_REFRESH,
-    clientId: DEFAULT_PEOPLE_CLIENT_ID,
-    clientSecret: DEFAULT_PEOPLE_CLIENT_SECRET,
-  });
-  profiles.push({
-    refreshToken: LEGACY_PEOPLE_REFRESH,
-    clientId: LEGACY_PEOPLE_CLIENT_ID,
-    clientSecret: LEGACY_PEOPLE_CLIENT_SECRET,
-  });
-
-  const seen = new Set();
-  return profiles.filter((p) => {
-    const key = `${p.refreshToken}|${p.clientId}`;
-    if (!p.refreshToken || !p.clientId || !p.clientSecret || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  // Always use the latest People token. Ignore Catalyst env — it still holds the
+  // sample 5-employee org refresh token and would override this default.
+  return [
+    {
+      refreshToken: DEFAULT_PEOPLE_REFRESH,
+      clientId: DEFAULT_PEOPLE_CLIENT_ID,
+      clientSecret: DEFAULT_PEOPLE_CLIENT_SECRET,
+    },
+  ];
 }
 
 async function refreshPeopleAccessToken() {
@@ -192,15 +183,9 @@ async function refreshPeopleAccessToken() {
   throw lastErr || new Error('Failed to refresh Zoho People access token.');
 }
 
-/** Prefer refresh; only use ZOHO_PEOPLE_ACCESS_TOKEN (not shared ZOHO_ACCESS_TOKEN — often expired/wrong scope). */
+/** Always mint a People access token from the People refresh token (ignore stale env access tokens). */
 async function getAccessToken(options = {}) {
-  const forceRefresh = options.forceRefresh === true;
-  if (!forceRefresh) {
-    const directAccessToken = envOr('ZOHO_PEOPLE_ACCESS_TOKEN', '');
-    if (directAccessToken.length > 10) {
-      return directAccessToken;
-    }
-  } else {
+  if (options.forceRefresh === true) {
     cachedPeopleAccessToken = null;
     cachedPeopleAccessTokenExpiresAt = 0;
   }
@@ -235,38 +220,161 @@ function isZohoNoMoreRecordsError(error, sIndex) {
   return false;
 }
 
-async function fetchPeopleRecords({ accessToken, formName, limit, sIndex, allowAuthRetry = true }) {
-  const base = process.env.ZOHO_PEOPLE_BASE_URL || 'https://people.zoho.in/people/api';
-  const endpoint = `${base}/forms/${encodeURIComponent(formName)}/getRecords`;
+/** Official People API path. Portal UI (`/hrmsvayonaenergy/`) is not an API base — token selects the org. */
+const PEOPLE_API_BASE = 'https://people.zoho.in/people/api';
+
+function peopleApiBase() {
+  const envBase = envOr('ZOHO_PEOPLE_BASE_URL', '').replace(/\/+$/, '');
+  if (envBase && !/hrmsvayonaenergy/i.test(envBase)) return envBase;
+  return PEOPLE_API_BASE;
+}
+
+async function zohoPeopleGet({ accessToken, path, params, allowAuthRetry = true }) {
+  const url = `${peopleApiBase()}${path.startsWith('/') ? path : `/${path}`}`;
   try {
-    const { data } = await axios.get(endpoint, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-      params: {
-        limit: String(limit),
-        sIndex: String(sIndex),
-      },
+    const { data } = await axios.get(url, {
+      headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
+      params,
     });
+    return data;
+  } catch (error) {
+    if (isAuthError(error)) {
+      try {
+        const { data } = await axios.get(url, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          params,
+        });
+        return data;
+      } catch (bearerErr) {
+        if (allowAuthRetry && isAuthError(bearerErr)) {
+          const freshToken = await getAccessToken({ forceRefresh: true });
+          if (freshToken && freshToken !== accessToken) {
+            return zohoPeopleGet({
+              accessToken: freshToken,
+              path,
+              params,
+              allowAuthRetry: false,
+            });
+          }
+        }
+        throw bearerErr;
+      }
+    }
+    throw error;
+  }
+}
+
+function unwrapZohoList(payload) {
+  const data = payload?.data !== undefined ? payload.data : payload;
+  const result = data?.response?.result ?? data?.result ?? data;
+  if (Array.isArray(result)) return result;
+  return [];
+}
+
+function formLinkOf(form) {
+  if (!form || typeof form !== 'object') return '';
+  return String(
+    form.componentName ||
+      form.formLinkName ||
+      form.linkName ||
+      form.sys_name ||
+      form.formName ||
+      ''
+  ).trim();
+}
+
+function viewLinkOf(view) {
+  if (!view || typeof view !== 'object') return '';
+  return String(
+    view.viewName || view.viewLinkName || view.sys_name || view.componentName || ''
+  ).trim();
+}
+
+async function listPeopleForms(accessToken) {
+  try {
+    const payload = await zohoPeopleGet({ accessToken, path: '/forms' });
+    return unwrapZohoList(payload);
+  } catch (err) {
+    console.warn('peopledata_function: list forms failed:', extractZohoError(err));
+    return [];
+  }
+}
+
+async function listPeopleViews(accessToken, formName) {
+  try {
+    const payload = await zohoPeopleGet({
+      accessToken,
+      path: `/forms/${encodeURIComponent(formName)}/views`,
+    });
+    return unwrapZohoList(payload);
+  } catch (err) {
+    console.warn('peopledata_function: list views failed:', formName, extractZohoError(err));
+    return [];
+  }
+}
+
+async function fetchPeopleRecords({ accessToken, formName, limit, sIndex, viewName }) {
+  try {
+    const path = viewName
+      ? `/views/${encodeURIComponent(viewName)}/records`
+      : `/forms/${encodeURIComponent(formName)}/getRecords`;
+    const data = await zohoPeopleGet({
+      accessToken,
+      path,
+      params: { limit: String(limit), sIndex: String(sIndex) },
+    });
+    if (data && typeof data === 'object') {
+      data.__peopleApiBase = peopleApiBase();
+      data.__peopleForm = formName;
+      data.__peopleView = viewName || '';
+    }
     return data;
   } catch (error) {
     if (isZohoNoMoreRecordsError(error, sIndex)) {
       return wrapEmployeesAsZohoResponse([]);
     }
-    if (allowAuthRetry && isAuthError(error)) {
-      const freshToken = await getAccessToken({ forceRefresh: true });
-      if (freshToken && freshToken !== accessToken) {
-        return fetchPeopleRecords({
-          accessToken: freshToken,
-          formName,
-          limit,
-          sIndex,
-          allowAuthRetry: false,
-        });
-      }
-    }
     throw error;
   }
+}
+
+function employeeLikeForms(forms, requestedForm) {
+  const requested = String(requestedForm || 'employee').trim() || 'employee';
+  const named = [];
+  const seen = new Set();
+  const add = (link) => {
+    if (!link || seen.has(link.toLowerCase())) return;
+    seen.add(link.toLowerCase());
+    named.push(link);
+  };
+  add(requested);
+  add('employee');
+  add('P_Employee');
+  add('Employee');
+  forms.forEach((form) => {
+    const link = formLinkOf(form);
+    const label = String(form.labelName || form.displayName || form.formName || '');
+    if (/employee/i.test(`${link} ${label}`)) add(link);
+  });
+  return named;
+}
+
+function preferredViewName(views) {
+  if (!Array.isArray(views) || views.length === 0) return '';
+  const scored = views
+    .map((view) => {
+      const link = viewLinkOf(view);
+      const label = String(view.displayName || view.labelName || link);
+      const blob = `${link} ${label}`.toLowerCase();
+      let score = 0;
+      if (/all/.test(blob)) score += 8;
+      if (/active/.test(blob)) score += 4;
+      if (/employee/.test(blob)) score += 2;
+      if (/team|my /.test(blob)) score -= 5;
+      return { link, score };
+    })
+    .filter((v) => v.link)
+    .sort((a, b) => b.score - a.score);
+  return scored[0]?.link || '';
 }
 
 /** Flatten one Zoho People page into employee objects (mirrors app flattenZohoPeopleEmployees). */
@@ -355,15 +463,65 @@ function wrapEmployeesAsZohoResponse(employees) {
   };
 }
 
+function smallOrgWarning(count) {
+  if (count > 5) return '';
+  return (
+    `This Zoho OAuth token only returned ${count} employee(s). ` +
+    'That is the People organisation tied to the API Console login, not Vayona Energy. ' +
+    'Generate a new Self Client token while logged in as zohoadmin@vayonaenergy.com ' +
+    '(the same account as people.zoho.in/hrmsvayonaenergy). ' +
+    'The Z_people connection in People Developer Space is not used by this Catalyst function.'
+  );
+}
+
+async function resolveEmployeeSource({ accessToken, formName }) {
+  const forms = await listPeopleForms(accessToken);
+  const candidates = employeeLikeForms(forms, formName);
+  let best = { formName: candidates[0] || 'employee', viewName: '', count: -1 };
+
+  for (const link of candidates) {
+    const views = await listPeopleViews(accessToken, link);
+    const viewName = preferredViewName(views);
+    const probes = viewName ? [viewName, ''] : [''];
+    for (const probeView of probes) {
+      try {
+        const page = await fetchPeopleRecords({
+          accessToken,
+          formName: link,
+          viewName: probeView,
+          limit: 200,
+          sIndex: 1,
+        });
+        const count = extractEmployeesFromZohoPage(page).length;
+        if (count > best.count) {
+          best = { formName: link, viewName: probeView, count };
+        }
+        if (count >= 200) return best;
+      } catch (err) {
+        console.warn('peopledata_function: source probe failed:', link, probeView, extractZohoError(err));
+      }
+    }
+  }
+
+  return best;
+}
+
 async function fetchAllPeopleRecords({ accessToken, formName, pageSize }) {
   const limit = clampPageSize(pageSize);
+  const source = await resolveEmployeeSource({ accessToken, formName });
   const merged = [];
   let sIndex = 1;
   let pages = 0;
   const delayMs = Math.max(0, parseInt(process.env.ZOHO_PEOPLE_PAGE_DELAY_MS || '300', 10) || 300);
 
   for (let guard = 0; guard < 500; guard++) {
-    const page = await fetchPeopleRecords({ accessToken, formName, limit, sIndex });
+    const page = await fetchPeopleRecords({
+      accessToken,
+      formName: source.formName,
+      viewName: source.viewName,
+      limit,
+      sIndex,
+    });
     const batch = extractEmployeesFromZohoPage(page);
     pages += 1;
     merged.push(...batch);
@@ -375,6 +533,14 @@ async function fetchAllPeopleRecords({ accessToken, formName, pageSize }) {
 
   return {
     data: wrapEmployeesAsZohoResponse(merged),
-    meta: { total: merged.length, pages, pageSize: limit },
+    meta: {
+      total: merged.length,
+      pages,
+      pageSize: limit,
+      apiBase: peopleApiBase(),
+      formName: source.formName,
+      viewName: source.viewName || '',
+      warning: smallOrgWarning(merged.length),
+    },
   };
 }

@@ -1868,6 +1868,7 @@ const buildFormXIXMPFastZipDownload = async ({
   const rowsForZip = Array.isArray(exportRows) && exportRows.length > 0 ? exportRows : [null];
   const zip = new JSZip();
   const usedNames = new Map();
+  const entryPrefix = resolveFormXIXMPDownloadEntryPrefix(formFileName, parsedFormHeader);
   for (let i = 0; i < rowsForZip.length; i += 1) {
     const empItem = resolveFormXIXMPDownloadEmployeeForRow(rowsForZip[i], employees, i);
     const payrollRow =
@@ -1877,7 +1878,7 @@ const buildFormXIXMPFastZipDownload = async ({
     );
     const xlsxBytes = await buildFormXIXMPFastXlsxBytes(fastTemplate, mergedHeaderData);
     const baseName = resolveFormXIXMPEmployeeDownloadBaseName(rowsForZip[i], hdrs, i);
-    zip.file(allocateUniqueFormXIXMPDownloadFileName(baseName, usedNames), xlsxBytes);
+    zip.file(allocateUniqueFormXIXMPDownloadFileName(baseName, usedNames, entryPrefix), xlsxBytes);
     if (i > 0 && i % 25 === 0) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -2321,12 +2322,30 @@ export function resolveFormXIXMPEmployeeDownloadBaseName(row, headers, fallbackI
   return slug || `Employee_${fallbackIndex + 1}`;
 }
 
-export function allocateUniqueFormXIXMPDownloadFileName(baseName, usedNames) {
+/** Per-employee xlsx prefix — Gujarat uses Form_XIX_GJ; MP (and other shared callers) stay Form_XIX_MP. */
+export function resolveFormXIXMPDownloadEntryPrefix(formFileName, parsedFormHeader) {
+  const nameHint = String(formFileName || parsedFormHeader?.title || '');
+  const parts = [nameHint, parsedFormHeader?.title, parsedFormHeader?.subtitle, parsedFormHeader?.reference]
+    .filter((x) => x != null && String(x).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+  // Prefer explicit GJ markers from the download form name/title (zip already uses Form_XIX_GJ).
+  if (/gujarat/.test(parts) || /form[\s._-]*xix[\s._-]*gj/.test(parts) || /xix[_-]?gj/.test(parts)) {
+    return 'Form_XIX_GJ';
+  }
+  if (isFormXIXGJGujaratWageSlipContext(parsedFormHeader, null, nameHint, '')) {
+    return 'Form_XIX_GJ';
+  }
+  return 'Form_XIX_MP';
+}
+
+export function allocateUniqueFormXIXMPDownloadFileName(baseName, usedNames, filePrefix = 'Form_XIX_MP') {
   const root = String(baseName || 'Employee').trim() || 'Employee';
   const count = usedNames.get(root) || 0;
   usedNames.set(root, count + 1);
   const suffix = count > 0 ? `_${count + 1}` : '';
-  return `Form_XIX_MP_${root}${suffix}.xlsx`;
+  const prefix = String(filePrefix || 'Form_XIX_MP').trim() || 'Form_XIX_MP';
+  return `${prefix}_${root}${suffix}.xlsx`;
 }
 
 export function triggerFormXIXMPZipDownload(blob, fileName) {
@@ -2412,6 +2431,7 @@ export async function buildFormXIXMPPerEmployeeDownload({
 
   const zip = new JSZip();
   const usedNames = new Map();
+  const entryPrefix = resolveFormXIXMPDownloadEntryPrefix(formFileName, parsedFormHeader);
   for (let i = 0; i < rowsForZip.length; i += 1) {
     const empItem = resolveFormXIXMPDownloadEmployeeForRow(rowsForZip[i], employees, i);
     const payrollRow =
@@ -2429,7 +2449,7 @@ export async function buildFormXIXMPPerEmployeeDownload({
     });
     const xlsxBytes = new Uint8Array(await blob.arrayBuffer());
     const baseName = resolveFormXIXMPEmployeeDownloadBaseName(rowsForZip[i], hdrs, i);
-    zip.file(allocateUniqueFormXIXMPDownloadFileName(baseName, usedNames), xlsxBytes);
+    zip.file(allocateUniqueFormXIXMPDownloadFileName(baseName, usedNames, entryPrefix), xlsxBytes);
     if (i > 0 && i % 15 === 0) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }

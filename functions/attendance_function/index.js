@@ -9,9 +9,8 @@ const ZOHO_ATTENDANCE_PAGE_SIZE = 100;
 /**
  * Catalyst function to fetch Zoho People Attendance data.
  * Same model as peopledata_function: getAccessToken then fetch from API.
- * Token model (ZOHOPEOPLE.attendance.ALL / attendance.all, api_domain: https://www.zohoapis.in):
- *   - Use access_token when set (ZOHO_ATTENDANCE_ACCESS_TOKEN) – e.g. when you only have access_token.
- *   - Else use refresh_token to get access_token (ZOHO_ATTENDANCE_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET).
+ * Token model (ZOHOPEOPLE.attendance.ALL, api_domain: https://www.zohoapis.in):
+ *   Always mint an access_token from the attendance refresh_token (access_token expires in 1 hour).
  * Query:
  *   ?sdate=yyyy-MM-dd&edate=yyyy-MM-dd
  *   ?fetch_all=1 (default) – paginate until all employees are loaded
@@ -97,29 +96,44 @@ module.exports = async (req, res) => {
   }
 };
 
-async function getAccessToken() {
-  // 1) When you only have access_token (attendance scope, api_domain https://www.zohoapis.in)
-  const envAccessToken = process.env.ZOHO_ATTENDANCE_ACCESS_TOKEN || process.env.ZOHO_ACCESS_TOKEN;
-  if (envAccessToken && String(envAccessToken).trim().length > 10) {
-    return envAccessToken.trim();
+let cachedAttendanceAccessToken = null;
+let cachedAttendanceAccessTokenExpiresAt = 0;
+
+const DEFAULT_ATTENDANCE_REFRESH =
+  '1000.cd4fc2bc6a91d4c6b08d8fc9a477faf3.85968ede6278b79bc4a7e72d40034efb';
+const DEFAULT_ATTENDANCE_CLIENT_ID = '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
+const DEFAULT_ATTENDANCE_CLIENT_SECRET = 'b6d3935145d59974934b981d6291b40af69a3ab150';
+
+function attendanceTokenProfile() {
+  // Always use the latest attendance token (scope ZOHOPEOPLE.attendance.ALL).
+  // Ignore Catalyst env — a stale access_token expires in 1 hour.
+  return {
+    refreshToken: DEFAULT_ATTENDANCE_REFRESH,
+    clientId: DEFAULT_ATTENDANCE_CLIENT_ID,
+    clientSecret: DEFAULT_ATTENDANCE_CLIENT_SECRET,
+  };
+}
+
+async function getAccessToken(options = {}) {
+  if (options.forceRefresh === true) {
+    cachedAttendanceAccessToken = null;
+    cachedAttendanceAccessTokenExpiresAt = 0;
   }
 
-  // 2) Use refresh_token to get access_token (same model as People)
-  const refreshToken =
-    process.env.ZOHO_ATTENDANCE_REFRESH_TOKEN ||
-    process.env.ZOHO_REFRESH_TOKEN ||
-    '1000.a95c0823eaed5ea94d7ce2b7ba0b7e4a.d1d5b43a69867a70bbbac761cf2f0000';
-  const clientId = process.env.ZOHO_CLIENT_ID || '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
-  const clientSecret = process.env.ZOHO_CLIENT_SECRET || 'b6d3935145d59974934b981d6291b40af69a3ab150';
+  const now = Date.now();
+  if (cachedAttendanceAccessToken && now < cachedAttendanceAccessTokenExpiresAt - 60_000) {
+    return cachedAttendanceAccessToken;
+  }
 
-  if (!refreshToken || !clientId || !clientSecret) {
-    throw new Error('Missing Zoho OAuth env. Set ZOHO_ATTENDANCE_ACCESS_TOKEN (access_token only) or ZOHO_ATTENDANCE_REFRESH_TOKEN + ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET.');
+  const profile = attendanceTokenProfile();
+  if (!profile.refreshToken || !profile.clientId || !profile.clientSecret) {
+    throw new Error('Missing Zoho Attendance OAuth credentials.');
   }
 
   const params = new URLSearchParams({
-    refresh_token: refreshToken,
-    client_id: clientId,
-    client_secret: clientSecret,
+    refresh_token: profile.refreshToken,
+    client_id: profile.clientId,
+    client_secret: profile.clientSecret,
     grant_type: 'refresh_token',
   });
 
@@ -132,16 +146,24 @@ async function getAccessToken() {
   } catch (err) {
     const zoho = err.response && err.response.data;
     if (zoho && (zoho.error === 'invalid_code' || zoho.error === 'invalid_token')) {
-      throw new Error('Invalid or expired refresh token. Set ZOHO_ATTENDANCE_ACCESS_TOKEN to your access_token instead.');
+      throw new Error('Invalid or expired attendance refresh token. Generate a new Self Client token with scope ZOHOPEOPLE.attendance.ALL.');
     }
-    throw new Error(zoho && (zoho.error || zoho.error_description) ? `${zoho.error} - ${zoho.error_description || ''}` : err.message);
+    throw new Error(
+      zoho && (zoho.error || zoho.error_description)
+        ? `${zoho.error} - ${zoho.error_description || ''}`
+        : err.message
+    );
   }
 
-  if (data && data.access_token) {
-    return data.access_token;
+  if (!data?.access_token) {
+    const errorMsg = data?.error || data?.error_description || 'Failed to obtain access token from Zoho.';
+    throw new Error(`Token refresh failed: ${errorMsg}`);
   }
-  const errorMsg = data?.error || data?.error_description || 'Failed to obtain access token from Zoho.';
-  throw new Error(`Token refresh failed: ${errorMsg}`);
+
+  cachedAttendanceAccessToken = data.access_token;
+  const expiresIn = parseInt(data.expires_in, 10) || 3600;
+  cachedAttendanceAccessTokenExpiresAt = now + expiresIn * 1000;
+  return cachedAttendanceAccessToken;
 }
 
 function isZohoNoMoreAttendanceError(error) {
@@ -179,23 +201,54 @@ function assertZohoAttendancePageOk(apiResult, startIndex) {
   return apiResult;
 }
 
-async function fetchAttendancePage({ accessToken, sdate, edate, startIndex, allowEmptyOnEnd = true }) {
+async function fetchAttendancePage({
+  accessToken,
+  sdate,
+  edate,
+  startIndex,
+  allowEmptyOnEnd = true,
+  allowAuthRetry = true,
+}) {
   const base = process.env.ZOHO_ATTENDANCE_API_BASE || 'https://people.zoho.in';
   const endpoint = `${base}/people/api/attendance/getUserReport`;
-  try {
+  const params = {
+    sdate,
+    edate,
+    dateFormat: 'yyyy-MM-dd',
+    startIndex: String(startIndex),
+  };
+
+  const requestWithAuth = async (token, scheme) => {
     const { data } = await axios.get(endpoint, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-      params: {
-        sdate,
-        edate,
-        dateFormat: 'yyyy-MM-dd',
-        startIndex: String(startIndex),
-      },
+      headers: { Authorization: `${scheme} ${token}` },
+      params,
     });
     return assertZohoAttendancePageOk(data, startIndex);
+  };
+
+  try {
+    try {
+      return await requestWithAuth(accessToken, 'Zoho-oauthtoken');
+    } catch (oauthErr) {
+      const status = oauthErr?.response?.status;
+      if (status !== 401 && status !== 403) throw oauthErr;
+      return await requestWithAuth(accessToken, 'Bearer');
+    }
   } catch (error) {
+    const status = error?.response?.status;
+    if (allowAuthRetry && (status === 401 || status === 403)) {
+      const freshToken = await getAccessToken({ forceRefresh: true });
+      if (freshToken && freshToken !== accessToken) {
+        return fetchAttendancePage({
+          accessToken: freshToken,
+          sdate,
+          edate,
+          startIndex,
+          allowEmptyOnEnd,
+          allowAuthRetry: false,
+        });
+      }
+    }
     if (allowEmptyOnEnd && isZohoNoMoreAttendanceError(error)) {
       return wrapAttendanceResponse([]);
     }

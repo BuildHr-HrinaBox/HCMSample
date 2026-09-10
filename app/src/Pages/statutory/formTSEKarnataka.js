@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import {
   applyExcelJSFullBoxBordersToRange,
   clearExcelJSTrailingTableCells,
@@ -1144,6 +1145,10 @@ export function ensureFormTSEKarnatakaSystemGeneratedNoteCentered(
   );
   let noteRow = 0;
   for (let r = 1; r <= 150; r += 1) {
+    const serialA = formTSEExcelJsCellText(worksheet, r, 1);
+    const nameB = formTSEExcelJsCellText(worksheet, r, 2);
+    // Never treat an employee identity row as the footer note (wipes the last name).
+    if (/^\d{1,4}$/.test(serialA) || looksLikeFormTSEEmployeeNameCell(nameB)) continue;
     for (let c = 1; c <= 8; c += 1) {
       const t = formTSEExcelJsCellText(worksheet, r, c);
       if (
@@ -1207,7 +1212,10 @@ export function looksLikeFormTSEKarnatakaWorksheet(worksheet) {
   }
   const monthRow = formTSEExcelJsCellText(worksheet, 9, 1).toLowerCase();
   const nameHeader = formTSEExcelJsCellText(worksheet, 12, 2).toLowerCase();
-  if (/month\s*\/?\s*year/.test(monthRow) && /name\s+of\s+employee/.test(nameHeader)) {
+  if (
+    /month\s*\/?\s*year/.test(monthRow) &&
+    (/name\s+of\s+employee/.test(nameHeader) || /principal\s+employer/.test(nameHeader))
+  ) {
     return true;
   }
   return false;
@@ -1252,11 +1260,51 @@ export async function applyFormTSEKarnatakaExportBordersToBuffer(arrayBuffer, hi
         writeFormTSEKarnatakaClraInLieuLines(worksheet);
         expandFormTSEKarnatakaClraTitleRows(worksheet);
       }
+      restoreFormTSEKarnatakaEmployeeNameColumnHeader(worksheet);
+      const stampRows = hints.mappedData || hints.rows;
+      const stampHeaders = hints.headers || hints.headersToUse || [];
+      if (Array.isArray(stampRows) && stampRows.length > 0) {
+        stampFormTSEKarnatakaEmployeeIdentity(
+          worksheet,
+          stampRows,
+          stampHeaders,
+          hints.employees || []
+        );
+      }
     });
     resetExcelJsWorkbookActiveSheet(workbook);
-    return workbook.xlsx.writeBuffer();
+    const written = await workbook.xlsx.writeBuffer();
+    const stampHeaders = hints.headers || hints.headersToUse || [];
+    const stampRows = overlayFormTSEPeopleNamesOntoRows(
+      hints.mappedData || hints.rows || [],
+      stampHeaders,
+      hints.employees || []
+    );
+    if (Array.isArray(stampRows) && stampRows.length > 0) {
+      return forceFormTSEIdentityCellsInSheetXml(
+        written,
+        stampRows,
+        stampHeaders,
+        hints.employees || []
+      );
+    }
+    return stripFormTSEDataIdentityMergesFromXlsx(written);
   } catch (err) {
     console.warn('Form T Karnataka export borders failed:', err);
+    const stampHeaders = hints.headers || hints.headersToUse || [];
+    const stampRows = overlayFormTSEPeopleNamesOntoRows(
+      hints.mappedData || hints.rows || [],
+      stampHeaders,
+      hints.employees || []
+    );
+    if (Array.isArray(stampRows) && stampRows.length > 0) {
+      return forceFormTSEIdentityCellsInSheetXml(
+        arrayBuffer,
+        stampRows,
+        stampHeaders,
+        hints.employees || []
+      );
+    }
     return arrayBuffer;
   }
 }
@@ -1290,7 +1338,7 @@ export function isFormTSESerialNumberHeader(h) {
   );
 }
 
-export function isFormTSEEmployeeNameHeader(h) {
+export function isFormTSECanonicalEmployeeNameHeader(h) {
   const s = formTSEEmployeeHeaderKeyNorm(h);
   if (!s.includes('name')) return false;
   return (
@@ -1299,6 +1347,16 @@ export function isFormTSEEmployeeNameHeader(h) {
     s.includes('worker') ||
     /nameoftheemployee/.test(s.replace(/\s/g, ''))
   );
+}
+
+/** CLRA leftover: table column 2 labelled "Name and address of principal employer". */
+export function isFormTSECorruptedClraEmployeeNameHeader(h) {
+  const s = formTSEEmployeeHeaderKeyNorm(h);
+  return s.includes('name') && /principal\s*employer/.test(s);
+}
+
+export function isFormTSEEmployeeNameHeader(h) {
+  return isFormTSECanonicalEmployeeNameHeader(h) || isFormTSECorruptedClraEmployeeNameHeader(h);
 }
 
 /** True when rows contain real employee names (not template 1,2,3… index strips). */
@@ -1370,20 +1428,35 @@ export function resolveFormTSERowsForExport({
         .filter((row) => row && typeof row === 'object')
         .map((row) => ({ ...row }))
     : [];
-  if (formTSEDownloadHasSubstantiveRows(fromLive, hdrs)) {
-    return prepareFormTSEExportRows(fromLive, hdrs, hdrs);
+  const overlaid = overlayFormTSEPeopleNamesOntoRows(fromLive, hdrs, employees, helpers);
+  const namedPayroll = overlayFormTSEPayrollOntoRowsByName(overlaid, hdrs, fromLive);
+  if (formTSEDownloadHasSubstantiveRows(namedPayroll, hdrs)) {
+    return prepareFormTSEExportRows(namedPayroll, hdrs, hdrs);
   }
   const fromEmployees = buildFormTSERowsFromEmployees(employees, hdrs, helpers);
   if (!formTSEDownloadHasSubstantiveRows(fromEmployees, hdrs)) {
     return prepareFormTSEExportRows(fromLive, hdrs, hdrs);
   }
-  // Overlay manual edits (e.g. Add Row / typed cells) onto rebuilt employee rows.
+  // Overlay Autofill payroll/edits by FirstName + LastName (not row index).
   const overlay = fromLive.filter((row) => formTSEDownloadHasSubstantiveRows([row], hdrs));
   if (overlay.length === 0) {
     return prepareFormTSEExportRows(fromEmployees, hdrs, hdrs);
   }
+  const findLiveByName = (row) => {
+    const named = getFormTSEKarnatakaEmployeeNameFromRow(row, hdrs);
+    if (!named) return null;
+    return (
+      overlay.find((live) =>
+        personNamesMatch(
+          named,
+          getFormTSEKarnatakaEmployeeNameFromRow(live, hdrs) ||
+            String(live.__employeeLookupName || live.__employeelookupname || '').trim()
+        )
+      ) || null
+    );
+  };
   const merged = fromEmployees.map((row, i) => {
-    const edit = overlay[i];
+    const edit = findLiveByName(row) || overlay[i];
     if (!edit) return row;
     const out = { ...row };
     hdrs.forEach((h) => {
@@ -1392,11 +1465,18 @@ export function resolveFormTSERowsForExport({
     });
     return out;
   });
-  // Append extra manual rows beyond employee count
-  for (let i = fromEmployees.length; i < overlay.length; i += 1) {
-    merged.push({ ...overlay[i] });
+  for (let i = 0; i < overlay.length; i += 1) {
+    const named = getFormTSEKarnatakaEmployeeNameFromRow(overlay[i], hdrs);
+    const already = merged.some((row) =>
+      personNamesMatch(named, getFormTSEKarnatakaEmployeeNameFromRow(row, hdrs))
+    );
+    if (!already) merged.push({ ...overlay[i] });
   }
-  return prepareFormTSEExportRows(merged, hdrs, hdrs);
+  return prepareFormTSEExportRows(
+    overlayFormTSEPayrollOntoRowsByName(merged, hdrs, fromLive),
+    hdrs,
+    hdrs
+  );
 }
 
 export function isFormTSEFatherHusbandHeader(h) {
@@ -1462,6 +1542,32 @@ export function isFormTSEEmployeeIdentityHeader(h) {
   );
 }
 
+export function isFormTSEKarnatakaPayrollRegisterHeader(header, allHeaders = []) {
+  if (!header) return false;
+  if (isFormTSEAttendanceDayHeader(header) || isFormTSEEmployeeIdentityHeader(header)) return false;
+  if (isFormTSEWagesFixedIncludingVDAHeader(header)) return false;
+  if (isFormTSEKarnatakaTotalOtHoursHeader(header)) return true;
+  if (isFormTSEKarnatakaEarnedWageComponentHeader(header)) return true;
+  if (isFormTSEKarnatakaEarningsTotalHeader(header, allHeaders)) return true;
+  if (isFormTSEKarnatakaDeductionTotalHeader(header, allHeaders)) return true;
+  if (isFormTSEKarnatakaNetAmountPayableHeader(header)) return true;
+  const s = formTSEEmployeeHeaderKeyNorm(header);
+  if (!s) return false;
+  if (s.includes('mode') && s.includes('payment')) return true;
+  if (s === 'pf' || s === 'epf') return true;
+  if ((/\bpf\b/.test(s) || s.includes('provident')) && !s.includes('uan') && !s.includes('registration')) {
+    return true;
+  }
+  if (s === 'pt' || s.includes('professional tax') || (s.includes('profession') && s.includes('tax'))) {
+    return true;
+  }
+  if (s.includes('esi') && !s.includes('no') && !s.includes('registration')) return true;
+  if (s.includes('salary adv') || /\bfines?\b/.test(s) || s.includes('damage')) return true;
+  if (s.includes('insurance') || s.includes('society') || s === 'tos') return true;
+  if (s.includes('deduction')) return true;
+  return false;
+}
+
 export function formatFormTSEKarnatakaEmployeeName(emp = {}) {
   const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || emp['First Name'] || '').trim();
   const ln = String(emp.LastName || emp['LastName'] || emp.lastName || emp['Last Name'] || '').trim();
@@ -1505,6 +1611,167 @@ export function getFormTSEKarnatakaRowValueForHeader(row, header) {
   return v == null ? '' : v;
 }
 
+/** Employee name from a modal/export row — never Father / Husband's Name. */
+export function getFormTSEKarnatakaEmployeeNameFromRow(row, headers = []) {
+  if (!row || typeof row !== 'object') return '';
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const fatherHeader =
+    hdrs.find((h) => isFormTSEFatherHusbandHeader(h)) ||
+    Object.keys(row).find((k) => isFormTSEFatherHusbandHeader(k)) ||
+    '';
+  const fatherText = fatherHeader
+    ? String(getFormTSEKarnatakaRowValueForHeader(row, fatherHeader) ?? '').trim()
+    : '';
+  const accept = (text) => {
+    const named = String(text ?? '').trim();
+    if (!looksLikeFormTSEEmployeeNameCell(named)) return '';
+    if (fatherText && named.toLowerCase() === fatherText.toLowerCase()) return '';
+    return named;
+  };
+  const tryHeader = (header) => {
+    if (!header) return '';
+    return accept(getFormTSEKarnatakaRowValueForHeader(row, header));
+  };
+  const pickFrom = (list, predicate) => {
+    for (let i = 0; i < list.length; i += 1) {
+      if (!predicate(list[i])) continue;
+      const named = tryHeader(list[i]);
+      if (named) return named;
+    }
+    return '';
+  };
+  const keys = Object.keys(row).filter((k) => !String(k).startsWith('__'));
+  const fromHeaders =
+    pickFrom(hdrs, isFormTSECanonicalEmployeeNameHeader) ||
+    pickFrom(keys, isFormTSECanonicalEmployeeNameHeader) ||
+    pickFrom(hdrs, isFormTSEEmployeeNameHeader) ||
+    pickFrom(keys, isFormTSEEmployeeNameHeader) ||
+    '';
+  const lookup = accept(row.__employeeLookupName || row.__employeelookupname);
+  // Autofill shows People (__employeeLookupName) even when the Name cell leaked Father ("abc").
+  if (lookup) {
+    if (!fromHeaders) return lookup;
+    if (fromHeaders.toLowerCase() === lookup.toLowerCase()) return lookup;
+    if (fatherText && fromHeaders.toLowerCase() === fatherText.toLowerCase()) return lookup;
+    if (fromHeaders.length <= 3 && lookup.length > fromHeaders.length) return lookup;
+  }
+  return fromHeaders || lookup || '';
+}
+
+/**
+ * Fill Name when the live/export row is missing it (or still has Father "abc")
+ * using People autofill rows. Autofill can show People names while the Name cell is empty.
+ */
+export function overlayFormTSEPeopleNamesOntoRows(rows, headers, employees, helpers = {}) {
+  const list = Array.isArray(rows)
+    ? rows.filter((row) => row && typeof row === 'object').map((row) => ({ ...row }))
+    : [];
+  let hdrs = Array.isArray(headers) ? headers.filter((h) => String(h || '').trim()) : [];
+  if (!hdrs.length && list[0]) {
+    hdrs = Object.keys(list[0]).filter((k) => !String(k).startsWith('__'));
+  }
+  const fromPeople = buildFormTSERowsFromEmployees(employees, hdrs, helpers);
+  const nameHeaders = hdrs.filter((h) => isFormTSEEmployeeNameHeader(h));
+  const fatherHeader = hdrs.find((h) => isFormTSEFatherHusbandHeader(h)) || '';
+  const getFather = (row) =>
+    fatherHeader ? String(getFormTSEKarnatakaRowValueForHeader(row, fatherHeader) ?? '').trim() : '';
+  const getRawName = (row) => {
+    for (let i = 0; i < nameHeaders.length; i += 1) {
+      const v = String(getFormTSEKarnatakaRowValueForHeader(row, nameHeaders[i]) ?? '').trim();
+      if (v) return v;
+    }
+    return String(row?.__employeeLookupName || row?.__employeelookupname || '').trim();
+  };
+  const applyPeopleName = (row, peopleRow) => {
+    if (!peopleRow) return row;
+    const peopleName = getFormTSEKarnatakaEmployeeNameFromRow(peopleRow, hdrs);
+    if (!peopleName) return row;
+    const out = { ...row };
+    if (nameHeaders.length > 0) {
+      nameHeaders.forEach((h) => {
+        out[h] = peopleName;
+      });
+    } else {
+      out['Name of Employee'] = peopleName;
+    }
+    out.__employeeLookupName = peopleName;
+    const peopleFather = getFather(peopleRow);
+    if (peopleFather && fatherHeader && !getFather(out)) out[fatherHeader] = peopleFather;
+    return out;
+  };
+  const fatherValues = new Set();
+  const collectFather = (row) => {
+    const f = getFather(row);
+    if (f) fatherValues.add(f.toLowerCase());
+  };
+  list.forEach(collectFather);
+  fromPeople.forEach(collectFather);
+  const outLen = Math.max(list.length, fromPeople.length);
+  const out = [];
+  for (let i = 0; i < outLen; i += 1) {
+    let row = list[i] ? { ...list[i] } : fromPeople[i] ? { ...fromPeople[i] } : null;
+    if (!row) continue;
+    const prevFather = i > 0 ? getFather(out[i - 1] || list[i - 1] || {}) : '';
+    const named = getFormTSEKarnatakaEmployeeNameFromRow(row, hdrs);
+    const rawName = getRawName(row);
+    const ownFather = getFather(row);
+    const leaked =
+      !named ||
+      (prevFather && rawName && rawName.toLowerCase() === prevFather.toLowerCase()) ||
+      (!ownFather && rawName && fatherValues.has(rawName.toLowerCase()));
+    if (leaked) row = applyPeopleName(row, fromPeople[i]);
+    out.push(row);
+  }
+  return out;
+}
+
+/**
+ * Copy payable days / Basic / HRA / Total / PF / PT onto the row whose
+ * FirstName + LastName match Autofill — never by column index.
+ * Do not copy wages onto a row with no attendance for the month.
+ */
+export function overlayFormTSEPayrollOntoRowsByName(rows, headers, sourceRows = []) {
+  const hdrs = Array.isArray(headers) ? headers.filter((h) => String(h || '').trim()) : [];
+  const list = Array.isArray(rows)
+    ? rows.map((row) => (row && typeof row === 'object' ? { ...row } : row))
+    : [];
+  const sources = (Array.isArray(sourceRows) && sourceRows.length > 0 ? sourceRows : list).filter(
+    (row) => row && typeof row === 'object'
+  );
+  const payrollHeaders = hdrs.filter((h) => isFormTSEKarnatakaPayrollRegisterHeader(h, hdrs));
+  if (!payrollHeaders.length || !list.length) return list;
+  const hasAttendanceBand = listFormTSEAttendanceDayHeaders(hdrs).length > 0;
+  const rowName = (row) =>
+    String(
+      getFormTSEKarnatakaEmployeeNameFromRow(row, hdrs) ||
+        row?.__employeeLookupName ||
+        row?.__employeelookupname ||
+        ''
+    ).trim();
+  const findByName = (named) => {
+    if (!named) return null;
+    return sources.find((src) => {
+      const srcName = rowName(src);
+      return srcName && personNamesMatch(named, srcName);
+    });
+  };
+  return list.map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    const named = rowName(row);
+    const src = findByName(named);
+    const out = { ...row };
+    const canCopyPayroll = src && (!hasAttendanceBand || formTSERowHasAttendanceMarks(row, hdrs));
+    if (canCopyPayroll) {
+      payrollHeaders.forEach((h) => {
+        const v = getFormTSEKarnatakaRowValueForHeader(src, h);
+        if (v == null || String(v).trim() === '') return;
+        out[h] = v;
+      });
+    }
+    return clearFormTSEKarnatakaPayrollIfNoAttendance(out, hdrs);
+  });
+}
+
 export function applyFormTSEKarnatakaEmployeeToRow(row, emp, headers, helpers = {}) {
   if (!row || !emp || !Array.isArray(headers)) return row;
   const {
@@ -1520,8 +1787,19 @@ export function applyFormTSEKarnatakaEmployeeToRow(row, emp, headers, helpers = 
   const setCell = (header, value) => {
     if (!header) return;
     if (onlyEmpty) {
-      const existing = getFormTSEKarnatakaRowValueForHeader(row, header);
-      if (String(existing ?? '').trim() !== '') return;
+      const existing = String(getFormTSEKarnatakaRowValueForHeader(row, header) ?? '').trim();
+      if (existing) {
+        if (!isFormTSEEmployeeNameHeader(header)) return;
+        const fatherHeader = headers.find((h) => isFormTSEFatherHusbandHeader(h));
+        const fatherExisting = fatherHeader
+          ? String(getFormTSEKarnatakaRowValueForHeader(row, fatherHeader) ?? '').trim()
+          : '';
+        const peopleFather = String(fatherName || '').trim();
+        const leaked =
+          (fatherExisting && existing.toLowerCase() === fatherExisting.toLowerCase()) ||
+          (peopleFather && existing.toLowerCase() === peopleFather.toLowerCase());
+        if (!leaked) return;
+      }
     }
     row[header] = sanitizeValue(value);
   };
@@ -1784,7 +2062,20 @@ export function prepareFormTSEDownloadHeaderData(headerFormData, parsedFormHeade
     }
   }
 
-  return applyFormTSEKarnatakaAutofillFromSite(out, siteContext, { onlyEmpty: false });
+  // Prefer values already on the Autofill form. Site context only fills blanks —
+  // never overwrite Establishment / Employer the user can see in the modal.
+  const preserved = {
+    form_t_month_year: String(out.form_t_month_year ?? '').trim(),
+    form_t_establishment_name_address: String(out.form_t_establishment_name_address ?? '').trim(),
+    form_t_employer: String(out.form_t_employer ?? '').trim(),
+  };
+  out = applyFormTSEKarnatakaAutofillFromSite(out, siteContext, { onlyEmpty: true });
+  if (preserved.form_t_month_year) out.form_t_month_year = preserved.form_t_month_year;
+  if (preserved.form_t_establishment_name_address) {
+    out.form_t_establishment_name_address = preserved.form_t_establishment_name_address;
+  }
+  if (preserved.form_t_employer) out.form_t_employer = preserved.form_t_employer;
+  return out;
 }
 
 function fieldLabelMatchesCell(label, cellText) {
@@ -2196,6 +2487,16 @@ export function isFormTSEAttendanceDayHeader(header) {
   return day >= 1 && day <= 31;
 }
 
+/** Autofill attendance marks only — reject payroll leakage (31, NIL, 18563). */
+export function sanitizeFormTSEAttendanceMark(value) {
+  const t = String(value ?? '').trim();
+  if (!t) return '';
+  if (/^enter\s*\d+/i.test(t)) return '';
+  if (/^(nil|n\/a)$/i.test(t)) return '';
+  if (/^-?\d+(\.\d+)?$/.test(t)) return '';
+  return t;
+}
+
 export function listFormTSEAttendanceDayHeaders(headers) {
   const out = [];
   (Array.isArray(headers) ? headers : []).forEach((header) => {
@@ -2204,6 +2505,58 @@ export function listFormTSEAttendanceDayHeaders(headers) {
     out.push({ header, day });
   });
   return out.sort((a, b) => a.day - b.day);
+}
+
+/** True when any ATTENDANCE_1…31 cell has a real mark (P, WO, CL, …). */
+export function formTSERowHasAttendanceMarks(row, headers = []) {
+  if (!row || typeof row !== 'object') return false;
+  const hdrs = Array.isArray(headers) && headers.length
+    ? headers
+    : Object.keys(row).filter((k) => !String(k).startsWith('__'));
+  const dayHeaders = listFormTSEAttendanceDayHeaders(hdrs);
+  if (dayHeaders.length) {
+    return dayHeaders.some(({ header }) =>
+      Boolean(sanitizeFormTSEAttendanceMark(getFormTSEKarnatakaRowValueForHeader(row, header)))
+    );
+  }
+  return Object.keys(row).some(
+    (k) => isFormTSEAttendanceDayHeader(k) && Boolean(sanitizeFormTSEAttendanceMark(row[k]))
+  );
+}
+
+function isFormTSEKarnatakaKeptPayrollHeaderWhenAbsent(header) {
+  if (isFormTSEKarnatakaTotalOtHoursHeader(header)) return true;
+  const s = formTSEEmployeeHeaderKeyNorm(header);
+  return s.includes('mode') && s.includes('payment');
+}
+
+/**
+ * If the person did not attend this month, do not show payroll register
+ * amounts (payable days, Basic, HRA, Total, PF, PT, …). Keep OT NIL.
+ */
+export function clearFormTSEKarnatakaPayrollIfNoAttendance(row, headers = []) {
+  if (!row || typeof row !== 'object') return row;
+  const hdrs = Array.isArray(headers) && headers.length
+    ? headers
+    : Object.keys(row).filter((k) => !String(k).startsWith('__'));
+  if (!listFormTSEAttendanceDayHeaders(hdrs).length) return row;
+  if (formTSERowHasAttendanceMarks(row, hdrs)) return row;
+  hdrs.forEach((h) => {
+    if (!isFormTSEKarnatakaPayrollRegisterHeader(h, hdrs)) return;
+    if (isFormTSEKarnatakaKeptPayrollHeaderWhenAbsent(h)) return;
+    row[h] = '';
+  });
+  return row;
+}
+
+export function applyFormTSEKarnatakaPayrollOnlyWhenAttended(mappedData, headers = []) {
+  if (!Array.isArray(mappedData)) return [];
+  return mappedData.map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    const out = { ...row };
+    clearFormTSEKarnatakaPayrollIfNoAttendance(out, headers);
+    return out;
+  });
 }
 
 /** Consecutive ATTENDANCE_1 … band inside parsed table headers (modal day grid). */
@@ -2685,12 +3038,8 @@ export function prepareFormTSEExportRows(liveRows, exportHeaders, sourceHeaders)
     const rowKeys = Object.keys(rows[0]).filter((k) => !String(k).startsWith('__'));
     const keysMatchExport =
       rowKeys.length === hdrs.length && rowKeys.every((k, i) => k === hdrs[i]);
-    if (!keysMatchExport && rowKeys.length >= Math.min(hdrs.length, 4)) {
-      if (rowKeys.length === hdrs.length) {
-        srcHdrs = rowKeys;
-      } else if (srcHdrs.length !== hdrs.length) {
-        srcHdrs = rowKeys;
-      }
+    if (!keysMatchExport && rowKeys.length === hdrs.length) {
+      srcHdrs = rowKeys;
     }
   }
 
@@ -2707,15 +3056,20 @@ export function prepareFormTSEExportRows(liveRows, exportHeaders, sourceHeaders)
       return colIndex < row.length ? row[colIndex] : '';
     }
     // Prefer Form T key-norm match (strips "(2)" suffixes) — same as the autofill modal UI.
+    if (isFormTSEAttendanceDayHeader(header)) {
+      return sanitizeFormTSEAttendanceMark(getFormTSEKarnatakaRowValueForHeader(row, header));
+    }
     const byFormTKey = getFormTSEKarnatakaRowValueForHeader(row, header);
     if (byFormTKey != null && String(byFormTKey).trim() !== '') return byFormTKey;
     if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
     const srcKey = srcHdrs[colIndex];
-    if (srcKey && Object.prototype.hasOwnProperty.call(row, srcKey)) {
+    const sameField =
+      srcKey && formTSEEmployeeHeaderKeyNorm(srcKey) === formTSEEmployeeHeaderKeyNorm(header);
+    if (sameField && Object.prototype.hasOwnProperty.call(row, srcKey)) {
       const srcVal = row[srcKey];
       if (srcVal != null && String(srcVal).trim() !== '') return srcVal;
     }
-    if (srcKey) {
+    if (sameField) {
       const bySrcKey = getFormTSEKarnatakaRowValueForHeader(row, srcKey);
       if (bySrcKey != null && String(bySrcKey).trim() !== '') return bySrcKey;
     }
@@ -2729,14 +3083,10 @@ export function prepareFormTSEExportRows(liveRows, exportHeaders, sourceHeaders)
         hdrs.slice(0, colIndex + 1).filter((h) => normalize(h) === target).length - 1;
       return row[exact[Math.min(Math.max(occur, 0), exact.length - 1)]];
     }
-    const fuzzy = rowKeys.find((k) => {
-      const nk = normalize(k);
-      return nk && (nk.includes(target) || target.includes(nk));
-    });
-    return fuzzy ? row[fuzzy] : '';
+    return '';
   };
 
-  return alignedRows.map((row, rowIndex) => {
+  const prepared = alignedRows.map((row, rowIndex) => {
     const out = {};
     hdrs.forEach((header, colIndex) => {
       let value = pickRowValue(row, header, colIndex);
@@ -2752,8 +3102,26 @@ export function prepareFormTSEExportRows(liveRows, exportHeaders, sourceHeaders)
       }
       out[header] = value != null ? value : '';
     });
+    if (row && typeof row === 'object' && !Array.isArray(row)) {
+      const lookup = String(row.__employeeLookupName || row.__employeelookupname || '').trim();
+      if (lookup) out.__employeeLookupName = lookup;
+    }
+    const named = getFormTSEKarnatakaEmployeeNameFromRow(
+      { ...(row && typeof row === 'object' && !Array.isArray(row) ? row : {}), ...out },
+      hdrs
+    );
+    if (named) {
+      hdrs.forEach((header) => {
+        if (isFormTSEEmployeeNameHeader(header)) out[header] = named;
+      });
+      out.__employeeLookupName = named;
+    }
     return out;
   });
+  return applyFormTSEKarnatakaPayrollOnlyWhenAttended(
+    overlayFormTSEPayrollOntoRowsByName(prepared, hdrs, rows),
+    hdrs
+  );
 }
 
 export function repairFormTSETableHeadersFromWorkbook(workbook, parsed = {}) {
@@ -2969,42 +3337,634 @@ function clearFormTSEExcelJsDataRowBand(worksheet, rowFrom, rowTo, colThrough = 
   }
 }
 
-function unmergeFormTSEWorksheetRows(worksheet, rowFrom, rowTo) {
-  const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
-  if (merges.length === 0) return;
-  const keep = [];
-  for (let mi = 0; mi < merges.length; mi += 1) {
-    const ref = String(merges[mi] || '');
-    const parts = ref.split(':');
-    if (parts.length !== 2) {
-      keep.push(merges[mi]);
-      continue;
+function formTSEParseMergeRangeLabel(worksheet, label) {
+  const parts = String(label || '').split(':');
+  if (parts.length !== 2) return null;
+  try {
+    const tl = worksheet.getCell(parts[0]);
+    const br = worksheet.getCell(parts[1]);
+    if (!tl || !br) return null;
+    return { top: tl.row, left: tl.col, bottom: br.row, right: br.col };
+  } catch (_) {
+    return null;
+  }
+}
+
+function eachFormTSEWorksheetMerge(worksheet, visit) {
+  if (!worksheet || typeof visit !== 'function') return;
+  const seen = new Set();
+  const add = (top, left, bottom, right) => {
+    if (![top, left, bottom, right].every((n) => Number.isFinite(n) && n >= 1)) return;
+    const key = `${top}:${left}:${bottom}:${right}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    visit({ top, left, bottom, right });
+  };
+  const ingestMergeLike = (merge) => {
+    if (!merge) return;
+    if (typeof merge === 'string') {
+      const parsed = formTSEParseMergeRangeLabel(worksheet, merge);
+      if (parsed) add(parsed.top, parsed.left, parsed.bottom, parsed.right);
+      return;
     }
-    try {
-      const tl = worksheet.getCell(parts[0]);
-      const br = worksheet.getCell(parts[1]);
-      if (!tl || !br) {
-        keep.push(merges[mi]);
-        continue;
-      }
-      if (br.row < rowFrom || tl.row > rowTo) {
-        keep.push(merges[mi]);
-        continue;
-      }
-      if (tl.row < rowFrom && br.row < rowFrom) {
-        keep.push(merges[mi]);
-        continue;
-      }
+    if (typeof merge !== 'object') return;
+    const top = Number(merge.top ?? merge.s?.r ?? merge.tl?.row);
+    const left = Number(merge.left ?? merge.s?.c ?? merge.tl?.col);
+    const bottom = Number(merge.bottom ?? merge.e?.r ?? merge.br?.row);
+    const right = Number(merge.right ?? merge.e?.c ?? merge.br?.col);
+    if (Number.isFinite(top) && Number.isFinite(left)) {
+      add(top, left, Number.isFinite(bottom) ? bottom : top, Number.isFinite(right) ? right : left);
+    }
+  };
+  const ingestCollection = (obj) => {
+    if (!obj) return;
+    if (typeof obj.forEach === 'function') {
       try {
-        worksheet.unMergeCells(ref);
+        obj.forEach((merge) => ingestMergeLike(merge));
       } catch (_) {
-        /* drop the merge from the model below */
+        /* ignore */
       }
+    }
+    if (Array.isArray(obj)) {
+      obj.forEach((merge) => ingestMergeLike(merge));
+      return;
+    }
+    if (typeof obj !== 'object') return;
+    if (obj.merges && obj.merges !== obj) ingestCollection(obj.merges);
+    Object.keys(obj).forEach((addr) => {
+      if (addr === 'merges') return;
+      ingestMergeLike(obj[addr]);
+      const parsed = formTSEParseMergeRangeLabel(worksheet, addr);
+      if (parsed) add(parsed.top, parsed.left, parsed.bottom, parsed.right);
+    });
+  };
+  ingestCollection(worksheet._merges);
+  ingestCollection(worksheet.model?.merges);
+}
+
+function unmergeFormTSEWorksheetRows(worksheet, rowFrom, rowTo) {
+  if (!worksheet || rowFrom < 1 || rowTo < rowFrom) return;
+  const toUnmerge = [];
+  eachFormTSEWorksheetMerge(worksheet, (m) => {
+    if (m.bottom < rowFrom || m.top > rowTo) return;
+    toUnmerge.push(m);
+  });
+  toUnmerge.forEach((m) => {
+    try {
+      worksheet.unMergeCells(m.top, m.left, m.bottom, m.right);
     } catch (_) {
-      keep.push(merges[mi]);
+      /* already unmerged */
+    }
+  });
+}
+
+/** Drop every A–I merge on a data row, including leftover B:C (Name+Father). */
+function stripFormTSEIdentityMergesOnRow(worksheet, excelRow) {
+  if (!worksheet || excelRow < 1) return;
+  formTSEUnmergeCovering(worksheet, excelRow, 1, excelRow, 9);
+  unmergeFormTSEWorksheetRows(worksheet, excelRow, excelRow);
+  for (let c = 1; c <= 9; c += 1) {
+    try {
+      const cell = worksheet.getCell(excelRow, c);
+      const master = cell?.master;
+      if (master?.address) worksheet.unMergeCells(master.address);
+      else if (cell?.isMerged && cell.address) worksheet.unMergeCells(cell.address);
+    } catch (_) {
+      /* already unmerged */
     }
   }
-  if (worksheet.model) worksheet.model.merges = keep;
+  try {
+    worksheet.unMergeCells(excelRow, 2, excelRow, 3);
+  } catch (_) {
+    /* no B:C merge */
+  }
+  try {
+    worksheet.unMergeCells(excelRow, 1, excelRow, 9);
+  } catch (_) {
+    /* no A:I merge */
+  }
+  try {
+    worksheet.unMergeCells(`B${excelRow}:C${excelRow}`);
+  } catch (_) {
+    /* no B:C address merge */
+  }
+  const merges = worksheet.model?.merges;
+  if (Array.isArray(merges)) {
+    worksheet.model.merges = merges.filter((label) => {
+      const parsed = formTSEParseMergeRangeLabel(worksheet, label);
+      if (!parsed) return true;
+      if (parsed.bottom < excelRow || parsed.top > excelRow) return true;
+      if (parsed.right < 1 || parsed.left > 9) return true;
+      return false;
+    });
+  }
+}
+
+function unmergeAllFormTSEDataIdentityBands(worksheet) {
+  if (!worksheet) return;
+  const rowTo = Math.max(80, Number(worksheet.rowCount) || 40);
+  for (let r = 14; r <= rowTo; r += 1) {
+    stripFormTSEIdentityMergesOnRow(worksheet, r);
+  }
+}
+
+function formTSEA1ColLettersToNumber(letters) {
+  let n = 0;
+  const s = String(letters || '').toUpperCase();
+  for (let i = 0; i < s.length; i += 1) {
+    const code = s.charCodeAt(i);
+    if (code < 65 || code > 90) return 0;
+    n = n * 26 + (code - 64);
+  }
+  return n;
+}
+
+function formTSEMergeRefHitsDataIdentity(ref) {
+  const parts = String(ref || '').split(':');
+  if (parts.length !== 2) return false;
+  const parse = (addr) => {
+    const m = String(addr || '').trim().match(/^([A-Z]+)(\d+)$/i);
+    if (!m) return null;
+    return { col: formTSEA1ColLettersToNumber(m[1]), row: Number(m[2]) };
+  };
+  const a = parse(parts[0]);
+  const b = parse(parts[1]);
+  if (!a || !b) return false;
+  const top = Math.min(a.row, b.row);
+  const bottom = Math.max(a.row, b.row);
+  const left = Math.min(a.col, b.col);
+  const right = Math.max(a.col, b.col);
+  if (bottom < 15 || top > 120) return false;
+  return left <= 3 && right >= 2;
+}
+
+function formTSEWorksheetXmlPaths(zip) {
+  return Object.keys(zip.files || {}).filter((p) => /xl\/worksheets\/sheet[^/]*\.xml$/i.test(p));
+}
+
+/** Drop Name/Father data-row merges and keep mergeCells count in sync. */
+function rewriteFormTSESheetIdentityMergesXml(xml) {
+  if (!xml) return xml;
+  return String(xml).replace(/<mergeCells\b[^>]*>[\s\S]*?<\/mergeCells>/gi, (block) => {
+    const tags = [];
+    const re = /<mergeCell\b[^>]*\/>|<mergeCell\b[^>]*>\s*<\/mergeCell>/gi;
+    let m;
+    while ((m = re.exec(block))) {
+      const refM = m[0].match(/\bref\s*=\s*["']([^"']+)["']/i);
+      if (!refM) continue;
+      if (formTSEMergeRefHitsDataIdentity(refM[1])) continue;
+      tags.push(m[0].replace(/>\s*<\/mergeCell>/i, '/>'));
+    }
+    if (tags.length === 0) return '';
+    return `<mergeCells count="${tags.length}">${tags.join('')}</mergeCells>`;
+  });
+}
+
+/** Official Form T_KA keeps B20:C20 merged in sheet XML even after ExcelJS unMergeCells. */
+export async function stripFormTSEDataIdentityMergesFromXlsx(arrayBuffer) {
+  if (!arrayBuffer || arrayBuffer.byteLength < 32) return arrayBuffer;
+  try {
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const paths = formTSEWorksheetXmlPaths(zip);
+    let touched = false;
+    for (let i = 0; i < paths.length; i += 1) {
+      const path = paths[i];
+      const file = zip.file(path);
+      if (!file) continue;
+      const xml = await file.async('string');
+      const next = rewriteFormTSESheetIdentityMergesXml(xml);
+      if (next !== xml) {
+        touched = true;
+        zip.file(path, next);
+      }
+    }
+    if (!touched) return arrayBuffer;
+    return zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+  } catch (_) {
+    return arrayBuffer;
+  }
+}
+
+function formTSEXmlEscapeText(text) {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formTSESheetXmlCellStyleId(xml, ref) {
+  if (!xml || !ref) return '';
+  const cellRe = new RegExp(
+    `<c\\b(?=[^>]*\\br=["']${ref}["'])[^>]*>[\\s\\S]*?</c>|<c\\b(?=[^>]*\\br=["']${ref}["'])[^>]*/>`,
+    'i'
+  );
+  const existing = xml.match(cellRe);
+  const style = existing && existing[0].match(/\bs="([^"]+)"/i);
+  return style ? style[1] : '';
+}
+
+/** Row 20 Name/Father sat on the Date: merge — reuse a data-row xf so Father "abc" is centered. */
+function formTSEIdentityXmlStyleId(xml, ref) {
+  const col = String(ref || '').replace(/\d+$/i, '');
+  const rowNum = Number(String(ref || '').replace(/^[A-Z]+/i, ''));
+  const own = formTSESheetXmlCellStyleId(xml, ref);
+  const preferNeighbor = rowNum === 20 || !own;
+  if (!preferNeighbor) return own;
+  const probes = [rowNum - 1, rowNum + 1, 19, 18, 16, 15, 21]
+    .filter((r) => Number.isFinite(r) && r >= 15 && r !== rowNum)
+    .map((r) => `${col}${r}`);
+  for (let i = 0; i < probes.length; i += 1) {
+    const id = formTSESheetXmlCellStyleId(xml, probes[i]);
+    if (id) return id;
+  }
+  return own;
+}
+
+function formTSEReplaceSheetCellInline(xml, ref, text) {
+  const escaped = formTSEXmlEscapeText(text);
+  const cellRe = new RegExp(
+    `<c\\b(?=[^>]*\\br=["']${ref}["'])[^>]*>[\\s\\S]*?</c>|<c\\b(?=[^>]*\\br=["']${ref}["'])[^>]*/>`,
+    'i'
+  );
+  const existing = xml.match(cellRe);
+  const sId = formTSEIdentityXmlStyleId(xml, ref);
+  const sAttr = sId ? ` s="${sId}"` : '';
+  const spaceAttr = /^\s|\s$/.test(String(text ?? '')) ? ' xml:space="preserve"' : '';
+  const cell = `<c r="${ref}"${sAttr} t="inlineStr"><is><t${spaceAttr}>${escaped}</t></is></c>`;
+  if (existing) return xml.replace(cellRe, cell);
+  const rowNum = String(ref).replace(/^[A-Z]+/i, '');
+  const rowOpen = new RegExp(`(<row\\b[^>]*\\br=["']${rowNum}["'][^>]*>)`, 'i');
+  if (rowOpen.test(xml)) return xml.replace(rowOpen, `$1${cell}`);
+  return xml;
+}
+
+function collectFormTSEIdentityXmlAssignments(list, hdrs, fatherHeader) {
+  const assignments = [];
+  const startRow = 15;
+  const pushPair = (excelRow, row) => {
+    if (!row || excelRow < 1) return;
+    const named = getFormTSEKarnatakaEmployeeNameFromRow(row, hdrs);
+    const father = fatherHeader
+      ? String(getFormTSEKarnatakaRowValueForHeader(row, fatherHeader) ?? '').trim()
+      : '';
+    if (named) assignments.push({ ref: `B${excelRow}`, text: named });
+    assignments.push({ ref: `C${excelRow}`, text: father });
+  };
+  list.forEach((row, i) => pushPair(startRow + i, row));
+  if (list[5]) pushPair(20, list[5]);
+  return assignments;
+}
+
+/**
+ * Last-pass write of Name/Father into sheet XML. Must not ExcelJS-writeBuffer
+ * afterwards — that recreates the official B20:C20 merge and puts Father ("abc")
+ * in the Name cell that Excel actually opens.
+ */
+export async function forceFormTSEIdentityCellsInSheetXml(arrayBuffer, rows, headers = [], employees = []) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const list = overlayFormTSEPeopleNamesOntoRows(
+    (Array.isArray(rows) ? rows : []).filter((row) => row && typeof row === 'object'),
+    hdrs,
+    employees || []
+  );
+  if (!arrayBuffer || arrayBuffer.byteLength < 32 || list.length === 0) return arrayBuffer;
+  const fatherHeader =
+    hdrs.find((h) => isFormTSEFatherHusbandHeader(h)) ||
+    Object.keys(list[0] || {}).find((k) => isFormTSEFatherHusbandHeader(k)) ||
+    '';
+  const assignments = collectFormTSEIdentityXmlAssignments(list, hdrs, fatherHeader);
+  if (assignments.length === 0) return arrayBuffer;
+  try {
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const paths = formTSEWorksheetXmlPaths(zip);
+    for (let i = 0; i < paths.length; i += 1) {
+      const file = zip.file(paths[i]);
+      if (!file) continue;
+      let xml = await file.async('string');
+      xml = rewriteFormTSESheetIdentityMergesXml(xml);
+      assignments.forEach(({ ref, text }) => {
+        xml = formTSEReplaceSheetCellInline(xml, ref, text);
+      });
+      zip.file(paths[i], xml);
+    }
+    return zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+  } catch (err) {
+    console.warn('Form T identity XML stamp failed:', err);
+    return arrayBuffer;
+  }
+}
+
+function unmergeFormTSEIdentityBandOnRow(worksheet, excelRow) {
+  stripFormTSEIdentityMergesOnRow(worksheet, excelRow);
+}
+
+/**
+ * Write Name (col B) and Father (col C) onto physical cells after unmerging.
+ * Official Form T_KA puts a B:C merge on the Date: footer; employee 6 lands there
+ * and Father ("abc") replaces Ashok unless this runs last.
+ */
+function applyFormTSEIdentityCellAlignment(cell, template) {
+  if (!cell) return;
+  const from =
+    template && template.alignment && typeof template.alignment === 'object'
+      ? template.alignment
+      : {};
+  const alignment = {
+    ...(cell.alignment || {}),
+    horizontal: from.horizontal || 'center',
+    vertical: from.vertical || 'middle',
+    wrapText: from.wrapText === true,
+    indent: 0,
+  };
+  cell.alignment = alignment;
+  try {
+    const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+    cell.style = { ...prev, alignment: { ...(prev.alignment || {}), ...alignment } };
+  } catch (_) {
+    /* alignment property is enough */
+  }
+}
+
+function writeFormTSEPhysicalNameAndFather(worksheet, excelRow, name, father) {
+  if (!worksheet || excelRow < 1) return;
+  const nameText = name == null ? '' : String(name).trim();
+  const fatherText = father == null ? '' : String(father).trim();
+  const templateRow = excelRow > 15 ? excelRow - 1 : excelRow + 1;
+  const assign = () => {
+    stripFormTSEIdentityMergesOnRow(worksheet, excelRow);
+    const fatherCell = worksheet.getCell(excelRow, 3);
+    const nameCell = worksheet.getCell(excelRow, 2);
+    fatherCell.value = fatherText;
+    nameCell.value = nameText;
+    applyFormTSEIdentityCellAlignment(fatherCell, worksheet.getCell(templateRow, 3));
+    applyFormTSEIdentityCellAlignment(nameCell, worksheet.getCell(templateRow, 2));
+  };
+  assign();
+  const nameNow = formTSEExcelJsCellText(worksheet, excelRow, 2);
+  const fatherNow = formTSEExcelJsCellText(worksheet, excelRow, 3);
+  const nameLost = nameText && nameNow.toLowerCase() !== nameText.toLowerCase();
+  const fatherLostInName =
+    fatherText &&
+    !fatherNow &&
+    nameNow.toLowerCase() === fatherText.toLowerCase();
+  if (nameLost || fatherLostInName) assign();
+}
+
+/** Date / signature / system-generated row that must stay below employee data. */
+function findFormTSEKarnatakaSheetFooterRow(worksheet, fromRow = 14) {
+  if (!worksheet) return 0;
+  const maxR = Math.max(160, Number(worksheet.rowCount) || 0);
+  for (let r = Math.max(1, fromRow); r <= maxR; r += 1) {
+    const a = formTSEExcelJsCellText(worksheet, r, 1).toLowerCase();
+    let line = a;
+    for (let c = 2; c <= 5; c += 1) {
+      const t = formTSEExcelJsCellText(worksheet, r, c).toLowerCase();
+      if (t) line += ` ${t}`;
+    }
+    if (
+      /^date\s*:?$/.test(a) ||
+      /^date\s*:/.test(a) ||
+      /\bdate\s*:/.test(line) ||
+      /system\s+generated/.test(line) ||
+      /authorised\s+signatory|authorized\s+signatory/.test(line) ||
+      /signature\s+of\s+employer/.test(line)
+    ) {
+      return r;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Make room for every employee row and flatten leftover template merges.
+ * ExcelJS getCell() on a B:C merge writes Name and Father into the same cell, so
+ * the last employee name becomes Father ("abc") in the downloaded Excel.
+ */
+function ensureFormTSEKarnatakaDataRowCapacity(worksheet, dataStartRow, rowCount, footerRowHint = 0) {
+  if (!worksheet || rowCount < 1 || dataStartRow < 1) return Number(footerRowHint) || 0;
+  const lastDataRow = dataStartRow + rowCount - 1;
+  let footerRow =
+    Number(footerRowHint) > 0
+      ? Number(footerRowHint)
+      : findFormTSEKarnatakaSheetFooterRow(worksheet, dataStartRow);
+  const unmergeTo = Math.max(lastDataRow + 6, footerRow || lastDataRow);
+  unmergeFormTSEWorksheetRows(worksheet, dataStartRow, unmergeTo);
+  for (let r = dataStartRow; r <= unmergeTo; r += 1) {
+    stripFormTSEIdentityMergesOnRow(worksheet, r);
+  }
+  footerRow = findFormTSEKarnatakaSheetFooterRow(worksheet, dataStartRow) || footerRow;
+  // Official Form T_KA: Date: + B:C merge is always Excel row 20 (6th employee).
+  stripFormTSEIdentityMergesOnRow(worksheet, 20);
+  try {
+    worksheet.unMergeCells('B20:C20');
+  } catch (_) {
+    /* no B20:C20 */
+  }
+  if (
+    dataStartRow <= 20 &&
+    lastDataRow >= 20 &&
+    typeof worksheet.spliceRows === 'function'
+  ) {
+    const a20 = formTSEExcelJsCellText(worksheet, 20, 1);
+    if (/^date\s*:/i.test(a20) || !/^\d{1,4}$/.test(a20)) {
+      try {
+        worksheet.spliceRows(20, 0, []);
+        footerRow = footerRow >= 20 ? footerRow + 1 : footerRow;
+      } catch (_) {
+        /* splice can fail on leftover merges */
+      }
+      stripFormTSEIdentityMergesOnRow(worksheet, 20);
+      stripFormTSEIdentityMergesOnRow(worksheet, 21);
+    }
+  }
+  if (footerRow > dataStartRow && typeof worksheet.spliceRows === 'function') {
+    const available = footerRow - dataStartRow;
+    const need = rowCount - available;
+    if (need > 0) {
+      try {
+        const blanks = Array.from({ length: need }, () => []);
+        worksheet.spliceRows(footerRow, 0, ...blanks);
+        footerRow += need;
+      } catch (_) {
+        /* ExcelJS splice can fail on leftover merges — move footer below data instead. */
+      }
+    }
+  }
+  const stillFooter = findFormTSEKarnatakaSheetFooterRow(worksheet, dataStartRow);
+  if (stillFooter > 0 && stillFooter <= lastDataRow) {
+    footerRow = moveFormTSEKarnatakaFooterBelowData(worksheet, lastDataRow, stillFooter);
+  }
+  unmergeFormTSEWorksheetRows(worksheet, dataStartRow, dataStartRow + rowCount - 1);
+  return footerRow;
+}
+
+/** Copy Date / signature / system-generated text below the last employee row. */
+function moveFormTSEKarnatakaFooterBelowData(worksheet, lastDataRow, footerRow) {
+  if (!worksheet || lastDataRow < 1 || footerRow < 1) return footerRow;
+  if (footerRow > lastDataRow) return footerRow;
+  const dest = lastDataRow + 1;
+  unmergeFormTSEWorksheetRows(worksheet, Math.min(footerRow, dest), dest + 2);
+  const maxCol = Math.max(Number(worksheet.columnCount) || 0, 40);
+  for (let c = 1; c <= maxCol; c += 1) {
+    const src = worksheet.getCell(footerRow, c);
+    worksheet.getCell(dest, c).value = src.value == null ? null : src.value;
+    src.value = null;
+  }
+  return dest;
+}
+
+function findFormTSEKarnatakaEmployeeDataStartRow(worksheet) {
+  if (!worksheet) return 15;
+  const rowTo = Math.min(40, Math.max(20, Number(worksheet.rowCount) || 20));
+  let headerRow = 0;
+  for (let r = 1; r <= rowTo; r += 1) {
+    const a = formTSEExcelJsCellText(worksheet, r, 1);
+    const b = formTSEExcelJsCellText(worksheet, r, 2);
+    if (/s\.?\s*no/i.test(a) && /name/i.test(b)) {
+      headerRow = r;
+      break;
+    }
+  }
+  let start = headerRow > 0 ? headerRow + 1 : 15;
+  for (let guard = 0; guard < 4; guard += 1) {
+    if (!formTSERowLooksLikeConsecutiveNumberStrip(worksheet, start, 1)) break;
+    start += 1;
+  }
+  return Math.max(start, 15);
+}
+
+/** Official Form T column 2 is Name of Employee — not CLRA "principal employer". */
+export function restoreFormTSEKarnatakaEmployeeNameColumnHeader(worksheet) {
+  if (!worksheet) return false;
+  let touched = false;
+  for (let r = 11; r <= 16; r += 1) {
+    const a = formTSEExcelJsCellText(worksheet, r, 1);
+    const b = formTSEExcelJsCellText(worksheet, r, 2);
+    const c = formTSEExcelJsCellText(worksheet, r, 3);
+    // Row 11 is the employer header box — only rewrite the table header row.
+    const isTableHeader =
+      /s\.?\s*no/i.test(a) ||
+      /father\s*\/\s*husband|father.*name/i.test(c) ||
+      (r === 12 && /principal\s+employer/i.test(b));
+    if (!isTableHeader) continue;
+    if (/name\s+of\s+employee/i.test(b) && !/principal\s+employer/i.test(b)) continue;
+    if (
+      /principal\s+employer/i.test(b) ||
+      (/name\s+and\s+address/i.test(b) && /employer/i.test(b) && !/establishment/i.test(b))
+    ) {
+      unmergeFormTSEIdentityBandOnRow(worksheet, r);
+      const cell = worksheet.getCell(r, 2);
+      cell.value = 'Name of Employee';
+      cell.alignment = {
+        ...(cell.alignment || {}),
+        wrapText: true,
+        vertical: 'middle',
+        horizontal: 'center',
+      };
+      touched = true;
+    }
+  }
+  return touched;
+}
+
+/**
+ * True when any employee serial row shows Father in the Name column (Father cell blank).
+ * Official Form T_KA always lands the 6th person on Excel row 20 (Date: B:C merge),
+ * even when more employees follow — so this is not only the last row.
+ */
+export function formTSEWorksheetHasNameFatherSwap(worksheet) {
+  if (!worksheet) return false;
+  const rowTo = Math.max(80, Number(worksheet.rowCount) || 0);
+  const serialRows = [];
+  const fathers = [];
+  for (let r = 14; r <= rowTo; r += 1) {
+    if (formTSERowLooksLikeConsecutiveNumberStrip(worksheet, r, 1)) continue;
+    if (!/^\d{1,4}$/.test(formTSEExcelJsCellText(worksheet, r, 1))) continue;
+    serialRows.push(r);
+    const fatherC = formTSEExcelJsCellText(worksheet, r, 3);
+    if (fatherC) fathers.push(fatherC.toLowerCase());
+  }
+  for (let i = 0; i < serialRows.length; i += 1) {
+    const r = serialRows[i];
+    const nameB = formTSEExcelJsCellText(worksheet, r, 2);
+    const fatherC = formTSEExcelJsCellText(worksheet, r, 3);
+    const genderD = formTSEExcelJsCellText(worksheet, r, 4);
+    if (fatherC || !nameB) continue;
+    if (!/^(male|female)$/i.test(genderD)) continue;
+    const prevFather =
+      i > 0 ? formTSEExcelJsCellText(worksheet, serialRows[i - 1], 3) : '';
+    if (prevFather && nameB.toLowerCase() === prevFather.toLowerCase()) return true;
+    if (fathers.includes(nameB.toLowerCase())) return true;
+  }
+  return false;
+}
+
+/** @deprecated use formTSEWorksheetHasNameFatherSwap — kept for existing callers. */
+export function formTSEWorksheetLastIdentityLooksNameFatherSwap(worksheet) {
+  return formTSEWorksheetHasNameFatherSwap(worksheet);
+}
+
+/**
+ * Write S.NO / Name / Father from autofill rows onto A–C (unmerges first).
+ * Used on Download Draft so a cached workbook cannot keep Father ("abc") in Name.
+ */
+export function stampFormTSEKarnatakaEmployeeIdentity(worksheet, rows, headers = [], employees = []) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const list = overlayFormTSEPeopleNamesOntoRows(
+    (Array.isArray(rows) ? rows : []).filter((row) => row && typeof row === 'object'),
+    hdrs,
+    employees
+  );
+  if (!worksheet || list.length === 0) return 0;
+  restoreFormTSEKarnatakaEmployeeNameColumnHeader(worksheet);
+  unmergeAllFormTSEDataIdentityBands(worksheet);
+  const startRow = findFormTSEKarnatakaEmployeeDataStartRow(worksheet);
+  const footer = findFormTSEKarnatakaSheetFooterRow(worksheet, startRow);
+  ensureFormTSEKarnatakaDataRowCapacity(worksheet, startRow, list.length, footer);
+  const fatherHeader =
+    hdrs.find((h) => isFormTSEFatherHusbandHeader(h)) ||
+    Object.keys(list[0] || {}).find((k) => isFormTSEFatherHusbandHeader(k)) ||
+    '';
+  const serialHeader =
+    hdrs.find((h) => isFormTSESerialNumberHeader(h)) ||
+    Object.keys(list[0] || {}).find((k) => isFormTSESerialNumberHeader(k)) ||
+    'S.NO';
+  let stamped = 0;
+  const writeIdentityAt = (excelRow, row, serialFallback) => {
+    unmergeFormTSEIdentityBandOnRow(worksheet, excelRow);
+    const named = getFormTSEKarnatakaEmployeeNameFromRow(row, hdrs);
+    const father = fatherHeader
+      ? String(getFormTSEKarnatakaRowValueForHeader(row, fatherHeader) ?? '').trim()
+      : '';
+    let serial = getFormTSEKarnatakaRowValueForHeader(row, serialHeader);
+    if (serial == null || String(serial).trim() === '') serial = serialFallback;
+    const serialText = String(serial).trim();
+    worksheet.getCell(excelRow, 1).value = /^\d+$/.test(serialText) ? Number(serialText) : serialText;
+    writeFormTSEPhysicalNameAndFather(worksheet, excelRow, named, father);
+    if (named) stamped += 1;
+  };
+  for (let i = 0; i < list.length; i += 1) {
+    writeIdentityAt(startRow + i, list[i], i + 1);
+  }
+  // Re-stamp by S.NO so a blank template row cannot shift Ashok off serial 6.
+  const rowTo = Math.max(40, Number(worksheet.rowCount) || 0);
+  for (let i = 0; i < list.length; i += 1) {
+    const row = list[i];
+    let serial = getFormTSEKarnatakaRowValueForHeader(row, serialHeader);
+    if (serial == null || String(serial).trim() === '') serial = i + 1;
+    const serialText = String(serial).trim();
+    if (!/^\d+$/.test(serialText)) continue;
+    for (let r = startRow; r <= rowTo; r += 1) {
+      if (formTSERowLooksLikeConsecutiveNumberStrip(worksheet, r, 1)) continue;
+      if (formTSEExcelJsCellText(worksheet, r, 1) !== serialText) continue;
+      const nameB = formTSEExcelJsCellText(worksheet, r, 2);
+      if (/name\s+of\s+employee|father\s*\/\s*husband|designation/i.test(nameB)) continue;
+      writeIdentityAt(r, row, serialText);
+      break;
+    }
+  }
+  return stamped;
 }
 
 /** Move S.NO/Name from J–R onto A–I when a write dumped identity under attendance. */
@@ -3109,6 +4069,9 @@ export async function formTSEWorkbookHasIdentityInColumnA(arrayBuffer) {
       }
     }
     if (sawShifted) return false;
+    if (sawAligned && formTSEWorksheetHasNameFatherSwap(worksheet)) {
+      return false;
+    }
     return sawAligned;
   } catch (_) {
     return false;
@@ -3165,10 +4128,81 @@ export async function applyFormTSEWorkbookOpenAtColumnA(arrayBuffer) {
  */
 export async function prepareFormTSEWorkbookForDownload(arrayBuffer, borderHints = {}) {
   if (!arrayBuffer || arrayBuffer.byteLength < 32) return arrayBuffer;
-  // Always run J→A repair. A false "already aligned" check was leaving names under J.
-  const repaired = await repairFormTSEWorkbookColumnAlignment(arrayBuffer);
-  const opened = await applyFormTSEWorkbookOpenAtColumnA(repaired);
-  return applyFormTSEKarnatakaExportBordersToBuffer(opened, borderHints);
+  try {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(arrayBuffer);
+    const sheets = workbook.worksheets || [];
+    if (sheets.length === 0) return arrayBuffer;
+    const headers = borderHints.headers || borderHints.headersToUse || [];
+    const rows = overlayFormTSEPeopleNamesOntoRows(
+      borderHints.mappedData || borderHints.rows || [],
+      headers,
+      borderHints.employees || [],
+      borderHints.helpers || {}
+    );
+    sheets.forEach((worksheet) => {
+      shiftFormTSEWorksheetIdentityFromJToA(worksheet);
+      restoreFormTSEKarnatakaEmployeeNameColumnHeader(worksheet);
+      if (Array.isArray(rows) && rows.length > 0) {
+        stampFormTSEKarnatakaEmployeeIdentity(
+          worksheet,
+          rows,
+          headers,
+          borderHints.employees || []
+        );
+      }
+      resetFormTSEWorksheetOpenAtColumnA(worksheet);
+    });
+    resetExcelJsWorkbookActiveSheet(workbook);
+    let repaired = await workbook.xlsx.writeBuffer();
+    repaired = await stripFormTSEDataIdentityMergesFromXlsx(repaired);
+    const verifyWb = new ExcelJS.Workbook();
+    await verifyWb.xlsx.load(repaired);
+    const needsRestamp = (verifyWb.worksheets || []).some((ws) =>
+      formTSEWorksheetHasNameFatherSwap(ws)
+    );
+    if (needsRestamp && Array.isArray(rows) && rows.length > 0) {
+      verifyWb.worksheets.forEach((worksheet) => {
+        unmergeAllFormTSEDataIdentityBands(worksheet);
+        stampFormTSEKarnatakaEmployeeIdentity(
+          worksheet,
+          rows,
+          headers,
+          borderHints.employees || []
+        );
+        resetFormTSEWorksheetOpenAtColumnA(worksheet);
+      });
+      resetExcelJsWorkbookActiveSheet(verifyWb);
+      repaired = await verifyWb.xlsx.writeBuffer();
+      repaired = await stripFormTSEDataIdentityMergesFromXlsx(repaired);
+    }
+    const opened = await applyFormTSEWorkbookOpenAtColumnA(repaired);
+    const bordered = await applyFormTSEKarnatakaExportBordersToBuffer(opened, borderHints);
+    if (Array.isArray(rows) && rows.length > 0) {
+      return forceFormTSEIdentityCellsInSheetXml(
+        bordered,
+        rows,
+        headers,
+        borderHints.employees || []
+      );
+    }
+    return bordered;
+  } catch (err) {
+    console.warn('Form T Karnataka download prepare failed:', err);
+    const repaired = await repairFormTSEWorkbookColumnAlignment(arrayBuffer);
+    const opened = await applyFormTSEWorkbookOpenAtColumnA(repaired);
+    const bordered = await applyFormTSEKarnatakaExportBordersToBuffer(opened, borderHints);
+    if (Array.isArray(borderHints.mappedData || borderHints.rows) &&
+        (borderHints.mappedData || borderHints.rows).length > 0) {
+      return forceFormTSEIdentityCellsInSheetXml(
+        bordered,
+        borderHints.mappedData || borderHints.rows,
+        borderHints.headers || borderHints.headersToUse || [],
+        borderHints.employees || []
+      );
+    }
+    return bordered;
+  }
 }
 
 /**
@@ -3631,6 +4665,9 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
     if (!row || typeof row !== 'object' || Array.isArray(row)) {
       return Array.isArray(row) ? row[headerIndex] : '';
     }
+    if (isFormTSEAttendanceDayHeader(header)) {
+      return sanitizeFormTSEAttendanceMark(getFormTSEKarnatakaRowValueForHeader(row, header));
+    }
     const byFormTKey = getFormTSEKarnatakaRowValueForHeader(row, header);
     if (byFormTKey != null && String(byFormTKey).trim() !== '') return byFormTKey;
     if (Object.prototype.hasOwnProperty.call(row, header)) return row[header];
@@ -3644,12 +4681,6 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
         allHeaders.slice(0, headerIndex + 1).filter((h) => normalize(h) === target).length - 1;
       return row[exact[Math.min(Math.max(occur, 0), exact.length - 1)]];
     }
-    const fuzzy = rowKeys.find((k) => {
-      const nk = normalize(k);
-      return nk && (nk.includes(target) || target.includes(nk));
-    });
-    if (fuzzy) return row[fuzzy];
-    if (headerIndex < rowKeys.length) return row[rowKeys[headerIndex]];
     return '';
   };
 
@@ -3745,6 +4776,16 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
     }).filter((row) => rowLooksMeaningful(row));
   }
 
+  // Insert rows above Date:/signature and unmerge B:C leftovers so the last
+  // employee name is not overwritten by Father / Husband's Name.
+  dateFooterRow = ensureFormTSEKarnatakaDataRowCapacity(
+    worksheet,
+    startRow,
+    Math.max(sourcePrimary.length, 1),
+    dateFooterRow
+  );
+  mergeTopLeftCache.clear();
+
   const tableColMin = fieldCols.length > 0 ? Math.min(...fieldCols) : 1;
   const tableColMax = fieldCols.length > 0 ? Math.max(...fieldCols) : writeHeaders.length;
   const templateBodyRows = countExcelJSTemplateBodyRows(worksheet, startRow, tableColMin, tableColMax);
@@ -3776,9 +4817,21 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
 
   const writeEmployeeRow = (row, i, cols1Based) => {
     const excelRow = startRow + i;
+    const safeRow =
+      row && typeof row === 'object' && !Array.isArray(row)
+        ? clearFormTSEKarnatakaPayrollIfNoAttendance({ ...row }, writeHeaders)
+        : row;
+    unmergeFormTSEIdentityBandOnRow(worksheet, excelRow);
     for (let j = 0; j < writeHeaders.length; j += 1) {
       const header = writeHeaders[j];
-      let value = getRowValueForHeader(row, header, j, writeHeaders);
+      let value = getRowValueForHeader(safeRow, header, j, writeHeaders);
+      if (isFormTSEAttendanceDayHeader(header)) {
+        value = sanitizeFormTSEAttendanceMark(value);
+      }
+      if (isFormTSEEmployeeNameHeader(header)) {
+        const named = getFormTSEKarnatakaEmployeeNameFromRow(safeRow, writeHeaders);
+        if (named) value = named;
+      }
       if (
         (value == null || String(value).trim() === '') &&
         /s\.?\s*no|serial|sl\.?\s*no/i.test(String(header || ''))
@@ -3853,6 +4906,12 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
       }
       cell.font = { ...(cell.font || {}), bold: false };
     }
+    const namedLast = getFormTSEKarnatakaEmployeeNameFromRow(row, writeHeaders);
+    const fatherLast = writeHeaders.find((h) => isFormTSEFatherHusbandHeader(h));
+    const fatherVal = fatherLast
+      ? String(getRowValueForHeader(row, fatherLast, writeHeaders.indexOf(fatherLast), writeHeaders) ?? '').trim()
+      : '';
+    writeFormTSEPhysicalNameAndFather(worksheet, excelRow, namedLast, fatherVal);
   };
 
   for (let i = 0; i < sourcePrimary.length; i += 1) {
@@ -3878,6 +4937,7 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
     for (let i = 0; i < sourcePrimary.length; i += 1) {
       const row = sourcePrimary[i];
       const excelRow = startRow + i;
+      unmergeFormTSEIdentityBandOnRow(worksheet, excelRow);
       for (let slot = 0; slot < identityHeaders.length; slot += 1) {
         const header = identityHeaders[slot];
         let value = header
@@ -3892,6 +4952,10 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
         // Fallback by leading column order when header detectors miss modal labels.
         if ((value == null || String(value).trim() === '') && writeHeaders[slot] && slot < 9) {
           value = getRowValueForHeader(row, writeHeaders[slot], slot, writeHeaders);
+        }
+        if (slot === 1) {
+          const named = getFormTSEKarnatakaEmployeeNameFromRow(row, writeHeaders);
+          if (named) value = named;
         }
         const cell = worksheet.getCell(excelRow, slot + 1);
         if (value == null || String(value).trim() === '') {
@@ -3915,6 +4979,12 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
           cell.font = { ...(cell.font || {}), bold: false };
         }
       }
+      const namedLast = getFormTSEKarnatakaEmployeeNameFromRow(row, writeHeaders);
+      const fatherLast = identityHeaders[2];
+      const fatherVal = fatherLast
+        ? String(getRowValueForHeader(row, fatherLast, writeHeaders.indexOf(fatherLast), writeHeaders) ?? '').trim()
+        : '';
+      writeFormTSEPhysicalNameAndFather(worksheet, excelRow, namedLast, fatherVal);
       // If serial/name were wrongly left under day columns, clear those cells when they
       // duplicate identity (numeric serial in J / person name in K).
       const nameInB = excelCellValueToString(worksheet.getCell(excelRow, 2)?.value).trim();
@@ -3975,13 +5045,14 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
     parsedFormHeader,
     headerSiteContext && typeof headerSiteContext === 'object' ? headerSiteContext : {}
   );
-  const headerScanEnd = Math.max(25, startRow > 0 ? startRow - 1 : 25);
+  const headerScanEnd = 11;
   // Put Month/Year, Address, Employer into the widened A–I header boxes (Label : value).
   // Adjacent mode left long values clipped inside the narrow A:D template merges.
   writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
     headerFormData: headerValues,
     parsedFormHeader,
     // Rows 1–8 are title / Rule 24 citation — never dump Establishment into row 3.
+    // Rows 12+ are the table — never rewrite "Name of Employee" as principal employer.
     headerRowStart: 9,
     headerRowEnd: headerScanEnd,
     maxScanCols: 80,
@@ -3992,7 +5063,9 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   expandFormTSEHeaderValueBoxes(worksheet, FORM_T_KARNATAKA_HEADER_BOX_END_COL);
   // Re-apply after expand/finalize-bound merges so Label : value survives on rows 10–11.
   writeFormTSEHeaderFieldsToWorksheet(worksheet, headerValues, parsedFormHeader);
+  restoreFormTSEKarnatakaEmployeeNameColumnHeader(worksheet);
   shiftFormTSEWorksheetIdentityFromJToA(worksheet);
+  stampFormTSEKarnatakaEmployeeIdentity(worksheet, sourcePrimary, writeHeaders, employees);
 
   await yieldToMain();
   resetFormTSEWorksheetOpenAtColumnA(worksheet);
@@ -4012,6 +5085,9 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
     force: true,
     headerFormData: headerValues,
     parsedFormHeader,
+    mappedData: sourcePrimary,
+    headers: writeHeaders,
+    employees,
   });
   const outName =
     formFileName ||

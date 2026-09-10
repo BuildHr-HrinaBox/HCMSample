@@ -3,7 +3,12 @@
 		"name": "attendance_function",
 		"stack": "node20",
 		"type": "advancedio",
-		"env_variables": {}
+		"env_variables": {
+			"ZOHO_CLIENT_ID": "1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA",
+			"ZOHO_CLIENT_SECRET": "b6d3935145d59974934b981d6291b40af69a3ab150",
+			"ZOHO_ATTENDANCE_REFRESH_TOKEN": "1000.cd4fc2bc6a91d4c6b08d8fc9a477faf3.85968ede6278b79bc4a7e72d40034efb",
+			"ZOHO_ATTENDANCE_API_BASE": "https://people.zoho.in"
+		}
 	},
 	"execution": {
 		"main": "index.js"

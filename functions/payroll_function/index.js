@@ -711,9 +711,10 @@ const DEFAULT_ZOHO_PAYROLL_CLIENT_ID = '1000.VEO83G2Y7D16OXNQC7CN5WTK7DFHYA';
 const DEFAULT_ZOHO_PAYROLL_CLIENT_SECRET = 'b6d3935145d59974934b981d6291b40af69a3ab150';
 /** Default refresh_token from Zoho Payroll OAuth response (grant_type=refresh_token). */
 const DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN =
-  '1000.5aac4ac693ef072d01fd9a7cfdb48164.d29c4e3270ef4b70a60fb90227799a59';
+  '1000.ab6fc119a4cba66c406d7e2de608ce69.32a06c8fa10a10f261099ac7ec537aa4';
 /** Fallback if primary refresh is revoked — set ZOHO_PAYROLL_REFRESH_TOKEN in Catalyst to override. */
-const DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN_ALT = '';
+const DEFAULT_ZOHO_PAYROLL_REFRESH_TOKEN_ALT =
+  '1000.5aac4ac693ef072d01fd9a7cfdb48164.d29c4e3270ef4b70a60fb90227799a59';
 
 /** Reuse access token within one function invocation (avoids multiple refresh calls per request). */
 let cachedPayrollAccessToken = null;

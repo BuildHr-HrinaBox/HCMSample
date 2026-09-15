@@ -10,6 +10,7 @@ import {
   applySiteCompanyHeaderAutofill,
   buildCompanyNameAndAddress,
   buildCompanyNameWithSiteAddress,
+  buildSiteContractorNameAndAddress,
   buildStatutoryEmployerTextFromCompanies,
   statutoryHeaderLabelMatchKey,
   writeFormUEstablishmentNameAddressToWorksheet,
@@ -56,6 +57,15 @@ describe('statutory header export helpers', () => {
       'Name and address of Establishemnt in/ under which contract is carried on :';
     expect(isEstablishmentContractCarriedHeaderLabel(typoLabel)).toBe(true);
     expect(statutoryHeaderLabelMatchKey(typoLabel)).toBe('statutory_establishment_contract');
+    expect(isEstablishmentContractCarriedHeaderLabel('Name and address of Establishemnt in/')).toBe(
+      true
+    );
+    expect(isEstablishmentContractCarriedHeaderLabel('under which contract is carried on:')).toBe(
+      true
+    );
+    expect(statutoryHeaderLabelMatchKey('Name and address of Establishemnt in/')).toBe(
+      'statutory_establishment_contract'
+    );
     expect(
       resolveHeaderFieldExportValue(
         {
@@ -404,5 +414,33 @@ describe('resolveCompanyRecordForStatutory', () => {
     expect(String(cells['6:1'].value)).toContain('Nilakantan Govindan');
     expect(cells['6:13'].value).toBeNull();
     expect(cells['6:14'].value).toBeNull();
+  });
+
+  it('matches compacted Form XVI contractor labels and builds Site Management contractor text', () => {
+    expect(statutoryHeaderLabelMatchKey('NameandaddressofContractor:')).toBe('statutory_contractor');
+    expect(
+      buildSiteContractorNameAndAddress({
+        ContractorName: 'Site Contractor Pvt Ltd',
+        ContractorAddress: 'Hyderabad',
+        ContractorCity: 'Hyderabad',
+        ContractorState: 'Telangana'
+      })
+    ).toBe('Site Contractor Pvt Ltd, Hyderabad, Hyderabad, Telangana');
+    const next = applySiteCompanyHeaderAutofill(
+      {},
+      {
+        site: {
+          siteName: 'AP-Nimbagallu',
+          location: 'AP-Nimbagallu',
+          contractorName: 'Site Contractor Pvt Ltd',
+          contractorAddress: 'Hyderabad'
+        },
+        formHeaderFields: [
+          { label: 'Name and address of Contractor :', key: 'form_xvi_contractor' }
+        ]
+      }
+    );
+    expect(next.form_xvi_contractor).toBe('Site Contractor Pvt Ltd, Hyderabad');
+    expect(next.form_xxi_contractor).toBe('Site Contractor Pvt Ltd, Hyderabad');
   });
 });

@@ -576,14 +576,16 @@ export async function fetchPayrollTableRowsForMonths(monthCandidates, options = 
     }
   }
 
-  const latest = await fetchLatestPayrollTablePayload({ timeoutMs });
-  if (latest.records.length > 0) {
-    return {
-      payrollMonth: latest.payrollMonth || list[0] || '',
-      rows: latest.records,
-      meta: latest.meta,
-      source: latest.source,
-    };
+  if (options.allowLatestFallback !== false) {
+    const latest = await fetchLatestPayrollTablePayload({ timeoutMs });
+    if (latest.records.length > 0) {
+      return {
+        payrollMonth: latest.payrollMonth || list[0] || '',
+        rows: latest.records,
+        meta: latest.meta,
+        source: latest.source,
+      };
+    }
   }
 
   return { payrollMonth: list[0] || '', rows: [], meta: null, source: 'none' };

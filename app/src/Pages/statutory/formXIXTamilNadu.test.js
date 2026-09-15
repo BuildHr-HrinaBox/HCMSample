@@ -83,6 +83,39 @@ describe('formXIXTamilNadu', () => {
     expect(row['Net Amount of Wages Paid']).toBe('61000');
   });
 
+  it('keeps Workman Name and Father Name separate (no stacked guardian line)', () => {
+    const { resolveFormXIXTamilNaduWorkmanName, resolveFormXIXTamilNaduFatherName } = require('./formXIXTamilNadu');
+    const emp = {
+      FirstName: 'Elumalai',
+      LastName: '.',
+      Father_SpouseName: 'V. Kalimuthu',
+    };
+    expect(resolveFormXIXTamilNaduWorkmanName(emp)).toBe('Elumalai .');
+    expect(resolveFormXIXTamilNaduFatherName(emp)).toBe('V. Kalimuthu');
+    const row = applyFormXIXTamilNaduEmployeeToRow({}, emp, FORM_XIX_TN_TABLE_HEADERS, {
+      sanitizeValue: (v) => String(v ?? '').trim(),
+    });
+    expect(row['Workman Name']).toBe('Elumalai .');
+    expect(row["Father's Name"]).toBe('V. Kalimuthu');
+    expect(String(row['Workman Name'])).not.toMatch(/Kalimuthu/);
+  });
+
+  it('uses Form_XIX_TamilNadu download prefix instead of Form_XIX_MP', () => {
+    const { resolveFormXIXMPDownloadEntryPrefix } = require('./formXIXMPWageSlip');
+    expect(
+      resolveFormXIXMPDownloadEntryPrefix('Form_XIX_-_TamilNadu.xlsx', {
+        formXIXTamilNaduTableLayout: true,
+        title: 'Form XIX',
+      })
+    ).toBe('Form_XIX_TamilNadu');
+    expect(
+      resolveFormXIXMPDownloadEntryPrefix('Form_XIX_MP.xlsx', {
+        formXIXMPTableLayout: true,
+        title: 'Form XIX',
+      })
+    ).toBe('Form_XIX_MP');
+  });
+
   it('fetches HRA into House Rent Allowance and derives Other Allowances when missing', () => {
     const row = applyFormXIXTamilNaduEmployeeToRow(
       {},
@@ -180,5 +213,6 @@ describe('formXIXTamilNadu', () => {
     writeFormXIXTamilNaduNetAmountRow(ws, '158123');
     expect(String(ws.getCell(17, 1).value || '')).toBe('Net Amount of Wages Paid');
     expect(String(ws.getCell(17, 4).value || '')).toBe('158123');
+    expect(ws.getCell(17, 4).alignment?.horizontal).toBe('left');
   });
 });

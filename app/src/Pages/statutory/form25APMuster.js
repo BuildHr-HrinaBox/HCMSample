@@ -214,6 +214,14 @@ export function looksLikeForm25APMusterPartialHeaders(tableHeaders) {
   if (/scheme\s+of\s+shift|register\s+of\s+adult|worker\s+identif|name\s+of\s+the\s+worker/.test(joined)) {
     return false;
   }
+  // CLRA Form XVI Muster (S.No / Name / Father / Sex / 1–31) is not Form 25 AP (8 prefix cols).
+  if (
+    /\bsex\b/.test(joined) &&
+    /father/.test(joined) &&
+    !/relay|period\s+of\s+work|shift\s+number/.test(joined)
+  ) {
+    return false;
+  }
   if (/relay/.test(joined) && /shift/.test(joined) && /period\s+of\s+work/.test(joined)) return true;
   const dayLike = src.filter((h) => isForm25APMusterDayHeaderKey(h)).length;
   if (dayLike < 5) return false;
@@ -508,6 +516,10 @@ export function isForm25APMusterRollContext(
 ) {
   const parts = buildForm25ContextBlob(formHeader, rowItem, fileName, tableHeaders, sheetText);
   if (!/\bform[\s._-]*25\b/.test(parts)) return false;
+  // CLRA Form XVI Muster Roll is a different register (day grid under Dates, 4 identity cols).
+  if (/form[\s._-]*xvi(?![a-z])/.test(parts) && !/form[\s._-]*25/.test(parts.replace(/form[\s._-]*xvi(?![a-z])/g, ''))) {
+    return false;
+  }
 
   if (isForm25TamilNaduContext(parts)) return false;
   if (form25HasFestivalHolidayHeaderBlock(parts)) return false;

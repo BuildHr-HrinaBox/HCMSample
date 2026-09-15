@@ -1,19 +1,33 @@
+import ExcelJS from 'exceljs';
+import { excelJSCellHasFullBoxBorder } from '../../utils/excelTableBorders';
 import {
+  detectFormBTamilNaduPdfGroupBands,
+  FORM_B_TN_AMOUNTS_DEDUCTED_GROUP_LABEL,
+  isFormBTamilNaduAmountsDeductedGroupLabel,
   applyFormBTamilNaduEstablishmentFromCompany,
   applyFormBTamilNaduSummaryTotals,
   computeFormBTamilNaduBalanceDue,
   computeFormBTamilNaduBasicPlusHra,
   computeFormBTamilNaduOtherDeductions,
   extractFormBTamilNaduSummaryExportValues,
+  formatFormBTamilNaduEstablishmentLine,
+  formatFormBTamilNaduMonthDisplay,
+  formatFormBTamilNaduMonthLine,
   formBTamilNaduSummaryHasExportAmounts,
   isFormBTamilNaduAmountActuallyPaidHeader,
   isFormBTamilNaduBalanceDueHeader,
   isFormBTamilNaduEstablishmentFromCompanyContext,
   isFormBTamilNaduOtherDeductionsHeader,
   isFormBTamilNaduPayrollSummaryHeader,
+  isFormBTamilNaduPdfSignatoryRow,
   isFormBTamilNaduTotalEmolumentsHeader,
+  looksLikeFormBTamilNaduPdfContext,
+  normalizeFormBTamilNaduPdfMatrix,
   resolveFormBTamilNaduBasicAndHra,
+  resolveFormBTamilNaduHeaderExportValues,
+  rewriteFormBTamilNaduPdfHeader,
   summarizeFormBTamilNaduPayrollAmounts,
+  writeFormBTamilNaduHeaderFieldsToWorksheet,
 } from './formBTamilNadu';
 
 describe('Form B Tamil Nadu payroll summary', () => {
@@ -181,6 +195,139 @@ describe('Form B Tamil Nadu payroll summary', () => {
     expect(values.amountActuallyPaid).toBe('135000');
     expect(values.balanceDue).toBe('0');
     expect(formBTamilNaduSummaryHasExportAmounts(values)).toBe(true);
+  });
+
+  test('keeps Name of the Establishment and For the Month of on Excel label cells', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form B');
+    ws.mergeCells(5, 1, 5, 4);
+    ws.mergeCells(6, 1, 6, 4);
+    ws.getCell(5, 1).value = 'Name of the Establishment :';
+    ws.getCell(6, 1).value = 'For the Month of';
+    const establishment =
+      'Vayona Energy Pvt Ltd, 274 A, Rani mangammal main road, Govindanagaram - 625517 Theni Taluk, Theni District, Tamilnadu';
+    writeFormBTamilNaduHeaderFieldsToWorksheet(ws, {
+      statutory_establishment_name_address: establishment,
+      form_b_header_for_the_month_of: 'July2026',
+    });
+    expect(String(ws.getCell(5, 1).value)).toBe(
+      `Name of the Establishment : ${establishment}`
+    );
+    expect(String(ws.getCell(6, 1).value)).toBe('For the Month of : July 2026');
+    expect(Number(ws.getRow(5).height)).toBeGreaterThanOrEqual(48);
+    expect(excelJSCellHasFullBoxBorder(ws.getCell(5, 1))).toBe(true);
+    expect(excelJSCellHasFullBoxBorder(ws.getCell(6, 1))).toBe(true);
+  });
+
+  test('moves collapsed Fine amount back to Other deductions for PDF', () => {
+    const normalized = normalizeFormBTamilNaduPdfMatrix(
+      [
+        [
+          'Total number of employees',
+          'Total emoluments payable during the month including basic wages, D.A, O.T., and bonus',
+          'Fine',
+          'Other deductions',
+          'Amount actually paid during the month',
+          'Balance due to the employees',
+        ],
+        ['', '', '(a)', '(b)', '', ''],
+        ['15', '1163466', '458439', '', '1035636', '0'],
+      ],
+      6,
+      0,
+      []
+    );
+    expect(normalized.rows[2][2]).toBe('');
+    expect(String(normalized.rows[2][3])).toBe('458439');
+    expect(String(normalized.rows[2][4])).toBe('1035636');
+  });
+
+  test('formats glued month tokens and header export values', () => {
+    expect(formatFormBTamilNaduMonthDisplay('July2026')).toBe('July 2026');
+    expect(formatFormBTamilNaduMonthLine('july 2026')).toBe('For the Month of : July 2026');
+    expect(formatFormBTamilNaduEstablishmentLine('Vayona Energy Pvt Ltd')).toBe(
+      'Name of the Establishment : Vayona Energy Pvt Ltd'
+    );
+    const resolved = resolveFormBTamilNaduHeaderExportValues({
+      statutory_establishment_name: 'Vayona Energy Pvt Ltd',
+      form_b_header_for_the_month_of: 'July2026',
+    });
+    expect(resolved.establishment).toBe('Vayona Energy Pvt Ltd');
+    expect(resolved.month).toBe('July 2026');
+  });
+
+  test('rewrites PDF header with labels and drops signatory lines', () => {
+    const rewritten = rewriteFormBTamilNaduPdfHeader(
+      [
+        'Form B',
+        '(See rule 29)',
+        'Tamilnadu Labour Welfare Fund Rules, 1973',
+        'Register of Wages',
+        'July2026',
+        'For (Company Name)',
+        'Authorised Signatory',
+      ],
+      [
+        'Vayona Energy Pvt Ltd, 274 A, Rani mangammal main road, Govindanagaram - 625517 Theni Taluk, Theni District, Tamilnadu',
+        'Signature of Employer / Manager / Authorised Person',
+      ]
+    );
+    expect(rewritten.titles).toEqual([
+      'Form B',
+      '(See rule 29)',
+      'Tamilnadu Labour Welfare Fund Rules, 1973',
+      'Register of Wages',
+    ]);
+    expect(rewritten.fields[0]).toMatch(/^Name of the Establishment\s*:/);
+    expect(rewritten.fields.some((f) => /^For the Month of\s*:\s*July 2026$/i.test(f))).toBe(true);
+    expect(rewritten.fields.join('\n')).not.toMatch(/Authorised Signatory/i);
+    expect(rewritten.fields.join('\n')).not.toMatch(/For\s*\(/);
+    expect(rewritten.fields.join('\n')).not.toMatch(/Signature of Employer/i);
+  });
+
+  test('spans Amounts deducted during the month across Fine and Other deductions', () => {
+    expect(isFormBTamilNaduAmountsDeductedGroupLabel('Amounts deducted during the month')).toBe(
+      true
+    );
+    expect(isFormBTamilNaduAmountsDeductedGroupLabel('Other deductions')).toBe(false);
+    const bands = detectFormBTamilNaduPdfGroupBands(
+      [
+        [
+          'Total number of employees',
+          'Total emoluments payable during the month including basic wages, D.A, O.T., and bonus',
+          'Amounts deducted during the month',
+          '',
+          'Amount actually paid during the month',
+          'Balance due to the employees',
+        ],
+        ['', '', 'Fine', 'Other deductions', '', ''],
+        ['', '', '(a)', '(b)', '', ''],
+      ],
+      0,
+      2,
+      6
+    );
+    expect(bands).toHaveLength(1);
+    expect(bands[0].start).toBe(2);
+    expect(bands[0].end).toBe(3);
+    expect(bands[0].label).toBe(FORM_B_TN_AMOUNTS_DEDUCTED_GROUP_LABEL);
+  });
+
+  test('detects Form B TN PDF context and signatory rows', () => {
+    expect(
+      looksLikeFormBTamilNaduPdfContext(
+        ['Form B', '(See rule 29)', 'Tamilnadu Labour Welfare Fund Rules, 1973', 'Register of Wages'],
+        [['Total number of employees', 'Total emoluments payable during the month']],
+        'Form B',
+        'Form_B_-_TamilNadu.xlsx'
+      )
+    ).toBe(true);
+    expect(isFormBTamilNaduPdfSignatoryRow(['For (Company Name)'])).toBe(true);
+    expect(isFormBTamilNaduPdfSignatoryRow(['Authorised Signatory'])).toBe(true);
+    expect(
+      isFormBTamilNaduPdfSignatoryRow(['Signature of Employer / Manager / Authorised Person'])
+    ).toBe(true);
+    expect(isFormBTamilNaduPdfSignatoryRow(['15'])).toBe(false);
   });
 
   test('detects payroll summary headers blocked from statutory overlay', () => {

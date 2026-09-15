@@ -8,7 +8,10 @@ import {
   sheetBlobIndicatesFormXLeaveRegister,
   matchesFormXHint,
   FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT,
+  FORM_XX_AP_DEFAULT_CONTRACTOR_NAME,
+  FORM_XXI_AP_CONTRACTOR_HEADER_KEY,
   FORM_XXI_AP_FINE_COLUMN_NIL_TEXT,
+  buildFormXXIAPWorkbookWithTemplateStyles,
   isFormXXAPDeductionNilHeader,
   applyFormXXAPDeductionsNilToMappedRows,
   resolveFormXXAPLeafHeaders,
@@ -17,6 +20,8 @@ import {
   pickFormXXAPExportHeaders,
   exportFormXXAPRowValuesByHeaders,
   reapplyFormXXAPDownloadTableBordersFromWorksheet,
+  applyFormXXAPHeaderLayoutFixes,
+  resolveFormXXAPContractorText,
   buildFormXXAPWorkbookWithTemplateStyles,
   isFormXXIAPFineNilHeader,
   applyFormXXIAPFinesNilToMappedRows,
@@ -293,6 +298,261 @@ describe('Form I Tamil Nadu vs Form X AP Register of Fines', () => {
         'Form X Register of Fines Name of the worker Nature & date of offence'
       )
     ).toBe(true);
+  });
+});
+
+describe('Form XX AP contractor header', () => {
+  it('resolves site contractor and defaults to VAYONA ENERGY PRIVATE LIMITED', () => {
+    expect(
+      resolveFormXXAPContractorText({ form_xx_contractor: 'Site Contractor Pvt Ltd, Hyderabad' })
+    ).toBe('Site Contractor Pvt Ltd, Hyderabad');
+    expect(resolveFormXXAPContractorText({})).toBe(FORM_XX_AP_DEFAULT_CONTRACTOR_NAME);
+    expect(resolveFormXXAPContractorText({ form_xx_contractor: 'Name and address of Contractor' })).toBe(
+      FORM_XX_AP_DEFAULT_CONTRACTOR_NAME
+    );
+  });
+
+  it('writes Name and address of Contractor from header data', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('XX-Deductions for Damage or loss');
+    ws.getCell(3, 1).value = 'FORM - XX REGISTER OF DEDUCTIONS FOR DAMAGE OR LOSS';
+    ws.getCell(4, 1).value =
+      '[Vide Rule 78 (1) (a) (ii) of Contract Labour (Reg. & Abolition) Central & A.P.Rules]';
+    ws.getCell(5, 1).value = 'Name and address of Contractor:';
+    ws.getCell(5, 6).value =
+      'Name and address of establishment/under which contract is carried on: Nimbagallu Site';
+    ws.getCell(9, 1).value = 'Nature and location of work: AP-Nimbagallu';
+    ws.getCell(9, 6).value = 'Name and address of Principal Employer: VAYONA ENERGY PRIVATE LIMITED';
+
+    applyFormXXAPHeaderLayoutFixes(ws, {
+      headerFormData: { form_xx_contractor: 'Site Contractor Pvt Ltd, Hyderabad' },
+      headerRowEnd: 12,
+      maxCol: 16
+    });
+
+    expect(String(ws.getCell(5, 1).value || '')).toMatch(/Name and address of Contractor/i);
+    expect(String(ws.getCell(5, 1).value || '')).toContain('Site Contractor Pvt Ltd, Hyderabad');
+  });
+
+  it('defaults contractor on download when site contractor is empty', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('XX-Deductions for Damage or loss');
+    ws.getCell(3, 1).value = 'FORM - XX REGISTER OF DEDUCTIONS FOR DAMAGE OR LOSS';
+    ws.getCell(4, 1).value =
+      '[Vide Rule 78 (1) (a) (ii) of Contract Labour (Reg. & Abolition) Central & A.P.Rules]';
+    ws.getCell(5, 1).value = 'Name and address of Contractor:';
+    ws.getCell(5, 6).value = 'Name and address of establishment/under which contract is carried on:';
+    ws.getCell(9, 1).value = 'Nature and location of work:';
+    ws.getCell(9, 6).value = 'Name and address of Principal Employer:';
+    ws.getCell(13, 1).value = 'S.No';
+    ws.getCell(13, 2).value = 'Name of Workmen';
+    ws.getCell(13, 3).value = "Father's/Husband's Name";
+    ws.getCell(13, 4).value = 'Nature of employment /Designation';
+    ws.getCell(13, 5).value = 'Particulars of Damage or Loss';
+    ws.getCell(13, 6).value = 'Date of Damage or Loss';
+    ws.getCell(13, 7).value = 'Whether workman showed cause against';
+    ws.getCell(13, 8).value = "Name of Person in whose presence Employee's explanation was heard";
+    ws.getCell(13, 9).value = 'Amount of deduction imposed';
+    ws.getCell(13, 10).value = 'No. of instalments';
+    ws.getCell(13, 11).value = 'First instalment';
+    ws.getCell(13, 12).value = 'Last instalment';
+    ws.getCell(13, 13).value = 'Remarks';
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+
+    const { blob } = await buildFormXXAPWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [{ 'S.No': 1, 'Name of Workmen': 'Ravi' }],
+      headersToUse: [
+        'S.No',
+        'Name of Workmen',
+        "Father's/Husband's Name",
+        'Nature of employment /Designation',
+        'Particulars of Damage or Loss',
+        'Date of Damage or Loss',
+        'Whether workman showed cause against',
+        "Name of Person in whose presence Employee's explanation was heard",
+        'Amount of deduction imposed',
+        'No. of instalments',
+        'First instalment',
+        'Last instalment',
+        'Remarks'
+      ],
+      parsedHeaderRowIndex: 12,
+      parsedDataStartIndex: 14,
+      parsedTableStartCol: 0,
+      parsedFormHeader: {
+        title: 'FORM - XX REGISTER OF DEDUCTIONS FOR DAMAGE OR LOSS',
+        fields: [
+          { key: 'form_xx_contractor', label: 'Name and address of Contractor', value: '' }
+        ]
+      },
+      headerFormData: {},
+      formFileName: 'Form_XX_AP.xlsx',
+      sheetNameHint: 'XX-Deductions for Damage or loss'
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const outWs = outWb.worksheets[0];
+    expect(String(outWs.getCell(5, 1).value || '')).toMatch(/Name and address of Contractor/i);
+    expect(String(outWs.getCell(5, 1).value || '')).toContain(FORM_XX_AP_DEFAULT_CONTRACTOR_NAME);
+  });
+});
+
+describe('Form XXI AP contractor header', () => {
+  it('resolves form_xxi_contractor from site header data', () => {
+    expect(
+      resolveFormXXAPContractorText({
+        [FORM_XXI_AP_CONTRACTOR_HEADER_KEY]: 'Site Contractor Pvt Ltd, Hyderabad'
+      })
+    ).toBe('Site Contractor Pvt Ltd, Hyderabad');
+  });
+
+  it('writes Name and address of Contractor on concatenated Form XXI label', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('XXI-Fines');
+    ws.getCell(3, 1).value = 'FORM - XXI REGISTER OF FINES';
+    ws.getCell(4, 1).value =
+      '[Vide Rule 78 (1) (a) (ii) of Contract Labour (Reg. & Abolition) Central & A.P.Rules]';
+    ws.getCell(5, 1).value = 'NameandaddressofContractor:';
+    ws.getCell(5, 8).value = 'Nameandaddressofestablishmentin/underwhich';
+    ws.getCell(9, 1).value = 'Natureandlocationofwork. :AP-Nimbagallu';
+    ws.getCell(9, 8).value = 'NameandaddressofPrincipalEmployer:VAYONAENERGYPRIVATE';
+
+    applyFormXXAPHeaderLayoutFixes(ws, {
+      headerFormData: { [FORM_XXI_AP_CONTRACTOR_HEADER_KEY]: 'Site Contractor Pvt Ltd, Hyderabad' },
+      headerRowEnd: 12,
+      maxCol: 16
+    });
+
+    expect(String(ws.getCell(5, 1).value || '')).toMatch(/Name and address of Contractor/i);
+    expect(String(ws.getCell(5, 1).value || '')).toContain('Site Contractor Pvt Ltd, Hyderabad');
+  });
+
+  it('defaults contractor on Form XXI download when site contractor is empty', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('XXI-Fines');
+    ws.getCell(3, 1).value = 'FORM - XXI REGISTER OF FINES';
+    ws.getCell(4, 1).value =
+      '[Vide Rule 78 (1) (a) (ii) of Contract Labour (Reg. & Abolition) Central & A.P.Rules]';
+    ws.getCell(5, 1).value = 'Name and address of Contractor:';
+    ws.getCell(5, 8).value = 'Name and address of establishment in/under which contract is carried on:';
+    ws.getCell(9, 1).value = 'Nature and location of work: AP-Nimbagallu';
+    ws.getCell(9, 8).value = 'Name and address of Principal Employer: VAYONA ENERGY PRIVATE LIMITED';
+    ws.getCell(13, 1).value = 'S.No';
+    ws.getCell(13, 2).value = 'Name of Workmen';
+    ws.getCell(13, 3).value = "Father's/Husband's Name";
+    ws.getCell(13, 4).value = 'Nature of employment /Designation';
+    ws.getCell(13, 5).value = 'Act/Omission for which fine imposed';
+    ws.getCell(13, 6).value = 'Date of Offence';
+    ws.getCell(13, 7).value = 'Whether workman showed cause against fine';
+    ws.getCell(13, 8).value = "Name of Person in whose presence Employee's explanation was heard";
+    ws.getCell(13, 9).value = 'Wage - period and wages payable';
+    ws.getCell(13, 10).value = 'Amount of fine Imposed';
+    ws.getCell(13, 11).value = 'Date on which fine realised';
+    ws.getCell(13, 12).value = 'Remarks';
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+
+    const { blob } = await buildFormXXIAPWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [{ 'S.No': 1, 'Name of Workmen': 'Ravi' }],
+      headersToUse: [
+        'S.No',
+        'Name of Workmen',
+        "Father's/Husband's Name",
+        'Nature of employment /Designation',
+        'Act/Omission for which fine imposed',
+        'Date of Offence',
+        'Whether workman showed cause against fine',
+        "Name of Person in whose presence Employee's explanation was heard",
+        'Wage - period and wages payable',
+        'Amount of fine Imposed',
+        'Date on which fine realised',
+        'Remarks'
+      ],
+      parsedHeaderRowIndex: 12,
+      parsedDataStartIndex: 14,
+      parsedTableStartCol: 0,
+      parsedFormHeader: {
+        title: 'FORM - XXI REGISTER OF FINES',
+        fields: [
+          { key: FORM_XXI_AP_CONTRACTOR_HEADER_KEY, label: 'Name and address of Contractor', value: '' }
+        ]
+      },
+      headerFormData: {},
+      formFileName: 'Form_XXI_AP.xlsx',
+      sheetNameHint: 'XXI-Fines'
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const outWs = outWb.worksheets[0];
+    expect(String(outWs.getCell(5, 1).value || '')).toMatch(/Name and address of Contractor/i);
+    expect(String(outWs.getCell(5, 1).value || '')).toContain(FORM_XX_AP_DEFAULT_CONTRACTOR_NAME);
+  });
+
+  it('left-aligns every Form XXI table box including S.No and NIL', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('XXI-Fines');
+    ws.getCell(3, 1).value = 'FORM - XXI REGISTER OF FINES';
+    ws.getCell(4, 1).value =
+      '[Vide Rule 78 (1) (a) (ii) of Contract Labour (Reg. & Abolition) Central & A.P.Rules]';
+    ws.getCell(13, 1).value = 'S.No';
+    ws.getCell(13, 2).value = 'Name of Workmen';
+    ws.getCell(13, 3).value = "Father's/Husband's Name";
+    ws.getCell(13, 4).value = 'Nature of employment /Designation';
+    ws.getCell(13, 5).value = 'Act/Omission for which fine imposed';
+    ws.getCell(13, 6).value = 'Date of Offence';
+    ws.getCell(13, 7).value = 'Whether workman showed cause against fine';
+    ws.getCell(13, 8).value = "Name of Person in whose presence Employee's explanation was heard";
+    ws.getCell(13, 9).value = 'Wage - period and wages payable';
+    ws.getCell(13, 10).value = 'Amount of fine Imposed';
+    ws.getCell(13, 11).value = 'Date on which fine realised';
+    ws.getCell(13, 12).value = 'Remarks';
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+
+    const { blob } = await buildFormXXIAPWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [
+        {
+          'S.No': 1,
+          'Name of Workmen': 'Ravi',
+          'Act/Omission for which fine imposed': 'NIL',
+          'Date of Offence': 'NIL',
+          'Amount of fine Imposed': 'NIL'
+        }
+      ],
+      headersToUse: [
+        'S.No',
+        'Name of Workmen',
+        "Father's/Husband's Name",
+        'Nature of employment /Designation',
+        'Act/Omission for which fine imposed',
+        'Date of Offence',
+        'Whether workman showed cause against fine',
+        "Name of Person in whose presence Employee's explanation was heard",
+        'Wage - period and wages payable',
+        'Amount of fine Imposed',
+        'Date on which fine realised',
+        'Remarks'
+      ],
+      parsedHeaderRowIndex: 12,
+      parsedDataStartIndex: 13,
+      parsedTableStartCol: 0,
+      parsedFormHeader: { title: 'FORM - XXI REGISTER OF FINES', fields: [] },
+      headerFormData: {},
+      formFileName: 'Form_XXI_AP.xlsx',
+      sheetNameHint: 'XXI-Fines'
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(await new Response(blob).arrayBuffer());
+    const outWs = outWb.worksheets[0];
+    expect(outWs.getCell(13, 1).alignment?.horizontal).toBe('left');
+    expect(outWs.getCell(13, 2).alignment?.horizontal).toBe('left');
+    expect(outWs.getCell(14, 1).alignment?.horizontal).toBe('left');
+    expect(outWs.getCell(14, 2).alignment?.horizontal).toBe('left');
+    expect(outWs.getCell(14, 5).alignment?.horizontal).toBe('left');
   });
 });
 

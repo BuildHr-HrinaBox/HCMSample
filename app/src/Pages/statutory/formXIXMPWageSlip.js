@@ -316,6 +316,41 @@ export function isFormXIXMPWorkmanNameHeader(h) {
   return (s.includes('workman') || s.includes('workmen')) && (s.includes('name') || s.includes('father') || s.includes('husband'));
 }
 
+/** Tamil Nadu / separate "Father's Name" column (not combined workman+guardian). */
+export function isFormXIXMPSeparateFatherNameHeader(h) {
+  const s = normHeader(h);
+  if (!s) return false;
+  if (s.includes('workman') || s.includes('workmen')) return false;
+  return /father'?s?\s+name|father\s*\/\s*husband|husband'?s?\s+name/.test(s);
+}
+
+export function formXIXMPHeadersHaveSeparateFatherNameColumn(headers = []) {
+  return (Array.isArray(headers) ? headers : []).some(isFormXIXMPSeparateFatherNameHeader);
+}
+
+const pickFormXIXMPFatherNameFromEmp = (emp = {}) => {
+  const keys = [
+    'Father_s_Name',
+    'Father_s Name',
+    'Father_Name',
+    'Father Name',
+    'FatherName',
+    "Father's Name",
+    'Father_SpouseName',
+    'Father/Husband Name',
+    'Spouse_Name',
+    'Spouse Name',
+    'SpouseName',
+    'HusbandName',
+    'Husband Name',
+  ];
+  for (const key of keys) {
+    const v = emp?.[key];
+    if (v != null && String(v).trim() !== '') return String(v).trim();
+  }
+  return '';
+};
+
 export function isFormXIXMPDaysWorkedHeader(h) {
   return /(?:no|number)\.?\s*of\s+days\s+worked|days\s+worked/.test(normHeader(h));
 }
@@ -1189,7 +1224,15 @@ export function applyFormXIXMPEmployeeToRow(row, emp, headers, helpers = {}) {
 
   hdrs.forEach((header) => {
     if (isFormXIXMPWorkmanNameHeader(header)) {
-      out[header] = sanitizeValue(formatWorkmanNameAndGuardian(emp));
+      // TN (and similar) keep Workman Name separate from Father's Name — never stack guardian.
+      const separateFather = formXIXMPHeadersHaveSeparateFatherNameColumn(hdrs);
+      out[header] = sanitizeValue(
+        separateFather ? formatWorkmanNameOnly(emp) : formatWorkmanNameAndGuardian(emp)
+      );
+      return;
+    }
+    if (isFormXIXMPSeparateFatherNameHeader(header)) {
+      out[header] = sanitizeValue(pickFormXIXMPFatherNameFromEmp(emp));
       return;
     }
     if (isFormXIXMPDaysWorkedHeader(header)) {
@@ -1999,10 +2042,11 @@ function buildEmployeeHeaderFormData(headerFormData, employeeRow, parsedFormHead
         const value = getFormXIXMPRowValueForHeader(employeeRow, tableHeader);
         if (String(value ?? '').trim() !== '') base[key] = value;
       });
-      const workmanName = String(base.form_xix_tn_workman_name ?? '').trim();
-      const fatherName = String(base.form_xix_tn_father_name ?? '').trim();
-      if (workmanName || fatherName) {
-        base.form_xix_ap_workman = [workmanName, fatherName].filter(Boolean).join('\n');
+      // Never keep name+guardian stacked in the TN Workman Name cell.
+      if (base.form_xix_tn_workman_name) {
+        base.form_xix_tn_workman_name = String(base.form_xix_tn_workman_name)
+          .split(/\r?\n/)[0]
+          .trim();
       }
     } else {
       const workmanHeader = FORM_XIX_MP_WAGE_TABLE_HEADERS.find(isFormXIXMPWorkmanNameHeader);
@@ -2022,11 +2066,18 @@ function buildEmployeeHeaderFormData(headerFormData, employeeRow, parsedFormHead
 
   const emp = unwrapFormXIXMPEmployeeItem(empItem);
   if (emp && typeof emp === 'object') {
-    const workmanName = formatWorkmanNameOnly(emp);
-    if (workmanName) base.form_xix_gj_workman_name = workmanName;
-    const workmanFull = formatWorkmanNameAndGuardian(emp);
-    if (workmanFull && !String(base.form_xix_ap_workman ?? '').trim()) {
-      base.form_xix_ap_workman = workmanFull;
+    if (tamilNaduLayout) {
+      const workmanOnly = formatWorkmanNameOnly(emp);
+      if (workmanOnly) base.form_xix_tn_workman_name = workmanOnly;
+      const fatherOnly = pickFormXIXMPFatherNameFromEmp(emp);
+      if (fatherOnly) base.form_xix_tn_father_name = fatherOnly;
+    } else {
+      const workmanName = formatWorkmanNameOnly(emp);
+      if (workmanName) base.form_xix_gj_workman_name = workmanName;
+      const workmanFull = formatWorkmanNameAndGuardian(emp);
+      if (workmanFull && !String(base.form_xix_ap_workman ?? '').trim()) {
+        base.form_xix_ap_workman = workmanFull;
+      }
     }
   } else if (String(base.form_xix_gj_workman_name ?? '').trim() === '') {
     const workmanOnly = String(base.form_xix_ap_workman ?? '')
@@ -2080,9 +2131,26 @@ const enrichFormXIXMPExportRowForDownload = (row, empItem, hdrs, helpers = {}) =
     sanitizeValue = (v) => String(v ?? '').trim(),
     gujaratPayrollRules = false,
     useMonthlyWageRateDefault = false,
+    tamilNaduLayout = false,
+    formatStatutoryDateDisplay = null,
+    monthCandidates = null,
   } = helpers;
   const payrollRow = typeof resolvePayrollRow === 'function' ? resolvePayrollRow(empItem) : null;
-  return applyFormXIXMPEmployeeToRow(row && typeof row === 'object' ? { ...row } : {}, emp, hdrs, {
+  const baseRow = row && typeof row === 'object' ? { ...row } : {};
+  if (
+    tamilNaduLayout ||
+    formXIXMPHeadersHaveSeparateFatherNameColumn(hdrs)
+  ) {
+    // Avoid circular import at module load — TN apply keeps name/father/joining separate.
+    const { applyFormXIXTamilNaduEmployeeToRow } = require('./formXIXTamilNadu');
+    return applyFormXIXTamilNaduEmployeeToRow(baseRow, emp, hdrs, {
+      sanitizeValue,
+      payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
+      formatStatutoryDateDisplay,
+      monthCandidates,
+    });
+  }
+  return applyFormXIXMPEmployeeToRow(baseRow, emp, hdrs, {
     sanitizeValue,
     payrollRow: payrollRow && !payrollRow.fetch_error ? payrollRow : null,
     gujaratPayrollRules,
@@ -2256,7 +2324,7 @@ function writeFormXIXTamilNaduNetAmountRowInline(worksheet, netAmount) {
   if (amountText) amountCell.value = amountText;
   amountCell.alignment = {
     ...(amountCell.alignment || {}),
-    horizontal: 'right',
+    horizontal: 'left',
     vertical: 'middle',
   };
 }
@@ -2322,13 +2390,20 @@ export function resolveFormXIXMPEmployeeDownloadBaseName(row, headers, fallbackI
   return slug || `Employee_${fallbackIndex + 1}`;
 }
 
-/** Per-employee xlsx prefix — Gujarat uses Form_XIX_GJ; MP (and other shared callers) stay Form_XIX_MP. */
+/** Per-employee xlsx prefix — TN / GJ use state names; MP (and other shared callers) stay Form_XIX_MP. */
 export function resolveFormXIXMPDownloadEntryPrefix(formFileName, parsedFormHeader) {
   const nameHint = String(formFileName || parsedFormHeader?.title || '');
   const parts = [nameHint, parsedFormHeader?.title, parsedFormHeader?.subtitle, parsedFormHeader?.reference]
     .filter((x) => x != null && String(x).trim() !== '')
     .join(' ')
     .toLowerCase();
+  const tamilNaduLayout =
+    !!parsedFormHeader?.formXIXTamilNaduTableLayout ||
+    !!parsedFormHeader?.formXIXTamilNaduHeaderFieldLayout ||
+    /tamil[\s._-]*nadu|tamilnadu|form[\s._-]*xix[\s._-]*tamil|xix[_\s-]*tn\b/.test(parts);
+  if (tamilNaduLayout) {
+    return 'Form_XIX_TamilNadu';
+  }
   // Prefer explicit GJ markers from the download form name/title (zip already uses Form_XIX_GJ).
   if (/gujarat/.test(parts) || /form[\s._-]*xix[\s._-]*gj/.test(parts) || /xix[_-]?gj/.test(parts)) {
     return 'Form_XIX_GJ';
@@ -2378,9 +2453,14 @@ export async function buildFormXIXMPPerEmployeeDownload({
   const hdrs = resolveFormXIXMPWageTableHeaders(headersToUse);
   const employees = Array.isArray(employeesOverride) ? employeesOverride : [];
   const payrollHelpers = resolveFormXIXMPPayrollHelpers({ formHeader: parsedFormHeader });
+  const tamilNaduLayout =
+    !!parsedFormHeader?.formXIXTamilNaduTableLayout ||
+    !!parsedFormHeader?.formXIXTamilNaduHeaderFieldLayout ||
+    formXIXMPHeadersHaveSeparateFatherNameColumn(hdrs);
   const exportHelpers = {
     sanitizeValue: (v) => String(v ?? '').trim(),
     resolvePayrollRow: typeof resolvePayrollRow === 'function' ? resolvePayrollRow : null,
+    tamilNaduLayout,
     ...payrollHelpers,
   };
   let exportRows = resolveFormXIXMPDownloadExportRows(
@@ -2454,7 +2534,12 @@ export async function buildFormXIXMPPerEmployeeDownload({
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
   }
-  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_XIX_MP')
+  const zipBase = String(
+    formFileName ||
+      (tamilNaduLayout ? 'Form_XIX_TamilNadu' : '') ||
+      parsedFormHeader?.title ||
+      'Form_XIX_MP'
+  )
     .replace(/\.xlsx?$/i, '')
     .replace(/[^a-zA-Z0-9._-]+/g, '_');
   return {

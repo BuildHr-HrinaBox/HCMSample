@@ -107,6 +107,21 @@ export function isFormXXVITamilNaduRateOfWagesHeader(header) {
   return false;
 }
 
+/** Column (2) — Name of the Workman (not contractor / employer / father). */
+export function isFormXXVITamilNaduWorkmanNameHeader(header) {
+  const n = formXXVITamilNaduHeaderNorm(header).replace(/:+$/, '').trim();
+  if (!n) return false;
+  if (/father|husband|contractor|employer|establishment|worksite|location of/.test(n)) {
+    return false;
+  }
+  return (
+    /name\s+of\s+the\s+workman/.test(n) ||
+    /name\s+of\s+the\s+worker/.test(n) ||
+    /workman\s*name/.test(n) ||
+    (/name/.test(n) && /workm[ae]n|worker/.test(n))
+  );
+}
+
 /** Drop worksite / principal / contractor header labels from the data grid. */
 export function stripFormXXVITamilNaduNonTableHeaders(headers) {
   const list = Array.isArray(headers) ? headers : [];
@@ -149,6 +164,10 @@ export function buildFormXXVITamilNaduWorksiteText(site = {}, extras = {}) {
 }
 
 export function getFormXXVITamilNaduEmployeeName(emp = {}) {
+  const { firstName, lastName } = readFormXXVITamilNaduPersonNameParts(emp);
+  const composed = [firstName, lastName].filter(Boolean).join(' ').trim();
+  // Prefer FirstName + LastName so "Name of the Workman" is the full name.
+  if (firstName && lastName) return composed;
   const candidates = [
     emp.EmployeeName,
     emp['Employee Name'],
@@ -157,7 +176,9 @@ export function getFormXXVITamilNaduEmployeeName(emp = {}) {
     emp.name,
     emp.Full_Name,
     emp['Full Name'],
-    emp.fullName
+    emp.fullName,
+    emp.employee_name,
+    composed
   ];
   for (let i = 0; i < candidates.length; i += 1) {
     const v = String(candidates[i] ?? '').trim();
@@ -651,7 +672,10 @@ function formXXVITamilNaduEmployeeMatchKeys(empOrRow = {}) {
     src.employee_name || src.paid_days != null || src.payroll_payload
       ? flattenPayrollEarningColumns(src)
       : src;
+  const { firstName, lastName } = readFormXXVITamilNaduPersonNameParts(src);
+  const composedName = [firstName, lastName].filter(Boolean).join(' ').trim();
   const vals = [
+    composedName,
     flat.EmployeeName,
     flat['Employee Name'],
     flat.employeeName,
@@ -730,7 +754,10 @@ export function applyFormXXVITamilNaduPaidDaysToMappedRows(
 ) {
   const daysHeader = findFormXXVITamilNaduNumberOfDaysWorkedHeader(headers);
   const rateHeader = findFormXXVITamilNaduRateOfWagesHeader(headers);
-  if ((!daysHeader && !rateHeader) || !Array.isArray(rows) || rows.length === 0) {
+  const nameHeader = (Array.isArray(headers) ? headers : []).find((h) =>
+    isFormXXVITamilNaduWorkmanNameHeader(h)
+  );
+  if ((!daysHeader && !rateHeader && !nameHeader) || !Array.isArray(rows) || rows.length === 0) {
     return { paidDaysHits: 0, rateHits: 0 };
   }
 
@@ -802,6 +829,12 @@ export function applyFormXXVITamilNaduPaidDaysToMappedRows(
     if (!row || typeof row !== 'object') return;
     const emp = unwrapEmp(employeesForMapping[index] || null);
     const payrollRow = resolvePayrollForRow(row, index);
+    if (nameHeader && overwrite) {
+      const fromEmp = emp ? getFormXXVITamilNaduEmployeeName(emp) : '';
+      const fromPayroll = payrollRow ? getFormXXVITamilNaduEmployeeName(payrollRow) : '';
+      const fullName = fromEmp || fromPayroll;
+      if (fullName) row[nameHeader] = fullName;
+    }
     if (!payrollRow || payrollRow.fetch_error) {
       // No SamplePayroll row for this person — leave Rate / Days Worked blank.
       clearPayrollOnlyColumns(row);

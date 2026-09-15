@@ -6,6 +6,43 @@
 
 import { flattenPayrollEarningColumns, readPayrollScalar } from '../../utils/payrollEarnings';
 
+/**
+ * Filename Form_V_-_TamilNadu.xlsx: word-boundary after "v" fails because "_" is a word char.
+ * Must not match Form VI / VII / XIV / XV / XVI / XXII.
+ */
+export function looksLikeFormVTamilNaduFilename(text) {
+  const s = String(text || '').toLowerCase();
+  return /(?:^|[^a-z0-9])form[\s._-]*v(?:[^a-z0-9]|$)/i.test(s);
+}
+
+/** True for Form V / Form_V_-_TamilNadu / Tamil Nadu Register of Employment — never Form VI or AP Form XXII. */
+export function isFormVStatutoryDownloadHint(...parts) {
+  const blob = parts
+    .flat()
+    .filter((p) => p != null && String(p).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+  if (!blob) return false;
+  if (/\bform[\s._-]*xxii\b|\bform[\s._-]*22\b/.test(blob) && !looksLikeFormVTamilNaduFilename(blob)) {
+    return false;
+  }
+  if (/\bform[\s._-]*11\b/.test(blob) && /rajasthan|\brj\b/.test(blob)) return false;
+  if (/(?:^|[^a-z0-9])form[\s._-]*vi(?:[^a-z0-9]|$)/.test(blob) && !looksLikeFormVTamilNaduFilename(blob)) {
+    return false;
+  }
+  if (looksLikeFormVTamilNaduFilename(blob)) return true;
+  const isTamil = /tamil[\s._-]*nadu|tamilnadu/.test(blob);
+  const isRegister = /register\s+of\s+employment/.test(blob);
+  if (isTamil && isRegister) return true;
+  if (
+    isTamil &&
+    /(?:^|[^a-z0-9])form[\s._-]*5(?:[^a-z0-9]|$)/.test(blob) &&
+    !/\bform[\s._-]*5[0-9]/.test(blob)
+  ) {
+    return true;
+  }
+  return false;
+}
 
 export function resolveFormVTamilNaduDayNumberFromHeader(header) {
   const h = String(header || '').trim();
@@ -181,24 +218,65 @@ export function readFormVTamilNaduPaidDays(payrollRow) {
     /effective_paid_days/,
   ];
   const fromFlat = readPayrollScalar(flat, keys, patterns);
-  if (fromFlat !== '') return String(fromFlat);
+  if (fromFlat !== '') {
+    const raw = String(fromFlat).trim();
+    if (isFormVTamilNaduJunkSummaryValue(raw)) return '';
+    const num = Number(raw.replace(/,/g, ''));
+    if (Number.isFinite(num) && num >= 0) return String(num);
+  }
   if (payrollRow !== flat) {
     const fromRow = readPayrollScalar(payrollRow, keys, patterns);
-    if (fromRow !== '') return String(fromRow);
+    if (fromRow !== '') {
+      const raw = String(fromRow).trim();
+      if (isFormVTamilNaduJunkSummaryValue(raw)) return '';
+      const num = Number(raw.replace(/,/g, ''));
+      if (Number.isFinite(num) && num >= 0) return String(num);
+    }
   }
   return '';
 }
 
+/**
+ * Reject tenure/experience text like "1 month(s)" from Total Days / Hours cells.
+ * Those columns must stay blank when Paid_days is missing — never invent defaults.
+ */
+export function isFormVTamilNaduJunkSummaryValue(value) {
+  const s = String(value ?? '').trim();
+  if (!s) return false;
+  if (/^enter\s+/i.test(s) || /^select\s+/i.test(s) || /^nil$/i.test(s)) return true;
+  if (/[ap]\.?m\.?$/i.test(s) || /^\d{1,2}:\d{2}\b/i.test(s)) return true;
+  if (/month|year|week|day\s*\(|experience|tenure/i.test(s) && !/^\d+(\.\d+)?$/.test(s)) {
+    return true;
+  }
+  if (!/^\d+(\.\d+)?$/.test(s.replace(/,/g, ''))) return true;
+  return false;
+}
+
+/** Keep only numeric summary values; blank when missing or junk like "1 month(s)". */
+export function sanitizeFormVTamilNaduSummaryNumericValue(value) {
+  const s = String(value ?? '').trim();
+  if (!s || isFormVTamilNaduJunkSummaryValue(s)) return '';
+  const n = Number(s.replace(/,/g, ''));
+  if (!Number.isFinite(n) || n < 0) return '';
+  return String(Math.round(n * 100) / 100);
+}
+
 /** Total Hours Worked = Paid_days × 8. */
 export function computeFormVTamilNaduTotalHoursWorked(paidDays) {
-  const n = Number(String(paidDays ?? '').replace(/,/g, '').trim());
+  if (paidDays === '' || paidDays == null) return '';
+  const raw = String(paidDays).trim();
+  if (!raw || isFormVTamilNaduJunkSummaryValue(raw)) return '';
+  const n = Number(raw.replace(/,/g, ''));
   if (!Number.isFinite(n) || n < 0) return '';
   return String(Math.round(n * 8 * 100) / 100);
 }
 
 /** Loss of Pay days = monthDays − Paid_days (never negative). */
 export function computeFormVTamilNaduLossOfPayDays(paidDays, daysInMonth = 31) {
-  const paid = Number(String(paidDays ?? '').replace(/,/g, '').trim());
+  if (paidDays === '' || paidDays == null) return '';
+  const raw = String(paidDays).trim();
+  if (!raw || isFormVTamilNaduJunkSummaryValue(raw)) return '';
+  const paid = Number(raw.replace(/,/g, ''));
   const monthDays = Math.min(Math.max(Number(daysInMonth) || 31, 28), 31);
   if (!Number.isFinite(paid)) return '';
   return String(Math.max(0, monthDays - paid));
@@ -209,6 +287,7 @@ export function computeFormVTamilNaduLossOfPayDays(paidDays, daysInMonth = 31) {
  * - Total Days Worked ← Paid_days
  * - Total Hours Worked ← Paid_days × 8
  * - Loss of Pay ← monthDays − Paid_days
+ * Clears junk like "1 month(s)" when Paid_days is missing.
  * @returns {number} rows updated
  */
 export function applyFormVTamilNaduPaidDaysToRows(
@@ -241,24 +320,47 @@ export function applyFormVTamilNaduPaidDaysToRows(
     const emp = unwrapEmp(Array.isArray(employeesForMapping) ? employeesForMapping[index] : null);
     const payrollRow = resolvePayrollRow(emp, row, index);
     const paidDays = readFormVTamilNaduPaidDays(payrollRow);
-    if (paidDays === '') return;
     let changed = false;
-    if (daysHeader && (overwrite || String(row[daysHeader] ?? '').trim() === '')) {
+
+    const clearIfJunkOrOverwrite = (header) => {
+      if (!header) return;
+      const cur = String(row[header] ?? '').trim();
+      if (!cur) return;
+      if (overwrite || isFormVTamilNaduJunkSummaryValue(cur)) {
+        row[header] = '';
+        changed = true;
+      }
+    };
+
+    if (paidDays === '') {
+      // No Paid_days — blank days/hours/LOP (never keep "1 month(s)" / non-numeric junk).
+      clearIfJunkOrOverwrite(daysHeader);
+      clearIfJunkOrOverwrite(hoursHeader);
+      clearIfJunkOrOverwrite(lopHeader);
+      if (changed) hits += 1;
+      return;
+    }
+
+    if (daysHeader && (overwrite || String(row[daysHeader] ?? '').trim() === '' || isFormVTamilNaduJunkSummaryValue(row[daysHeader]))) {
       row[daysHeader] = sanitize(paidDays);
       changed = true;
     }
-    if (hoursHeader && (overwrite || String(row[hoursHeader] ?? '').trim() === '')) {
+    if (hoursHeader && (overwrite || String(row[hoursHeader] ?? '').trim() === '' || isFormVTamilNaduJunkSummaryValue(row[hoursHeader]))) {
       const hours = computeFormVTamilNaduTotalHoursWorked(paidDays);
       if (hours !== '') {
         row[hoursHeader] = sanitize(hours);
         changed = true;
+      } else {
+        clearIfJunkOrOverwrite(hoursHeader);
       }
     }
-    if (lopHeader && (overwrite || String(row[lopHeader] ?? '').trim() === '')) {
+    if (lopHeader && (overwrite || String(row[lopHeader] ?? '').trim() === '' || isFormVTamilNaduJunkSummaryValue(row[lopHeader]))) {
       const lop = computeFormVTamilNaduLossOfPayDays(paidDays, daysInMonth);
       if (lop !== '') {
         row[lopHeader] = sanitize(lop);
         changed = true;
+      } else {
+        clearIfJunkOrOverwrite(lopHeader);
       }
     }
     if (changed) hits += 1;
@@ -655,3 +757,433 @@ export function locateFormVTamilNaduLeaveBlankExcelColumns(
   }
   return [...cols].sort((a, b) => a - b);
 }
+
+/** Excel hides values written onto merged non-master cells. */
+export function writeFormVTamilNaduExcelVisibleCell(worksheet, row, col, value) {
+  if (!worksheet || !Number.isFinite(row) || !Number.isFinite(col) || row < 1 || col < 1) return;
+  let targetRow = row;
+  let targetCol = col;
+  try {
+    const cell = worksheet.getCell(row, col);
+    if (cell?.isMerged && cell.master) {
+      targetRow = cell.master.row || targetRow;
+      targetCol = cell.master.col || targetCol;
+    }
+  } catch (_) {
+    /* write to the requested cell */
+  }
+  worksheet.getCell(targetRow, targetCol).value = value;
+}
+
+function formVIdentityHeaderNorm(txt) {
+  return String(txt || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/** Classify Form V identity columns (never day / summary). */
+export function formVTamilNaduIdentityColumnKind(header) {
+  if (isFormVTamilNaduDayHeader(header)) return '';
+  const s = formVIdentityHeaderNorm(header);
+  if (!s) return '';
+  if (/^(s\.?\s*no\.?|sl\.?\s*no\.?|sr\.?\s*no\.?|serial(\s+no\.?)?)$/.test(s) || /\bs\.?\s*no\.?\b/.test(s)) {
+    return 'sno';
+  }
+  if (/identification|employee\s*id|emp\.?\s*id|token\s*no/.test(s)) return 'empid';
+  if (/commence|begins|start/.test(s) && /time|work/.test(s)) return 'commence';
+  if (/^rest(\s+interval)?$/.test(s) || /rest\s+interval/.test(s)) return 'rest';
+  if ((/ends|cease/.test(s) && /time|work/.test(s)) || /time\s+at\s+which\s+work\s+ends/.test(s)) {
+    return 'ends';
+  }
+  if (
+    /name\s+of\s+the\s+(employee|person|workman|worker)/.test(s) ||
+    /name\s+of\s+(employee|person|worker)/.test(s) ||
+    /^name$/.test(s)
+  ) {
+    return 'name';
+  }
+  return '';
+}
+
+/**
+ * Map Autofill / array rows onto header keys so Excel export can read names and times.
+ */
+export function coerceFormVTamilNaduRowToObject(row, headers = []) {
+  if (!row) return null;
+  const hdrs = Array.isArray(headers) ? headers : [];
+  if (Array.isArray(row)) {
+    const obj = {};
+    hdrs.forEach((h, i) => {
+      if (h == null || String(h).trim() === '') return;
+      obj[h] = row[i];
+    });
+    row.forEach((v, i) => {
+      if (v == null || String(v).trim() === '') return;
+      if (obj[String(i)] == null) obj[String(i)] = v;
+    });
+    return obj;
+  }
+  if (typeof row !== 'object') return null;
+  const keys = Object.keys(row).filter((k) => !String(k).startsWith('__'));
+  const hasNamedHeader = hdrs.some((h) => h && Object.prototype.hasOwnProperty.call(row, h));
+  if (hasNamedHeader) return row;
+  const numericKeys = keys.filter((k) => /^\d+$/.test(k));
+  if (numericKeys.length >= 3 && hdrs.length > 0) {
+    const obj = { ...row };
+    hdrs.forEach((h, i) => {
+      if (!h) return;
+      const fromIndex = row[i] != null ? row[i] : row[String(i)];
+      if (fromIndex != null && String(fromIndex).trim() !== '' && (obj[h] == null || String(obj[h]).trim() === '')) {
+        obj[h] = fromIndex;
+      }
+    });
+    return obj;
+  }
+  return row;
+}
+
+function isMeaningfulFormVExportValue(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return false;
+  if (/^enter\s+/i.test(text)) return false;
+  if (/^select\s+/i.test(text)) return false;
+  return true;
+}
+
+/** Autofill stores P/A/WO/CL; older grids may still have Present/Absent. */
+export function normalizeFormVTamilNaduAttendanceCode(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  if (/^(P|A|WO|H|L|WOP|OD|SL|CL|EL)$/i.test(raw)) return raw.toUpperCase();
+  const lower = raw.toLowerCase().replace(/\s+/g, ' ');
+  if (/^present$|^on duty|^od$|^p$/.test(lower)) return 'P';
+  if (/^absent$|^loss of pay$|^lop$|^a$/.test(lower)) return 'A';
+  if (/weekend|week off|weekoff|^wo$|^holiday$/.test(lower)) return 'WO';
+  if (/contingency|^c\/?l$|^cl$/.test(lower)) return 'CL';
+  return '';
+}
+
+/**
+ * Resolve a Form V identity/summary cell from an Autofill row (object or array).
+ */
+export function resolveFormVTamilNaduExportCellValue(row, header, headers = [], headerIndex = null) {
+  if (isFormVTamilNaduDayHeader(header)) {
+    const day = resolveFormVTamilNaduDayNumberFromHeader(header);
+    return resolveFormVTamilNaduDayValue(row, day, headers);
+  }
+  const coerced = coerceFormVTamilNaduRowToObject(row, headers);
+  if (!coerced || typeof coerced !== 'object') return '';
+  const kind = formVTamilNaduIdentityColumnKind(header);
+  const isSummaryNumeric =
+    isFormVTamilNaduTotalDaysWorkedHeader(header) ||
+    isFormVTamilNaduTotalHoursWorkedHeader(header) ||
+    isFormVTamilNaduLossOfPayHeader(header);
+  const pickResolved = (raw) => {
+    if (!isMeaningfulFormVExportValue(raw)) return '';
+    if (isSummaryNumeric) return sanitizeFormVTamilNaduSummaryNumericValue(raw);
+    return raw;
+  };
+  if (header && Object.prototype.hasOwnProperty.call(coerced, header)) {
+    const picked = pickResolved(coerced[header]);
+    if (picked !== '') return picked;
+  }
+  if (
+    headerIndex != null &&
+    headerIndex >= 0 &&
+    Array.isArray(headers) &&
+    headers[headerIndex] &&
+    Object.prototype.hasOwnProperty.call(coerced, headers[headerIndex])
+  ) {
+    const picked = pickResolved(coerced[headers[headerIndex]]);
+    if (picked !== '') return picked;
+  }
+  const rowKeys = Object.keys(coerced).filter((k) => !String(k).startsWith('__'));
+  const target = formVTamilNaduHeaderNorm(header).replace(/[^a-z0-9]+/g, ' ').trim();
+  if (target) {
+    const exact = rowKeys.find((k) => formVTamilNaduHeaderNorm(k).replace(/[^a-z0-9]+/g, ' ').trim() === target);
+    if (exact) {
+      const picked = pickResolved(coerced[exact]);
+      if (picked !== '') return picked;
+    }
+  }
+  if (kind) {
+    for (const key of rowKeys) {
+      if (formVTamilNaduIdentityColumnKind(key) !== kind) continue;
+      const picked = pickResolved(coerced[key]);
+      if (picked !== '') return picked;
+    }
+  }
+  if (kind === 'name') {
+    for (const key of rowKeys) {
+      if (/employee\s*name|^name$|full\s*name/i.test(String(key || ''))) {
+        const picked = pickResolved(coerced[key]);
+        if (picked !== '') return picked;
+      }
+    }
+  }
+  if (kind === 'empid') {
+    for (const key of rowKeys) {
+      if (/employeeid|employee_id|empcode|emp_id/i.test(String(key || ''))) {
+        const picked = pickResolved(coerced[key]);
+        if (picked !== '') return picked;
+      }
+    }
+  }
+  return '';
+}
+
+export function resolveFormVTamilNaduDayValue(row, dayNum, headers = []) {
+  if (!row || !dayNum) return '';
+  const day = Number(dayNum);
+  if (!Number.isFinite(day) || day < 1 || day > 31) return '';
+  const pick = (raw) => normalizeFormVTamilNaduAttendanceCode(raw);
+  if (Array.isArray(row)) {
+    const hdrs = Array.isArray(headers) ? headers : [];
+    const idx = hdrs.findIndex((h) => resolveFormVTamilNaduDayNumberFromHeader(h) === day);
+    if (idx >= 0) return pick(row[idx]);
+    return pick(row[day]) || pick(row[day - 1]) || '';
+  }
+  if (typeof row !== 'object') return '';
+  if (Object.prototype.hasOwnProperty.call(row, String(day))) {
+    const v = pick(row[String(day)]);
+    if (v) return v;
+  }
+  if (Object.prototype.hasOwnProperty.call(row, day)) {
+    const v = pick(row[day]);
+    if (v) return v;
+  }
+  for (const key of Object.keys(row)) {
+    if (String(key).startsWith('__')) continue;
+    if (resolveFormVTamilNaduDayNumberFromHeader(key) !== day) continue;
+    const v = pick(row[key]);
+    if (v) return v;
+  }
+  return '';
+}
+
+/**
+ * Locate S.No / Name / Emp ID / shift-time columns on the Form V template header band.
+ */
+export function locateFormVTamilNaduIdentityExcelColumns(
+  worksheet,
+  { headerRow = 10, dayRow = -1, firstDayCol = 0, startCol = 1, maxScanCols = 20, cellText = (cell) => String(cell?.value ?? '') } = {}
+) {
+  const out = { sno: null, name: null, empid: null, commence: null, rest: null, ends: null };
+  if (!worksheet) return out;
+  const fromRow = Math.max(1, Math.min(headerRow, dayRow > 0 ? dayRow : headerRow) - 1);
+  const toRow = Math.max(headerRow, dayRow > 0 ? dayRow : headerRow);
+  const lastIdentityCol = firstDayCol > startCol ? firstDayCol - 1 : Math.max(6, startCol + 5);
+  const colLimit = Math.min(Number(maxScanCols) || 20, lastIdentityCol);
+  for (let c = Math.max(1, startCol); c <= colLimit; c += 1) {
+    const parts = [];
+    for (let r = fromRow; r <= toRow; r += 1) {
+      const piece = String(cellText(worksheet.getCell(r, c)) || '').trim();
+      if (piece && !/^\d{1,2}$/.test(piece)) parts.push(piece);
+    }
+    const kind = formVTamilNaduIdentityColumnKind(parts.join(' '));
+    if (kind && out[kind] == null) out[kind] = c;
+  }
+  if (out.sno == null && startCol > 0) out.sno = startCol;
+  if (out.name == null && out.sno > 0) out.name = out.sno + 1;
+  return out;
+}
+
+const FORM_V_TN_MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+function formVTamilNaduOrdinalDay(n) {
+  const j = n % 10;
+  const k = n % 100;
+  if (k >= 11 && k <= 13) return `${n}th`;
+  if (j === 1) return `${n}st`;
+  if (j === 2) return `${n}nd`;
+  if (j === 3) return `${n}rd`;
+  return `${n}th`;
+}
+
+/**
+ * "For the period from 1st April 2026 to 30th April 2026" from selected month/year.
+ * Replaces truncated template text like "…April 202…".
+ */
+export function buildFormVTamilNaduPeriodLine(monthName, year) {
+  const idx = FORM_V_TN_MONTH_NAMES.findIndex(
+    (m) => m.toLowerCase() === String(monthName || '').toLowerCase().trim()
+  );
+  if (idx < 0) return '';
+  const y = Number(year);
+  if (!Number.isFinite(y) || y < 1900) return '';
+  const lastDay = new Date(y, idx + 1, 0).getDate();
+  const mon = FORM_V_TN_MONTH_NAMES[idx];
+  return `For the period from ${formVTamilNaduOrdinalDay(1)} ${mon} ${y} to ${formVTamilNaduOrdinalDay(lastDay)} ${mon} ${y}`;
+}
+
+function formVTamilNaduCellText(val) {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (typeof val === 'object') {
+    if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+    if (val.text != null) return String(val.text);
+    if (val.result != null) return String(val.result);
+  }
+  return String(val ?? '');
+}
+
+function isFormVTamilNaduTitleBannerText(raw) {
+  const t = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  if (/^form[\s–—-]*v\.?$/i.test(t)) return true;
+  if (/register\s+of\s+employment/i.test(t)) return true;
+  if (/see\s+sub-?rule|rule\s*\(?\s*16\s*\)?/i.test(t)) return true;
+  if (/for\s+the\s+period\s+from/i.test(t)) return true;
+  return false;
+}
+
+function centerFormVTamilNaduBannerCell(cell) {
+  if (!cell) return;
+  const align = {
+    ...(cell.alignment || {}),
+    horizontal: 'center',
+    vertical: 'middle',
+    wrapText: true,
+  };
+  cell.alignment = align;
+  try {
+    if (cell.style && typeof cell.style === 'object') {
+      cell.style = { ...cell.style, alignment: { ...(cell.style.alignment || {}), ...align } };
+    }
+  } catch (_) {
+    /* alignment on cell is enough */
+  }
+}
+
+/**
+ * After day-31 insert the table grows past AP, but title merges stay A1:AP1 — headings then
+ * look right-shifted vs Remarks. Re-merge title rows across the full table and force center.
+ */
+export function centerFormVTamilNaduTitleBannerRows(
+  worksheet,
+  { headerRowEnd = 8, tableEndCol = 0, periodText = '' } = {}
+) {
+  if (!worksheet) return { centered: 0, rematched: 0 };
+  const rowEnd = Math.max(1, Math.min(Number(headerRowEnd) || 8, 12));
+  const periodLine = String(periodText || '').trim();
+  let endCol = Number(tableEndCol) || 0;
+  if (!(endCol >= 10)) {
+    // Fall back to widest existing title merge / last non-empty header cell.
+    endCol = 42;
+    try {
+      const merges = Array.isArray(worksheet.model?.merges) ? worksheet.model.merges : [];
+      merges.forEach((m) => {
+        const match = String(m || '').match(/^A([1-4]):([A-Z]+)([1-4])$/i);
+        if (!match) return;
+        const colLetters = match[2].toUpperCase();
+        let col = 0;
+        for (let i = 0; i < colLetters.length; i += 1) {
+          col = col * 26 + (colLetters.charCodeAt(i) - 64);
+        }
+        if (col > endCol) endCol = col;
+      });
+    } catch (_) {
+      /* keep default */
+    }
+  }
+  endCol = Math.max(10, Math.min(Number(endCol) || 42, 80));
+
+  let centered = 0;
+  let rematched = 0;
+  for (let r = 1; r <= rowEnd; r += 1) {
+    let bannerText = '';
+    let foundCol = 0;
+    for (let c = 1; c <= Math.max(endCol, 45); c += 1) {
+      const raw = formVTamilNaduCellText(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      if (!isFormVTamilNaduTitleBannerText(raw)) continue;
+      bannerText = raw;
+      foundCol = c;
+      break;
+    }
+    if (!bannerText) continue;
+    if (periodLine && /for\s+the\s+period\s+from/i.test(bannerText)) {
+      bannerText = periodLine;
+    }
+
+    // Unmerge any existing merges that touch this title row, then merge A..endCol.
+    try {
+      const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
+      merges.forEach((range) => {
+        const m = String(range || '').match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+        if (!m) return;
+        const r1 = Number(m[2]);
+        const r2 = Number(m[4]);
+        if (r < r1 || r > r2) return;
+        try {
+          worksheet.unMergeCells(range);
+        } catch (_) {
+          /* ignore */
+        }
+      });
+    } catch (_) {
+      /* keep existing merges */
+    }
+
+    // Clear non-master leftovers across the band, then write + merge + center.
+    for (let c = 1; c <= endCol; c += 1) {
+      try {
+        const cell = worksheet.getCell(r, c);
+        if (c === 1) continue;
+        if (formVTamilNaduCellText(cell?.value).trim()) cell.value = null;
+      } catch (_) {
+        /* skip */
+      }
+    }
+    writeFormVTamilNaduExcelVisibleCell(worksheet, r, 1, bannerText);
+    try {
+      worksheet.mergeCells(r, 1, r, endCol);
+      rematched += 1;
+    } catch (_) {
+      /* merge may already exist */
+    }
+    const master = worksheet.getCell(r, 1);
+    centerFormVTamilNaduBannerCell(master);
+    // Also center any visible merge children ExcelJS exposes.
+    for (let c = 1; c <= Math.min(endCol, 5); c += 1) {
+      try {
+        centerFormVTamilNaduBannerCell(worksheet.getCell(r, c));
+      } catch (_) {
+        /* skip */
+      }
+    }
+    centered += 1;
+    if (foundCol > 1) {
+      /* value already moved to A */
+    }
+  }
+  return { centered, rematched, endCol };
+}
+
+/** Replace template "For the period from …" banner with the selected month/year sentence (centered). */
+export function writeFormVTamilNaduPeriodToWorksheet(worksheet, periodText, headerRowEnd = 12, tableEndCol = 0) {
+  if (!worksheet) return false;
+  const line = String(periodText || '').trim();
+  const { centered } = centerFormVTamilNaduTitleBannerRows(worksheet, {
+    headerRowEnd: Math.max(1, Number(headerRowEnd) || 12),
+    tableEndCol,
+    periodText: line,
+  });
+  return centered > 0;
+}
+

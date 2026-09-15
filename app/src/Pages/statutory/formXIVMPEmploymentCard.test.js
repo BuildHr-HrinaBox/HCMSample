@@ -9,9 +9,12 @@ import {
   buildFormXIVMPWorkbookWithTemplateStyles,
   detectFormXIVKarnatakaWorksheetLayout,
   detectFormXIVStackedWorkmanLayout,
+  enrichFormXIVMPPayrollRows,
   finalizeFormXIVMadhyaPradeshWorksheet,
   isFormXIVKarnatakaContext,
+  mapFormXIVMPRowsFromEmployees,
   resolveFormXIVExportVariant,
+  resolveFormXIVMPWageRate,
   resolveFormXIVMPWorkmanFieldPositions,
   resolveFormXIVVariant,
   writeFormXIVMPHeaderFieldsToWorksheet,
@@ -1399,5 +1402,52 @@ describe('Form XIV KA payroll name match', () => {
     expect(resolve({ FirstName: 'Ashok', LastName: 'Jangamashetti' })).toEqual(payroll[1]);
     expect(resolve({ FirstName: 'Umesh S O' })).toEqual(payroll[2]);
     expect(resolve({ FirstName: 'Ashok' })).toBeNull();
+  });
+
+  it('matches payroll employee_name-only rows for wage-rate lookup', () => {
+    const payroll = [{ employee_name: 'Naveen K M', gross_pay: 81234 }];
+    const resolve = buildKarnatakaPayrollRowResolver(payroll);
+    expect(resolve({ FirstName: 'Naveen', LastName: 'K M' })).toEqual(payroll[0]);
+    expect(resolve({ FirstName: 'Naveen' })).toBeNull();
+  });
+});
+
+describe('Form XIV wage rate autofill', () => {
+  const wageHeader = 'Wage rate with particulars or unit, in case of piece of work';
+  const headers = [...FORM_XIV_MP_CANONICAL_TABLE_HEADERS];
+
+  it('reads gross_pay, monthly_gross_amount, and People monthly_salary', () => {
+    expect(
+      resolveFormXIVMPWageRate({ FirstName: 'A' }, { gross_pay: 74992 })
+    ).toBe('74992');
+    expect(
+      resolveFormXIVMPWageRate({ FirstName: 'A' }, { monthly_gross_amount: 81234 })
+    ).toBe('81234');
+    expect(resolveFormXIVMPWageRate({ monthly_salary: 69000 }, null)).toBe('69000');
+    expect(resolveFormXIVMPWageRate({ MonthlySalary: 69000 }, null)).toBe('69000');
+  });
+
+  it('maps wage rate from payroll onto the Form XIV table header', () => {
+    const employees = [{ FirstName: 'Prakash', LastName: 'Talawar', Designation: 'Engineer' }];
+    const rows = mapFormXIVMPRowsFromEmployees(employees, headers, {
+      selectedMonth: 'May',
+      item: { dueDate: '30-05-2026', formName: 'Form XIV - Karnataka', state: 'Karnataka' },
+      fileName: 'Form_XIV_-_Karnataka.xlsx',
+      formHeader: { title: 'FORM XIV' },
+      resolvePayrollRow: () => ({ first_name: 'Prakash', last_name: 'Talawar', gross_pay: 74992 }),
+    });
+    expect(rows[0][wageHeader]).toBe('74992');
+    expect(rows[0]['Nature of employment / designation']).toBe('Engineer');
+  });
+
+  it('enriches empty wage-rate cells from payroll after the first map pass', () => {
+    const employees = [{ FirstName: 'Prakash', LastName: 'Talawar' }];
+    const mapped = [{ [wageHeader]: '', 'Nature of employment / designation': 'Engineer' }];
+    const hits = enrichFormXIVMPPayrollRows(mapped, employees, headers, {
+      overwrite: true,
+      resolvePayrollRow: () => ({ employee_name: 'Prakash Talawar', monthly_gross_amount: 74992 }),
+    });
+    expect(hits).toBe(1);
+    expect(mapped[0][wageHeader]).toBe('74992');
   });
 });

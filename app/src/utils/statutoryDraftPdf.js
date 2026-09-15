@@ -37,9 +37,64 @@ import {
   normalizeFormXIXKarnatakaWageSlipPdfMatrix
 } from './statutoryDraftPdf.formXIX.KA';
 import {
+  looksLikeFormXIXTamilNaduPdfContext,
+  resolveFormXIXTamilNaduNetAmountPdfSpan,
+} from './statutoryDraftPdf.formXIX.TN';
+import {
   looksLikeFormXIVKarnatakaPdfContext,
   normalizeFormXIVKarnatakaPdfMatrix
 } from './statutoryDraftPdf.formXIV.KA';
+import {
+  looksLikeFormKGJGujaratPdfContext,
+  rewriteFormKGJGujaratPdfHeader,
+  trimFormKGJGujaratLeadingBlankPdfColumns,
+} from './statutoryDraftPdf.formKGJ.GJ';
+import {
+  detectFormLGJGujaratPdfGroupBands,
+  formLGJGujaratColumnWeight,
+  looksLikeFormLGJGujaratPdfContext,
+  trimFormLGJGujaratLeadingBlankPdfColumns,
+} from './statutoryDraftPdf.formLGJ.GJ';
+import {
+  detectFormPGJGujaratPdfGroupBands,
+  formPGJGujaratColumnWeight,
+  isFormPGJDateOfMonthGroupLabel,
+  looksLikeFormPGJGujaratPdfContext,
+  normalizeFormPGJGujaratPdfMatrix,
+  dropFormPGJGujaratExtraDayPdfColumns,
+  blankFormPGJGujaratMinimumRateOfWagesPdfCells,
+  resolveFormPGJGujaratPdfDaysInMonth,
+  rewriteFormPGJGujaratPdfHeader,
+  trimFormPGJGujaratLeadingBlankPdfColumns,
+} from './statutoryDraftPdf.formPGJ.GJ';
+import {
+  looksLikeFormOGJGujaratPdfContext,
+  rewriteFormOGJGujaratPdfHeader,
+  trimFormOGJGujaratLeadingBlankPdfColumns,
+} from './statutoryDraftPdf.formOGJ.GJ';
+import {
+  FORM_XVIII_TN_PDF_TABLE_FONT_SIZE,
+  coalesceFormXVIIITamilNaduTitleLines,
+  detectFormXVIIITamilNaduPdfGroupBands,
+  isFormXVIIITamilNaduAmountOfWagesEarnedGroupLabel,
+  isFormXVIIITamilNaduWagesCumMusterTitle,
+  looksLikeFormXVIIITamilNaduPdfContext,
+} from '../Pages/statutory/formXVIIITamilNaduWagesMuster';
+import {
+  detectFormBTamilNaduPdfGroupBands,
+  formBTamilNaduPdfColumnWeight,
+  isFormBTamilNaduAmountsDeductedGroupLabel,
+  isFormBTamilNaduPdfSignatoryRow,
+  isFormBTamilNaduPdfSignatoryText,
+  looksLikeFormBTamilNaduPdfContext,
+  normalizeFormBTamilNaduPdfMatrix,
+  rewriteFormBTamilNaduPdfHeader,
+} from '../Pages/statutory/formBTamilNadu';
+import {
+  isFormCTamilNaduLwfPdfSignatoryRow,
+  isFormCTamilNaduLwfPdfSignatoryText,
+  rewriteFormCTamilNaduLwfPdfHeader,
+} from '../Pages/statutory/formCTamilNaduLwf';
 import {
   getFormXVIAPHeaderTitles,
   isFormXVIIDateNumberRow,
@@ -55,14 +110,63 @@ import {
   looksLikeFormXIIIAPPdfContext
 } from './statutoryDraftPdf.formXIII.AP';
 import {
+  extractFormXXIIIAPSEAdminLayout,
+  findFormXXIIIAPSEDeductionsBand,
+  FORM_XXIII_APSE_ADMIN_WIDTHS,
+  formXXIIIAPSEColumnWeight,
+  formatFormXXIIIAPSEMoneyPdfValue,
+  getFormXXIIIAPSEHeaderTitles,
+  isFormXXIIIAPSEAdminRow,
+  isFormXXIIIAPSECenterValueHeader,
+  isFormXXIIIAPSEDeductionsGroupLabel,
+  isFormXXIIIAPSEMoneyHeader,
+  isFormXXIIIAPSETableHeaderRow,
+  isFormXXIIIAPSETitleRow,
+  looksLikeFormXXIIIAPSEPdfContext,
+  trimFormXXIIIAPSEEmptyPdfColumns
+} from './statutoryDraftPdf.formXXIII.AP.S&D.js';
+import {
   applyFormTSEKarnatakaPdfNormalization,
+  detectFormTSEKarnatakaAttendanceBand,
   extractFormTSEKarnatakaHeaderFields,
+  FORM_T_KA_PDF_DATE_LABEL,
+  FORM_T_KA_PDF_SIGNATORY_LABEL,
   getFormTSEKarnatakaHeaderTitles,
   isFormTSEKarnatakaAdminRowBlob,
+  isFormTSEKarnatakaPdfFooterOnlyRow,
   isFormTSEKarnatakaTableHeaderRow,
   looksLikeFormTSEKarnatakaPdfContext,
   normalizeFormTSEKarnatakaPdfMatrix,
 } from './statutoryDraftPdf.formT.KA';
+import {
+  applyFormQKarnatakaPdfNormalization,
+  looksLikeFormQKarnatakaPdfContext,
+  normalizeFormQKarnatakaPdfMatrix,
+} from './statutoryDraftPdf.formQ.KA';
+import {
+  applyFormMGJGujaratPdfNormalization,
+  drawFormMGJGujaratIdentityCard,
+  looksLikeFormMGJGujaratPdfContext,
+  normalizeFormMGJGujaratPdfMatrix,
+} from './statutoryDraftPdf.formMGJ.GJ';
+import {
+  applyFormNGJGujaratPdfNormalization,
+  drawFormNGJGujaratLeaveBook,
+  looksLikeFormNGJGujaratPdfContext,
+  normalizeFormNGJGujaratPdfMatrix,
+} from './statutoryDraftPdf.formNGJ.GJ';
+import {
+  applyFormFKarnatakaPdfNormalization,
+  drawFormFKarnatakaLeaveRegister,
+  looksLikeFormFKarnatakaPdfContext,
+  normalizeFormFKarnatakaPdfMatrix,
+} from './statutoryDraftPdf.formF.KA';
+import {
+  applyFormPKarnatakaPdfNormalization,
+  drawFormPKarnatakaNotice,
+  looksLikeFormPKarnatakaPdfContext,
+  normalizeFormPKarnatakaPdfMatrix,
+} from './statutoryDraftPdf.formP.KA';
 import { isApPdfHeadingRow } from './statutoryDraftPdf.apHeaderTitles';
 import { buildFormXVAPServiceCertificatePdfBlob } from './statutoryDraftPdf.formXV.AP';
 const EXCEL_EXT_RE = /\.(xlsx|xls|xlsm|xlsb)$/i;
@@ -134,12 +238,19 @@ const expandStatutoryMetaSegments = (raw) => {
     .map((s) => s.replace(/[ \t\u00a0]+/g, ' ').trim())
     .filter(Boolean);
 
+  // Form XVIII TN subtitle must stay one line (do not split on "Register of").
+  const joinedNorm = parts.join(' ').replace(/\s+/g, ' ').trim();
+  if (isFormXVIIITamilNaduWagesCumMusterTitle(joinedNorm)) {
+    return [joinedNorm];
+  }
+
   // SheetJS / some exports flatten wrapText titles into one long line — re-split.
   if (parts.length === 1) {
     const blob = parts[0];
     const looksLikeStackedTitle =
       /^form\b/i.test(blob) &&
       blob.length > 36 &&
+      !isFormXVIIITamilNaduWagesCumMusterTitle(blob) &&
       (TITLE_CONCAT_SPLIT_RE.test(blob) ||
         /register of|see\s+(?:sub-)?rule|prescribed\s+under|overtime\s+muster/i.test(blob));
     if (looksLikeStackedTitle) {
@@ -150,7 +261,7 @@ const expandStatutoryMetaSegments = (raw) => {
       if (split.length > 1) parts = split;
     }
   }
-  return parts;
+  return coalesceFormXVIIITamilNaduTitleLines(parts);
 };
 
 const isSystemGeneratedDocumentNote = (text) =>
@@ -561,7 +672,8 @@ const cellToText = (value) => {
     if (value.v != null) return cellToText(value.v);
     if (value.hyperlink != null && value.text != null) return String(value.text).trim();
   }
-  return String(value).trim();
+  const text = String(value).trim();
+  return text === '[object Object]' ? '' : text;
 };
 
 const collectExcelBuffersFromDraft = async (arrayBuffer, fileName = '') => {
@@ -2392,6 +2504,8 @@ const looksLikeFormWPdfContext = (metaLines, rows, tableStart = 0) => {
     .map((t) => String(t || ''))
     .join(' ')
     .toLowerCase();
+  if (looksLikeFormXVIIITamilNaduPdfContext(metaLines, rows, '', '')) return false;
+  if (/wages[\s._-]*cum[\s._-]*muster|form[\s._-]*xviii(?![a-z])/.test(blob)) return false;
   const isFormW =
     /(?:^|[^a-z0-9])form[\s._-]*w(?:[^a-z0-9]|$)/.test(blob) ||
     (/register of wages/.test(blob) && /sub-rule\s*\(?\s*1\s*\)?\s*of\s*rule\s*\(?\s*16/.test(blob));
@@ -2411,7 +2525,7 @@ const looksLikeFormWPdfContext = (metaLines, rows, tableStart = 0) => {
 /**
  * Build a dense AOA matrix from a worksheet — all data cells, merges collapsed.
  */
-const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
+const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet', fileName = '') => {
   const aoa = XLSX.utils.sheet_to_json(worksheet, {
     header: 1,
     defval: '',
@@ -2494,6 +2608,25 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
     if (remarksIdx >= 0) maxCol = Math.min(maxCol, remarksIdx + 1);
   }
 
+  const isFormITnSubsistence =
+    /subsistence\s+allowance/.test(earlyBlob) ||
+    /employees\s+placed\s+under\s+suspension/.test(earlyBlob) ||
+    (/date\s+of\s+suspension/.test(earlyBlob) && /nature\s+of\s+offence/.test(earlyBlob));
+  if (isFormITnSubsistence) {
+    let signatureIdx = -1;
+    for (let r = 0; r < Math.min(rows.length, 8); r += 1) {
+      const row = rows[r] || [];
+      for (let c = 0; c < row.length; c += 1) {
+        const t = String(cellToText(row[c]) || '').toLowerCase();
+        if (/signature\s+of\s+employee|postal\s+acknowledgement/.test(t)) {
+          signatureIdx = Math.max(signatureIdx, c);
+        }
+      }
+    }
+    if (signatureIdx >= 0) maxCol = Math.min(maxCol, signatureIdx + 1);
+    else maxCol = Math.min(maxCol, 12);
+  }
+
   const padded = [];
   for (let r = 0; r <= endRow; r += 1) {
     const line = [];
@@ -2501,6 +2634,79 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
       line.push(cellToText(rows[r]?.[c]));
     }
     padded.push(line);
+  }
+
+  // Gujarat Form M identity card — rebuild before generic meta/table splitting.
+  if (looksLikeFormMGJGujaratPdfContext([], padded, sheetName)) {
+    const normalized = normalizeFormMGJGujaratPdfMatrix(padded, maxCol, 0, []);
+    return {
+      name: sheetName,
+      rows: normalized.rows,
+      colCount: normalized.colCount,
+      metaLines: normalized.metaLines,
+      tableStartRow: normalized.tableStartRow,
+      formMGJLayout: true,
+      formMGJTitles: normalized.formMGJTitles,
+      formMGJFields: normalized.formMGJFields,
+      formMGJSignatures: normalized.formMGJSignatures,
+    };
+  }
+
+  // Gujarat Form N Leave Book — three stacked sections, not one generic grid.
+  if (looksLikeFormNGJGujaratPdfContext([], padded, sheetName)) {
+    const normalized = normalizeFormNGJGujaratPdfMatrix(padded, maxCol, 0, []);
+    return {
+      name: sheetName,
+      rows: normalized.rows,
+      colCount: normalized.colCount,
+      metaLines: normalized.metaLines,
+      tableStartRow: normalized.tableStartRow,
+      formNGJLayout: true,
+      formNGJModel: normalized.formNGJModel,
+    };
+  }
+
+  // Karnataka Form F leave register — identity + PART I + PART II, not one generic grid.
+  if (looksLikeFormFKarnatakaPdfContext([], padded, sheetName, fileName)) {
+    const normalized = normalizeFormFKarnatakaPdfMatrix(padded, maxCol, 0, []);
+    return {
+      name: sheetName,
+      rows: normalized.rows,
+      colCount: normalized.colCount,
+      metaLines: normalized.metaLines,
+      tableStartRow: normalized.tableStartRow,
+      formFKALayout: true,
+      formFKAModel: normalized.formFKAModel,
+      fileName,
+    };
+  }
+
+  // Karnataka Form P notice of maximum leave — letter + small table, not a generic grid.
+  if (looksLikeFormPKarnatakaPdfContext([], padded, sheetName, fileName)) {
+    const normalized = normalizeFormPKarnatakaPdfMatrix(padded, maxCol, 0, []);
+    return {
+      name: sheetName,
+      rows: normalized.rows,
+      colCount: normalized.colCount,
+      metaLines: normalized.metaLines,
+      tableStartRow: normalized.tableStartRow,
+      formPKALayout: true,
+      formPKAModel: normalized.formPKAModel,
+      fileName,
+    };
+  }
+
+  // Karnataka Form Q appointment order — 2-column Excel label|value, not stacked meta bands.
+  if (looksLikeFormQKarnatakaPdfContext([], padded, sheetName)) {
+    const normalized = normalizeFormQKarnatakaPdfMatrix(padded, maxCol, 0, []);
+    return {
+      name: sheetName,
+      rows: normalized.rows,
+      colCount: normalized.colCount,
+      metaLines: normalized.metaLines,
+      tableStartRow: normalized.tableStartRow,
+      formQKALayout: true,
+    };
   }
 
   // Split form title/meta (full-width once) from the data table
@@ -2534,6 +2740,11 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
       padded.slice(0, Math.min(padded.length, 24)),
       sheetName
     );
+    const isFormXXIIIAPSE = looksLikeFormXXIIIAPSEPdfContext(
+      metaLines,
+      padded.slice(0, Math.min(padded.length, 24)),
+      sheetName
+    );
     const earlyFormBGJ =
       looksLikeFormBGJGujaratPdfContext(
         metaLines,
@@ -2546,6 +2757,19 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
         /gujarat|_gj|wage\s+register|minimum\s+wages/i.test(
           [sheetName || '', ...padded.slice(0, 12).flat()].join(' ')
         ));
+    if (isFormXXIIIAPSE && (isFormXXIIIAPSETitleRow(padded[r]) || isFormXXIIIAPSEAdminRow(padded[r]))) {
+      const unique = [];
+      padded[r].forEach((cell) => {
+        const text = String(cell || '').trim();
+        if (text && !unique.includes(text)) unique.push(text);
+      });
+      unique.forEach((text) => {
+        expandStatutoryMetaSegments(text).forEach((segment) => metaLines.push(segment));
+      });
+      tableStartRow = r + 1;
+      continue;
+    }
+
     if (
       (isFormXXAP || isFormXXIAP || isFormXVIIAP) &&
       (isFormXXAPAdministrativeRow(padded[r]) || isFormXVIIAdministrativeRow(padded[r]))
@@ -2597,6 +2821,7 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
     }
 
     const isColHeader =
+      (isFormXXIIIAPSE && isFormXXIIIAPSETableHeaderRow(padded[r]) && filled.length >= 3) ||
       (isFormXXAPTableHeaderRow(padded[r]) && filled.length >= 5) ||
       (isFormXVIAPTableHeaderRow(padded[r]) && filled.length >= 3) ||
       (isFormXVIAP && isFormXVIIDateNumberRow(padded[r])) ||
@@ -2707,6 +2932,19 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
   let formXIVFooterLines = [];
   let formXIVKALayout = false;
   let formTKALayout = false;
+  let formTKAAttendanceBand = null;
+  let formTKAFooter = null;
+  let formQKALayout = false;
+  let formMGJLayout = false;
+  let formMGJTitles = [];
+  let formMGJFields = [];
+  let formMGJSignatures = [];
+  let formNGJLayout = false;
+  let formNGJModel = null;
+  let formFKALayout = false;
+  let formFKAModel = null;
+  let formPKALayout = false;
+  let formPKAModel = null;
   if (isForm25Tn) {
     finalRows = trimForm25TamilNaduPdfTrailingEmployeeRows(padded, tableStartRow);
   }
@@ -2741,6 +2979,82 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
     );
     finalRows = trimmedLead.rows;
     finalColCount = trimmedLead.colCount;
+  }
+  if (looksLikeFormKGJGujaratPdfContext(metaLines, finalRows, sheetName)) {
+    const trimmedLead = trimFormKGJGujaratLeadingBlankPdfColumns(
+      finalRows,
+      finalColCount,
+      tableStartRow
+    );
+    finalRows = trimmedLead.rows;
+    finalColCount = trimmedLead.colCount;
+  }
+  if (looksLikeFormLGJGujaratPdfContext(metaLines, finalRows, sheetName)) {
+    const trimmedLead = trimFormLGJGujaratLeadingBlankPdfColumns(
+      finalRows,
+      finalColCount,
+      tableStartRow
+    );
+    finalRows = trimmedLead.rows;
+    finalColCount = trimmedLead.colCount;
+  }
+  if (looksLikeFormPGJGujaratPdfContext(metaLines, finalRows, sheetName)) {
+    const trimmedLead = normalizeFormPGJGujaratPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = trimmedLead.rows;
+    finalColCount = trimmedLead.colCount;
+  }
+  if (looksLikeFormBTamilNaduPdfContext(metaLines, finalRows, sheetName, fileName)) {
+    const normalized = normalizeFormBTamilNaduPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = normalized.rows;
+    finalColCount = normalized.colCount;
+    tableStartRow = normalized.tableStartRow;
+    if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
+  }
+  if (looksLikeFormOGJGujaratPdfContext(metaLines, finalRows, sheetName)) {
+    const trimmedLead = trimFormOGJGujaratLeadingBlankPdfColumns(
+      finalRows,
+      finalColCount,
+      tableStartRow
+    );
+    finalRows = trimmedLead.rows;
+    finalColCount = trimmedLead.colCount;
+  }
+  if (looksLikeFormXXIIIAPSEPdfContext(metaLines, finalRows, sheetName)) {
+    let headerEnd = tableStartRow;
+    for (let r = tableStartRow; r < Math.min(finalRows.length, tableStartRow + 6); r += 1) {
+      if (
+        isFormXXIIIAPSETableHeaderRow(finalRows[r]) ||
+        isLikelyHeaderBandRow(finalRows[r], r)
+      ) {
+        headerEnd = r;
+      }
+    }
+    const deductionsBand = findFormXXIIIAPSEDeductionsBand(
+      finalRows,
+      tableStartRow,
+      finalColCount
+    );
+    if (deductionsBand) {
+      headerEnd = Math.max(headerEnd, deductionsBand.childRow, deductionsBand.parentRow);
+    }
+    const trimmedXxiii = trimFormXXIIIAPSEEmptyPdfColumns(
+      finalRows,
+      tableStartRow,
+      headerEnd,
+      finalColCount
+    );
+    finalRows = trimmedXxiii.rows;
+    finalColCount = trimmedXxiii.colCount;
   }
   if (looksLikeForm11RajasthanPdfContext(metaLines, finalRows, sheetName)) {
     finalRows = scrubForm11RajasthanTotalHoursPdfColumn(
@@ -2816,6 +3130,79 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
     tableStartRow = normalized.tableStartRow;
     if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
     formTKALayout = true;
+    if (normalized.attendanceBand) formTKAAttendanceBand = normalized.attendanceBand;
+    if (normalized.formTKAFooter) formTKAFooter = normalized.formTKAFooter;
+  }
+  if (looksLikeFormQKarnatakaPdfContext(metaLines, finalRows, sheetName)) {
+    const normalized = normalizeFormQKarnatakaPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = normalized.rows;
+    finalColCount = normalized.colCount;
+    tableStartRow = normalized.tableStartRow;
+    if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
+    formQKALayout = true;
+  }
+  if (looksLikeFormMGJGujaratPdfContext(metaLines, finalRows, sheetName)) {
+    const normalized = normalizeFormMGJGujaratPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = normalized.rows;
+    finalColCount = normalized.colCount;
+    tableStartRow = normalized.tableStartRow;
+    if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
+    formMGJLayout = true;
+    formMGJTitles = normalized.formMGJTitles || [];
+    formMGJFields = normalized.formMGJFields || [];
+    formMGJSignatures = normalized.formMGJSignatures || [];
+  }
+  if (looksLikeFormNGJGujaratPdfContext(metaLines, finalRows, sheetName)) {
+    const normalized = normalizeFormNGJGujaratPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = normalized.rows;
+    finalColCount = normalized.colCount;
+    tableStartRow = normalized.tableStartRow;
+    if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
+    formNGJLayout = true;
+    formNGJModel = normalized.formNGJModel || null;
+  }
+  if (looksLikeFormFKarnatakaPdfContext(metaLines, finalRows, sheetName, fileName)) {
+    const normalized = normalizeFormFKarnatakaPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = normalized.rows;
+    finalColCount = normalized.colCount;
+    tableStartRow = normalized.tableStartRow;
+    if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
+    formFKALayout = true;
+    formFKAModel = normalized.formFKAModel || null;
+  }
+  if (looksLikeFormPKarnatakaPdfContext(metaLines, finalRows, sheetName, fileName)) {
+    const normalized = normalizeFormPKarnatakaPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = normalized.rows;
+    finalColCount = normalized.colCount;
+    tableStartRow = normalized.tableStartRow;
+    if (Array.isArray(normalized.metaLines)) metaLines = normalized.metaLines;
+    formPKALayout = true;
+    formPKAModel = normalized.formPKAModel || null;
   }
 
   return {
@@ -2833,7 +3220,21 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet') => {
     formXIXKABottomSection,
     formXIVFooterLines,
     formXIVKALayout,
-    formTKALayout
+    formTKALayout,
+    attendanceBand: formTKAAttendanceBand,
+    formTKAFooter,
+    formQKALayout,
+    formMGJLayout,
+    formMGJTitles,
+    formMGJFields,
+    formMGJSignatures,
+    formNGJLayout,
+    formNGJModel,
+    formFKALayout,
+    formFKAModel,
+    formPKALayout,
+    formPKAModel,
+    fileName,
   };
 };
 
@@ -2864,10 +3265,25 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
       if (formXIVAlreadyNormalized) {
         return;
       }
+      if (matrix.formMGJLayout === true) {
+        return;
+      }
+      if (matrix.formNGJLayout === true) {
+        return;
+      }
       if (matrix.formXIXAPLayout === true || matrix.formXIXKarnatakaLayout === true) {
         return;
       }
       if (matrix.formTKALayout === true) {
+        return;
+      }
+      if (matrix.formQKALayout === true) {
+        return;
+      }
+      if (matrix.formFKALayout === true) {
+        return;
+      }
+      if (matrix.formPKALayout === true) {
         return;
       }
 
@@ -2944,6 +3360,100 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
       // Form X RJ Employment Card: remove the empty first table column.
       if (looksLikeFormXRajasthanEmploymentCardPdfContext(matrix.metaLines, matrix.rows, matrix.name)) {
         const trimmedLead = trimFormXRajasthanEmploymentLeadingBlankPdfColumns(
+          matrix.rows,
+          matrix.colCount,
+          matrix.tableStartRow || 0
+        );
+        matrix.rows = trimmedLead.rows;
+        matrix.colCount = trimmedLead.colCount;
+      }
+
+      // Form K GJ: drop the empty template column before Sr. No.
+      if (
+        looksLikeFormKGJGujaratPdfContext(
+          matrix.metaLines,
+          matrix.rows,
+          matrix.name,
+          matrix.fileName
+        )
+      ) {
+        const trimmedLead = trimFormKGJGujaratLeadingBlankPdfColumns(
+          matrix.rows,
+          matrix.colCount,
+          matrix.tableStartRow || 0
+        );
+        matrix.rows = trimmedLead.rows;
+        matrix.colCount = trimmedLead.colCount;
+      }
+
+      // Form L GJ: drop the empty template column before Sr. No.
+      if (
+        looksLikeFormLGJGujaratPdfContext(
+          matrix.metaLines,
+          matrix.rows,
+          matrix.name,
+          matrix.fileName
+        )
+      ) {
+        const trimmedLead = trimFormLGJGujaratLeadingBlankPdfColumns(
+          matrix.rows,
+          matrix.colCount,
+          matrix.tableStartRow || 0
+        );
+        matrix.rows = trimmedLead.rows;
+        matrix.colCount = trimmedLead.colCount;
+      }
+
+      // Form P GJ: drop the empty template column before Sr. No.
+      if (
+        looksLikeFormPGJGujaratPdfContext(
+          matrix.metaLines,
+          matrix.rows,
+          matrix.name,
+          matrix.fileName
+        )
+      ) {
+        const trimmedLead = normalizeFormPGJGujaratPdfMatrix(
+          matrix.rows,
+          matrix.colCount,
+          matrix.tableStartRow || 0,
+          matrix.metaLines
+        );
+        matrix.rows = trimmedLead.rows;
+        matrix.colCount = trimmedLead.colCount;
+      }
+
+      // Form B TN: keep Fine blank; Other deductions stay in the Other column.
+      if (
+        looksLikeFormBTamilNaduPdfContext(
+          matrix.metaLines,
+          matrix.rows,
+          matrix.name,
+          matrix.fileName
+        )
+      ) {
+        const normalized = normalizeFormBTamilNaduPdfMatrix(
+          matrix.rows,
+          matrix.colCount,
+          matrix.tableStartRow || 0,
+          matrix.metaLines
+        );
+        matrix.rows = normalized.rows;
+        matrix.colCount = normalized.colCount;
+        matrix.tableStartRow = normalized.tableStartRow;
+        if (Array.isArray(normalized.metaLines)) matrix.metaLines = normalized.metaLines;
+      }
+
+      // Form O GJ: drop the empty template column before Sr. No.
+      if (
+        looksLikeFormOGJGujaratPdfContext(
+          matrix.metaLines,
+          matrix.rows,
+          matrix.name,
+          matrix.fileName
+        )
+      ) {
+        const trimmedLead = trimFormOGJGujaratLeadingBlankPdfColumns(
           matrix.rows,
           matrix.colCount,
           matrix.tableStartRow || 0
@@ -3054,7 +3564,7 @@ const collectWorkbookMatrices = async (arrayBuffer, label = 'Draft') => {
   const wb = XLSX.read(arrayBuffer, { type: 'array', cellDates: true, cellText: true });
   const matrices = [];
   (wb.SheetNames || []).forEach((name) => {
-    const matrix = sheetToDenseMatrix(wb.Sheets[name], name || label);
+    const matrix = sheetToDenseMatrix(wb.Sheets[name], name || label, label);
     if (matrix.rows.length > 0 && matrix.colCount > 0) {
       matrices.push(matrix);
     }
@@ -3097,6 +3607,8 @@ const looksLikeAuxiliaryOrPivotPdfSheet = (matrix) => {
 
 /** Form 15 Part 1 TN — Register of Leave with Wages. */
 const looksLikeForm15TamilNaduPdfContext = (metaLines, rows, sheetName = '') => {
+  if (looksLikeFormFKarnatakaPdfContext(metaLines, rows, sheetName)) return false;
+  if (looksLikeFormPKarnatakaPdfContext(metaLines, rows, sheetName)) return false;
   const blob = [...(metaLines || []), ...(rows || []).slice(0, 12).flat(), sheetName || '']
     .join(' ')
     .toLowerCase();
@@ -3238,9 +3750,11 @@ const isWageDeductionGroupLabel = (text) => {
   if (/^other\s+allowances?$/.test(n)) return true;
   // Form XXVII TN Register of Wages group banners
   if (/^wages?\s+earned$/.test(n)) return true;
+  if (isFormXVIIITamilNaduAmountOfWagesEarnedGroupLabel(t)) return true;
   if (/other\s+allowances?\s*\/\s*cash\s+payment|cash\s+payment\s+nature/.test(n)) return true;
   // Mid-tier "OTHER" over PT / Uniform Deposits (not "Other Deductions" leaf)
   if (/^other$/.test(n)) return true;
+  if (isFormBTamilNaduAmountsDeductedGroupLabel(t)) return true;
   return false;
 };
 
@@ -3252,11 +3766,13 @@ const isFormBRajasthanWageRateGroupLabel = (text) => {
   return /^rate\s+of\s+minimum\s+wages\s+and\s+since\s+the\s+date\b/.test(normalized);
 };
 
-const looksLikeFormBGJGujaratPdfContext = (metaLines, rows, sheetName = '') => {
-  const blob = [...(metaLines || []), ...(rows || []).slice(0, 22).flat(), sheetName || '']
+const looksLikeFormBGJGujaratPdfContext = (metaLines, rows, sheetName = '', fileName = '') => {
+  if (looksLikeFormPGJGujaratPdfContext(metaLines, rows, sheetName, fileName)) return false;
+  const blob = [...(metaLines || []), ...(rows || []).slice(0, 22).flat(), sheetName || '', fileName || '']
     .join(' ')
     .toLowerCase();
   if (/rajasthan|\b_rj\b|form[\s._-]*b[\s._-]*rj|form_b_rj/.test(blob)) return false;
+  if (/\bform\s*[-–.]?\s*p\b/.test(blob) && /muster[\s-]*roll\s+cum\s+wage/.test(blob)) return false;
   const hasFormB = /\bform\s*b\b|form[\s._-]*b[\s._-]|form_b_gj/.test(blob);
   const hasWageRegister =
     /format\s+of\s+wage\s+register/.test(blob) ||
@@ -3520,7 +4036,9 @@ const isStatutoryGroupHeaderLabel = (text) =>
   isWageDeductionGroupLabel(text) ||
   isFormVIFestivalGroupLabel(text) ||
   isFormBRajasthanWageRateGroupLabel(text) ||
-  isFormXXDateOfRecoveryGroupLabel(text);
+  isFormXXDateOfRecoveryGroupLabel(text) ||
+  isFormXXIIIAPSEDeductionsGroupLabel(text) ||
+  isFormBTamilNaduAmountsDeductedGroupLabel(text);
 
 /** True when a leaf header marks the end of a Deductions / Leave Wages group span. */
 const isGroupBandStopLeaf = (text) => {
@@ -3569,10 +4087,9 @@ const isForeignLeafForGroup = (groupLabel, leafText) => {
   if (/^leave\s+wages?$/.test(g)) {
     return /gross\s+wage|overtime|basic\s+wage|deduction|provident|net\s+wage/.test(n);
   }
-  if (/^wages?\s+earned$/.test(g)) {
-    return (
-      /gross\s+wage|deduction|provident|insurance|net\s+wage|signature|unpaid|fines?/.test(n) ||
-      isGroupBandStopLeaf(n)
+  if (/amount\s+of\s+wages?\s+earned|^wages?\s+earned$/.test(g)) {
+    return /deduction|net\s+amount|net\s+wage|signature|thumb|initial|daily\s+rate|attendance|provident|unpaid|fines?/.test(
+      n
     );
   }
   if (/other\s+allowances?\s*\/\s*cash\s+payment|cash\s+payment\s+nature/.test(g)) {
@@ -3590,6 +4107,9 @@ const isForeignLeafForGroup = (groupLabel, leafText) => {
   }
   if (/^deductions?$/.test(g)) {
     return isGroupBandStopLeaf(n);
+  }
+  if (/amounts?\s+deducted\s+during\s+the\s+month/.test(g)) {
+    return /amount\s+actually\s+paid|balance\s+due|total\s+emolument|total\s+number/.test(n);
   }
   // Form VI festival-holiday banner — stop before Remarks / identity columns.
   if (
@@ -3795,9 +4315,9 @@ const isNilOfTheMonthIgnorableSpillPdfText = (text) => {
   if (/authorised\s+signatory|authorized\s+signatory/i.test(flat)) return true;
   if (/signature\s+of\s+employer/i.test(flat)) return true;
   if (/manager\s*\/\s*authori[sz]ed\s+person/i.test(flat)) return true;
-  // Bare calendar date (31-08-2026) left from template / pay-run stamp
+  // Bare calendar date (31-07-2026) left from template / pay-run stamp — do not show.
   if (/^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}$/.test(flat)) return true;
-  // Multiline spill: date + For (… + Authorised Signatory
+  // Multiline spill: leftover template date + For (… + Authorised Signatory.
   if (
     /\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}/.test(flat) &&
     (/for\s*\(/i.test(flat) || /authori[sz]ed\s+signatory/i.test(flat) || /signature\s+of\s+employer/i.test(flat))
@@ -3865,7 +4385,9 @@ const formatNilOfTheMonthPdfDisplay = (nilText, filledTexts = []) => {
 /**
  * Detect a data row that is a nil-month notice (after Excel merges collapse).
  * Returns a full-width span so PDF paints one merged, center-aligned box.
- * Form 1 TN / Form XXIX: "1 | Nill of the month | Aug 2026 | …" → "Nil of the Month Aug 2026".
+ * Form XXIX / Form 26: "1 | Nill of the month | Aug 2026 | …" → "Nil of the Month Aug 2026".
+ * Form 1 TN subsistence keeps a month-end payment date in its own column, so that row
+ * is not merged (the date must stay visible).
  */
 const resolveNilOfTheMonthPdfSpan = (row, colCount, rowIndex, headerBandEnd) => {
   if (rowIndex <= headerBandEnd || colCount < 2) return null;
@@ -3932,6 +4454,17 @@ const statutoryHeaderColumnWeight = (headerText, maxDataLen = 0, colCount = 12) 
     return Math.max(12, Math.min(wideForm ? 18 : 20, Math.max(headerLen * 0.16, dataLen * 0.45, 12)));
   }
 
+  // Form I TN subsistence: keep "date of payment" visible under the amount header.
+  if (
+    /amount/.test(lower) &&
+    /allowance/.test(lower) &&
+    /paid/.test(lower) &&
+    /date/.test(lower) &&
+    /payment/.test(lower)
+  ) {
+    return Math.max(14, Math.min(wideForm ? 20 : 22, headerLen * 0.22 + Math.min(dataLen, 12) * 0.35));
+  }
+
   // Form 14 RJ young-person / hours / overtime columns — keep readable in landscape.
   if (/young\s+person|total\s+hours\s+worked|days\s+on\s+which\s+overtime|extent\s+of\s+overtime/i.test(lower)) {
     return Math.max(10, Math.min(16, headerLen * 0.18 + Math.min(dataLen, 12) * 0.3));
@@ -3976,6 +4509,15 @@ const enforcePdfColumnMinWidths = (widths, headers, usableWidth, options = {}) =
       return compactSex ? Math.max(18, total * 0.025) : Math.max(28, total * 0.045);
     }
     if (h.length >= 55) return Math.max(56, total * 0.09);
+    if (
+      /amount/.test(lower) &&
+      /allowance/.test(lower) &&
+      /paid/.test(lower) &&
+      /date/.test(lower) &&
+      /payment/.test(lower)
+    ) {
+      return Math.max(64, total * 0.1);
+    }
     if (h.length >= 28 || /name|address|witness|signature|occupation|department/i.test(lower)) {
       return Math.max(36, total * 0.06);
     }
@@ -4084,12 +4626,14 @@ const resolveLeafHeaderTexts = (rows, tableStart, headerBandEnd, colCount) => {
         if (!numberFallback) numberFallback = t;
         continue;
       }
+      if (isFormPGJDateOfMonthGroupLabel(t)) continue;
       // Prefer the deepest (leaf) non-group label; skip ultra-wide group banners alone.
       if (
         /^deductions$/i.test(t) ||
         /^advances$/i.test(t) ||
         /^damages\s*\/\s*fine$/i.test(t) ||
-        /^details of injury$/i.test(t)
+        /^details of injury$/i.test(t) ||
+        isFormBTamilNaduAmountsDeductedGroupLabel(t)
       ) {
         if (!best) best = t;
         continue;
@@ -4654,7 +5198,12 @@ const extractFormXVIAPHeaderFields = (rows, tableStart, metaLines = []) => {
  
   // Field patterns - with label text preserved for output
   const fieldPatterns = [
-    { re: /address\s+of\s+the\s+establishment\s*:/i, label: 'Address of the Establishment :', key: 'establishment' },
+    {
+      re: /name\s+and\s+address\s+of\s+(?:the\s+)?establishment[\s\S]{0,80}contract\s+is\s+carried\s+on\s*:/i,
+      label: 'Name and Address of the Establishment in/ under which contract is carried on :',
+      key: 'establishment'
+    },
+    { re: /address\s+of\s+the\s+establishment\s*:/i, label: 'Name and Address of the Establishment in/ under which contract is carried on :', key: 'establishment' },
     { re: /name\s+and\s+address\s+of\s+contractor\.?\s*:/i, label: 'Name and Address of Contractor. :', key: 'contractor' },
     { re: /name\s+and\s+address\s+of\s+principal\s+employer\.?\s*:/i, label: 'Name and address of Principal Employer :', key: 'employer' },
     { re: /nature\s+and\s+location\s+of\s+work\s*:/i, label: 'Nature and Location of work :', key: 'nature' },
@@ -4717,13 +5266,29 @@ const extractFormXVIAPHeaderFields = (rows, tableStart, metaLines = []) => {
    
     // Only use if valid (not empty and not a form/rule indicator)
     if (value && !/^\s*(form|vide|rule|s\.?\s*no)/i.test(value) && value.length > 1) {
-      extracted[current.key] = `${current.label} ${value}`;
+      if (!extracted[current.key]) extracted[current.key] = `${current.label} ${value}`;
     }
+  }
+
+  const stripFormXVIFieldValue = (line) => {
+    const text = String(line || '');
+    const colon = text.indexOf(':');
+    return colon >= 0 ? text.slice(colon + 1).trim() : '';
+  };
+  const establishmentValue = stripFormXVIFieldValue(extracted.establishment);
+  const employerValue = stripFormXVIFieldValue(extracted.employer);
+  if (employerValue && (!establishmentValue || establishmentValue.length + 12 < employerValue.length)) {
+    extracted.establishment =
+      `Name and Address of the Establishment in/ under which contract is carried on : ${employerValue}`;
+  } else if (establishmentValue) {
+    extracted.establishment =
+      `Name and Address of the Establishment in/ under which contract is carried on : ${establishmentValue}`;
   }
  
   return {
     fields: [
-      extracted.establishment || 'Address of the Establishment :',
+      extracted.establishment ||
+        'Name and Address of the Establishment in/ under which contract is carried on :',
       extracted.contractor || 'Name and Address of Contractor. :',
       extracted.employer || 'Name and address of Principal Employer :'
     ],
@@ -4788,6 +5353,31 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
       rightFields: [],
       formXIIIAP: true,
       formXIIIAPAdminRows: extractFormXIIIAPAdministrativeRows(
+        effectiveMetaLines,
+        rows,
+        tableStart
+      ),
+      hasSystemNote: (effectiveMetaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
+      isFormXXVI: false,
+      isFormW: false,
+      isFormXXVIIRegister: false,
+      titleBoxFullBorder: false,
+      hideRightBandSplit: false
+    };
+  }
+
+  const isFormXXIIIAPSE = looksLikeFormXXIIIAPSEPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName
+  );
+  if (isFormXXIIIAPSE) {
+    return {
+      titles: getFormXXIIIAPSEHeaderTitles(effectiveMetaLines, rows, tableStart),
+      fields: [],
+      rightFields: [],
+      formXXIIIAPSE: true,
+      formXXIIIAPSEAdminLayout: extractFormXXIIIAPSEAdminLayout(
         effectiveMetaLines,
         rows,
         tableStart
@@ -4963,6 +5553,30 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
   }
 
   const isFormW = looksLikeFormWPdfContext(effectiveMetaLines, rows, tableStart);
+  const isFormPGJ = looksLikeFormPGJGujaratPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName,
+    fileName
+  );
+  const isFormXVIIITamilNadu = looksLikeFormXVIIITamilNaduPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName,
+    fileName
+  );
+  const isFormBTamilNadu = looksLikeFormBTamilNaduPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName,
+    fileName
+  );
+  const isFormXIXTamilNadu = looksLikeFormXIXTamilNaduPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName,
+    fileName
+  );
   const isFormXXVIIRegister = looksLikeFormXXVIITamilNaduRegisterPdfContext(
     effectiveMetaLines,
     rows,
@@ -5015,6 +5629,9 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
         hasSystemNote = true;
         return;
       }
+      if (isFormBTamilNadu && isFormBTamilNaduPdfSignatoryText(line)) {
+        return;
+      }
       // Form C footnotes belong under the table (outside the box), not in the title band.
       if (isFormCWhereverApplicableFootnoteText(line) || isFormCDamageLossFineFootnoteText(line)) {
         return;
@@ -5055,7 +5672,7 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
         return;
       }
 
-      if (/^month\s*:?\s*/i.test(line) && !/name and|address|nature/i.test(line)) {
+      if (!isFormPGJ && /^month\s*:?\s*/i.test(line) && !/name and|address|nature/i.test(line)) {
         month = stripFieldLabelPrefix(line, /^month/i) || month;
         return;
       }
@@ -5125,10 +5742,13 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
 
   const rightFields = [];
   if (
+    !isFormPGJ &&
+    (
     month !== '' ||
     date !== '' ||
     year !== '' ||
     /month|date|year|wage\s*period/i.test((effectiveMetaLines || []).join(' '))
+    )
   ) {
     const hasMonthDateHint = (effectiveMetaLines || []).some((l) =>
       /^(month|date|year|wage\s*period)\b/i.test(String(l || '').trim())
@@ -5170,6 +5790,38 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     finalTitles = finalTitles.filter(
       (t) => !/labour\s+identification\s+no/i.test(String(t || ''))
     );
+  }
+  // Form K GJ: drop truncated intro under NOTICE; keep the full sentence above the table.
+  if (
+    looksLikeFormKGJGujaratPdfContext(
+      effectiveMetaLines,
+      rows,
+      sheetName,
+      fileName
+    )
+  ) {
+    const rewritten = rewriteFormKGJGujaratPdfHeader(finalTitles, finalFields);
+    finalTitles = rewritten.titles;
+    finalFields = rewritten.fields;
+  }
+  // Form P GJ: Excel-model titles + Establishment / Employer / Month (no Form B min-wages box).
+  if (isFormPGJ) {
+    const rewritten = rewriteFormPGJGujaratPdfHeader(finalTitles, finalFields);
+    finalTitles = rewritten.titles;
+    finalFields = rewritten.fields;
+  }
+  // Form O GJ: Address → Authorized person → Notice → legal text → Details of Workers.
+  if (
+    looksLikeFormOGJGujaratPdfContext(
+      effectiveMetaLines,
+      rows,
+      sheetName,
+      fileName
+    )
+  ) {
+    const rewritten = rewriteFormOGJGujaratPdfHeader(finalTitles, finalFields);
+    finalTitles = rewritten.titles;
+    finalFields = rewritten.fields;
   }
 
   let formAGJSplitRows = [];
@@ -5227,6 +5879,33 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     finalFields = reorderFormBGJPdfHeaderFields(finalFields);
   }
 
+  if (isFormBTamilNadu) {
+    const rewritten = rewriteFormBTamilNaduPdfHeader(finalTitles, finalFields);
+    finalTitles = rewritten.titles;
+    finalFields = rewritten.fields;
+  }
+
+  const isFormCTamilNaduLwf =
+    (/form\s*-?\s*c\b/i.test(
+      [...(effectiveMetaLines || []), sheetName || '', fileName || ''].join(' ')
+    ) ||
+      /lwf\b/i.test([...(effectiveMetaLines || []), sheetName || '', fileName || ''].join(' '))) &&
+    (/unpaid\s+accumulations|details\s+of\s+fines|quarter\s+ending|register\s+of\s+fines/i.test(
+      [...(effectiveMetaLines || []), ...(rows || []).slice(0, 8).flat()].join(' ')
+    ) ||
+      (Array.isArray(rows) &&
+        rows.some((row) => isFormCLwfColHeaderBlob((row || []).join(' ')))));
+
+  if (isFormCTamilNaduLwf) {
+    const rewritten = rewriteFormCTamilNaduLwfPdfHeader(finalTitles, finalFields);
+    finalTitles = rewritten.titles;
+    finalFields = rewritten.fields;
+  }
+
+  if (isFormXVIIITamilNadu) {
+    finalTitles = coalesceFormXVIIITamilNaduTitleLines(finalTitles);
+  }
+
   const formBGJMinWagesBox = looksLikeFormBGJGujaratPdfContext(
     effectiveMetaLines,
     rows,
@@ -5242,12 +5921,23 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     formAGJSplitRows,
     formAGJGujarat: looksLikeFormAGJGujaratPdfContext(effectiveMetaLines, rows, sheetName),
     formBGJGujarat: looksLikeFormBGJGujaratPdfContext(effectiveMetaLines, rows, sheetName),
+    formLGJGujarat: looksLikeFormLGJGujaratPdfContext(
+      effectiveMetaLines,
+      rows,
+      sheetName,
+      fileName
+    ),
+    formPGJGujarat: isFormPGJ,
     formBGJMinWagesBox,
     genderBox,
     hasSystemNote,
     isFormXXVI: false,
     isFormW,
     isFormXXVIIRegister,
+    formXVIIITamilNadu: isFormXVIIITamilNadu,
+    formBTamilNadu: isFormBTamilNadu,
+    formCTamilNaduLwf: isFormCTamilNaduLwf,
+    formXIXTamilNadu: isFormXIXTamilNadu,
     /** Form XXVII: full title box, no Month/Year vertical divider. */
     titleBoxFullBorder: isFormXXVIIRegister,
     hideRightBandSplit: isFormXXVIIRegister
@@ -5281,11 +5971,14 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
   const x1 = marginX + usableWidth;
   const padX = 6;
   const lineH = 10;
-  const rawTitles = headerModel?.formXIIIAP
-    ? Array.isArray(headerModel.titles) ? headerModel.titles : []
-    : Array.isArray(headerModel?.titles)
-      ? headerModel.titles
-      : [];
+  const rawTitles =
+    headerModel?.formXIIIAP || headerModel?.formXXIIIAPSE
+      ? Array.isArray(headerModel.titles)
+        ? headerModel.titles
+        : []
+      : Array.isArray(headerModel?.titles)
+        ? headerModel.titles
+        : [];
   const fields = Array.isArray(headerModel?.fields) ? headerModel.fields : [];
   const rightFields = Array.isArray(headerModel?.rightFields) ? headerModel.rightFields : [];
   const genderBox = headerModel?.genderBox || null;
@@ -5312,8 +6005,15 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
     headerModel?.formXVIAP === true ||
     headerModel?.formXIIIAP === true ||
     headerModel?.formXIXAP === true ||
-    headerModel?.formXVAPService === true;
-  const titles = isApForm ? uniqueExpandedTitleBands(rawTitles) : rawTitles;
+    headerModel?.formXVAPService === true ||
+    headerModel?.formXXIIIAPSE === true;
+  const isFormXIXTamilNadu = headerModel?.formXIXTamilNadu === true;
+  const titles =
+    headerModel?.formXXIIIAPSE || headerModel?.formXIIIAP
+      ? rawTitles
+      : isApForm
+        ? uniqueExpandedTitleBands(rawTitles)
+        : rawTitles;
   const isFormA = titles.some((title) => /^form\s*a\b/i.test(String(title || '').trim()));
   const useRightBand = rightFields.some((t) => String(t || '').trim());
   const hideRightBandSplit = headerModel?.hideRightBandSplit === true;
@@ -5335,13 +6035,13 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
     doc.rect(x, top, w, h, 'S');
   };
 
-  const paintFullBand = (text, { bold = false, size = 9, align = 'center', minH = 16 } = {}) => {
+  const paintFullBand = (text, { bold = false, size = 9, align = 'center', minH = 16, singleLine = false } = {}) => {
     const line = String(text || '').trim();
     if (!line) return;
     const effectiveSize = isApForm ? 9 : size;
     doc.setFont('helvetica', bold ? 'bold' : 'normal');
     doc.setFontSize(effectiveSize);
-    const wrapped = doc.splitTextToSize(line, usableWidth - padX * 2);
+    const wrapped = singleLine ? [line] : doc.splitTextToSize(line, usableWidth - padX * 2);
     const h = Math.max(minH, wrapped.length * (effectiveSize + 2) + 8);
     ensureSpace(h);
     strokeRect(x0, y, usableWidth, h);
@@ -5507,17 +6207,33 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
       expandStatutoryMetaSegments(title).forEach((seg) => {
         const lower = String(seg).toLowerCase();
         const isFormName = /^form\s+/i.test(seg);
-        const isRegister =
-          /^register of\b|^overtime\s+muster\s+roll\b|^muster\s+roll\b|^list of\b|^wage\s+slip\b|^letter\s+of\b|^notice\s+of\b|^combined\b|^format\s+of\s+wage\s+register\b/i.test(
+          const isRegister =
+          /^register of\b|^overtime\s+muster\s+roll\b|^muster[\s-]*roll\b|^list of\b|^wage\s+slip\b|^letter\s+of\b|^notice\s+of\b|^combined\b|^format\s+of\s+wage\s+register\b/i.test(
             seg
           );
+        const isXviiiMusterTitle = isFormXVIIITamilNaduWagesCumMusterTitle(seg);
         const isRule = /see\s+(?:sub-)?rule|prescribed\s+under/i.test(lower);
         const isActBanner = /^the\s+.+\b(act|rules)\b/i.test(seg);
         paintFullBand(seg, {
-          bold: isFormName || isRegister || titlePaintIdx === 0,
+          bold: isFormXIXTamilNadu ? false : isFormName || isRegister || isXviiiMusterTitle || titlePaintIdx === 0,
+          singleLine: isXviiiMusterTitle,
           size: isApForm
             ? 9
-            : headerModel?.formBGJGujarat
+            : headerModel?.formXVIIITamilNadu
+              ? isFormName || isXviiiMusterTitle
+                ? 12
+                : isRule || isActBanner
+                  ? 9
+                  : 11
+            : headerModel?.formTKA
+              ? isFormName
+                ? 14
+                : isRegister
+                  ? 12
+                  : isRule || isActBanner
+                    ? 10
+                    : 9
+            : headerModel?.formBGJGujarat || headerModel?.formLGJGujarat || headerModel?.formPGJGujarat
               ? isFormName
                 ? 13
                 : isRegister
@@ -5533,17 +6249,82 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
                     ? 8
                     : 9,
           align: 'center',
-          minH: headerModel?.formBGJGujarat
+          minH: headerModel?.formTKA
             ? isFormName || isRegister
-              ? 24
+              ? 26
               : 18
-            : isFormName || isRegister
-              ? 20
-              : 16
+            : headerModel?.formBGJGujarat || headerModel?.formLGJGujarat || headerModel?.formPGJGujarat
+              ? isFormName || isRegister
+                ? 24
+                : 18
+              : isFormName || isRegister
+                ? 20
+                : 16
         });
         titlePaintIdx += 1;
       });
     });
+  }
+
+  if (headerModel?.formXXIIIAPSE && headerModel.formXXIIIAPSEAdminLayout) {
+    const admin = headerModel.formXXIIIAPSEAdminLayout;
+    const adminSize = 9;
+    const adminLineH = adminSize + 3;
+    const labelW = usableWidth * FORM_XXIII_APSE_ADMIN_WIDTHS.label;
+    const valueW = usableWidth * 0.4;
+    const restW = Math.max(usableWidth - labelW - valueW, 40);
+    const rightCols = 5;
+    const rightW = restW / rightCols;
+    const joinParts = (...parts) => parts.map((p) => String(p || '').trim()).filter(Boolean).join(' ');
+    const fromText = joinParts(admin.fromLabel || 'From:', admin.fromValue);
+    const toText = joinParts(admin.toLabel || 'To:', admin.toValue);
+    const row1Cells = [
+      { text: admin.establishmentLabel || 'Name of Establishment / Shop:', width: labelW, bold: true },
+      { text: admin.establishmentValue || '', width: valueW, bold: false },
+      { text: admin.registrationLabel || 'Registration No.:', width: rightW, bold: true },
+      { text: admin.registrationValue || '', width: rightW, bold: false },
+      { text: admin.wagePeriodLabel || 'Wage Period', width: rightW, bold: true },
+      { text: fromText, width: rightW, bold: false },
+      { text: toText, width: rightW, bold: false }
+    ];
+    const row2Cells = [
+      { text: admin.addressLabel || 'Address of the Establishment:', width: labelW, bold: true },
+      { text: admin.addressValue || '', width: usableWidth - labelW, bold: false }
+    ];
+
+    const paintAdminCells = (cells) => {
+      const wrapped = cells.map((cell) => {
+        doc.setFont('helvetica', cell.bold ? 'bold' : 'normal');
+        doc.setFontSize(adminSize);
+        return {
+          ...cell,
+          lines: doc.splitTextToSize(String(cell.text || ''), Math.max(cell.width - padX * 2, 20))
+        };
+      });
+      const h = Math.max(
+        28,
+        wrapped.reduce((max, cell) => Math.max(max, cell.lines.length), 1) * adminLineH + 10
+      );
+      ensureSpace(h);
+      strokeRect(x0, y, usableWidth, h);
+      doc.setDrawColor(0, 0, 0);
+      doc.setLineWidth(0.7);
+      let x = x0;
+      wrapped.forEach((cell, idx) => {
+        if (idx > 0) doc.line(x, y, x, y + h);
+        doc.setFont('helvetica', cell.bold ? 'bold' : 'normal');
+        doc.setFontSize(adminSize);
+        doc.setTextColor(0, 0, 0);
+        if (cell.lines.length) {
+          doc.text(cell.lines, x + padX, y + 12);
+        }
+        x += cell.width;
+      });
+      y += h;
+    };
+
+    paintAdminCells(row1Cells);
+    paintAdminCells(row2Cells);
   }
 
   if (
@@ -5563,7 +6344,10 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
       const half = usableWidth / 2;
       const leftLines = doc.splitTextToSize(left, half - padX * 2);
       const rightLines = doc.splitTextToSize(right, half - padX * 2);
-      const h = Math.max(30, Math.max(leftLines.length, rightLines.length || 1) * 10 + 10);
+      const h = Math.max(
+        headerModel?.formXVIIAP ? 52 : 30,
+        Math.max(leftLines.length, rightLines.length || 1) * 10 + 10
+      );
       ensureSpace(h);
       strokeRect(x0, y, usableWidth, h);
       doc.line(x0 + half, y, x0 + half, y + h);
@@ -5698,9 +6482,21 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
       const centerFormAPartA = isFormA && /\[?\s*part\s*[-\s]?a\s*:/i.test(String(field || ''));
       paintFullBand(field, {
         bold: false,
-        size: headerModel?.formXVIAP ? 9 : headerModel?.formAGJGujarat ? 10 : 8,
-        align: centerFormAPartA ? 'center' : 'left',
-        minH: headerModel?.formAGJGujarat ? 20 : 16,
+        size: headerModel?.formTKA
+          ? 11
+          : headerModel?.formXVIIITamilNadu
+            ? 10
+          : headerModel?.formXVIAP
+            ? 9
+            : headerModel?.formAGJGujarat || headerModel?.formLGJGujarat
+              ? 10
+              : 8,
+        align: centerFormAPartA || headerModel?.formLGJGujarat ? 'center' : 'left',
+        minH: headerModel?.formTKA
+          ? 22
+          : headerModel?.formAGJGujarat || headerModel?.formLGJGujarat
+            ? 20
+            : 16,
       });
     }
     // Place gender box after establishment / total band (Excel layout)
@@ -5728,6 +6524,18 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
  * Draw one sheet: meta headings once (full width), then full data table.
  */
 const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
+  if (matrix?.formMGJLayout === true) {
+    return drawFormMGJGujaratIdentityCard(doc, matrix, startY);
+  }
+  if (matrix?.formNGJLayout === true) {
+    return drawFormNGJGujaratLeaveBook(doc, matrix, startY);
+  }
+  if (matrix?.formFKALayout === true) {
+    return drawFormFKarnatakaLeaveRegister(doc, matrix, startY);
+  }
+  if (matrix?.formPKALayout === true) {
+    return drawFormPKarnatakaNotice(doc, matrix, startY);
+  }
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   const marginX = 24;
@@ -5744,6 +6552,15 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   });
   if (matrix.formXIXAPLayout === true) headerModel.formXIXAP = true;
   const isFormXIXKA = matrix.formXIXKarnatakaLayout === true;
+  const isFormXIXTamilNadu =
+    headerModel.formXIXTamilNadu === true ||
+    looksLikeFormXIXTamilNaduPdfContext(
+      metaLines,
+      rows,
+      matrix.name || '',
+      pdfOpts.fileName || matrix.fileName || ''
+    );
+  if (isFormXIXTamilNadu) headerModel.formXIXTamilNadu = true;
   if (isFormXIXKA) {
     const kaTitles = [];
     const kaFields = [];
@@ -5763,17 +6580,23 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     headerModel.hideRightBandSplit = false;
   }
   const isFormXIVKALayout = matrix.formXIVKALayout === true;
+  const isFormQKALayout = matrix.formQKALayout === true;
   if (isFormXIVKALayout) {
     headerModel.fields = (headerModel.fields || []).filter((field) => {
       const text = String(field || '');
       return matchFormXIVPdfHeaderFieldIndex(text) < 0 && !isFormXIVEmploymentCardHeaderLabelText(text);
     });
   }
+  if (isFormQKALayout) {
+    headerModel.fields = [];
+    headerModel.rightFields = [];
+  }
   const isFormXXAP = headerModel.formXXAP === true;
   const isFormXXIAP = headerModel.formXXIAP === true;
   const isFormXVIIAP = headerModel.formXVIIAP === true;
   const isFormXVIAP = headerModel.formXVIAP === true;
   const isFormXIIIAP = headerModel.formXIIIAP === true;
+  const isFormXXIIIAPSE = headerModel.formXXIIIAPSE === true;
   const isFormXIXAP = matrix.formXIXAPLayout === true;
 
   let headerBandEnd = tableStart;
@@ -5789,7 +6612,14 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   if (isFormXIVEmploymentCardSheet) {
     headerBandEnd = tableStart - 1;
   }
+  if (isFormQKALayout) {
+    headerBandEnd = tableStart - 1;
+  }
   if (isFormXIXAP) {
+    headerBandEnd = tableStart - 1;
+  }
+  if (isFormXIXTamilNadu) {
+    // Entire sheet is label|value data — no bold header band / centered headers.
     headerBandEnd = tableStart - 1;
   }
   if (isFormXIXKA) {
@@ -5797,6 +6627,17 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   }
   if (isFormXXAP) {
     headerBandEnd = Math.min(rows.length - 1, tableStart + 1);
+  }
+  if (isFormXXIIIAPSE) {
+    for (let r = tableStart; r < Math.min(rows.length, tableStart + 4); r += 1) {
+      if (isFormXXIIIAPSETableHeaderRow(rows[r])) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+    }
+    const xxiiiBand = findFormXXIIIAPSEDeductionsBand(rows, tableStart, colCount);
+    if (xxiiiBand) {
+      headerBandEnd = Math.max(headerBandEnd, xxiiiBand.parentRow, xxiiiBand.childRow);
+    }
   }
   if (isFormXVIIAP) {
     const formXVIIHeaderStart = Math.max(0, tableStart - 4);
@@ -5820,6 +6661,19 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       }
     }
   }
+  // Form B TN LWF — parent "Amounts deducted during the month" + Fine / Other leaves.
+  if (headerModel.formBTamilNadu) {
+    for (let r = tableStart; r < Math.min(rows.length, tableStart + 6); r += 1) {
+      const blob = (rows[r] || []).join(' ').toLowerCase();
+      if (
+        /total\s+number\s+of\s+empl|emolument|amounts?\s+deducted|actually\s+paid|balance\s+due|other\s+deductions?|\bfine\b/.test(
+          blob
+        )
+      ) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+    }
+  }
   // Form W has a 3-row merged header band (group → mid → leaf).
   if (headerModel.isFormW) {
     for (let r = tableStart; r < Math.min(rows.length, tableStart + 5); r += 1) {
@@ -5834,7 +6688,7 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     for (let r = tableStart; r < Math.min(rows.length, tableStart + 6); r += 1) {
       const blob = (rows[r] || []).join(' ').toLowerCase();
       if (
-        /s\.?\s*no|attendance|earned\s+wages|deductions|wages\s+fixed|name of(?:\s+the)?\s+employee|father/.test(
+        /s\.?\s*no|attendance|earned\s+wages|deductions|wages\s+fixed|name of(?:\s+the)?\s+employee|principal\s+employer|father/.test(
           blob
         )
       ) {
@@ -5864,21 +6718,45 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     }
   }
   // Leave registers + Form 15 Part 2 wage bands + Form VI festival band.
-  for (let r = tableStart; r < Math.min(rows.length, tableStart + 8); r += 1) {
-    const blob = (rows[r] || []).join(' ').toLowerCase();
-    if (
-      /earned\s+leave|medical\s+leave|other\s+leave|maternity\s+benefit|leave\s+at\s+the\s+beginning|leave\s+availed|name\s+of\s+the\s+employee/.test(
-        blob
-      ) ||
-      /deductions|advances|damages\s*\/\s*fine|leave\s+wages|provident\s+fund|gross\s+wages|net\s+wages|advance\s+paid/.test(
-        blob
-      ) ||
-      /days,?\s+dates\s+and\s+months|national\s+and\s+festival\s+holidays|pongal|republic\s+day|diwali|christmas/.test(
-        blob
-      )
-    ) {
-      headerBandEnd = Math.max(headerBandEnd, r);
+  // Form Q KA appointment order: "3. Name of the Employee" is a data row, not a header band.
+  if (!isFormQKALayout) {
+    for (let r = tableStart; r < Math.min(rows.length, tableStart + 8); r += 1) {
+      const blob = (rows[r] || []).join(' ').toLowerCase();
+      if (
+        /earned\s+leave|medical\s+leave|other\s+leave|maternity\s+benefit|leave\s+at\s+the\s+beginning|leave\s+availed|name\s+of\s+the\s+employee/.test(
+          blob
+        ) ||
+        /deductions|advances|damages\s*\/\s*fine|leave\s+wages|provident\s+fund|gross\s+wages|net\s+wages|advance\s+paid/.test(
+          blob
+        ) ||
+        /days,?\s+dates\s+and\s+months|national\s+and\s+festival\s+holidays|pongal|republic\s+day|diwali|christmas/.test(
+          blob
+        )
+      ) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
     }
+  }
+  // Form P GJ — group banner + day numbers 1–31 + statutory column-index strip.
+  if (headerModel.formPGJGujarat === true) {
+    for (let r = tableStart; r < Math.min(rows.length, tableStart + 6); r += 1) {
+      const blob = (rows[r] || []).join(' ').toLowerCase();
+      if (
+        /sr\.?\s*no|date\s+of\s+(the\s+)?month|full\s+name\s+of\s+the\s+worker|interval\s+for\s+rest|working\s+hours/.test(
+          blob
+        )
+      ) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+      const filled = (rows[r] || []).filter((c) => String(c || '').trim());
+      if (filled.filter((c) => /^\(?\s*\d{1,2}\s*\)?$/.test(String(c).trim())).length >= 8) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+    }
+  }
+  // Form Q KA: every label|value row is body text (Excel model) — never a header band.
+  if (isFormQKALayout) {
+    headerBandEnd = tableStart - 1;
   }
   const formXVIDateBand = isFormXVIAP
     ? (() => {
@@ -5899,8 +6777,82 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         return null;
       })()
     : null;
-  const dayBand = formXVIDateBand || detectDailyHoursBand(rows, tableStart, headerBandEnd, colCount);
-  const groupBands = detectStatutoryGroupHeaderBands(rows, tableStart, headerBandEnd, colCount);
+  const isFormTKASheet = headerModel.formTKA === true || matrix.formTKALayout === true;
+  const formTKAAttendanceBand = isFormTKASheet
+    ? matrix.attendanceBand && Number.isFinite(matrix.attendanceBand.start)
+      ? matrix.attendanceBand
+      : detectFormTSEKarnatakaAttendanceBand(rows, tableStart, headerBandEnd, colCount)
+    : null;
+  const formLGJGroupBands = looksLikeFormLGJGujaratPdfContext(
+    metaLines,
+    rows,
+    matrix.name || '',
+    pdfOpts.fileName || matrix.fileName || ''
+  )
+    ? detectFormLGJGujaratPdfGroupBands(rows, tableStart, headerBandEnd, colCount)
+    : [];
+  const formPGJGroupBands = looksLikeFormPGJGujaratPdfContext(
+    metaLines,
+    rows,
+    matrix.name || '',
+    pdfOpts.fileName || matrix.fileName || ''
+  )
+    ? detectFormPGJGujaratPdfGroupBands(rows, tableStart, headerBandEnd, colCount)
+    : [];
+  const dayBand =
+    formXVIDateBand ||
+    formTKAAttendanceBand ||
+    (formPGJGroupBands[0] && formPGJGroupBands[0].end > formPGJGroupBands[0].start
+      ? formPGJGroupBands[0]
+      : null) ||
+    detectDailyHoursBand(rows, tableStart, headerBandEnd, colCount);
+  const groupBands = [
+    ...detectStatutoryGroupHeaderBands(rows, tableStart, headerBandEnd, colCount),
+    ...formLGJGroupBands,
+    ...formPGJGroupBands,
+  ];
+  if (headerModel.formBTamilNadu) {
+    detectFormBTamilNaduPdfGroupBands(rows, tableStart, headerBandEnd, colCount).forEach((band) => {
+      const exists = groupBands.some(
+        (b) => Number(b.start) === Number(band.start) && Number(b.end) === Number(band.end)
+      );
+      if (!exists) groupBands.push(band);
+    });
+  }
+  if (headerModel.formXVIIITamilNadu === true) {
+    detectFormXVIIITamilNaduPdfGroupBands(rows, tableStart, headerBandEnd, colCount).forEach(
+      (band) => {
+        const exists = groupBands.some(
+          (b) =>
+            Number(b.start) === Number(band.start) && Number(b.end) === Number(band.end)
+        );
+        if (!exists) groupBands.push(band);
+      }
+    );
+  }
+  if (isFormXXIIIAPSE) {
+    const xxiiiDeductions = findFormXXIIIAPSEDeductionsBand(rows, tableStart, colCount);
+    if (
+      xxiiiDeductions &&
+      !groupBands.some(
+        (band) =>
+          band.labelRow === xxiiiDeductions.parentRow &&
+          band.start === xxiiiDeductions.start &&
+          band.end === xxiiiDeductions.end
+      )
+    ) {
+      const label = String(
+        rows[xxiiiDeductions.parentRow]?.[xxiiiDeductions.start] ||
+          'Deductions if Any, and Reasons Thereof'
+      ).trim();
+      groupBands.push({
+        labelRow: xxiiiDeductions.parentRow,
+        start: xxiiiDeductions.start,
+        end: xxiiiDeductions.end,
+        label
+      });
+    }
+  }
   // Resolve leaf headers for ALL forms so widths follow column names (Form 11, Form W, …).
   const leafHeaders = resolveLeafHeaderTexts(rows, tableStart, headerBandEnd, colCount);
   const formXVIRemarksColumn = isFormXVIAP
@@ -5946,13 +6898,30 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
 
   const isFormXVAP = headerModel.formXVAPService === true;
   const isApForm =
-    isFormXXAP || isFormXXIAP || isFormXVIIAP || isFormXVIAP || isFormXIIIAP || isFormXIXAP || isFormXVAP;
+    isFormXXAP ||
+    isFormXXIAP ||
+    isFormXVIIAP ||
+    isFormXVIAP ||
+    isFormXIIIAP ||
+    isFormXIXAP ||
+    isFormXVAP ||
+    isFormXXIIIAPSE;
   const isApMultiLevelForm = isFormXXAP || isFormXXIAP || isFormXVIIAP || isFormXVIAP;
   const weights = [];
   for (let c = 0; c < colCount; c += 1) {
     const inDayBand = dayBand && c >= dayBand.start && c <= dayBand.end;
     if (inDayBand) {
-      weights.push(isApMultiLevelForm ? 1.6 : 2.2);
+      weights.push(
+        isApMultiLevelForm ? 1.6 : isFormTKASheet ? 1.8 : headerModel.isFormXXVI ? 2.8 : 2.2
+      );
+      continue;
+    }
+    if (isFormTKASheet && c === 1) {
+      weights.push(8.5);
+      continue;
+    }
+    if (isFormTKASheet && c === 2) {
+      weights.push(6);
       continue;
     }
     let maxLen = 4;
@@ -5967,6 +6936,22 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     }
     if (headerModel.isFormW) {
       weights.push(formWTamilNaduColumnWeight(leafHeaders[c], maxDataLen || maxLen));
+      continue;
+    }
+    if (headerModel.formBTamilNadu) {
+      weights.push(formBTamilNaduPdfColumnWeight(leafHeaders[c]));
+      continue;
+    }
+    if (isFormXXIIIAPSE) {
+      weights.push(formXXIIIAPSEColumnWeight(leafHeaders[c]));
+      continue;
+    }
+    if (headerModel.formLGJGujarat === true) {
+      weights.push(formLGJGujaratColumnWeight(leafHeaders[c], maxDataLen || maxLen));
+      continue;
+    }
+    if (headerModel.formPGJGujarat === true) {
+      weights.push(formPGJGujaratColumnWeight(leafHeaders[c], maxDataLen || maxLen));
       continue;
     }
     if (headerModel.isFormXXVIIRegister) {
@@ -6009,7 +6994,7 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       continue;
     }
     weights.push(
-      (isFormXIXRajasthanOvertimeSheet || isFormASheet || isFormBRajasthanSheet) &&
+      (isFormXIXRajasthanOvertimeSheet || isFormASheet || isFormBRajasthanSheet || isFormXXIIIAPSE) &&
         isPdfSerialNumberHeader(leafHeaders[c])
         ? 5.5
         : weight
@@ -6022,7 +7007,8 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       isFormXVIAP ||
       isFormXIXRajasthanOvertimeSheet ||
       isFormASheet ||
-      isFormBRajasthanSheet,
+      isFormBRajasthanSheet ||
+      isFormXXIIIAPSE,
     tightSerial: isFormXVIAP,
     compactSex: isFormXVIAP
   });
@@ -6030,6 +7016,12 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   for (let i = 0; i < colWidths.length; i += 1) colXs.push(colXs[i] + colWidths[i]);
   if (isFormXIVKALayout && colCount === 2) {
     colWidths[0] = usableWidth * 0.44;
+    colWidths[1] = usableWidth - colWidths[0];
+    colXs.length = 0;
+    colXs.push(marginX, marginX + colWidths[0], marginX + usableWidth);
+  }
+  if (isFormQKALayout && colCount === 2) {
+    colWidths[0] = usableWidth * 0.52;
     colWidths[1] = usableWidth - colWidths[0];
     colXs.length = 0;
     colXs.push(marginX, marginX + colWidths[0], marginX + usableWidth);
@@ -6050,9 +7042,17 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       ? 5.2
       : 5.8
     : headerModel.isFormXXVIIRegister
-      ? colCount > 24
-        ? 5
-        : 5.4
+      ? 8
+      : headerModel.isFormXXVI
+        ? 8
+      : isFormTKASheet
+        ? 7.5
+      : isFormQKALayout
+        ? 9
+      : headerModel.formPGJGujarat === true
+        ? 8
+      : headerModel.formXVIIITamilNadu === true
+        ? FORM_XVIII_TN_PDF_TABLE_FONT_SIZE
       : colCount > 40
         ? 4.5
         : colCount > 28
@@ -6204,6 +7204,9 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   const measureRowHeight = (row, rowIndex) => {
     const mergeDayLabel = isDayBandLabelHeaderRow(row, rowIndex);
     const nilSpan = resolveNilOfTheMonthPdfSpan(row, colCount, rowIndex, headerBandEnd);
+    const tnNetSpan = isFormXIXTamilNadu
+      ? resolveFormXIXTamilNaduNetAmountPdfSpan(row, colCount)
+      : null;
     const isHeaderRow = rowIndex <= headerBandEnd;
     let maxLines = 1;
 
@@ -6211,6 +7214,18 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       const bandW = colXs[nilSpan.end + 1] - colXs[nilSpan.start] - 3;
       const wrapped = doc.splitTextToSize(nilSpan.text, Math.max(bandW, 6));
       maxLines = Math.max(1, Math.min(wrapped.length, 3));
+      return Math.max(fontSize + 5, maxLines * (fontSize + 1.5) + 4);
+    }
+
+    if (tnNetSpan) {
+      const labelW = colXs[tnNetSpan.labelEnd + 1] - colXs[tnNetSpan.labelStart] - 3;
+      const labelWrapped = doc.splitTextToSize(tnNetSpan.label || ' ', Math.max(labelW, 6));
+      maxLines = Math.max(1, Math.min(labelWrapped.length, 4));
+      if (tnNetSpan.amountCol >= 0 && tnNetSpan.amount) {
+        const amountW = Math.max(colWidths[tnNetSpan.amountCol] - 3, 6);
+        const amountWrapped = doc.splitTextToSize(tnNetSpan.amount, amountW);
+        maxLines = Math.max(maxLines, Math.min(amountWrapped.length, 3));
+      }
       return Math.max(fontSize + 5, maxLines * (fontSize + 1.5) + 4);
     }
 
@@ -6239,22 +7254,38 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       const lineCap =
         groupBand && isFormVIFestivalGroupLabel(groupBand.label)
           ? 10
+          : groupBand && isFormBTamilNaduAmountsDeductedGroupLabel(groupBand.label)
+            ? 8
+          : isFormQKALayout
+            ? 12
           : isHeaderRow
             ? headerModel.isFormW
               ? 6
-              : 8
+              : String(text || '').length >= 40
+                ? 14
+                : 8
             : 8;
       maxLines = Math.max(maxLines, Math.min(wrapped.length, lineCap));
     }
     const rowHeight = Math.max(fontSize + 5, maxLines * (fontSize + 1.5) + 4);
+    if (headerModel?.formLGJGujarat && isHeaderRow) return Math.max(22, rowHeight);
+    if (headerModel?.formPGJGujarat && isHeaderRow) return Math.max(24, rowHeight);
+    if (headerModel?.formBTamilNadu && isHeaderRow) return Math.max(28, rowHeight);
     return isFormXVIAP ? Math.max(34, rowHeight * 1.35) : rowHeight;
   };
 
   const paintGridRow = (row, rowIndex, rowH) => {
-    const bold = rowIndex <= headerBandEnd || isLikelyHeaderBandRow(row, rowIndex);
+    const bold = isFormXIXTamilNadu
+      ? false
+      : isFormQKALayout
+        ? false
+        : rowIndex <= headerBandEnd || isLikelyHeaderBandRow(row, rowIndex);
     const mergeDayLabel = isDayBandLabelHeaderRow(row, rowIndex);
     const nilSpan = resolveNilOfTheMonthPdfSpan(row, colCount, rowIndex, headerBandEnd);
-    const isHeaderRow = rowIndex <= headerBandEnd;
+    const tnNetSpan = isFormXIXTamilNadu
+      ? resolveFormXIXTamilNaduNetAmountPdfSpan(row, colCount)
+      : null;
+    const isHeaderRow = !isFormQKALayout && !isFormXIXTamilNadu && rowIndex <= headerBandEnd;
     const isFormXIIINumberRow =
       isFormXIIIAP &&
       isHeaderRow &&
@@ -6275,6 +7306,26 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       doc.text(lines, colXs[nilSpan.start] + bandW / 2, y + (rowH - textH) / 2 + fontSize, {
         align: 'center'
       });
+      y += rowH;
+      return;
+    }
+
+    if (tnNetSpan) {
+      const labelW = colXs[tnNetSpan.labelEnd + 1] - colXs[tnNetSpan.labelStart];
+      doc.rect(colXs[tnNetSpan.labelStart], y, labelW, rowH, 'S');
+      const labelLines = doc
+        .splitTextToSize(tnNetSpan.label || ' ', Math.max(labelW - 3, 6))
+        .slice(0, 4);
+      doc.text(labelLines, colXs[tnNetSpan.labelStart] + 1.5, y + fontSize + 1);
+      if (tnNetSpan.amountCol >= 0) {
+        doc.rect(colXs[tnNetSpan.amountCol], y, colWidths[tnNetSpan.amountCol], rowH, 'S');
+        if (tnNetSpan.amount) {
+          const amountLines = doc
+            .splitTextToSize(tnNetSpan.amount, Math.max(colWidths[tnNetSpan.amountCol] - 3, 6))
+            .slice(0, 3);
+          doc.text(amountLines, colXs[tnNetSpan.amountCol] + 1.5, y + fontSize + 1);
+        }
+      }
       y += rowH;
       return;
     }
@@ -6300,7 +7351,11 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       if (groupBand && c === groupBand.start) {
         const bandW = colXs[groupBand.end + 1] - colXs[groupBand.start];
         doc.rect(colXs[c], y, bandW, rowH, 'S');
-        const groupLineCap = isFormVIFestivalGroupLabel(groupBand.label) ? 10 : 3;
+        const groupLineCap = isFormVIFestivalGroupLabel(groupBand.label)
+          ? 10
+          : isFormBTamilNaduAmountsDeductedGroupLabel(groupBand.label)
+            ? 8
+            : 3;
         const lines = doc
           .splitTextToSize(groupBand.label, Math.max(bandW - 4, 8))
           .slice(0, groupLineCap);
@@ -6320,7 +7375,9 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         rowIndex <= headerBandEnd &&
         c >= dayBand.start &&
         c <= dayBand.end &&
-        /daily\s+hours/i.test(raw)
+        (/daily\s+hours/i.test(raw) ||
+          (isFormTKASheet && /attendance/i.test(raw) && !/^\d{1,2}$/.test(raw.trim())) ||
+          (headerModel.formPGJGujarat === true && isFormPGJDateOfMonthGroupLabel(raw)))
       ) {
         continue;
       }
@@ -6369,6 +7426,13 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         continue;
       }
 
+      // Tamil Nadu Form XIX: all labels and values left-aligned, never bold (set above).
+      if (isFormXIXTamilNadu) {
+        const tnLines = doc.splitTextToSize(raw, cellW).slice(0, 8);
+        doc.text(tnLines, colXs[c] + 1.5, y + fontSize + 1);
+        continue;
+      }
+
       if (isFormXIXKA) {
         const kaLines = doc.splitTextToSize(raw, cellW).slice(0, 6);
         const textH = kaLines.length * (fontSize + 1);
@@ -6407,6 +7471,25 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         doc.text(displayRaw, colXs[c] + colWidths[c] / 2, y + (rowH + size) / 2 - 1, { align: 'center' });
         doc.setFontSize(fontSize);
         continue;
+      }
+
+      if (isFormXXIIIAPSE && !isHeaderRow) {
+        const xxiiiHeader = leafHeaders[c] || '';
+        const xxiiiDisplay = isFormXXIIIAPSEMoneyHeader(xxiiiHeader)
+          ? formatFormXXIIIAPSEMoneyPdfValue(raw)
+          : raw;
+        if (isFormXXIIIAPSECenterValueHeader(xxiiiHeader) && String(xxiiiDisplay || '').trim()) {
+          doc.text(xxiiiDisplay, colXs[c] + colWidths[c] / 2, y + (rowH + fontSize) / 2 - 1, {
+            align: 'center'
+          });
+          continue;
+        }
+        if (isFormXXIIIAPSEMoneyHeader(xxiiiHeader) && String(xxiiiDisplay || '').trim()) {
+          doc.text(xxiiiDisplay, colXs[c] + colWidths[c] - 1.5, y + (rowH + fontSize) / 2 - 1, {
+            align: 'right'
+          });
+          continue;
+        }
       }
 
       // Form XVI AP: center S.No column (column 0) and date columns (1-31)
@@ -6454,7 +7537,12 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         }
         let size = fontSize;
         doc.setFontSize(size);
-        while (!isApForm && size > 3.2 && doc.getTextWidth(raw) > cellW) {
+        while (
+          !isApForm &&
+          headerModel.formPGJGujarat !== true &&
+          size > 3.2 &&
+          doc.getTextWidth(raw) > cellW
+        ) {
           size -= 0.4;
           doc.setFontSize(size);
         }
@@ -6465,11 +7553,17 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         continue;
       }
 
-      const lineCap = isHeaderRow && headerModel.isFormW ? 6 : 8;
+      const lineCap = isFormQKALayout
+        ? 12
+        : isHeaderRow && headerModel.isFormW
+          ? 6
+          : isHeaderRow && raw.length >= 40
+            ? 14
+            : 8;
       const lines = doc.splitTextToSize(raw, cellW).slice(0, lineCap);
-      if (alignRight) {
+      if (alignRight && !isFormQKALayout) {
         doc.text(lines, colXs[c] + colWidths[c] - 1.5, y + fontSize + 1, { align: 'right' });
-      } else if (isHeaderRow || isPureNilPdfText(raw)) {
+      } else if (!isFormQKALayout && (isHeaderRow || isPureNilPdfText(raw))) {
         // Header labels and Nil/NIL values — center like the Excel register model.
         const textH = lines.length * (fontSize + 1);
         doc.text(lines, colXs[c] + colWidths[c] / 2, y + (rowH - textH) / 2 + fontSize, {
@@ -6775,12 +7869,25 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     const row = rows[r];
     if (!rowHasContent(row)) continue;
     if (isFormXIIIAP && isFormXIIIPdfTitleRow(row)) continue;
+    if (isFormXXIIIAPSE && (isFormXXIIIAPSETitleRow(row) || isFormXXIIIAPSEAdminRow(row))) continue;
     if (isApForm && isApPdfHeadingRow(row)) continue;
     if ((isFormXXAP || isFormXVIIAP || isFormXVIAP) && r <= headerBandEnd) continue;
 
     // Never draw the footer inside Sr. No. — paint after the full column band.
     if (isSystemGeneratedDocumentNoteRow(row)) {
       pendingSystemNote = true;
+      continue;
+    }
+    if (isFormTKASheet && isFormTSEKarnatakaPdfFooterOnlyRow(row)) {
+      continue;
+    }
+    if (headerModel?.formBTamilNadu && isFormBTamilNaduPdfSignatoryRow(row)) {
+      continue;
+    }
+    if (
+      (headerModel?.formCTamilNaduLwf || looksLikeFormCLwfSheet) &&
+      isFormCTamilNaduLwfPdfSignatoryRow(row)
+    ) {
       continue;
     }
 
@@ -6871,6 +7978,31 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       if (r > headerBandEnd) repeatColumnHeaders();
     }
     paintGridRow(row, r, rowH);
+  }
+
+  // Form T KA: Date: (left) and Authorised Signatory (right) sit under the table box.
+  if (isFormTKASheet) {
+    const footer = matrix.formTKAFooter || {
+      date: FORM_T_KA_PDF_DATE_LABEL,
+      signatory: FORM_T_KA_PDF_SIGNATORY_LABEL,
+    };
+    const dateText = String(footer.date || FORM_T_KA_PDF_DATE_LABEL).trim() || FORM_T_KA_PDF_DATE_LABEL;
+    const signatoryText =
+      String(footer.signatory || FORM_T_KA_PDF_SIGNATORY_LABEL).trim() ||
+      FORM_T_KA_PDF_SIGNATORY_LABEL;
+    const size = 9;
+    const h = size + 8;
+    y += 10;
+    if (y + h > pageHeight - marginBottom) {
+      doc.addPage();
+      y = marginTop;
+    }
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(size);
+    doc.setTextColor(0, 0, 0);
+    doc.text(dateText, marginX, y + size);
+    doc.text(signatoryText, pageWidth - marginX, y + size, { align: 'right' });
+    y += h;
   }
 
   if (isFormXIXAP && Array.isArray(matrix.formXIXAPFooterLines)) {
@@ -7134,6 +8266,62 @@ export async function buildStatutoryDraftPdfBlob({
           m.name = file.label;
         }
         m.fileName = file.label || fileName || m.fileName || '';
+        // Form L GJ: drop the empty template column before Sr. No. (file name may be
+        // the only Gujarat hint when the worksheet tab is still Sheet1).
+        if (
+          looksLikeFormLGJGujaratPdfContext(
+            m.metaLines,
+            m.rows,
+            m.name,
+            m.fileName
+          )
+        ) {
+          const trimmedLead = trimFormLGJGujaratLeadingBlankPdfColumns(
+            m.rows,
+            m.colCount,
+            m.tableStartRow || 0
+          );
+          m.rows = trimmedLead.rows;
+          m.colCount = trimmedLead.colCount;
+        }
+        // Form O GJ: drop the empty template column before Sr. No. (file name may be
+        // the only Gujarat hint when the worksheet tab is still Sheet1).
+        if (
+          looksLikeFormOGJGujaratPdfContext(
+            m.metaLines,
+            m.rows,
+            m.name,
+            m.fileName
+          )
+        ) {
+          const trimmedLead = trimFormOGJGujaratLeadingBlankPdfColumns(
+            m.rows,
+            m.colCount,
+            m.tableStartRow || 0
+          );
+          m.rows = trimmedLead.rows;
+          m.colCount = trimmedLead.colCount;
+        }
+        // Form B TN: Fine stays blank; Other deductions stay under Other.
+        if (
+          looksLikeFormBTamilNaduPdfContext(
+            m.metaLines,
+            m.rows,
+            m.name,
+            m.fileName
+          )
+        ) {
+          const normalized = normalizeFormBTamilNaduPdfMatrix(
+            m.rows,
+            m.colCount,
+            m.tableStartRow || 0,
+            m.metaLines
+          );
+          m.rows = normalized.rows;
+          m.colCount = normalized.colCount;
+          m.tableStartRow = normalized.tableStartRow;
+          if (Array.isArray(normalized.metaLines)) m.metaLines = normalized.metaLines;
+        }
         // Karnataka XIX: official dotted Excel → boxed wage-slip model (image 1).
         if (
           looksLikeFormXIXKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName) &&
@@ -7202,6 +8390,80 @@ export async function buildStatutoryDraftPdfBlob({
             )
           );
         }
+        // Karnataka Form Q appointment order — 2-column Excel label|value.
+        if (
+          looksLikeFormQKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName) &&
+          m.formQKALayout !== true
+        ) {
+          applyFormQKarnatakaPdfNormalization(
+            m,
+            normalizeFormQKarnatakaPdfMatrix(
+              m.rows,
+              m.colCount,
+              m.tableStartRow || 0,
+              m.metaLines
+            )
+          );
+        }
+        // Gujarat Form M identity card: sparse Excel → official card layout.
+        if (
+          looksLikeFormMGJGujaratPdfContext(m.metaLines, m.rows, m.name, m.fileName) &&
+          m.formMGJLayout !== true
+        ) {
+          applyFormMGJGujaratPdfNormalization(
+            m,
+            normalizeFormMGJGujaratPdfMatrix(
+              m.rows,
+              m.colCount,
+              m.tableStartRow || 0,
+              m.metaLines
+            )
+          );
+        }
+        // Gujarat Form N Leave Book: identity + accumulation / festival / casual sections.
+        if (
+          looksLikeFormNGJGujaratPdfContext(m.metaLines, m.rows, m.name, m.fileName) &&
+          m.formNGJLayout !== true
+        ) {
+          applyFormNGJGujaratPdfNormalization(
+            m,
+            normalizeFormNGJGujaratPdfMatrix(
+              m.rows,
+              m.colCount,
+              m.tableStartRow || 0,
+              m.metaLines
+            )
+          );
+        }
+        // Karnataka Form F leave register — identity + PART I + PART II Excel model.
+        if (
+          looksLikeFormFKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName) &&
+          m.formFKALayout !== true
+        ) {
+          applyFormFKarnatakaPdfNormalization(
+            m,
+            normalizeFormFKarnatakaPdfMatrix(
+              m.rows,
+              m.colCount,
+              m.tableStartRow || 0,
+              m.metaLines
+            )
+          );
+        }
+        if (
+          looksLikeFormPKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName) &&
+          m.formPKALayout !== true
+        ) {
+          applyFormPKarnatakaPdfNormalization(
+            m,
+            normalizeFormPKarnatakaPdfMatrix(
+              m.rows,
+              m.colCount,
+              m.tableStartRow || 0,
+              m.metaLines
+            )
+          );
+        }
         allMatrices.push(m);
       });
     } catch (err) {
@@ -7258,28 +8520,67 @@ export async function buildStatutoryDraftPdfBlob({
   const anyFormXIVEmploymentCard = matricesForPdf.some((m) =>
     looksLikeFormXIVEmploymentCardPdfContext(m.metaLines, m.rows, m.name)
   );
+  const anyFormMGJIdentityCard = matricesForPdf.some(
+    (m) =>
+      m.formMGJLayout === true ||
+      looksLikeFormMGJGujaratPdfContext(m.metaLines, m.rows, m.name, m.fileName)
+  );
+  const anyFormQKAAppointment = matricesForPdf.some(
+    (m) =>
+      m.formQKALayout === true ||
+      looksLikeFormQKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName)
+  );
+  const anyFormNGJLeaveBook = matricesForPdf.some(
+    (m) =>
+      m.formNGJLayout === true ||
+      looksLikeFormNGJGujaratPdfContext(m.metaLines, m.rows, m.name, m.fileName)
+  );
+  const anyFormFKALeaveRegister = matricesForPdf.some(
+    (m) =>
+      m.formFKALayout === true ||
+      looksLikeFormFKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName)
+  );
+  const anyFormPKANotice = matricesForPdf.some(
+    (m) =>
+      m.formPKALayout === true ||
+      looksLikeFormPKarnatakaPdfContext(m.metaLines, m.rows, m.name, m.fileName)
+  );
+  const anyFormPGJ = matricesForPdf.some((m) =>
+    looksLikeFormPGJGujaratPdfContext(m.metaLines, m.rows, m.name, m.fileName)
+  );
   // Form 14 RJ has few columns but very long header labels — landscape keeps them aligned.
-  // Form XIX Wage Slip / Form XIV Employment Card stay portrait A4 (compact card layout).
-  const forcePortraitCard = anyFormXIXWageSlip || anyFormXIVEmploymentCard;
+  // Form XIX Wage Slip / Form XIV Employment Card / Form M GJ / Form Q KA stay portrait A4.
+  const forcePortraitCard =
+    anyFormXIXWageSlip ||
+    anyFormXIVEmploymentCard ||
+    anyFormMGJIdentityCard ||
+    anyFormQKAAppointment ||
+    anyFormPKANotice;
   const wide =
     (!forcePortraitCard && maxCols > 8) ||
     anyFormW ||
     anyFormTKA ||
     anyAccidentBook ||
     anyForm25 ||
-    anyForm14Rj;
+    anyForm14Rj ||
+    anyFormNGJLeaveBook ||
+    anyFormFKALeaveRegister ||
+    anyFormPGJ;
   // Form W (~30 wage/deduction cols) and Form T KA (~40 identity/attendance/wage cols)
   // need A2 landscape so amounts stay on one line.
+  // Form P GJ (~60 worker/day/wage cols) matches the Excel muster-roll on A2 landscape.
   // Form 11 Accident Book (~18 cols with long headers) and other wide registers need A3.
   const veryWide =
     anyFormW ||
     anyFormTKA ||
+    anyFormPGJ ||
     anyAccidentBook ||
     anyForm25 ||
+    anyFormNGJLeaveBook ||
     (!forcePortraitCard && maxCols > 14);
   const doc = new jsPDF({
     unit: 'pt',
-    format: forcePortraitCard ? 'a4' : anyFormW || anyFormTKA ? 'a2' : veryWide ? 'a3' : 'a4',
+    format: forcePortraitCard ? 'a4' : anyFormW || anyFormTKA || anyFormPGJ ? 'a2' : veryWide ? 'a3' : 'a4',
     orientation: forcePortraitCard ? 'portrait' : wide ? 'landscape' : 'portrait'
   });
 
@@ -7300,7 +8601,8 @@ export async function buildStatutoryDraftPdfBlob({
     firstHeaderModel.formXXIAP === true ||
     firstHeaderModel.formXVIIAP === true ||
     firstHeaderModel.formXVIAP === true ||
-    firstHeaderModel.formXIIIAP === true;
+    firstHeaderModel.formXIIIAP === true ||
+    firstHeaderModel.formXXIIIAPSE === true;
   // Use a real form title only — never the Excel/ZIP draft file name as a PDF heading.
   const headingCandidate = String(title || '')
     .replace(EXCEL_EXT_RE, '')
@@ -7368,6 +8670,18 @@ export const statutoryDraftPdfTestUtils = {
   normalizeFormXIXGJWageSlipPdfMatrix,
   looksLikeFormXIXKarnatakaPdfContext,
   normalizeFormXIXKarnatakaWageSlipPdfMatrix,
+  looksLikeFormXIXTamilNaduPdfContext,
+  resolveFormXIXTamilNaduNetAmountPdfSpan,
+  looksLikeFormBTamilNaduPdfContext,
+  rewriteFormBTamilNaduPdfHeader,
+  isFormBTamilNaduPdfSignatoryRow,
+  isFormBTamilNaduPdfSignatoryText,
+  rewriteFormCTamilNaduLwfPdfHeader,
+  isFormCTamilNaduLwfPdfSignatoryRow,
+  isFormCTamilNaduLwfPdfSignatoryText,
+  detectFormBTamilNaduPdfGroupBands,
+  isFormBTamilNaduAmountsDeductedGroupLabel,
+  normalizeFormBTamilNaduPdfMatrix,
   looksLikeFormXIVEmploymentCardPdfContext,
   normalizeFormXIVEmploymentCardPdfMatrix,
   looksLikeFormXIVKarnatakaPdfContext,
@@ -7376,6 +8690,16 @@ export const statutoryDraftPdfTestUtils = {
   normalizeFormTSEKarnatakaPdfMatrix,
   getFormTSEKarnatakaHeaderTitles,
   extractFormTSEKarnatakaHeaderFields,
+  looksLikeFormQKarnatakaPdfContext,
+  normalizeFormQKarnatakaPdfMatrix,
+  looksLikeFormMGJGujaratPdfContext,
+  normalizeFormMGJGujaratPdfMatrix,
+  looksLikeFormNGJGujaratPdfContext,
+  normalizeFormNGJGujaratPdfMatrix,
+  looksLikeFormFKarnatakaPdfContext,
+  normalizeFormFKarnatakaPdfMatrix,
+  looksLikeFormPKarnatakaPdfContext,
+  normalizeFormPKarnatakaPdfMatrix,
   isFormXIVEmploymentCardWorkmanLabelText,
   scrubForm11RajasthanTotalHoursPdfColumn,
   trimForm14RajasthanLeadingBlankPdfColumns,
@@ -7406,6 +8730,12 @@ export const statutoryDraftPdfTestUtils = {
   formWTamilNaduColumnWeight,
   formXXVIITamilNaduColumnWeight,
   looksLikeFormXXVIITamilNaduRegisterPdfContext,
+  looksLikeFormXVIIITamilNaduPdfContext,
+  FORM_XVIII_TN_PDF_TABLE_FONT_SIZE,
+  coalesceFormXVIIITamilNaduTitleLines,
+  detectFormXVIIITamilNaduPdfGroupBands,
+  isFormXVIIITamilNaduWagesCumMusterTitle,
+  isFormXVIIITamilNaduAmountOfWagesEarnedGroupLabel,
   extractMonthFromWagePeriodLine,
   isPurePdfNumericText,
   isPureNilPdfText,
@@ -7430,6 +8760,26 @@ export const statutoryDraftPdfTestUtils = {
   looksLikeFormDGJMusterRollPdfContext,
   looksLikeFormAGJGujaratPdfContext,
   looksLikeFormBGJGujaratPdfContext,
+  looksLikeFormKGJGujaratPdfContext,
+  rewriteFormKGJGujaratPdfHeader,
+  trimFormKGJGujaratLeadingBlankPdfColumns,
+  looksLikeFormLGJGujaratPdfContext,
+  trimFormLGJGujaratLeadingBlankPdfColumns,
+  looksLikeFormPGJGujaratPdfContext,
+  rewriteFormPGJGujaratPdfHeader,
+  trimFormPGJGujaratLeadingBlankPdfColumns,
+  detectFormPGJGujaratPdfGroupBands,
+  formPGJGujaratColumnWeight,
+  isFormPGJDateOfMonthGroupLabel,
+  normalizeFormPGJGujaratPdfMatrix,
+  dropFormPGJGujaratExtraDayPdfColumns,
+  blankFormPGJGujaratMinimumRateOfWagesPdfCells,
+  resolveFormPGJGujaratPdfDaysInMonth,
+  looksLikeFormOGJGujaratPdfContext,
+  rewriteFormOGJGujaratPdfHeader,
+  trimFormOGJGujaratLeadingBlankPdfColumns,
+  detectFormLGJGujaratPdfGroupBands,
+  formLGJGujaratColumnWeight,
   extractFormBGJMinimumWagesBox,
   isFormBGJMinimumWagesMetaText,
   normalizeFormBGJGujaratPdfMatrix,
@@ -7482,4 +8832,10 @@ export const statutoryDraftPdfTestUtils = {
   getFormXIIIAPHeaderTitles,
   uniqueExpandedTitleBands,
   isApPdfHeadingRow,
+  looksLikeFormXXIIIAPSEPdfContext,
+  getFormXXIIIAPSEHeaderTitles,
+  extractFormXXIIIAPSEAdminLayout,
+  isFormXXIIIAPSETableHeaderRow,
+  isFormXXIIIAPSEAdminRow,
+  trimFormXXIIIAPSEEmptyPdfColumns,
 };

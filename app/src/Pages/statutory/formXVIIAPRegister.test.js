@@ -1,5 +1,8 @@
 import {
+  applyFormXVIIAPHeaderLayoutFixes,
   applyFormXVIIAPPfPtToRow,
+  collapseFormXVIIAPRepeatedText,
+  FORM_XVII_AP_DEFAULT_CONTRACTOR_NAME,
   formXVIIAPPayrollRowHasPfOrPt,
   inferFormXVIIAPDeductionExportHeaders,
   isFormXVIIAPPfHeader,
@@ -214,9 +217,14 @@ describe('Form XVII AP Sample Payroll PF / PT', () => {
 });
 
 describe('Form XVII AP header layout fixes', () => {
+  test('collapses concatenated nature / location text', () => {
+    expect(collapseFormXVIIAPRepeatedText('AP-NimbagalluAP-Nimbagallu')).toBe('AP-Nimbagallu');
+    expect(collapseFormXVIIAPRepeatedText('AP-Nimbagallu / AP-Nimbagallu')).toBe('AP-Nimbagallu');
+    expect(collapseFormXVIIAPRepeatedText('AP-Tadipatri AP-Tadipatri')).toBe('AP-Tadipatri');
+  });
+
   test('places company establishment below the split label and keeps nature once', async () => {
     const ExcelJS = (await import('exceljs')).default;
-    const { applyFormXVIIAPHeaderLayoutFixes } = await import('./formXVIIAPRegister');
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('XVII-Register of Wages');
     ws.getCell(5, 1).value = 'Name and address of Contractor:';
@@ -249,12 +257,64 @@ describe('Form XVII AP header layout fixes', () => {
       maxCol: 20,
     });
 
-    expect(String(ws.getCell(7, 3).value || '')).toBe('AP-Tadipatri');
-    expect(String(ws.getCell(7, 4).value || '')).toBe('');
-    expect(String(ws.getCell(5, 3).value || '')).toBe('Site Contractor Pvt Ltd');
-    expect(String(ws.getCell(5, 4).value || '')).toBe('');
-    // Company goes below the first establishment label line, not on the upper band.
-    expect(String(ws.getCell(5, 13).value || '')).toBe('');
-    expect(String(ws.getCell(6, 10).value || '')).toContain('VAYONA ENERGY PRIVATE LIMITED');
+    expect(String(ws.getCell(5, 1).value || '')).toMatch(/Name and address of Contractor/i);
+    expect(String(ws.getCell(5, 1).value || '')).toContain('Site Contractor Pvt Ltd');
+    expect(ws.getCell(5, 1).alignment?.wrapText).toBe(false);
+    expect(String(ws.getCell(7, 1).value || '')).toMatch(/Nature and location of work/i);
+    expect(String(ws.getCell(7, 1).value || '')).toContain('AP-Tadipatri');
+    expect(String(ws.getCell(7, 1).value || '')).not.toMatch(/AP-Tadipatri.*AP-Tadipatri/i);
+    expect(String(ws.getCell(5, 9).value || '')).toMatch(/Establishment/i);
+    expect(String(ws.getCell(5, 9).value || '')).toContain('VAYONA ENERGY PRIVATE LIMITED');
+    expect(ws.getCell(5, 9).alignment?.wrapText).toBe(false);
+    expect(String(ws.getCell(6, 9).value || '')).toBe('');
+  });
+
+  test('defaults contractor to VAYONA ENERGY PRIVATE LIMITED and writes establishment in a taller box', async () => {
+    const ExcelJS = (await import('exceljs')).default;
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('XVII-Register of Wages');
+    ws.getCell(5, 1).value = 'Name and address of Contractor:';
+    ws.getCell(5, 9).value = 'Name and address of Establishemnt in/';
+    ws.getCell(6, 9).value = 'under which contract is carried on:';
+    ws.getCell(7, 1).value = 'Nature and location of work:AP-NimbagalluAP-Nimbagallu';
+    ws.getCell(7, 3).value = 'AP-Nimbagallu';
+    ws.getCell(9, 1).value = 'Wage period: monthly:';
+    ws.mergeCells(9, 10, 10, 18);
+    ws.getCell(9, 10).value = 'Name and address of Establishment : leftover';
+    ws.getRow(9).height = 15;
+    ws.getRow(10).height = 15;
+
+    applyFormXVIIAPHeaderLayoutFixes(ws, {
+      headerFormData: {
+        form_xvii_establishment_contract_carried:
+          'VAYONA ENERGY PRIVATE LIMITED, Vayona Energy Pvt Ltd, 277A, Ranerimangalam road, Govindanagaram',
+        form_xvii_nature_location_work: 'AP-NimbagalluAP-Nimbagallu',
+      },
+      parsedFormHeader: {
+        fields: [
+          { key: 'form_xvii_contractor', label: 'Name and Address of Contractor.' },
+          { key: 'form_xvii_nature_location_work', label: 'Nature and location of work.' },
+          {
+            key: 'form_xvii_establishment_contract_carried',
+            label: 'Name and address of establishment in/under which contract is carried on',
+          },
+        ],
+      },
+      headerRowEnd: 12,
+      maxCol: 20,
+    });
+
+    expect(FORM_XVII_AP_DEFAULT_CONTRACTOR_NAME).toBe('VAYONA ENERGY PRIVATE LIMITED');
+    expect(String(ws.getCell(5, 1).value || '')).toMatch(/Name and address of Contractor/i);
+    expect(String(ws.getCell(5, 1).value || '')).toContain(FORM_XVII_AP_DEFAULT_CONTRACTOR_NAME);
+    expect(ws.getCell(5, 1).alignment?.wrapText).toBe(false);
+    expect(String(ws.getCell(7, 1).value || '')).toMatch(/Nature and location of work/i);
+    expect(String(ws.getCell(7, 1).value || '')).toContain('AP-Nimbagallu');
+    expect(String(ws.getCell(7, 1).value || '')).not.toMatch(/AP-Nimbagallu.*AP-Nimbagallu/i);
+    expect(String(ws.getCell(5, 9).value || '')).toContain('VAYONA ENERGY PRIVATE LIMITED');
+    expect(String(ws.getCell(5, 9).value || '')).toMatch(/Establishment/i);
+    expect(ws.getCell(5, 9).alignment?.wrapText).toBe(false);
+    expect(ws.getRow(5).height).toBe(20);
+    expect(String(ws.getCell(9, 10).value || '')).toBe('');
   });
 });

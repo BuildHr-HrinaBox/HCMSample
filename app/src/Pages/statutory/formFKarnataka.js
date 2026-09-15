@@ -1110,6 +1110,73 @@ export function normalizePersonNameKey(name) {
     .toLowerCase();
 }
 
+function tokensAppearInOrder(needles, haystack) {
+  if (!Array.isArray(needles) || needles.length === 0) return false;
+  if (!Array.isArray(haystack) || haystack.length === 0) return false;
+  let i = 0;
+  for (let h = 0; h < haystack.length; h += 1) {
+    if (haystack[h] === needles[i]) i += 1;
+    if (i === needles.length) return true;
+  }
+  return false;
+}
+
+/**
+ * Match worker vs approved-leave employee name.
+ * Handles 3-part Gujarati names ("Patel Chandrakant Virabhai") when Zoho FirstName
+ * includes a middle name or omits the community surname.
+ * Still rejects last-initial shortcuts ("Harshad Dk" ↛ "Harshad Dineshkumar").
+ */
+export function personNamesMatchFirstLastStrict(workerName, recordName, firstName = '', lastName = '') {
+  const recordNorm = normalizePersonNameKey(recordName);
+  if (!recordNorm) return false;
+
+  const workerNorm = normalizePersonNameKey(workerName);
+  if (workerNorm && workerNorm === recordNorm) return true;
+
+  const fn = normalizePersonNameKey(firstName);
+  const ln = normalizePersonNameKey(lastName);
+  if (fn && ln) {
+    const combined = `${fn} ${ln}`.replace(/\s+/g, ' ').trim();
+    if (combined === recordNorm) return true;
+
+    const fnParts = fn.split(' ').filter(Boolean);
+    const lnParts = ln.split(' ').filter(Boolean);
+    const recordParts = recordNorm.split(' ').filter(Boolean);
+    const combinedParts = combined.split(' ').filter(Boolean);
+    if (recordParts.length < 2) return false;
+
+    const lastToken = lnParts[lnParts.length - 1];
+    const recordLast = recordParts[recordParts.length - 1];
+    // Truncated last name / initial must not match a longer surname.
+    if (lastToken !== recordLast) return false;
+
+    if (
+      recordParts.length >= fnParts.length + lnParts.length &&
+      fnParts.every((p, i) => recordParts[i] === p) &&
+      lnParts.every((p, i) => recordParts[recordParts.length - lnParts.length + i] === p)
+    ) {
+      return true;
+    }
+
+    if (
+      combinedParts.length >= 2 &&
+      (tokensAppearInOrder(combinedParts, recordParts) ||
+        tokensAppearInOrder(recordParts, combinedParts))
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  if (!workerNorm) return false;
+  const aParts = workerNorm.split(' ').filter(Boolean);
+  const bParts = recordNorm.split(' ').filter(Boolean);
+  if (aParts.length < 2 || bParts.length < 2) return false;
+  return aParts[0] === bParts[0] && aParts[aParts.length - 1] === bParts[bParts.length - 1];
+}
+
 /** Strict person-name match — avoids Satheesh ↔ Sathishkumar substring false positives. */
 export function personNamesMatch(candidate, recordName) {
   const a = normalizePersonNameKey(candidate);

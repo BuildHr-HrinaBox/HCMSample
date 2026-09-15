@@ -400,6 +400,43 @@ export function isFormITamilNaduAmountAllowancePaidHeader(header) {
   );
 }
 
+const FORM_I_TN_MONTH_ABBR_TO_NUM = {
+  jan: 1,
+  feb: 2,
+  mar: 3,
+  apr: 4,
+  may: 5,
+  jun: 6,
+  jul: 7,
+  aug: 8,
+  sep: 9,
+  oct: 10,
+  nov: 11,
+  dec: 12
+};
+
+/**
+ * Month-end payment date for the subsistence NIL row (Jul 2026 → 31-07-2026).
+ * Shown under "Amount of subsistence allowance paid and the date of payment".
+ */
+export function formatFormITamilNaduSuspensionMonthEndPaymentDate(monthYearLabel) {
+  const text = String(monthYearLabel || '').trim();
+  if (!text) return '';
+  const match = text.match(
+    /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(\d{4})\b/i
+  );
+  if (!match) return '';
+  const month = FORM_I_TN_MONTH_ABBR_TO_NUM[match[1].replace(/\./g, '').slice(0, 3).toLowerCase()];
+  const year = parseInt(match[2], 10);
+  if (!month || !Number.isFinite(year) || year < 1900) return '';
+  const lastDay = new Date(year, month, 0).getDate();
+  return `${String(lastDay).padStart(2, '0')}-${String(month).padStart(2, '0')}-${year}`;
+}
+
+export function findFormITamilNaduAmountAllowancePaidHeader(headers) {
+  return (headers || []).find((h) => isFormITamilNaduAmountAllowancePaidHeader(h)) || null;
+}
+
 /** Rate at which subsistence allowance is calculated — leave blank on download. */
 export function isFormITamilNaduRateAllowanceHeader(header) {
   const text = normalizeFormITamilNaduHeaderText(header);
@@ -497,7 +534,7 @@ export function isFormITamilNaduSuspensionWorkbookContext({
   return looksLikeFormI && looksLikeTamilNadu && looksLikeSuspensionRegister;
 }
 
-/** Clear Monthly emoluments; blank offence/suspension/rate/amount/signature; NIL for remarks. */
+/** Clear Monthly emoluments; blank offence/suspension/rate/signature; NIL for remarks. */
 export function applyFormITamilNaduNilDefaultsToRows(rows, headers, { overwriteNil = false } = {}) {
   if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(headers) || headers.length === 0) {
     return rows;
@@ -650,7 +687,7 @@ export function buildFormITamilNaduSuspensionNilTableRows(
     row[h] = '';
   });
   (headers || []).forEach((h) => {
-    // Remarks only — offence, dates, rate, amount paid, punishment, signature stay blank.
+    // Remarks only — offence, dates, rate, punishment, signature stay blank.
     if (isFormITamilNaduNilDefaultHeader(h)) {
       row[h] = FORM_I_TAMIL_NADU_NIL_DEFAULT;
     }
@@ -702,6 +739,133 @@ export function applyFormITamilNaduSuspensionNilTableRows(
 }
 
 export { FORM_I_TAMIL_NADU_NIL_DEFAULT, normalizeFormITamilNaduHeaderText };
+
+/** SA Form 1 subsistence table is A–L (Signature). Template leftover boxes M–V must be stripped. */
+export const FORM_I_TN_SUSPENSION_TABLE_COLS = 12;
+
+function formITnColLettersToNum(letters) {
+  return String(letters || '')
+    .toUpperCase()
+    .split('')
+    .reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0);
+}
+
+export function resolveFormITamilNaduSuspensionKeepCol(worksheet) {
+  if (!worksheet) return FORM_I_TN_SUSPENSION_TABLE_COLS;
+  let signatureCol = 0;
+  for (let r = 1; r <= 8; r += 1) {
+    for (let c = 1; c <= 20; c += 1) {
+      const t = safeFormIExcelJsCellText(worksheet.getCell(r, c)).trim();
+      if (/signature\s+of\s+employee|postal\s+acknowledgement/i.test(t)) {
+        signatureCol = Math.max(signatureCol, c);
+      }
+    }
+  }
+  return signatureCol || FORM_I_TN_SUSPENSION_TABLE_COLS;
+}
+
+/**
+ * Wipe values, borders, and column slots past Signature (M–V and further)
+ * on the Register of Subsistence Allowance sheet.
+ */
+export function stripFormITamilNaduSuspensionTrailingColumns(worksheet, keepCol) {
+  if (!worksheet) return 0;
+  const keep = Math.max(
+    1,
+    Number(keepCol) || resolveFormITamilNaduSuspensionKeepCol(worksheet) || FORM_I_TN_SUSPENSION_TABLE_COLS
+  );
+  const throughCol = Math.max(keep + 40, 40);
+  const rowTo = Math.max(Number(worksheet.rowCount) || 1, 40);
+
+  try {
+    const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
+    merges.forEach((range) => {
+      const m = String(range || '').match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+      if (!m) return;
+      const c1 = formITnColLettersToNum(m[1]);
+      const c2 = formITnColLettersToNum(m[3]);
+      if (c2 <= keep) return;
+      if (c1 > keep || c2 > keep) {
+        try {
+          worksheet.unMergeCells(range);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    });
+  } catch (_) {
+    /* ignore */
+  }
+
+  for (let r = 1; r <= rowTo; r += 1) {
+    for (let c = keep + 1; c <= throughCol; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      cell.value = null;
+      cell.border = {};
+      try {
+        const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+        cell.style = { ...prev, border: {} };
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
+  for (let c = keep + 1; c <= throughCol; c += 1) {
+    const col = worksheet.getColumn(c);
+    col.width = undefined;
+    try {
+      col.hidden = true;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  try {
+    const colCount = Number(worksheet.columnCount) || 0;
+    if (colCount > keep) {
+      worksheet.spliceColumns(keep + 1, colCount - keep);
+    }
+  } catch (_) {
+    /* spliceColumns unavailable — value/border wipe above is enough */
+  }
+
+  return keep;
+}
+
+export function stampFormITamilNaduAmountPaymentDateCell(cell, paymentDate) {
+  if (!cell) return;
+  void paymentDate;
+  cell.value = '';
+  cell.numFmt = '@';
+}
+
+/** Clear leftover template / pay-run dates in the amount/date-of-payment column. */
+export function ensureFormITamilNaduSuspensionAmountDatesVisible(worksheet, dataStartRow = 6) {
+  if (!worksheet) return 0;
+  let amountCol = 0;
+  for (let r = 1; r <= 8; r += 1) {
+    for (let c = 1; c <= 14; c += 1) {
+      if (isFormITamilNaduAmountAllowancePaidHeader(safeFormIExcelJsCellText(worksheet.getCell(r, c)))) {
+        amountCol = c;
+      }
+    }
+  }
+  if (!amountCol) return 0;
+  const start = Math.max(1, Number(dataStartRow) || 1);
+  const end = Math.max(start, Number(worksheet.rowCount) || start);
+  let cleared = 0;
+  for (let r = start; r <= Math.min(end, start + 80); r += 1) {
+    const cell = worksheet.getCell(r, amountCol);
+    const raw = safeFormIExcelJsCellText(cell).trim();
+    if (!raw) continue;
+    if (isFormITamilNaduAmountAllowancePaidHeader(raw)) continue;
+    cell.value = '';
+    cell.numFmt = '@';
+    cleared += 1;
+  }
+  return cleared;
+}
 
 /** Canonical Form I TN Register of Workmen layout from Form 1 Tamilnadu.xlsx → "FORM 1". */
 export const FORM_I_TN_WORKMEN_TABLE_COLS = 10;
@@ -780,6 +944,117 @@ function normalizeFormITitleText(raw) {
     .replace(/\r/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+/**
+ * Multi-sheet Form_I_-_TamilNadu.xlsx: prefer PW Form I (Register of Fines) or
+ * FORM 1 (Conferment workmen) based on catalog / filename hints.
+ * Works with SheetJS workbooks (`SheetNames` + `Sheets`).
+ */
+export function resolveFormITamilNaduWorkbookSheetName(workbook, hints = {}) {
+  const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
+  if (!names.length) return null;
+  if (names.length === 1) return names[0];
+
+  const blob = [
+    hints.fileName,
+    hints.formFileName,
+    hints.formName,
+    hints.item?.formName,
+    hints.item?.FormName,
+    hints.item?.description,
+    hints.item?.Description,
+    hints.item?.act,
+    hints.item?.Act,
+    hints.formHeaderTitle,
+    hints.formHeaderSubtitle,
+    hints.formHeader?.title,
+    hints.formHeader?.subtitle,
+    hints.preferredSheetName,
+    hints.sheetNameHint
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  const catalogFines =
+    /register\s+of\s+fines/.test(blob) ||
+    /pw\s+form\s*i\b/.test(blob) ||
+    ((/\bform\s*[-–]?\s*i\b/.test(blob) ||
+      (/\bform[\s._-]*1(?:[\s._-]|$)/.test(blob) && !/\bform[\s._-]*1[0-9]/.test(blob))) &&
+      (/minimum\s+wages?/.test(blob) || /payment\s+of\s+wages/.test(blob)) &&
+      !/conferment|register\s+of\s+workmen|permanent\s+status/.test(blob));
+  const catalogWorkmen =
+    /register\s+of\s+workmen|register\s+of\s+conferment|conferment\s+of\s+permanent|permanent\s+status\s+to\s+workmen/.test(
+      blob
+    ) && !catalogFines;
+  const letterTamilFile =
+    /form[_\s.-]*i[_\s.-]*tamil|form_i_-_tamil/.test(blob) &&
+    !/date\s+of\s+suspension|subsistence\s+allowance|kept\s+under\s+suspension/.test(blob);
+  const wantsFines = catalogFines || (letterTamilFile && !catalogWorkmen);
+  const wantsWorkmen = catalogWorkmen && !wantsFines;
+
+  const sheetProbe = (name) => {
+    const sheet = workbook?.Sheets?.[name];
+    if (!sheet) return String(name || '').toLowerCase();
+    // Lightweight probe — avoid pulling in Statutory sheet-text helpers.
+    try {
+      // eslint-disable-next-line global-require
+      const XLSX = require('xlsx');
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }).slice(0, 12);
+      return `${name} ${rows
+        .map((row) => (Array.isArray(row) ? row : []).map((c) => String(c || '')).join(' '))
+        .join(' ')}`.toLowerCase();
+    } catch (_) {
+      return String(name || '').toLowerCase();
+    }
+  };
+
+  if (wantsFines) {
+    const finesByName =
+      names.find((n) => /pw\s*form\s*i|register\s+of\s+fines/i.test(String(n || ''))) ||
+      names.find(
+        (n) =>
+          /\bform\s*i\b/i.test(String(n || '')) &&
+          !/^form\s*1$/i.test(String(n || '').trim()) &&
+          !/workmen|conferment|sa\s*form/i.test(String(n || ''))
+      );
+    if (finesByName) return finesByName;
+    const finesByContent = names.find((n) => {
+      const text = sheetProbe(n);
+      return (
+        /register\s+of\s+fines/.test(text) ||
+        (/act\s+or\s+omission/.test(text) && /fine\s+imposed/.test(text))
+      );
+    });
+    if (finesByContent) return finesByContent;
+  }
+
+  if (wantsWorkmen) {
+    const workmenByName =
+      names.find((n) => /^form\s*1$/i.test(String(n || '').trim())) ||
+      names.find((n) => /register\s+of\s+workmen|conferment/i.test(String(n || '')));
+    if (workmenByName) return workmenByName;
+  }
+
+  return null;
+}
+
+/** Re-pick Form I sheet when catalog wants fines/workmen but parse locked the other tab. */
+export function repickFormITamilNaduWorkbookSheetIfNeeded(
+  workbook,
+  hints = {},
+  currentSheetName = ''
+) {
+  const names = Array.isArray(workbook?.SheetNames) ? workbook.SheetNames : [];
+  if (names.length <= 1) return null;
+  const target = resolveFormITamilNaduWorkbookSheetName(workbook, {
+    ...hints,
+    preferredSheetName: currentSheetName || hints?.preferredSheetName || ''
+  });
+  if (!target) return null;
+  if (target === currentSheetName) return null;
+  return target;
 }
 
 /**
@@ -974,6 +1249,16 @@ export function buildFormITamilNaduRegisterOfFinesWorkbookClean({
   colWidths.forEach((w, i) => {
     outWs.getColumn(i + 1).width = w;
   });
+  // Never leave phantom K–V columns for Excel to paint empty bordered boxes into.
+  for (let c = headers.length + 1; c <= headers.length + 30; c += 1) {
+    const col = outWs.getColumn(c);
+    col.width = undefined;
+    try {
+      col.hidden = true;
+    } catch (_) {
+      /* ignore */
+    }
+  }
 
   return { workbook: outWb, worksheet: outWs };
 }

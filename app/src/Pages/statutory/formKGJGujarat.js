@@ -1,6 +1,11 @@
 import ExcelJS from 'exceljs';
 import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
 import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
+import {
+  FORM_KGJ_GJ_WEEKLY_HOLIDAY_INTRO,
+  isFormKGJHolidayCaptionText,
+  isFormKGJTruncatedWeeklyIntroText,
+} from '../../utils/statutoryDraftPdf.formKGJ.GJ';
 
 /** Gujarat Form K — worker register (name, designation, weekly holiday, hours of work). */
 
@@ -426,6 +431,35 @@ function detectFormKGJGujaratTableLayout(worksheet, hints = {}) {
   return { headerRow, dataStartRow, templateCols, startCol };
 }
 
+function rewriteFormKGJGujaratNoticeCaptionCells(worksheet, headerRow) {
+  const getMergeTopLeft = buildMergeTopLeftResolver(worksheet);
+  const seen = new Set();
+  const maxR = Math.max(1, Number(headerRow) - 1);
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= 16; c += 1) {
+      const tl = getMergeTopLeft(r, c);
+      const key = `${tl.r}:${tl.c}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const cell = worksheet.getCell(tl.r, tl.c);
+      const raw = excelCellValueToString(cell.value);
+      if (isFormKGJTruncatedWeeklyIntroText(raw)) {
+        cell.value = '';
+        continue;
+      }
+      if (isFormKGJHolidayCaptionText(raw)) {
+        cell.value = FORM_KGJ_GJ_WEEKLY_HOLIDAY_INTRO;
+        cell.alignment = {
+          ...(cell.alignment || {}),
+          wrapText: true,
+          vertical: 'middle',
+          horizontal: 'left',
+        };
+      }
+    }
+  }
+}
+
 export async function buildFormKGJGujaratWorkbookWithTemplateStyles({
   templateArrayBuffer,
   mappedData,
@@ -459,6 +493,8 @@ export async function buildFormKGJGujaratWorkbookWithTemplateStyles({
       maxScanCols: 80,
     });
   }
+
+  rewriteFormKGJGujaratNoticeCaptionCells(worksheet, layout.headerRow);
 
   const templateHeaderLabels = templateCols.map((entry) => entry.label);
   const normalizedHeaders = resolveFormKGJGujaratTableHeaders(

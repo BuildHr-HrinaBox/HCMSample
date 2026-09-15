@@ -1,9 +1,17 @@
 import * as XLSX from 'xlsx';
 import { statutoryDraftPdfTestUtils } from './statutoryDraftPdf';
 import {
+  detectFormTSEKarnatakaAttendanceBand,
   extractFormTSEKarnatakaHeaderFields,
+  FORM_T_KA_PDF_ATTENDANCE_LABEL,
+  FORM_T_KA_PDF_DATE_LABEL,
+  FORM_T_KA_PDF_DEDUCTIONS_GROUP,
+  FORM_T_KA_PDF_EARNED_WAGES_GROUP,
+  FORM_T_KA_PDF_IDENTITY_HEADERS,
+  FORM_T_KA_PDF_SIGNATORY_LABEL,
   FORM_T_KA_PDF_SUBTITLE,
   FORM_T_KA_PDF_TITLE,
+  isFormTSEKarnatakaPdfFooterOnlyRow,
   looksLikeFormTSEKarnatakaPdfContext,
   normalizeFormTSEKarnatakaPdfMatrix,
   shiftFormTSEKarnatakaPdfIdentityFromJToA,
@@ -279,5 +287,91 @@ describe('Form T Karnataka PDF layout', () => {
     const elbaz = normalized.rows.find((row) => String(row?.[1] || '').includes('Elbaz'));
     expect(String(elbaz[0])).toBe('6');
     expect(shiftFormTSEKarnatakaPdfIdentityFromJToA([header])[0][0]).toBe('S.NO');
+  });
+
+  test('rebuilds official Excel-model headers and merges ATTENDANCE across days', () => {
+    const rows = formTAoa();
+    const normalized = normalizeFormTSEKarnatakaPdfMatrix(rows, rows[11].length, 11, []);
+    expect(normalized.rows[0][1]).toBe(FORM_T_KA_PDF_IDENTITY_HEADERS[1]);
+    expect(normalized.rows[0][1]).not.toMatch(/Name of Employee/i);
+    expect(normalized.rows[0][9]).toBe(FORM_T_KA_PDF_ATTENDANCE_LABEL);
+    expect(String(normalized.rows[0][10] || '')).toBe('');
+    expect(String(normalized.rows[0][39] || '')).toBe('');
+    expect(String(normalized.rows[1][9])).toBe('1');
+    expect(String(normalized.rows[1][39])).toBe('31');
+    expect(String(normalized.rows[2][0])).toBe('1');
+    expect(String(normalized.rows[2][8])).toBe('9');
+    expect(String(normalized.rows[2][9])).toBe('10');
+    expect(normalized.attendanceBand.start).toBe(9);
+    expect(normalized.attendanceBand.end).toBe(39);
+    expect(normalized.attendanceBand.labelRow).toBe(0);
+    expect(normalized.attendanceBand.label).toBe(FORM_T_KA_PDF_ATTENDANCE_LABEL);
+    const band = detectFormTSEKarnatakaAttendanceBand(
+      normalized.rows,
+      0,
+      3,
+      normalized.colCount
+    );
+    expect(band.end - band.start + 1).toBe(31);
+  });
+
+  test('puts earned-wage leaves under the group and shows the Deductions band', () => {
+    const rows = formTAoa();
+    const normalized = normalizeFormTSEKarnatakaPdfMatrix(rows, rows[11].length, 11, []);
+    const wageStart = 40;
+    expect(normalized.rows[0][wageStart]).toMatch(/No\. of payable days/i);
+    expect(normalized.rows[0][wageStart + 1]).toMatch(/Total OT hours/i);
+    expect(normalized.rows[0][wageStart + 2]).toBe(FORM_T_KA_PDF_EARNED_WAGES_GROUP);
+    expect(normalized.rows[0][wageStart + 15]).toBe(FORM_T_KA_PDF_DEDUCTIONS_GROUP);
+    expect(String(normalized.rows[1][wageStart + 2])).toMatch(/BASIC/i);
+    expect(String(normalized.rows[1][wageStart + 4])).toMatch(/HRA/i);
+    expect(String(normalized.rows[1][wageStart + 15])).toMatch(/ESI/i);
+    expect(String(normalized.rows[1][wageStart + 16])).toMatch(/PF/i);
+    expect(String(normalized.rows[1][wageStart + 17])).toMatch(/PT/i);
+    expect(String(normalized.rows[2][wageStart])).toBe('11');
+    expect(String(normalized.rows[2][wageStart + 15])).toBe('26');
+    const employee = normalized.rows.find((row) => String(row?.[1] || '').includes('Vinay Kumar'));
+    expect(String(employee[wageStart + 15])).toBe('111');
+  });
+
+  test('reads Establishment and Employer from the following line when the label has no value', () => {
+    const fields = extractFormTSEKarnatakaHeaderFields(
+      [
+        'Name and address of the Establishment :',
+        'Bableshwar Hero Site, Karjol Village',
+        'Name and Address of employer :',
+        'M/s Clean Wind Power Bableshwar Pvt Ltd',
+      ],
+      [],
+      0
+    );
+    expect(fields[1]).toMatch(/Bableshwar Hero Site/);
+    expect(fields[2]).toMatch(/Clean Wind Power Bableshwar/);
+  });
+
+  test('puts Date: and Authorised Signatory below the table, not inside the grid', () => {
+    const rows = formTAoa();
+    rows.push(['Date:', '', '', '', '', 'Authorised Signatory']);
+    const normalized = normalizeFormTSEKarnatakaPdfMatrix(rows, rows[11].length, 11, []);
+    expect(normalized.formTKAFooter.date).toBe(FORM_T_KA_PDF_DATE_LABEL);
+    expect(normalized.formTKAFooter.signatory).toBe(FORM_T_KA_PDF_SIGNATORY_LABEL);
+    expect(
+      normalized.rows.some((row) => isFormTSEKarnatakaPdfFooterOnlyRow(row))
+    ).toBe(false);
+    expect(normalized.rows.some((row) => String(row?.[0] || '') === 'Date:')).toBe(false);
+    expect(
+      normalized.rows.some((row) =>
+        (row || []).some((cell) => /authorised\s+signatory/i.test(String(cell || '')))
+      )
+    ).toBe(false);
+
+    const withValue = normalizeFormTSEKarnatakaPdfMatrix(
+      [...formTAoa(), ['Date: 11-09-2026']],
+      20,
+      11,
+      []
+    );
+    expect(withValue.formTKAFooter.date).toBe('Date: 11-09-2026');
+    expect(withValue.formTKAFooter.signatory).toBe(FORM_T_KA_PDF_SIGNATORY_LABEL);
   });
 });

@@ -11,16 +11,19 @@ import {
 import {
   collectApprovedLeaveIdentityKeys,
   getApprovedLeaveRecordUniqueKey,
-  normalizePersonNameKey,
+  personNamesMatchFirstLastStrict,
   resolveApprovedLeavePeriodForFormNGJ,
 } from './formFKarnataka';
 import {
+  aggregateFormOGJApprovedLeaveMetrics,
   filterApprovedLeaveRecordsForFormOGJMonth,
   readApprovedLeaveLeaveType,
 } from './formOGJGujarat';
 import {
   computeFormXLeaveBeginning,
+  FORM_X_EARNED_LEAVE_TYPE_ALIASES,
   FORM_X_MEDICAL_LEAVE_TYPE_ALIASES,
+  getFormXEarnedLeaveApiMetrics,
   getFormXMedicalLeaveApiMetrics,
   leaveTypeLabelMatchesAliases,
 } from './formXTamilNaduLeave';
@@ -1022,7 +1025,14 @@ export function formatFormNGJGujaratEstablishmentFromSite(site) {
   const addr = String(site.siteAddress ?? site.SiteAddress ?? '').trim();
   const city = String(site.siteCity ?? site.SiteCity ?? '').trim();
   const state = String(site.siteState ?? site.SiteState ?? '').trim();
-  const addrLine = [addr, city, state].filter(Boolean).join(', ');
+  const addrNorm = addr.toLowerCase();
+  const extra = [city, state].filter((part) => {
+    const p = String(part || '').trim();
+    if (!p) return false;
+    if (addrNorm && addrNorm.includes(p.toLowerCase())) return false;
+    return true;
+  });
+  const addrLine = [addr, ...extra].filter(Boolean).join(', ');
   return [name, addrLine].filter(Boolean).join('\n').trim();
 }
 
@@ -1047,6 +1057,10 @@ export function applyFormNGJGujaratAutofillFromSite(headerData, siteContext = {}
     const cur = String(out.form_n_gj_establishment ?? '').trim();
     if (!onlyEmpty || !cur || /^enter\b/i.test(cur)) {
       out.form_n_gj_establishment = establishmentText;
+      const named = String(out['Name of the establishment'] ?? '').trim();
+      if (!onlyEmpty || !named || /^enter\b/i.test(named)) {
+        out['Name of the establishment'] = establishmentText;
+      }
     }
   }
   return out;
@@ -1199,25 +1213,7 @@ export function readFormNGJEmployeeNameParts(emp) {
  * which previously assigned another worker's 5-day leave to Ajaykumar Mansingbhai.
  */
 export function formNGJPersonNamesMatchExact(workerName, recordName, firstName = '', lastName = '') {
-  const recordNorm = normalizePersonNameKey(recordName);
-  if (!recordNorm) return false;
-
-  const fn = normalizePersonNameKey(firstName);
-  const ln = normalizePersonNameKey(lastName);
-  if (fn && ln) {
-    const recordParts = recordNorm.split(' ').filter(Boolean);
-    if (recordParts.length < 2) return false;
-    return recordParts[0] === fn && recordParts[recordParts.length - 1] === ln;
-  }
-
-  const workerNorm = normalizePersonNameKey(workerName);
-  if (!workerNorm) return false;
-  if (workerNorm === recordNorm) return true;
-
-  const aParts = workerNorm.split(' ').filter(Boolean);
-  const bParts = recordNorm.split(' ').filter(Boolean);
-  if (aParts.length < 2 || bParts.length < 2) return false;
-  return aParts[0] === bParts[0] && aParts[aParts.length - 1] === bParts[bParts.length - 1];
+  return personNamesMatchFirstLastStrict(workerName, recordName, firstName, lastName);
 }
 
 /** Only EmployeeID / Zoho People ids — never Role.ID or other shared codes. */
@@ -1320,18 +1316,14 @@ export function pickBestFormNGJContingencyLeave(matches, bookedLimit = '') {
   return matches[0];
 }
 
-/**
- * Find Contingency Leave approved record for a Form N worker row.
- * Matches on EmployeeID / Zoho id and FirstName+LastName (not first/last alone).
- */
-export function findApprovedContingencyLeaveForFormNRow(
+export function findApprovedContingencyLeaveRecordsForFormNRow(
   row,
   tableHeaders,
   approvedRecords,
   emp,
   options = {}
 ) {
-  if (!Array.isArray(approvedRecords) || approvedRecords.length === 0) return null;
+  if (!Array.isArray(approvedRecords) || approvedRecords.length === 0) return [];
 
   const hdrs = resolveFormNGJGujaratTableHeaders(tableHeaders);
   const workerHeader = hdrs.find(isFormNGJWorkerNameHeader) || '';
@@ -1339,7 +1331,7 @@ export function findApprovedContingencyLeaveForFormNRow(
   const workerName = workerHeader
     ? String(row?.[workerHeader] ?? row?.__employeeLookupName ?? empFullName ?? '').trim()
     : String(row?.__employeeLookupName ?? empFullName ?? '').trim();
-  if (!workerName && !empFullName) return null;
+  if (!workerName && !empFullName) return [];
 
   const usedRecordKeys =
     options.usedRecordKeys instanceof Set ? options.usedRecordKeys : new Set();
@@ -1361,6 +1353,27 @@ export function findApprovedContingencyLeaveForFormNRow(
       matches.push(rec);
     }
   }
+  return matches;
+}
+
+/**
+ * Find Contingency Leave approved record for a Form N worker row.
+ * Matches on EmployeeID / Zoho id and FirstName+LastName (not first/last alone).
+ */
+export function findApprovedContingencyLeaveForFormNRow(
+  row,
+  tableHeaders,
+  approvedRecords,
+  emp,
+  options = {}
+) {
+  const matches = findApprovedContingencyLeaveRecordsForFormNRow(
+    row,
+    tableHeaders,
+    approvedRecords,
+    emp,
+    options
+  );
   return pickBestFormNGJContingencyLeave(matches, options.bookedLimit || '');
 }
 
@@ -1381,8 +1394,13 @@ export function buildFormNGJCasualLeaveValues(approvedRecord, leaveRecord, leave
       ? formatFormNGJLeaveNumber(apiMetrics.booked)
       : '';
 
-  const metrics = resolveApprovedLeavePeriodForFormNGJ(approvedRecord || {}, booked);
-  const hasApprovedPeriod = !!(metrics.from || metrics.to);
+  const records = Array.isArray(approvedRecord)
+    ? approvedRecord
+    : approvedRecord
+      ? [approvedRecord]
+      : [];
+  const aggregated = aggregateFormOGJApprovedLeaveMetrics(records, '', '', booked);
+  const hasApprovedPeriod = !!(aggregated.from || aggregated.to);
   if (!hasApprovedPeriod) {
     return {
       from: '',
@@ -1395,7 +1413,7 @@ export function buildFormNGJCasualLeaveValues(approvedRecord, leaveRecord, leave
     };
   }
 
-  let availed = formatFormNGJLeaveNumber(metrics.daysCount);
+  let availed = formatFormNGJLeaveNumber(aggregated.daysCount);
   // If LeaveCount still exceeds Contingency booked, trust LeaveData booked.
   if (availed !== '' && booked !== '') {
     const leaveCountNum = Number(availed);
@@ -1415,8 +1433,8 @@ export function buildFormNGJCasualLeaveValues(approvedRecord, leaveRecord, leave
   if (!total && availed !== '') total = availed;
 
   return {
-    from: metrics.from || '',
-    to: metrics.to || '',
+    from: aggregated.from || '',
+    to: aggregated.to || '',
     totalLeave: total || '',
     availedLeave: availed || '',
     balanceLeave: balance || '',
@@ -1521,7 +1539,7 @@ export function applyFormNGJGujaratCasualLeaveAutofill(
         ).trim()
       : '';
 
-    const approvedRecord = findApprovedContingencyLeaveForFormNRow(
+    const approvedRecordsForRow = findApprovedContingencyLeaveRecordsForFormNRow(
       row,
       canonicalHeaders,
       contingencyRecords.length > 0 ? contingencyRecords : approvedLeaveRecords,
@@ -1535,9 +1553,11 @@ export function applyFormNGJGujaratCasualLeaveAutofill(
       }
     );
 
-    if (approvedRecord) {
-      const recordKey = getApprovedLeaveRecordUniqueKey(approvedRecord);
-      if (recordKey) usedRecordKeys.add(recordKey);
+    if (approvedRecordsForRow.length > 0) {
+      approvedRecordsForRow.forEach((approvedRecord) => {
+        const recordKey = getApprovedLeaveRecordUniqueKey(approvedRecord);
+        if (recordKey) usedRecordKeys.add(recordKey);
+      });
     } else {
       // No Contingency leave → clear all casual columns (no LeaveData defaults).
       canonicalHeaders.forEach((header) => {
@@ -1550,10 +1570,283 @@ export function applyFormNGJGujaratCasualLeaveAutofill(
 
     const applied = applyFormNGJGujaratCasualLeaveToRow(
       row,
-      approvedRecord,
+      approvedRecordsForRow,
       leaveRecord,
       canonicalHeaders,
       { overwrite: options.overwrite !== false, leaveTypeLabels }
+    );
+    if (applied > 0) hits += 1;
+  });
+
+  return hits;
+}
+
+/** Accumulation of leave / Leave allowed — Earned Leave (not Contingency). */
+export const FORM_NGJ_EARNED_LEAVE_TYPE_ALIASES = [...FORM_X_EARNED_LEAVE_TYPE_ALIASES];
+
+export function isFormNGJLeaveDueOnHeader(header) {
+  const raw = String(header || '');
+  if (isFormNGJCasualSectionHeader(raw) || /details\s+of\s+festival/i.test(raw)) return false;
+  return /leave\s+due\s+on/.test(normHeaderLabel(header));
+}
+
+export function isFormNGJNoOfDaysHeader(header) {
+  const raw = String(header || '');
+  if (isFormNGJCasualSectionHeader(raw) || /details\s+of\s+festival/i.test(raw)) return false;
+  return /no\.?\s*of\s+days/.test(normHeaderLabel(header));
+}
+
+export function isFormNGJLeaveAllowedFromToHeader(header) {
+  const raw = String(header || '');
+  if (isFormNGJCasualSectionHeader(raw) || /details\s+of\s+festival/i.test(raw)) return false;
+  if (/leave\s+allowed/i.test(raw) && /from/i.test(raw)) return true;
+  const n = normHeaderLabel(header);
+  return /from\s*-?\s*to/.test(n) && !/period|festival|casual/.test(n);
+}
+
+export function isApprovedLeaveEarnedForFormNGJ(record) {
+  const leaveType = readApprovedLeaveLeaveType(record);
+  if (!leaveType) return false;
+  if (isApprovedLeaveContingencyForFormNGJ(record)) return false;
+  return leaveTypeLabelMatchesAliases(leaveType, FORM_NGJ_EARNED_LEAVE_TYPE_ALIASES);
+}
+
+export function filterApprovedLeaveRecordsForFormNGJEarned(records, monthFrom, monthTo) {
+  const monthFiltered = filterApprovedLeaveRecordsForFormOGJMonth(records, monthFrom, monthTo);
+  return monthFiltered.filter(isApprovedLeaveEarnedForFormNGJ);
+}
+
+export function findApprovedEarnedLeaveRecordsForFormNRow(
+  row,
+  tableHeaders,
+  approvedRecords,
+  emp,
+  options = {}
+) {
+  if (!Array.isArray(approvedRecords) || approvedRecords.length === 0) return [];
+
+  const hdrs = resolveFormNGJGujaratTableHeaders(tableHeaders);
+  const workerHeader = hdrs.find(isFormNGJWorkerNameHeader) || '';
+  const { full: empFullName } = readFormNGJEmployeeNameParts(emp);
+  const workerName = workerHeader
+    ? String(row?.[workerHeader] ?? row?.__employeeLookupName ?? empFullName ?? '').trim()
+    : String(row?.__employeeLookupName ?? empFullName ?? '').trim();
+  if (!workerName && !empFullName) return [];
+
+  const usedRecordKeys =
+    options.usedRecordKeys instanceof Set ? options.usedRecordKeys : new Set();
+  const monthFrom = options.monthFrom || '';
+  const monthTo = options.monthTo || '';
+  const earnedRecords = filterApprovedLeaveRecordsForFormNGJEarned(
+    approvedRecords,
+    monthFrom,
+    monthTo
+  );
+
+  const matches = [];
+  for (let i = 0; i < earnedRecords.length; i += 1) {
+    const rec = earnedRecords[i];
+    if (!rec) continue;
+    const key = getApprovedLeaveRecordUniqueKey(rec);
+    if (key && usedRecordKeys.has(key)) continue;
+    if (formNGJRecordMatchesWorker(rec, workerName || empFullName, emp, options)) {
+      matches.push(rec);
+    }
+  }
+  return matches;
+}
+
+export function findApprovedEarnedLeaveForFormNRow(
+  row,
+  tableHeaders,
+  approvedRecords,
+  emp,
+  options = {}
+) {
+  const matches = findApprovedEarnedLeaveRecordsForFormNRow(
+    row,
+    tableHeaders,
+    approvedRecords,
+    emp,
+    options
+  );
+  return pickBestFormNGJContingencyLeave(matches, options.bookedLimit || '');
+}
+
+/**
+ * Accumulation of leave:
+ *   Leave due on → always blank
+ *   No. of days  → Earned Leave booked count only
+ * Leave allowed From-To → approved Earned Leave period
+ */
+export function buildFormNGJAccumulationLeaveValues(
+  approvedRecord,
+  leaveRecord,
+  options = {}
+) {
+  const leaveTypeLabels = options.leaveTypeLabels || {};
+  const formatDate =
+    typeof options.formatStatutoryDateDisplay === 'function'
+      ? options.formatStatutoryDateDisplay
+      : (v) => String(v || '').trim();
+  const apiMetrics = leaveRecord
+    ? getFormXEarnedLeaveApiMetrics(leaveRecord, leaveTypeLabels)
+    : { balance: '', booked: '', hasData: false };
+
+  const booked =
+    apiMetrics.hasData && apiMetrics.booked !== '' && apiMetrics.booked != null
+      ? formatFormNGJLeaveNumber(apiMetrics.booked)
+      : '';
+  const records = Array.isArray(approvedRecord)
+    ? approvedRecord
+    : approvedRecord
+      ? [approvedRecord]
+      : [];
+  const aggregated = aggregateFormOGJApprovedLeaveMetrics(
+    records,
+    options.monthFrom || '',
+    options.monthTo || '',
+    booked
+  );
+  const hasApprovedPeriod = !!(aggregated.from || aggregated.to);
+
+  const from = hasApprovedPeriod && aggregated.from ? formatDate(aggregated.from) : '';
+  const to = hasApprovedPeriod && aggregated.to ? formatDate(aggregated.to) : '';
+  const leaveFromTo =
+    aggregated.periods && aggregated.periods.length > 1
+      ? aggregated.periodDisplay
+      : [from, to].filter(Boolean).join(' - ');
+  const approvedDays = formatFormNGJLeaveNumber(aggregated.daysCount);
+
+  return {
+    leaveDueOn: '',
+    noOfDays: approvedDays || booked || '',
+    leaveFromTo: leaveFromTo || '',
+    hasLeaveMetrics: booked !== '' || approvedDays !== '',
+    hasApprovedPeriod,
+  };
+}
+
+export function applyFormNGJGujaratAccumulationLeaveToRow(
+  row,
+  approvedRecord,
+  leaveRecord,
+  tableHeaders,
+  options = {}
+) {
+  if (!row) return 0;
+  const values = buildFormNGJAccumulationLeaveValues(approvedRecord, leaveRecord, options);
+  if (!values.hasLeaveMetrics && !values.hasApprovedPeriod) return 0;
+
+  const overwrite = options.overwrite !== false;
+  const hdrs = resolveFormNGJGujaratTableHeaders(tableHeaders);
+  let applied = 0;
+  hdrs.forEach((header) => {
+    if (isFormNGJLeaveDueOnHeader(header)) {
+      row[header] = '';
+    } else if (isFormNGJNoOfDaysHeader(header) && values.noOfDays) {
+      if (setFormNGJCasualCell(row, header, values.noOfDays, overwrite)) applied += 1;
+    } else if (isFormNGJLeaveAllowedFromToHeader(header) && values.leaveFromTo) {
+      if (setFormNGJCasualCell(row, header, values.leaveFromTo, overwrite)) applied += 1;
+    }
+  });
+  return applied;
+}
+
+/** Autofill Accumulation of leave + Leave allowed from Earned Leave LeaveData / approvals. */
+export function applyFormNGJGujaratAccumulationLeaveAutofill(
+  mappedData,
+  employeesForMapping,
+  tableHeaders,
+  approvedLeaveRecords,
+  leaveRecords = [],
+  options = {}
+) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+
+  const priorHeaders = Array.isArray(tableHeaders) ? tableHeaders : [];
+  const canonicalHeaders = resolveFormNGJGujaratTableHeaders(tableHeaders);
+  const monthFrom = options.monthFrom || '';
+  const monthTo = options.monthTo || '';
+  const leaveTypeLabels = options.leaveTypeLabels || {};
+  const earnedRecords = filterApprovedLeaveRecordsForFormNGJEarned(
+    approvedLeaveRecords,
+    monthFrom,
+    monthTo
+  );
+  const leaveLookup = buildLeaveRecordLookupMap(leaveRecords);
+  const workerHeader = canonicalHeaders.find(isFormNGJWorkerNameHeader) || '';
+  const usedRecordKeys = new Set();
+  let hits = 0;
+
+  mappedData.forEach((row, index) => {
+    const normalizedRow = remapFormNGJGujaratRowsToHeaders(
+      [row],
+      priorHeaders,
+      canonicalHeaders
+    )[0];
+    Object.assign(row, normalizedRow);
+
+    const empItem = employeesForMapping[index];
+    const emp = empItem && (empItem.Employee || empItem.employee || empItem);
+    const empName = readEmployeeFullName(emp);
+    const empId = readEmployeeLookupId(emp);
+    if (empName) row.__employeeLookupName = empName;
+    if (empId) row.__employeeLookupId = empId;
+
+    let leaveRecord = null;
+    const idCandidates = collectEmployeeLookupIdCandidates(emp, options);
+    for (let i = 0; i < idCandidates.length; i += 1) {
+      const id = idCandidates[i];
+      if (leaveLookup.byId.has(id)) {
+        leaveRecord = leaveLookup.byId.get(id);
+        break;
+      }
+    }
+    if (!leaveRecord) {
+      leaveRecord =
+        findLeaveRecordForFormRow(leaveLookup, row, '', workerHeader) ||
+        (typeof options.findLeaveRecord === 'function'
+          ? options.findLeaveRecord(row, emp, index)
+          : null);
+    }
+
+    const bookedLimit = leaveRecord
+      ? String(getFormXEarnedLeaveApiMetrics(leaveRecord, leaveTypeLabels).booked ?? '').trim()
+      : '';
+
+    const approvedRecordsForRow = findApprovedEarnedLeaveRecordsForFormNRow(
+      row,
+      canonicalHeaders,
+      earnedRecords.length > 0 ? earnedRecords : approvedLeaveRecords,
+      emp,
+      {
+        usedRecordKeys,
+        monthFrom,
+        monthTo,
+        bookedLimit,
+        collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
+      }
+    );
+    if (approvedRecordsForRow.length > 0) {
+      approvedRecordsForRow.forEach((approvedRecord) => {
+        const recordKey = getApprovedLeaveRecordUniqueKey(approvedRecord);
+        if (recordKey) usedRecordKeys.add(recordKey);
+      });
+    }
+
+    const applied = applyFormNGJGujaratAccumulationLeaveToRow(
+      row,
+      approvedRecordsForRow.length > 0 ? approvedRecordsForRow : null,
+      leaveRecord,
+      canonicalHeaders,
+      {
+        overwrite: options.overwrite !== false,
+        leaveTypeLabels,
+        monthFrom,
+        monthTo,
+        formatStatutoryDateDisplay: options.formatStatutoryDateDisplay,
+      }
     );
     if (applied > 0) hits += 1;
   });
@@ -1911,44 +2204,188 @@ function detectFormNGJGujaratSheetLayout(worksheet) {
     casual,
     getMergedAwareCellText,
     getMergeTopLeft,
+    getMergeSpanEnd,
   };
 }
 
-function writeFormNGJValueBesideOrBelowLabel(worksheet, labelRow, labelCol, value, getMergedAwareCellText) {
+const FORM_NGJ_IDENTITY_LABEL_RE =
+  /name\s+of|description\s+of|date\s+of|receipt\s+of|department|employer|worker|establishment|if\s+applicable|signature\s+or\s+thumb/i;
+
+function isFormNGJEmptyValueText(text) {
+  const t = String(text || '').trim();
+  return !t || /^enter\b/i.test(t) || t === ':' || /^[_\s.\-:…]+$/u.test(t);
+}
+
+function isFormNGJIdentityLabelText(text) {
+  const t = String(text || '').trim();
+  if (!t || isFormNGJEmptyValueText(t)) return false;
+  return FORM_NGJ_IDENTITY_LABEL_RE.test(t.split(':')[0].trim());
+}
+
+function countFormNGJIdentityLabelsInText(text) {
+  const t = String(text || '');
+  if (!t.trim()) return 0;
+  let n = 0;
+  if (/name\s+of\s+the\s+establishment/i.test(t)) n += 1;
+  if (/name\s+of\s+the\s+worker/i.test(t)) n += 1;
+  if (/description\s+of\s+the\s+department/i.test(t)) n += 1;
+  if (/name\s+of\s+the\s+employer/i.test(t)) n += 1;
+  if (/date\s+of\s+entry\s+into\s+service/i.test(t)) n += 1;
+  if (/receipt\s+of\s+le[av]e?\s*book|receipt\s+of\s+level\s+book/i.test(t)) n += 1;
+  return n;
+}
+
+function isFormNGJIdentityAnchorLine(line) {
+  const labelPart = String(line || '')
+    .split(':')[0]
+    .replace(/:+\s*$/, '')
+    .trim();
+  if (!labelPart) return false;
+  return (
+    /name\s+of\s+the\s+establishment/i.test(labelPart) ||
+    /name\s+of\s+the\s+worker/i.test(labelPart) ||
+    /description\s+of\s+the\s+department/i.test(labelPart) ||
+    /^\(?if\s+applicable\)?$/i.test(labelPart) ||
+    /name\s+of\s+the\s+employer/i.test(labelPart) ||
+    /date\s+of\s+entry\s+into\s+service/i.test(labelPart) ||
+    /receipt\s+of\s+le[av]e?\s*book|receipt\s+of\s+level\s+book/i.test(labelPart) ||
+    /signature\s+or\s+thumb/i.test(labelPart)
+  );
+}
+
+function formNGJNextAnchorIndex(lines, startIdx) {
+  let i = startIdx + 1;
+  while (i < lines.length && !isFormNGJIdentityAnchorLine(lines[i])) i += 1;
+  return i;
+}
+
+/** Put value after one label line without deleting sibling labels in the same merged cell. */
+function injectFormNGJLabelValue(raw, labelRe, value) {
+  const val = String(value ?? '').trim();
+  const text = String(raw ?? '');
+  if (!val) return text;
+
+  const lines = text.split(/\r?\n/);
+  let idx = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!isFormNGJIdentityAnchorLine(lines[i]) && i !== 0) continue;
+    const labelPart = String(lines[i] || '').split(':')[0];
+    if (labelRe.test(labelPart) || labelRe.test(lines[i])) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) {
+    if (labelRe.test(text)) {
+      const colonIdx = text.indexOf(':');
+      const labelPart = (colonIdx >= 0 ? text.slice(0, colonIdx) : text).replace(/:+\s*$/, '').trim();
+      return `${labelPart}: ${val}`;
+    }
+    return text;
+  }
+
+  const nextLabelPart = String(lines[idx + 1] || '')
+    .split(':')[0]
+    .trim();
+  const nextIsIfApplicable = /^\(?if\s+applicable\)?$/i.test(nextLabelPart);
+  const isDepartment =
+    /description\s+of\s+the\s+department/i.test(lines[idx]) ||
+    /description\s+of\s+the\s+department/i.test(String(labelRe?.source || ''));
+
+  if (isDepartment) {
+    const replaceEnd = nextIsIfApplicable
+      ? formNGJNextAnchorIndex(lines, idx + 1)
+      : formNGJNextAnchorIndex(lines, idx);
+    const block = nextIsIfApplicable
+      ? ['Description of the Department', `(if applicable): ${val}`]
+      : [`Description of the Department (if applicable): ${val}`];
+    return [...lines.slice(0, idx), ...block, ...lines.slice(replaceEnd)].join('\n');
+  }
+
+  const colonIdx = String(lines[idx] || '').indexOf(':');
+  const labelPart = (colonIdx >= 0 ? lines[idx].slice(0, colonIdx) : lines[idx])
+    .replace(/:+\s*$/, '')
+    .trimEnd();
+  const valueLines = val.split(/\r?\n/);
+  const block = [`${labelPart}: ${valueLines[0] || ''}`.trimEnd(), ...valueLines.slice(1)];
+  const replaceEnd = formNGJNextAnchorIndex(lines, idx);
+  return [...lines.slice(0, idx), ...block, ...lines.slice(replaceEnd)].join('\n');
+}
+
+function writeFormNGJValueBesideOrBelowLabel(
+  worksheet,
+  labelRow,
+  labelCol,
+  value,
+  getMergedAwareCellText,
+  getMergeSpanEnd,
+  labelRe
+) {
   const val = String(value ?? '').trim();
   if (!val || labelRow < 1 || labelCol < 1) return;
 
-  const rightText = getMergedAwareCellText(labelRow, labelCol + 1);
-  const rightLooksLikeLabel =
-    /name\s+of|description\s+of|date\s+of|receipt\s+of|department|employer|worker|establishment/i.test(
-      rightText
-    );
-  if (!rightText || /^enter\b/i.test(rightText) || rightText === ':') {
-    const cell = worksheet.getCell(labelRow, labelCol + 1);
-    cell.value = val;
-    cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'middle' };
+  const styleValueCell = (cell) => {
+    cell.alignment = {
+      ...(cell.alignment || {}),
+      wrapText: true,
+      vertical: 'top',
+      horizontal: 'left',
+    };
+  };
+
+  const labelCell = worksheet.getCell(labelRow, labelCol);
+  const current = excelCellValueToString(labelCell.value);
+  const multiLabel = countFormNGJIdentityLabelsInText(current) > 1;
+
+  // Official Leave Book: one merged box holds several labels. Inject each value
+  // onto its own line so establishment does not wipe worker / department.
+  if (multiLabel && labelRe && labelRe.test(current)) {
+    labelCell.value = injectFormNGJLabelValue(current, labelRe, val);
+    styleValueCell(labelCell);
     return;
   }
-  if (rightLooksLikeLabel) {
-    const belowText = getMergedAwareCellText(labelRow + 1, labelCol);
-    if (!belowText || /^enter\b/i.test(belowText)) {
-      const cell = worksheet.getCell(labelRow + 1, labelCol);
-      cell.value = val;
-      cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'middle' };
+
+  const span =
+    typeof getMergeSpanEnd === 'function'
+      ? getMergeSpanEnd(labelRow, labelCol)
+      : { r: labelRow, c: labelCol };
+  const spanEndCol = Math.max(labelCol, Number(span?.c) || labelCol);
+  const mergeWidth = spanEndCol - labelCol + 1;
+
+  if (mergeWidth < 2 && !multiLabel) {
+    for (let c = labelCol + 1; c <= Math.min(labelCol + 8, 20); c += 1) {
+      const t = getMergedAwareCellText(labelRow, c);
+      if (isFormNGJIdentityLabelText(t)) break;
+      if (isFormNGJEmptyValueText(t)) {
+        const cell = worksheet.getCell(labelRow, c);
+        cell.value = val;
+        styleValueCell(cell);
+        return;
+      }
     }
+  }
+
+  const raw = current.trim();
+  if (!raw) {
+    labelCell.value = val;
+    styleValueCell(labelCell);
     return;
   }
-  const belowText = getMergedAwareCellText(labelRow + 1, labelCol);
-  if (!belowText || /^enter\b/i.test(belowText)) {
-    const cell = worksheet.getCell(labelRow + 1, labelCol);
-    cell.value = val;
-    cell.alignment = { ...(cell.alignment || {}), wrapText: true, vertical: 'middle' };
+  if (labelRe && labelRe.test(raw)) {
+    labelCell.value = injectFormNGJLabelValue(raw, labelRe, val);
+    styleValueCell(labelCell);
+    return;
   }
+  const colonIdx = raw.indexOf(':');
+  const labelPart = (colonIdx >= 0 ? raw.slice(0, colonIdx) : raw).replace(/:+\s*$/, '').trim();
+  labelCell.value = `${labelPart}: ${val}`;
+  styleValueCell(labelCell);
 }
 
 function writeFormNGJWorkerHeaderFields(worksheet, layout, values) {
   const getText = layout.getMergedAwareCellText;
   const getMergeTopLeft = layout.getMergeTopLeft;
+  const getMergeSpanEnd = layout.getMergeSpanEnd;
   const maxRow = Math.max(1, layout.leaveHeaderRow - 1);
   const specs = [
     { re: /name\s+of\s+the\s+establishment/i, value: values.establishment },
@@ -1966,16 +2403,117 @@ function writeFormNGJWorkerHeaderFields(worksheet, layout, values) {
       if (tl.r !== r || tl.c !== c) continue;
       const raw = getText(r, c);
       if (!raw) continue;
-      const labelOnly = String(raw).split(':')[0].trim();
       for (const spec of specs) {
         if (written.has(spec.re.source)) continue;
-        if (!spec.re.test(labelOnly) && !spec.re.test(raw)) continue;
+        if (!spec.re.test(raw)) continue;
         if (!String(spec.value || '').trim()) {
           written.add(spec.re.source);
           continue;
         }
-        writeFormNGJValueBesideOrBelowLabel(worksheet, r, c, spec.value, getText);
+        writeFormNGJValueBesideOrBelowLabel(
+          worksheet,
+          r,
+          c,
+          spec.value,
+          getText,
+          getMergeSpanEnd,
+          spec.re
+        );
         written.add(spec.re.source);
+      }
+    }
+  }
+
+  ensureFormNGJMergedIdentityBoxValues(worksheet, layout, values);
+}
+
+function styleFormNGJIdentityCell(cell) {
+  cell.alignment = {
+    ...(cell.alignment || {}),
+    wrapText: true,
+    vertical: 'top',
+    horizontal: 'left',
+  };
+}
+
+/** Tall merged Leave Book boxes keep all identity lines, not only establishment / employer. */
+function ensureFormNGJMergedIdentityBoxValues(worksheet, layout, values) {
+  const getText = layout.getMergedAwareCellText;
+  const getMergeTopLeft = layout.getMergeTopLeft;
+  const getMergeSpanEnd = layout.getMergeSpanEnd;
+  if (typeof getText !== 'function' || typeof getMergeTopLeft !== 'function') return;
+  const maxRow = Math.max(1, layout.leaveHeaderRow - 1);
+
+  for (let r = 1; r <= maxRow; r += 1) {
+    for (let c = 1; c <= 20; c += 1) {
+      const tl = getMergeTopLeft(r, c);
+      if (tl.r !== r || tl.c !== c) continue;
+      const span =
+        typeof getMergeSpanEnd === 'function' ? getMergeSpanEnd(r, c) : { r, c };
+      const mergeHeight = Math.max(1, (Number(span?.r) || r) - r + 1);
+      if (mergeHeight < 2 && countFormNGJIdentityLabelsInText(getText(r, c)) < 2) continue;
+
+      const cell = worksheet.getCell(r, c);
+      let next = excelCellValueToString(cell.value);
+      if (!next.trim()) continue;
+
+      if (/name\s+of\s+the\s+establishment/i.test(next)) {
+        if (values.establishment) {
+          next = injectFormNGJLabelValue(
+            next,
+            /name\s+of\s+the\s+establishment/i,
+            values.establishment
+          );
+        }
+        if (values.workerName) {
+          if (/name\s+of\s+the\s+worker/i.test(next)) {
+            next = injectFormNGJLabelValue(next, /name\s+of\s+the\s+worker/i, values.workerName);
+          } else {
+            next = `${next.trimEnd()}\nName of the worker: ${values.workerName}`;
+          }
+        }
+        if (values.department) {
+          if (/description\s+of\s+the\s+department/i.test(next)) {
+            next = injectFormNGJLabelValue(
+              next,
+              /description\s+of\s+the\s+department/i,
+              values.department
+            );
+          } else {
+            next = `${next.trimEnd()}\nDescription of the Department (if applicable): ${values.department}`;
+          }
+        }
+        cell.value = next;
+        styleFormNGJIdentityCell(cell);
+        continue;
+      }
+
+      if (/name\s+of\s+the\s+employer/i.test(next)) {
+        if (values.employer) {
+          next = injectFormNGJLabelValue(next, /name\s+of\s+the\s+employer/i, values.employer);
+        }
+        if (values.dateOfEntry) {
+          if (/date\s+of\s+entry\s+into\s+service/i.test(next)) {
+            next = injectFormNGJLabelValue(
+              next,
+              /date\s+of\s+entry\s+into\s+service/i,
+              values.dateOfEntry
+            );
+          } else {
+            next = `${next.trimEnd()}\nDate of entry into service: ${values.dateOfEntry}`;
+          }
+        }
+        if (values.receipt) {
+          if (/receipt\s+of\s+le[av]e?\s*book|receipt\s+of\s+level\s+book/i.test(next)) {
+            next = injectFormNGJLabelValue(
+              next,
+              /receipt\s+of\s+le[av]e?\s*book|receipt\s+of\s+level\s+book/i,
+              values.receipt
+            );
+          }
+        }
+        cell.value = next;
+        styleFormNGJIdentityCell(cell);
       }
     }
   }
@@ -2005,6 +2543,14 @@ function writeFormNGJSectionRow(worksheet, section, rowValuesByBucket) {
   });
 }
 
+function pickFirstNonEmptyText(...values) {
+  for (let i = 0; i < values.length; i += 1) {
+    const text = String(values[i] ?? '').trim();
+    if (text) return text;
+  }
+  return '';
+}
+
 function collectFormNGJHeaderValuesFromRow(row, headers, headerFormData, formatDate) {
   const hdrs = resolveFormNGJGujaratTableHeaders(headers);
   const workerHeader = hdrs.find(isFormNGJWorkerNameHeader);
@@ -2012,23 +2558,39 @@ function collectFormNGJHeaderValuesFromRow(row, headers, headerFormData, formatD
   const employerHeader = hdrs.find(isFormNGJEmployerHeader);
   const entryHeader = hdrs.find(isFormNGJDateOfEntryHeader);
   const receiptHeader = hdrs.find(isFormNGJReceiptHeader);
-  const establishment =
-    String(headerFormData?.form_n_gj_establishment ?? '').trim() ||
-    String(headerFormData?.['Name of the establishment'] ?? '').trim();
+  const src = row && typeof row === 'object' ? row : {};
+  const establishment = pickFirstNonEmptyText(
+    headerFormData?.form_n_gj_establishment,
+    headerFormData?.['Name of the establishment'],
+    headerFormData?.statutory_establishment_name,
+    headerFormData?.statutory_establishment_name_address
+  );
   const dateOfEntryRaw = getFormNGJRowValueForHeader(
-    row,
+    src,
     entryHeader || 'Date of entry into service'
   );
   return {
     establishment,
-    workerName: getFormNGJRowValueForHeader(row, workerHeader || 'Name of the worker'),
-    department: getFormNGJRowValueForHeader(
-      row,
-      deptHeader || 'Description of the Department (if applicable)'
+    workerName: pickFirstNonEmptyText(
+      getFormNGJRowValueForHeader(src, workerHeader || 'Name of the worker'),
+      src.__employeeLookupName,
+      src['Employee Name'],
+      src.Employee_Name,
+      src.EmployeeName
     ),
-    employer: getFormNGJRowValueForHeader(row, employerHeader || 'Name of the employer'),
+    department: pickFirstNonEmptyText(
+      getFormNGJRowValueForHeader(
+        src,
+        deptHeader || 'Description of the Department (if applicable)'
+      ),
+      src.Department,
+      src.department,
+      src.Designation,
+      src.designation
+    ),
+    employer: getFormNGJRowValueForHeader(src, employerHeader || 'Name of the employer'),
     dateOfEntry: dateOfEntryRaw ? formatDate(dateOfEntryRaw) : '',
-    receipt: getFormNGJRowValueForHeader(row, receiptHeader || 'Receipt of level book'),
+    receipt: getFormNGJRowValueForHeader(src, receiptHeader || 'Receipt of level book'),
   };
 }
 

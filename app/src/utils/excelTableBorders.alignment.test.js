@@ -1,5 +1,6 @@
 import {
   applyStatutoryDownloadContentAlignment,
+  worksheetLooksLikeFormXVIIITamilNadu,
   detachOrphanedExcelJSSharedFormulas,
   isStatutoryFormTitleBandText,
   isStatutoryNumericCellValue,
@@ -120,6 +121,52 @@ describe('statutory download content alignment helpers', () => {
     expect(cells.get('A10').alignment.horizontal).toBe('left');
     expect(cells.get('H4').alignment.horizontal).toBe('right');
     expect(cells.get('H10').alignment.horizontal).toBe('right');
+  });
+
+  test('Form XXI AP boxed cells stay left, including S.No and NIL', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('XXI-Fines');
+    ws.getCell(2, 1).value = 'FORM - XXI REGISTER OF FINES';
+    ws.getCell(3, 1).value =
+      '[Vide Rule 78 (1) (a) (ii) of Contract Labour (Reg. & Abolition) Central & A.P.Rules]';
+    ws.getCell(13, 1).value = 'S.No';
+    ws.getCell(13, 1).alignment = { horizontal: 'center' };
+    ws.getCell(13, 2).value = 'Name of Workmen';
+    ws.getCell(14, 1).value = 1;
+    ws.getCell(14, 1).alignment = { horizontal: 'center' };
+    ws.getCell(14, 2).value = 'Ravi';
+    ws.getCell(14, 5).value = 'NIL';
+    ws.getCell(14, 5).alignment = { horizontal: 'center' };
+
+    applyStatutoryDownloadContentAlignment(ws);
+
+    expect(ws.getCell(2, 1).alignment.horizontal).toBe('center');
+    expect(ws.getCell(3, 1).alignment.horizontal).toBe('center');
+    expect(ws.getCell(13, 1).alignment.horizontal).toBe('left');
+    expect(ws.getCell(14, 1).alignment.horizontal).toBe('left');
+    expect(ws.getCell(14, 2).alignment.horizontal).toBe('left');
+    expect(ws.getCell(14, 5).alignment.horizontal).toBe('left');
+  });
+
+  test('Form XVIII TN table body text is left-aligned', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORMXVIII');
+    ws.getCell(1, 1).value = 'FORM XVIII';
+    ws.getCell(2, 1).value = 'Form of Register of Wages-cum-Muster Roll';
+    ws.getCell(11, 4).value = 'Daily attendance /units worked';
+    ws.getCell(11, 5).value = 'Total attendance/ units of work done';
+    for (let c = 1; c <= 16; c += 1) {
+      ws.getCell(12, c).value = c;
+    }
+    ws.getCell(13, 2).value = 'Selva P';
+    ws.getCell(13, 2).alignment = { horizontal: 'center' };
+    ws.getCell(13, 4).value = 26;
+    ws.getCell(13, 4).alignment = { horizontal: 'center' };
+    expect(worksheetLooksLikeFormXVIIITamilNadu(ws)).toBe(true);
+    applyStatutoryDownloadContentAlignment(ws);
+    expect(ws.getCell(1, 1).alignment.horizontal).toBe('center');
+    expect(ws.getCell(13, 2).alignment.horizontal).toBe('left');
+    expect(ws.getCell(13, 4).alignment.horizontal).toBe('left');
   });
 });
 

@@ -596,8 +596,11 @@ export function resolveFormXIXTamilNaduFatherName(emp = {}) {
     'Father Name',
     'FatherName',
     "Father's Name",
-    'SpouseName',
+    'Father_SpouseName',
+    'Father/Husband Name',
+    'Spouse_Name',
     'Spouse Name',
+    'SpouseName',
     'HusbandName',
     'Husband Name',
   ]);
@@ -1036,7 +1039,7 @@ export function writeFormXIXTamilNaduNetAmountRow(worksheet, netAmount, excelCel
     worksheet.getCell(17, 4).value = amountText;
   }
   worksheet.getCell(17, 4).alignment = {
-    horizontal: 'right',
+    horizontal: 'left',
     vertical: 'middle',
   };
 }

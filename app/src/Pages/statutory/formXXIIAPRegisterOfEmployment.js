@@ -1,12 +1,26 @@
 import ExcelJS from 'exceljs';
 import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
-import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
+import {
+  formatStatutoryHeaderLabelValueExport,
+  writeStatutoryHeaderFieldsToExcelJsWorksheet
+} from '../../utils/statutorySiteCompanyHeaders';
 import { sanitizeFormXVIAPMonthValue, sanitizeFormXVIAPNatureValue } from '../../utils/statutoryDraftPdf.formXVI.AP';
+import {
+  FORM_XVI_AP_CONTRACTOR_HEADER_KEY,
+  FORM_XVI_AP_DEFAULT_CONTRACTOR_NAME,
+  FORM_XVI_AP_ESTABLISHMENT_CONTRACT_KEY,
+  FORM_XVI_AP_ESTABLISHMENT_CONTRACT_LABEL
+} from './formXVIAPMuster';
 
 /** Excel columns AK / AL (1-based) — leftover overflow boxes on Form XVI AP Muster Roll. */
 export const FORM_XVI_AP_COL_AK = 37;
 export const FORM_XVI_AP_COL_AL = 38;
 export const FORM_XVI_MONTH_HEADER_KEY = 'form_xvi_month';
+export {
+  FORM_XVI_AP_CONTRACTOR_HEADER_KEY,
+  FORM_XVI_AP_ESTABLISHMENT_CONTRACT_KEY,
+  FORM_XVI_AP_ESTABLISHMENT_CONTRACT_LABEL
+};
 
 /** AP Form XXII — Register of Employment (Shops & Establishment; P / A / WO day grid). */
 
@@ -224,6 +238,8 @@ export function readFormXXIIAPCellValue(row, header) {
       if (val == null || String(val).trim() === '') continue;
       if (resolveFormXXIIAPDayNumberFromHeader(key) === day) return val;
     }
+    // Never fuzzy-match "1" to "11"/"15" — empty early days must stay empty.
+    return '';
   }
 
   const target = formXXIIAPHeaderNorm(header);
@@ -231,7 +247,7 @@ export function readFormXXIIAPCellValue(row, header) {
     for (const [key, val] of Object.entries(row)) {
       if (val == null || String(val).trim() === '') continue;
       const nk = formXXIIAPHeaderNorm(key);
-      if (nk === target || (nk && (nk.includes(target) || target.includes(nk)))) return val;
+      if (nk === target) return val;
     }
   }
   return '';
@@ -271,8 +287,21 @@ export function detectFormXXIIAPDayColumnMapWithMarker(getCell, headerRow, maxSc
         hits += 1;
       }
     }
-    if (hits > bestHits) {
-      bestHits = hits;
+    if (hits < 2) continue;
+    const day1Col = rowMap.get(1) || 0;
+    // Official CLRA column-index rows start at col A (1=S.No). Dates 1–31 start after identity cols.
+    let score = hits * 10;
+    if (day1Col >= 5) score += 40;
+    if (r >= anchor) score += 15;
+    let consecutive = 0;
+    for (let d = 1; d < 31; d += 1) {
+      const c = rowMap.get(d);
+      const next = rowMap.get(d + 1);
+      if (c && next && next === c + 1) consecutive += 1;
+    }
+    score += consecutive;
+    if (score > bestHits) {
+      bestHits = score;
       bestMap = rowMap;
       markerRow = r;
     }
@@ -464,6 +493,66 @@ function resolveFormXVIAPNatureLocationText(headerFormData) {
   return '';
 }
 
+function isFormXVIAPContractorPlaceholderValue(value) {
+  const s = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return true;
+  const squeezed = s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return (
+    /^name\s+and\s+address\s+of\s+(?:the\s+)?contractor\.?\s*$/i.test(s) ||
+    squeezed === 'nameandaddressofcontractor' ||
+    squeezed === 'nameandaddressofthecontractor'
+  );
+}
+
+export function resolveFormXVIAPContractorText(headerFormData) {
+  if (!headerFormData || typeof headerFormData !== 'object') return '';
+  const keys = [
+    FORM_XVI_AP_CONTRACTOR_HEADER_KEY,
+    'form_xv_contractor',
+    'form_xvii_contractor',
+    'form_xviii_contractor',
+    'form_xxiii_contractor',
+    'form25_contractor',
+    'statutory_contractor'
+  ];
+  for (let i = 0; i < keys.length; i += 1) {
+    const v = String(headerFormData[keys[i]] ?? '').trim();
+    if (!v || isFormXVIAPContractorPlaceholderValue(v)) continue;
+    return v;
+  }
+  for (const [key, raw] of Object.entries(headerFormData)) {
+    if (!/contractor/i.test(String(key || '')) || /principal/i.test(String(key || ''))) continue;
+    const v = String(raw ?? '').trim();
+    if (!v || isFormXVIAPContractorPlaceholderValue(v)) continue;
+    return v;
+  }
+  return FORM_XVI_AP_DEFAULT_CONTRACTOR_NAME;
+}
+
+export function resolveFormXVIAPEstablishmentContractText(headerFormData) {
+  if (!headerFormData || typeof headerFormData !== 'object') return FORM_XVI_AP_DEFAULT_CONTRACTOR_NAME;
+  const keys = [
+    FORM_XVI_AP_ESTABLISHMENT_CONTRACT_KEY,
+    'form_xvii_establishment_contract_carried',
+    'form_xxiii_establishment_contract_carried',
+    'form_xv_establishment_contract_carried',
+    'form_xiii_establishment_contract_carried',
+    'statutory_establishment_name_address',
+    'statutory_principal_employer',
+    'form_xvi_principal_employer'
+  ];
+  for (let i = 0; i < keys.length; i += 1) {
+    const v = String(headerFormData[keys[i]] ?? '').trim();
+    if (!v || isFormXVIAPContractorPlaceholderValue(v)) continue;
+    if (/^address\s+of\s+the\s+establishment\.?\s*$/i.test(v)) continue;
+    if (/establishment[\s\S]*contract\s+is\s+carried\s+on\.?\s*$/i.test(v)) continue;
+    return v;
+  }
+  return FORM_XVI_AP_DEFAULT_CONTRACTOR_NAME;
+}
+
 function isFormXVIAPMonthLabelCell(raw) {
   const s = String(raw || '').replace(/\s+/g, ' ').trim();
   if (!s) return false;
@@ -476,6 +565,142 @@ function isFormXVIAPNatureLabelCell(raw) {
   if (!s) return false;
   // Must start with the nature label — do not match concatenated header dumps.
   return /^nature\s+and\s+location\s+of\s+work/i.test(s);
+}
+
+function isFormXVIAPContractorLabelCell(raw) {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!s) return false;
+  const labelOnly = s.split(':')[0].trim();
+  const squeezed = labelOnly.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (/principal/i.test(s) || squeezed.includes('principal')) return false;
+  return (
+    /^(\d+\.?\s*)?name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i.test(s) ||
+    squeezed === 'nameandaddressofcontractor' ||
+    squeezed === 'nameandaddressofthecontractor'
+  );
+}
+
+function isFormXVIAPEstablishmentContractLabelCell(raw) {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!s) return false;
+  const squeezed = s.split(':')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (/principal|contractor/i.test(s) && !/establ/i.test(s)) return false;
+  return (
+    /^address\s+of\s+the\s+establishment/i.test(s) ||
+    /establ(?:ishment|ishemnt).*under\s+which\s+contract/i.test(s) ||
+    squeezed === 'addressoftheestablishment' ||
+    squeezed.includes('establishmentin') ||
+    squeezed.includes('underwhichcontract')
+  );
+}
+
+function isFormXVIAPPrincipalEmployerLabelCell(raw) {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!s) return false;
+  const squeezed = s.split(':')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+  return (
+    /name\s+and\s+address\s+of\s+(?:the\s+)?principal\s+employer/i.test(s) ||
+    squeezed.includes('principalemployer')
+  );
+}
+
+/** Write "Name and address of Contractor : {site contractor}" on the Form XVI meta band. */
+export function writeFormXVIAPContractorHeader(
+  worksheet,
+  { headerFormData, headerScanEnd, contractorText: contractorTextOverride } = {}
+) {
+  if (!worksheet) return;
+  const contractorText = String(
+    contractorTextOverride ||
+      resolveFormXVIAPContractorText(headerFormData) ||
+      FORM_XVI_AP_DEFAULT_CONTRACTOR_NAME
+  ).trim();
+  if (!contractorText || isFormXVIAPContractorPlaceholderValue(contractorText)) return;
+
+  const scanRows = Math.max(16, Number(headerScanEnd) || 16);
+  let contractorRow = 0;
+  let contractorCol = 0;
+  let peCol = 0;
+
+  for (let r = 1; r <= scanRows; r += 1) {
+    for (let c = 1; c <= 60; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      if (!contractorCol && isFormXVIAPContractorLabelCell(raw)) {
+        contractorRow = r;
+        contractorCol = c;
+      }
+      if (contractorRow === r && !peCol && isFormXVIAPPrincipalEmployerLabelCell(raw)) {
+        peCol = c;
+      }
+    }
+  }
+
+  if (!contractorRow || !contractorCol) {
+    // Template sometimes omits the label — place on row 5 left band (standard AP XVI layout).
+    contractorRow = 5;
+    contractorCol = 1;
+  }
+
+  const mergeEnd = peCol > contractorCol + 1 ? peCol - 1 : Math.max(contractorCol + 10, 12);
+  const label = 'Name and address of Contractor';
+  const text = formatStatutoryHeaderLabelValueExport(label, label, contractorText);
+  writeFormXVIAPSingleLineHeader(worksheet, contractorRow, contractorCol, mergeEnd, text);
+}
+
+/** Rename Address of the Establishment → establishment in/under which contract is carried on. */
+export function writeFormXVIAPEstablishmentContractHeader(
+  worksheet,
+  { headerFormData, headerScanEnd, establishmentText: establishmentTextOverride } = {}
+) {
+  if (!worksheet) return;
+  const establishmentText = String(
+    establishmentTextOverride ||
+      resolveFormXVIAPEstablishmentContractText(headerFormData) ||
+      FORM_XVI_AP_DEFAULT_CONTRACTOR_NAME
+  ).trim();
+  if (!establishmentText) return;
+
+  const scanRows = Math.max(16, Number(headerScanEnd) || 16);
+  let establishmentRow = 0;
+  let establishmentCol = 0;
+  let nextLabelCol = 0;
+
+  for (let r = 1; r <= scanRows; r += 1) {
+    for (let c = 1; c <= 60; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      if (!establishmentCol && isFormXVIAPEstablishmentContractLabelCell(raw)) {
+        establishmentRow = r;
+        establishmentCol = c;
+      }
+      if (
+        establishmentRow === r &&
+        establishmentCol &&
+        !nextLabelCol &&
+        c > establishmentCol &&
+        (isFormXVIAPContractorLabelCell(raw) ||
+          isFormXVIAPPrincipalEmployerLabelCell(raw) ||
+          isFormXVIAPNatureLabelCell(raw) ||
+          isFormXVIAPMonthLabelCell(raw))
+      ) {
+        nextLabelCol = c;
+      }
+    }
+  }
+
+  if (!establishmentRow || !establishmentCol) {
+    establishmentRow = 2;
+    establishmentCol = 1;
+  }
+
+  const mergeEnd = nextLabelCol > establishmentCol + 1 ? nextLabelCol - 1 : Math.max(establishmentCol + 12, 14);
+  const text = formatStatutoryHeaderLabelValueExport(
+    FORM_XVI_AP_ESTABLISHMENT_CONTRACT_LABEL,
+    FORM_XVI_AP_ESTABLISHMENT_CONTRACT_LABEL,
+    establishmentText
+  );
+  writeFormXVIAPSingleLineHeader(worksheet, establishmentRow, establishmentCol, mergeEnd, text);
 }
 
 /** Merge a Form XVI header label across columns and keep the full text on one line. */
@@ -756,6 +981,18 @@ export function applyFormXVIAPMusterLayoutFixes(
     headerScanEnd
   });
 
+  writeFormXVIAPEstablishmentContractHeader(worksheet, {
+    headerFormData,
+    headerScanEnd,
+    establishmentText: resolveFormXVIAPEstablishmentContractText(headerFormData)
+  });
+
+  writeFormXVIAPContractorHeader(worksheet, {
+    headerFormData,
+    headerScanEnd,
+    contractorText: resolveFormXVIAPContractorText(headerFormData)
+  });
+
   const extraCols = new Set();
   extraCols.add(FORM_XVI_AP_COL_AK);
   extraCols.add(FORM_XVI_AP_COL_AL);
@@ -1005,7 +1242,8 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
   const sourcePrimary = normalizeFormXXIIAPRowsForExport(rawPrimary, headersForExport, {
     year: exportYear,
     monthIndex: exportMonthIndex,
-    fillFallback: !rawPrimary.some((row) => rowHasAnyFormXXIIAPAttendance(row)),
+    fillFallback:
+      !formXVIAPMusterFixes && !rawPrimary.some((row) => rowHasAnyFormXXIIAPAttendance(row)),
     onlyFillEmpty: true
   });
   const sourceHeaders = resolveFormXXIIExportHeaders(headersForExport, sourcePrimary);
@@ -1065,6 +1303,17 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
       return '';
     }
     if (typeof rowObj !== 'object') return '';
+    if (formXVIAPMusterFixes) {
+      const direct = pickExportCell(rowObj[String(dayNum)]);
+      if (direct !== '') return direct;
+      for (const [key, val] of Object.entries(rowObj)) {
+        if (String(key).startsWith('__')) continue;
+        if (resolveFormXXIIAPDayNumberFromHeader(key) !== dayNum) continue;
+        const picked = pickExportCell(val);
+        if (picked !== '') return picked;
+      }
+      return '';
+    }
     const directByDayHeader = pickExportCell(readFormXXIIAPCellValue(rowObj, String(dayNum)));
     if (directByDayHeader !== '') return directByDayHeader;
     for (const [key, val] of Object.entries(rowObj)) {
@@ -1142,6 +1391,10 @@ export async function buildFormXXIIAPWorkbookWithTemplateStyles({
       attendanceMonthIndex
     );
     if (monthText) headerValues[FORM_XVI_MONTH_HEADER_KEY] = monthText;
+    const contractorText = resolveFormXVIAPContractorText(headerValues);
+    if (contractorText) headerValues[FORM_XVI_AP_CONTRACTOR_HEADER_KEY] = contractorText;
+    const establishmentText = resolveFormXVIAPEstablishmentContractText(headerValues);
+    if (establishmentText) headerValues[FORM_XVI_AP_ESTABLISHMENT_CONTRACT_KEY] = establishmentText;
   }
   writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
     headerFormData: headerValues,

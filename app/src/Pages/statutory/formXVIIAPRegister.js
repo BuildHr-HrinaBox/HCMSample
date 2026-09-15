@@ -18,6 +18,8 @@ import {
  * PF / PT deduction columns ← Sample Payroll PF and Professional Tax.
  */
 
+export const FORM_XVII_AP_DEFAULT_CONTRACTOR_NAME = 'VAYONA ENERGY PRIVATE LIMITED';
+
 function formXVIIAPHeaderNorm(header) {
   return String(header || '')
     .replace(/\r?\n/g, ' ')
@@ -540,64 +542,198 @@ function valuesLookLikeFormXVIIAPDuplicate(a, b) {
   return false;
 }
 
-function writeFormXVIIAPValueCell(cell, text) {
-  if (!cell) return;
-  const val = String(text || '').trim();
-  cell.value = val || null;
+/** "AP-NimbagalluAP-Nimbagallu" / "AP-Nimbagallu / AP-Nimbagallu" → one value. */
+export function collapseFormXVIIAPRepeatedText(text) {
+  let v = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!v) return '';
+  const slash = v.split(/\s*[\/|]\s*/).map((p) => p.trim()).filter(Boolean);
+  if (
+    slash.length === 2 &&
+    normalizeFormXVIIAPCompare(slash[0]) === normalizeFormXVIIAPCompare(slash[1])
+  ) {
+    return slash[0];
+  }
+  const tokens = v.split(/\s+/);
+  if (tokens.length >= 2 && tokens.length % 2 === 0) {
+    const mid = tokens.length / 2;
+    const a = tokens.slice(0, mid).join(' ');
+    const b = tokens.slice(mid).join(' ');
+    if (normalizeFormXVIIAPCompare(a) === normalizeFormXVIIAPCompare(b)) return a;
+  }
+  const compact = v.replace(/\s+/g, '');
+  if (compact.length >= 8) {
+    const half = Math.floor(compact.length / 2);
+    if (compact.slice(0, half).toLowerCase() === compact.slice(half, half * 2).toLowerCase()) {
+      return v.slice(0, Math.ceil(v.length / 2)).replace(/[\/|,]+$/, '').trim();
+    }
+  }
+  return v;
+}
+
+function decodeFormXVIIAPA1(a1) {
+  const m = String(a1 || '').match(/^([A-Z]+)(\d+)$/i);
+  if (!m) return null;
+  let col = 0;
+  const letters = m[1].toUpperCase();
+  for (let i = 0; i < letters.length; i += 1) {
+    col = col * 26 + (letters.charCodeAt(i) - 64);
+  }
+  return { row: Number(m[2]), col };
+}
+
+function listFormXVIIAPMergeBoxes(worksheet) {
+  const fromModel = Array.isArray(worksheet?.model?.merges) ? worksheet.model.merges : [];
+  const fromMap = worksheet?._merges && typeof worksheet._merges === 'object'
+    ? Object.keys(worksheet._merges)
+    : [];
+  const raw = fromModel.length > 0 ? fromModel : fromMap;
+  const out = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const parts = String(raw[i] || '').split(':');
+    if (parts.length < 2) continue;
+    const a = decodeFormXVIIAPA1(parts[0]);
+    const b = decodeFormXVIIAPA1(parts[1]);
+    if (!a || !b) continue;
+    out.push({
+      row: Math.min(a.row, b.row),
+      col: Math.min(a.col, b.col),
+      endRow: Math.max(a.row, b.row),
+      endCol: Math.max(a.col, b.col),
+    });
+  }
+  return out;
+}
+
+function findFormXVIIAPMergeCovering(worksheet, row, col) {
+  const boxes = listFormXVIIAPMergeBoxes(worksheet);
+  for (let i = 0; i < boxes.length; i += 1) {
+    const box = boxes[i];
+    if (row >= box.row && row <= box.endRow && col >= box.col && col <= box.endCol) {
+      return box;
+    }
+  }
+  return { row, col, endRow: row, endCol: col };
+}
+
+function findFormXVIIAPWagePeriodCell(worksheet, scanEnd, colLimit) {
+  for (let r = 1; r <= scanEnd; r += 1) {
+    for (let c = 1; c <= Math.min(8, colLimit); c += 1) {
+      const raw = formXVIIAPExcelCellText(worksheet.getCell(r, c)?.value);
+      if (/wage\s*period/i.test(formXVIIAPLabelOnly(raw))) {
+        return { row: r, col: c };
+      }
+    }
+  }
+  return null;
+}
+
+function stripFormXVIIAPEstablishmentLabelPrefix(raw) {
+  return String(raw || '')
+    .replace(/^name\s+and\s+address[^\n:]*:\s*/i, '')
+    .trim();
+}
+
+function unmergeFormXVIIAPRange(worksheet, rowFrom, rowTo, colFrom, colTo) {
+  if (!worksheet) return;
+  const boxes = listFormXVIIAPMergeBoxes(worksheet);
+  const r0 = Math.max(1, Number(rowFrom) || 1);
+  const r1 = Math.max(r0, Number(rowTo) || r0);
+  const c0 = Math.max(1, Number(colFrom) || 1);
+  const c1 = Math.max(c0, Number(colTo) || c0);
+  for (let i = 0; i < boxes.length; i += 1) {
+    const box = boxes[i];
+    if (box.endRow < r0 || box.row > r1 || box.endCol < c0 || box.col > c1) continue;
+    try {
+      worksheet.unMergeCells(box.row, box.col, box.endRow, box.endCol);
+    } catch (_) {
+      try {
+        if (typeof worksheet.unmergeCells === 'function') {
+          worksheet.unmergeCells(box.row, box.col, box.endRow, box.endCol);
+        }
+      } catch (__) {
+        /* already unmerged */
+      }
+    }
+  }
+}
+
+/** Label + value on one horizontal line (no wrap / no tall stacked box). */
+function writeFormXVIIAPSingleLine(worksheet, row, startCol, endCol, text) {
+  if (!worksheet || !text || !row) return;
+  const c0 = Math.max(1, Number(startCol) || 1);
+  const c1 = Math.max(c0, Number(endCol) || c0);
+  unmergeFormXVIIAPRange(worksheet, row, row, c0, c1);
+  for (let c = c0; c <= c1; c += 1) {
+    const cell = worksheet.getCell(row, c);
+    if (c === c0) continue;
+    if (cell?.isMerged && cell.master && (cell.master.row !== row || cell.master.col !== c)) continue;
+    cell.value = null;
+  }
+  if (c1 > c0) {
+    try {
+      worksheet.mergeCells(row, c0, row, c1);
+    } catch (_) {
+      /* template may already merge */
+    }
+  }
+  const cell = worksheet.getCell(row, c0);
+  cell.value = text;
   cell.alignment = {
     ...(cell.alignment || {}),
-    wrapText: true,
-    vertical: 'top',
+    wrapText: false,
+    shrinkToFit: false,
+    vertical: 'middle',
     horizontal: 'left',
   };
+  const wsRow = worksheet.getRow(row);
+  if (wsRow) wsRow.height = 20;
 }
 
-/** Prefer an existing value cell to the right of the label (AP templates often skip a merge slave). */
-function findFormXVIIAPValueCol(worksheet, row, labelCol, colLimit, stopAtCol = 0) {
-  const start = Math.max(1, Number(labelCol) || 1) + 1;
-  const end = Math.min(Number(colLimit) || start, start + 5, stopAtCol > 0 ? stopAtCol - 1 : Number(colLimit) || start);
-  let firstEmpty = 0;
-  for (let c = start; c <= end; c += 1) {
-    const raw = formXVIIAPExcelCellText(worksheet.getCell(row, c)?.value);
-    if (!raw) {
-      if (!firstEmpty) firstEmpty = c;
-      continue;
-    }
-    if (isFormXVIIAPMetaHeaderLabelText(raw)) return firstEmpty || Math.min(start, colLimit);
-    return c;
-  }
-  return firstEmpty || Math.min(start, colLimit);
-}
+function findFormXVIIAPEstablishmentValueBox(worksheet, establishmentLabels, scanEnd, colLimit) {
+  const first = establishmentLabels[0];
+  const last = establishmentLabels[establishmentLabels.length - 1];
+  const labelCol = first?.col || 9;
+  const wage = findFormXVIIAPWagePeriodCell(worksheet, scanEnd, colLimit);
+  const boxes = listFormXVIIAPMergeBoxes(worksheet);
 
-/**
- * Clear horizontal duplicate value cells on a meta row (e.g. AP-Tadipatri AP-Tadipatri).
- * Keeps the first value cell in [valueStartCol, valueEndCol]; clears other unlabeled values.
- */
-function dedupeFormXVIIAPAdjacentValueCells(worksheet, row, valueStartCol, valueEndCol, keepValue) {
-  if (!worksheet || !row) return;
-  const start = Math.max(1, Number(valueStartCol) || 1);
-  const end = Math.max(start, Number(valueEndCol) || start);
-  const keep = String(keepValue || '').trim();
-  let kept = false;
-  for (let c = start; c <= end; c += 1) {
-    const cell = worksheet.getCell(row, c);
-    const raw = formXVIIAPExcelCellText(cell?.value);
-    if (isFormXVIIAPMetaHeaderLabelText(raw)) continue;
-    if (!kept && keep) {
-      writeFormXVIIAPValueCell(cell, keep);
-      kept = true;
-      continue;
+  if (wage) {
+    let best = null;
+    for (let i = 0; i < boxes.length; i += 1) {
+      const box = boxes[i];
+      if (wage.row >= box.row && wage.row <= box.endRow && box.col >= 8) {
+        if (!best || box.col < best.col) best = box;
+      }
     }
-    // Drop leftover template / adjacent spill cells in the value band.
-    if (raw) cell.value = null;
+    if (best) return best;
+    const startCol = Math.max(9, labelCol);
+    let firstEmpty = 0;
+    for (let c = startCol; c <= colLimit; c += 1) {
+      const raw = formXVIIAPExcelCellText(worksheet.getCell(wage.row, c)?.value);
+      if (!raw) {
+        if (!firstEmpty) firstEmpty = c;
+        continue;
+      }
+      if (isFormXVIIAPNatureLabel(raw) || isFormXVIIAPContractorLabel(raw)) continue;
+      if (/wage\s*period/i.test(formXVIIAPLabelOnly(raw))) continue;
+      return findFormXVIIAPMergeCovering(worksheet, wage.row, c);
+    }
+    return findFormXVIIAPMergeCovering(
+      worksheet,
+      wage.row,
+      firstEmpty || Math.max(10, labelCol + 1)
+    );
   }
+
+  const valueRow = Math.max((first?.row || 5) + 1, last?.row || 6);
+  const valueCol = Math.min(Math.max(labelCol + 1, 10), colLimit);
+  return findFormXVIIAPMergeCovering(worksheet, valueRow, valueCol);
 }
 
 /**
  * Form XVII AP Excel meta band:
- * - Establishment (company name + address) once, on the row BELOW the first establishment label line
- *   (template splits "Establishemnt in/" / "under which contract…").
- * - Nature / contractor values once (no adjacent duplicates).
+ * - Contractor defaults to VAYONA ENERGY PRIVATE LIMITED when site contractor is empty.
+ * - Each heading + value sits on one horizontal line (no wrap / stacked columns).
+ * - Nature / contractor / establishment values once (no adjacent duplicates).
  */
 export function applyFormXVIIAPHeaderLayoutFixes(
   worksheet,
@@ -608,12 +744,13 @@ export function applyFormXVIIAPHeaderLayoutFixes(
     maxCol = 24,
   } = {}
 ) {
-  if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
+  if (!worksheet) return;
+  const data = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
 
   const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
   const resolveByKeys = (keys, labelHint) => {
     for (let i = 0; i < keys.length; i += 1) {
-      const v = resolveHeaderFieldExportValue(headerFormData, { key: keys[i], label: labelHint });
+      const v = resolveHeaderFieldExportValue(data, { key: keys[i], label: labelHint });
       if (v) return v;
     }
     for (let i = 0; i < fields.length; i += 1) {
@@ -622,18 +759,34 @@ export function applyFormXVIIAPHeaderLayoutFixes(
       if (labelHint === 'establishment' && !isEstablishmentContractCarriedHeaderLabel(field.label)) continue;
       if (labelHint === 'nature' && !isNatureLocationHeaderLabel(field.label)) continue;
       if (labelHint === 'contractor' && !isContractorHeaderLabel(field.label)) continue;
-      const v = resolveHeaderFieldExportValue(headerFormData, field);
+      const v = resolveHeaderFieldExportValue(data, field);
       if (v) return v;
     }
     return '';
   };
 
   const establishmentValue = resolveByKeys(
-    ['form_xvii_establishment_contract_carried', 'form_xiii_establishment_contract_carried'],
+    [
+      'form_xvii_establishment_contract_carried',
+      'form_xiii_establishment_contract_carried',
+      'form_xxiii_establishment_contract_carried',
+      'form_xvi_establishment_contract_carried',
+      'statutory_establishment_name_address',
+      'statutory_employer_name_address',
+    ],
     'establishment'
   );
-  const natureValue = resolveByKeys(['form_xvii_nature_location_work', 'form_xvi_nature_location_work'], 'nature');
-  const contractorValue = resolveByKeys(['form_xvii_contractor', 'form_xxiii_contractor'], 'contractor');
+  const natureValue = collapseFormXVIIAPRepeatedText(
+    resolveByKeys(
+      ['form_xvii_nature_location_work', 'form_xvi_nature_location_work', 'form_xxiii_nature_location_work'],
+      'nature'
+    )
+  );
+  const contractorValue =
+    resolveByKeys(
+      ['form_xvii_contractor', 'form_xxiii_contractor', 'form_xvi_contractor', 'form25_contractor'],
+      'contractor'
+    ) || FORM_XVII_AP_DEFAULT_CONTRACTOR_NAME;
 
   const scanEnd = Math.max(8, Number(headerRowEnd) || 12);
   const colLimit = Math.max(16, Number(maxCol) || 24);
@@ -646,6 +799,7 @@ export function applyFormXVIIAPHeaderLayoutFixes(
     for (let c = 1; c <= colLimit; c += 1) {
       const raw = formXVIIAPExcelCellText(worksheet.getCell(r, c)?.value);
       if (!raw) continue;
+      if (/form[\s._-]*xvii|register\s+of\s+wages|vide\s+rule/i.test(raw) && r <= 3) continue;
       if (!contractorLabel && isFormXVIIAPContractorLabel(raw)) {
         contractorLabel = { row: r, col: c, raw };
       }
@@ -658,118 +812,144 @@ export function applyFormXVIIAPHeaderLayoutFixes(
     }
   }
 
-  // Nature: one value only, immediately beside the label.
-  if (natureLabel) {
-    const rightBound = establishmentLabels[0]?.col > natureLabel.col ? establishmentLabels[0].col : 0;
-    const valueCol = findFormXVIIAPValueCol(worksheet, natureLabel.row, natureLabel.col, colLimit, rightBound);
-    const existing =
-      formXVIIAPValueAfterColon(natureLabel.raw) ||
-      formXVIIAPExcelCellText(worksheet.getCell(natureLabel.row, valueCol)?.value) ||
-      '';
-    const nature = String(natureValue || existing || '').trim();
-    // Keep label cell as label-only when value sits beside it.
-    if (formXVIIAPValueAfterColon(natureLabel.raw)) {
-      worksheet.getCell(natureLabel.row, natureLabel.col).value = `${formXVIIAPLabelOnly(natureLabel.raw)}:`;
-    }
-    if (nature) {
-      writeFormXVIIAPValueCell(worksheet.getCell(natureLabel.row, valueCol), nature);
-      dedupeFormXVIIAPAdjacentValueCells(
-        worksheet,
-        natureLabel.row,
-        valueCol,
-        Math.min(valueCol + 6, rightBound > 0 ? rightBound - 1 : Math.max(7, valueCol + 4)),
-        nature
-      );
+  if (!contractorLabel) {
+    for (let r = 4; r <= scanEnd && !contractorLabel; r += 1) {
+      for (let c = 1; c <= 8; c += 1) {
+        const raw = formXVIIAPExcelCellText(worksheet.getCell(r, c)?.value);
+        if (
+          raw &&
+          (valuesLookLikeFormXVIIAPDuplicate(contractorValue, raw) || /vayona\s+energy/i.test(raw)) &&
+          !isFormXVIIAPNatureLabel(raw) &&
+          !/wage\s*period/i.test(raw)
+        ) {
+          contractorLabel = { row: r, col: 1, raw: 'Name and address of Contractor:' };
+          break;
+        }
+      }
     }
   }
+  if (!contractorLabel) contractorLabel = { row: 5, col: 1, raw: 'Name and address of Contractor:' };
+  if (!natureLabel) natureLabel = { row: 7, col: 1, raw: 'Nature and location of work:' };
 
-  // Contractor: one value only beside the label (never duplicate horizontally).
-  if (contractorLabel) {
-    const rightBound = establishmentLabels[0]?.col > contractorLabel.col ? establishmentLabels[0].col : 0;
-    const valueCol = findFormXVIIAPValueCol(
-      worksheet,
-      contractorLabel.row,
-      contractorLabel.col,
-      colLimit,
-      rightBound
-    );
-    const existing =
+  establishmentLabels.sort((a, b) => a.row - b.row || a.col - b.col);
+  const rightStart =
+    establishmentLabels[0]?.col > 4 ? establishmentLabels[0].col : 9;
+  const leftEnd = Math.max(4, rightStart - 1);
+  const wage = findFormXVIIAPWagePeriodCell(worksheet, scanEnd, colLimit);
+  const oldBox = findFormXVIIAPEstablishmentValueBox(
+    worksheet,
+    establishmentLabels.length ? establishmentLabels : [{ row: 5, col: rightStart }],
+    scanEnd,
+    colLimit
+  );
+
+  const contractor = String(
+    contractorValue ||
       formXVIIAPValueAfterColon(contractorLabel.raw) ||
-      formXVIIAPExcelCellText(worksheet.getCell(contractorLabel.row, valueCol)?.value) ||
-      '';
-    const contractor = String(contractorValue || existing || '').trim();
-    if (formXVIIAPValueAfterColon(contractorLabel.raw)) {
-      worksheet.getCell(contractorLabel.row, contractorLabel.col).value =
-        `${formXVIIAPLabelOnly(contractorLabel.raw)}:`;
-    }
-    if (contractor) {
-      writeFormXVIIAPValueCell(worksheet.getCell(contractorLabel.row, valueCol), contractor);
-      dedupeFormXVIIAPAdjacentValueCells(
-        worksheet,
-        contractorLabel.row,
-        valueCol,
-        Math.min(valueCol + 6, rightBound > 0 ? rightBound - 1 : Math.max(7, valueCol + 4)),
-        contractor
-      );
-    }
+      FORM_XVII_AP_DEFAULT_CONTRACTOR_NAME
+  ).trim();
+  const natureExisting = collapseFormXVIIAPRepeatedText(
+    formXVIIAPValueAfterColon(natureLabel.raw) ||
+      formXVIIAPExcelCellText(worksheet.getCell(natureLabel.row, natureLabel.col + 1)?.value) ||
+      ''
+  );
+  const nature = collapseFormXVIIAPRepeatedText(natureValue || natureExisting || '');
+
+  writeFormXVIIAPSingleLine(
+    worksheet,
+    contractorLabel.row,
+    1,
+    leftEnd,
+    formatStatutoryHeaderLabelValueExport(
+      'Name and address of Contractor',
+      contractorLabel.raw,
+      contractor
+    )
+  );
+
+  if (nature) {
+    writeFormXVIIAPSingleLine(
+      worksheet,
+      natureLabel.row,
+      1,
+      leftEnd,
+      formatStatutoryHeaderLabelValueExport(
+        'Nature and location of work',
+        natureLabel.raw,
+        nature
+      )
+    );
   }
 
-  // Establishment: company name + address once, BELOW the first label line (not on the upper band).
-  if (establishmentLabels.length > 0) {
-    establishmentLabels.sort((a, b) => a.row - b.row || a.col - b.col);
-    const first = establishmentLabels[0];
-    const last = establishmentLabels[establishmentLabels.length - 1];
-    const labelCol = first.col;
-    // Prefer a value column to the right of the establishment label block.
-    const valueCol = Math.min(Math.max(labelCol + 1, 10), colLimit);
-    // Put company text on the continuation row (below "Establishemnt in/"), not above it.
-    const valueRow = Math.max(first.row + 1, last.row);
+  if (wage) {
+    const wageVal = (
+      formXVIIAPValueAfterColon(formXVIIAPExcelCellText(worksheet.getCell(wage.row, wage.col)?.value)) ||
+      'monthly'
+    ).replace(/:+\s*$/g, '').trim() || 'monthly';
+    writeFormXVIIAPSingleLine(
+      worksheet,
+      wage.row,
+      1,
+      leftEnd,
+      formatStatutoryHeaderLabelValueExport('Wage period', 'Wage period', wageVal)
+    );
+  }
 
-    // Clear company / establishment spill from the upper establishment band and duplicate cells.
-    for (let r = first.row; r <= Math.min(valueRow + 1, scanEnd); r += 1) {
-      for (let c = labelCol; c <= colLimit; c += 1) {
-        if (r === valueRow && c === valueCol) continue;
+  if (oldBox && (oldBox.endRow > oldBox.row || oldBox.endCol > oldBox.col)) {
+    unmergeFormXVIIAPRange(worksheet, oldBox.row, oldBox.endRow, oldBox.col, oldBox.endCol);
+    for (let r = oldBox.row; r <= (oldBox.endRow || oldBox.row); r += 1) {
+      for (let c = oldBox.col; c <= (oldBox.endCol || oldBox.col); c += 1) {
         const cell = worksheet.getCell(r, c);
         const raw = formXVIIAPExcelCellText(cell?.value);
-        if (!raw) continue;
-        if (isFormXVIIAPEstablishmentLabelPart(raw)) {
-          // Keep label text only (strip any inline value on the upper line).
-          if (formXVIIAPValueAfterColon(raw)) {
-            cell.value = `${formXVIIAPLabelOnly(raw)}:`;
-          }
-          continue;
-        }
-        if (isFormXVIIAPPrincipalEmployerLabel(raw) || isFormXVIIAPNatureLabel(raw)) continue;
-        if (
-          establishmentValue &&
-          (valuesLookLikeFormXVIIAPDuplicate(establishmentValue, raw) ||
-            valuesLookLikeFormXVIIAPDuplicate(establishmentValue, formXVIIAPValueAfterColon(raw) || raw))
-        ) {
-          cell.value = null;
-        }
+        if (/wage\s*period/i.test(formXVIIAPLabelOnly(raw))) continue;
+        cell.value = null;
       }
-    }
-
-    if (establishmentValue) {
-      // Prefer plain value under the label; combine only if the target cell still holds a label fragment.
-      const target = worksheet.getCell(valueRow, valueCol);
-      const targetRaw = formXVIIAPExcelCellText(target?.value);
-      if (isFormXVIIAPEstablishmentLabelPart(targetRaw)) {
-        target.value = formatStatutoryHeaderLabelValueExport(
-          formXVIIAPLabelOnly(targetRaw) || 'Name and address of Establishment in/under which contract is carried on',
-          targetRaw,
-          establishmentValue
-        );
-      } else {
-        writeFormXVIIAPValueCell(target, establishmentValue);
+      if (r >= 4) {
+        const wsRow = worksheet.getRow(r);
+        if (Number(wsRow.height) > 22) wsRow.height = 20;
       }
-      dedupeFormXVIIAPAdjacentValueCells(
-        worksheet,
-        valueRow,
-        valueCol,
-        Math.min(valueCol + 8, colLimit),
-        establishmentValue
-      );
     }
   }
+
+  if (establishmentValue) {
+    const estRow = establishmentLabels[0]?.row || contractorLabel.row || 5;
+    writeFormXVIIAPSingleLine(
+      worksheet,
+      estRow,
+      rightStart,
+      colLimit,
+      formatStatutoryHeaderLabelValueExport(
+        'Name and address of Establishment in/under which contract is carried on',
+        establishmentLabels[0]?.raw || '',
+        establishmentValue
+      )
+    );
+    for (let i = 1; i < establishmentLabels.length; i += 1) {
+      const extra = establishmentLabels[i];
+      if (extra.row === estRow) continue;
+      const cell = worksheet.getCell(extra.row, extra.col);
+      if (isFormXVIIAPEstablishmentLabelPart(formXVIIAPExcelCellText(cell?.value))) {
+        cell.value = null;
+      }
+    }
+  }
+
+  // Drop leftover duplicate values on the left band (same text in column F, etc.).
+  [contractorLabel.row, natureLabel.row, wage?.row].filter(Boolean).forEach((row) => {
+    for (let c = 2; c <= leftEnd; c += 1) {
+      const cell = worksheet.getCell(row, c);
+      if (cell?.isMerged && cell.master && (cell.master.row !== row || cell.master.col !== c)) continue;
+      if (c === 1) continue;
+      const raw = formXVIIAPExcelCellText(cell?.value);
+      if (!raw) continue;
+      if (isFormXVIIAPMetaHeaderLabelText(raw) && formXVIIAPValueAfterColon(raw)) continue;
+      if (
+        valuesLookLikeFormXVIIAPDuplicate(contractor, raw) ||
+        valuesLookLikeFormXVIIAPDuplicate(nature, raw) ||
+        valuesLookLikeFormXVIIAPDuplicate(establishmentValue, raw)
+      ) {
+        cell.value = null;
+      }
+    }
+  });
 }

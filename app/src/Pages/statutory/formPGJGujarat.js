@@ -7,6 +7,12 @@ import {
   readPayrollScalar,
   readPayrollTextScalar,
 } from '../../utils/payrollEarnings';
+import { extractApprovedLeavePositiveDayKeys } from './formFKarnataka';
+import {
+  approvedLeaveRecordOverlapsFormOGJMonth,
+  formOGJRecordMatchesWorker,
+  readApprovedLeaveLeaveType,
+} from './formOGJGujarat';
 
 export function formPGJGujaratHeaderNorm(txt) {
   return String(txt || '')
@@ -14,6 +20,62 @@ export function formPGJGujaratHeaderNorm(txt) {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+const FORM_PGJ_MONTH_INDEX = {
+  jan: 0,
+  january: 0,
+  feb: 1,
+  february: 1,
+  mar: 2,
+  march: 2,
+  apr: 3,
+  april: 3,
+  may: 4,
+  jun: 5,
+  june: 5,
+  jul: 6,
+  july: 6,
+  aug: 7,
+  august: 7,
+  sep: 8,
+  sept: 8,
+  september: 8,
+  oct: 9,
+  october: 9,
+  nov: 10,
+  november: 10,
+  dec: 11,
+  december: 11,
+};
+
+export function clampFormPGJGujaratDaysInMonth(value, fallback = 31) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.round(n), 28), 31);
+}
+
+/** June → 30, July → 31, February → 28/29. */
+export function resolveFormPGJGujaratDaysInMonth(monthText, yearText = '') {
+  const blob = `${monthText || ''} ${yearText || ''}`
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!blob) return 31;
+  const monthMatch = blob.match(
+    /\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\b/i
+  );
+  if (!monthMatch) return 31;
+  const monthIdx = FORM_PGJ_MONTH_INDEX[String(monthMatch[1] || '').toLowerCase()];
+  if (!Number.isFinite(monthIdx)) return 31;
+  const yearMatch = blob.match(/\b(20\d{2}|19\d{2})\b/);
+  const yearFromArg = Number(String(yearText || '').replace(/\D/g, '').slice(0, 4));
+  const year = yearMatch
+    ? Number(yearMatch[1])
+    : Number.isFinite(yearFromArg) && yearFromArg >= 1900
+      ? yearFromArg
+      : new Date().getFullYear();
+  return clampFormPGJGujaratDaysInMonth(new Date(year, monthIdx + 1, 0).getDate(), 31);
 }
 
 const stripLeadingNumber = (s) =>
@@ -52,6 +114,8 @@ export function isFormPGJGujaratContext(
     .toLowerCase();
 
   if (/\bform\s*q\b|\bform_q\b|form[\s._-]*q[\s._-]*gj/.test(parts)) return false;
+  if (/karnataka/.test(parts) && /accumulated\s+leave/.test(parts)) return false;
+  if (/form[\s._-]*p[\s._-]*ka\b/.test(parts) && /accumulated\s+leave/.test(parts)) return false;
   const hasGujarat = /gujarat|\b_gj\b|form[\s._-]*p[\s._-]*gj|form_p_gj/.test(parts);
   const hasFormP = /\bform[\s._-]*p\b/.test(parts);
   if (hasGujarat && hasFormP) return true;
@@ -172,6 +236,51 @@ const isEmployerMetaLabel = (txt) => {
     /name\s+of\s+the\s+establishment/.test(t)
   );
 };
+
+const FORM_PGJ_DEFAULT_HEADER_FIELDS = [
+  { label: 'Name of the employer', value: '', key: 'form_p_gj_employer' },
+  { label: 'Month', value: '', key: 'form_p_gj_month' },
+];
+
+function ensureFormPGJGujaratHeaderFields(fields) {
+  const list = Array.isArray(fields) ? [...fields] : [];
+  const has = (re) =>
+    list.some((f) => formPGJGujaratHeaderNorm(f?.label).replace(/:+$/, '').trim().match(re));
+  if (!has(/name\s+of\s+(?:the\s+)?employer/)) {
+    list.unshift({ label: 'Name of the employer', value: '', key: 'form_p_gj_employer' });
+  }
+  if (!has(/^month$/)) {
+    list.push({ label: 'Month', value: '', key: 'form_p_gj_month' });
+  }
+  return list;
+}
+
+/** "VAYONA ENERGY PRIVATE LIMITED, address…" → company name for Name of the employer. */
+export function formPGJEmployerDisplayName(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  const comma = raw.indexOf(',');
+  if (comma >= 8) return raw.slice(0, comma).trim();
+  return raw;
+}
+
+export function applyFormPGJGujaratHeaderAutofill(headerData, siteContext = {}, options = {}) {
+  const { onlyEmpty = false } = options;
+  const out = headerData && typeof headerData === 'object' ? { ...headerData } : {};
+  const monthText = String(siteContext.monthText || '').trim();
+  const employerText = formPGJEmployerDisplayName(siteContext.employerText);
+  const setIf = (key, value) => {
+    if (!key || !value) return;
+    const cur = String(out[key] ?? '').trim();
+    if (!onlyEmpty || !cur || /^enter\b/i.test(cur)) out[key] = value;
+  };
+  if (monthText) {
+    setIf('form_p_gj_month', monthText);
+    setIf('form_x_month', monthText);
+  }
+  if (employerText) setIf('form_p_gj_employer', employerText);
+  return out;
+}
 
 /** Excel section index (1–9) under worker parents — not a data sub-column. */
 const isFormPGJSectionMarkerSub = (sub, main) => {
@@ -443,18 +552,42 @@ export function rebuildFormPGJGujaratTableHeadersFromSheet({
   const headerFields = [];
   for (let r = 0; r < headerRowIndex; r += 1) {
     for (let col = 0; col < Math.max(20, effectiveSheetCols); col += 1) {
-      const raw = norm(getMergedAwareCellText(r, col));
+      const raw = String(getMergedAwareCellText(r, col) || '').replace(/\s+/g, ' ').trim();
       if (!raw) continue;
-      if (/^month\s*:?$/i.test(raw)) {
-        let val = '';
-        for (let nc = col + 1; nc < Math.min(col + 8, maxCols); nc += 1) {
-          const v = norm(getMergedAwareCellText(r, nc));
-          if (v && !/^month\s*:?$/i.test(v)) {
-            val = v;
-            break;
+      const labelOnly = raw.split(':')[0].trim();
+      if (/^month\s*:?$/i.test(raw) || /^month$/i.test(labelOnly)) {
+        let val = String(raw.split(':').slice(1).join(':') || '').trim();
+        if (!val) {
+          for (let nc = col + 1; nc < Math.min(col + 8, maxCols); nc += 1) {
+            const v = String(getMergedAwareCellText(r, nc) || '').trim();
+            if (v && !/^month\s*:?$/i.test(v)) {
+              val = v;
+              break;
+            }
           }
         }
-        headerFields.push({ label: 'Month', value: val, key: 'form_p_gj_month' });
+        if (!headerFields.some((f) => f.key === 'form_p_gj_month')) {
+          headerFields.push({ label: 'Month', value: val, key: 'form_p_gj_month' });
+        }
+      }
+      if (/name\s+of\s+(?:the\s+)?employer/i.test(labelOnly) && !/address/i.test(labelOnly)) {
+        let val = String(raw.split(':').slice(1).join(':') || '').trim();
+        if (!val) {
+          for (let nc = col + 1; nc < Math.min(col + 8, maxCols); nc += 1) {
+            const v = String(getMergedAwareCellText(r, nc) || '').trim();
+            if (v && !/name\s+of\s+(?:the\s+)?employer/i.test(v)) {
+              val = v;
+              break;
+            }
+          }
+        }
+        if (!headerFields.some((f) => f.key === 'form_p_gj_employer')) {
+          headerFields.push({
+            label: 'Name of the employer',
+            value: val,
+            key: 'form_p_gj_employer',
+          });
+        }
       }
     }
   }
@@ -465,9 +598,7 @@ export function rebuildFormPGJGujaratTableHeadersFromSheet({
     headers: mainHeaders,
     expandedHeaders: finalHeaders,
     subColumnsData,
-    headerFields: headerFields.length
-      ? headerFields
-      : [{ label: 'Month', value: '', key: 'form_p_gj_month' }],
+    headerFields: ensureFormPGJGujaratHeaderFields(headerFields),
   };
 }
 
@@ -481,7 +612,7 @@ export function resolveFormPGJTableHeadersForWorkbook(workbook, daysInMonth = 31
       subColumns: buildFormPGJSubColumnsFromHeaders(canonical),
       headerRowIndex: 11,
       dataStartIndex: 14,
-      headerFields: [{ label: 'Month', value: '', key: 'form_p_gj_month' }],
+      headerFields: [...FORM_PGJ_DEFAULT_HEADER_FIELDS],
     };
   }
   const worksheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -544,7 +675,7 @@ export function resolveFormPGJTableHeadersForWorkbook(workbook, daysInMonth = 31
         : buildFormPGJSubColumnsFromHeaders(headers),
     headerRowIndex: rebuild?.headerRowIndex ?? 11,
     dataStartIndex,
-    headerFields: rebuild?.headerFields || [{ label: 'Month', value: '', key: 'form_p_gj_month' }],
+    headerFields: ensureFormPGJGujaratHeaderFields(rebuild?.headerFields),
   };
 }
 
@@ -1011,6 +1142,7 @@ function matchFormPGJWageTailBucket(header) {
   if (n.includes('total deduction')) return 'totalDeduction';
   if (n.includes('net payable')) return 'netPay';
   if (n.includes('date of payment')) return 'paymentDate';
+  if (n.includes('signature') || n.includes('thumb impression')) return 'signature';
   return '';
 }
 
@@ -1168,6 +1300,153 @@ export function applyFormPGJGujaratStaticDefaults(mappedData, headers, { overwri
   return hits;
 }
 
+const FORM_PGJ_LEAVE_MONTHS = [
+  'jan',
+  'feb',
+  'mar',
+  'apr',
+  'may',
+  'jun',
+  'jul',
+  'aug',
+  'sep',
+  'oct',
+  'nov',
+  'dec',
+];
+
+function parseZohoLeaveDateParts(dateStr) {
+  const m = String(dateStr || '').match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/i);
+  if (!m) return null;
+  const month = FORM_PGJ_LEAVE_MONTHS.indexOf(m[2].toLowerCase());
+  if (month < 0) return null;
+  return { day: parseInt(m[1], 10), month, year: parseInt(m[3], 10) };
+}
+
+function formatZohoLeaveDate(date) {
+  const mon = FORM_PGJ_LEAVE_MONTHS[date.getMonth()];
+  if (!mon) return '';
+  return `${String(date.getDate()).padStart(2, '0')}-${mon.charAt(0).toUpperCase()}${mon.slice(1)}-${date.getFullYear()}`;
+}
+
+function zohoLeaveDateInRange(dateStr, monthFrom, monthTo) {
+  if (!monthFrom || !monthTo) return true;
+  const parts = parseZohoLeaveDateParts(dateStr);
+  const fromParts = parseZohoLeaveDateParts(monthFrom);
+  const toParts = parseZohoLeaveDateParts(monthTo);
+  if (!parts || !fromParts || !toParts) return true;
+  const t = Date.UTC(parts.year, parts.month, parts.day);
+  const start = Date.UTC(fromParts.year, fromParts.month, fromParts.day);
+  const end = Date.UTC(toParts.year, toParts.month, toParts.day);
+  return t >= start && t <= end;
+}
+
+export function formPGJLeaveCodeFromType(leaveType) {
+  const t = String(leaveType || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (/contingency|casual|\bc\/?l\b|^cl$/.test(t)) return 'CL';
+  if (/earned|privilege|annual|accumulated|\be\/?l\b|^el$/.test(t)) return 'EL';
+  if (/sick|medical|\bs\/?l\b|^sl$/.test(t)) return 'SL';
+  return 'L';
+}
+
+function collectFormPGJLeaveDayNumbers(record, monthFrom, monthTo) {
+  const days = new Set();
+  const addIfInRange = (dateStr) => {
+    if (!zohoLeaveDateInRange(dateStr, monthFrom, monthTo)) return;
+    const parts = parseZohoLeaveDateParts(dateStr);
+    if (parts) days.add(parts.day);
+  };
+
+  const positive = extractApprovedLeavePositiveDayKeys(record?.Days ?? record?.days);
+  if (positive.length > 0) {
+    positive.forEach((d) => addIfInRange(d));
+    return [...days];
+  }
+
+  const fromParts = parseZohoLeaveDateParts(record?.From ?? record?.from);
+  const toParts = parseZohoLeaveDateParts(
+    record?.To ?? record?.to ?? record?.From ?? record?.from
+  );
+  if (!fromParts) return [];
+  const end = toParts || fromParts;
+  const cursor = new Date(fromParts.year, fromParts.month, fromParts.day);
+  const last = new Date(end.year, end.month, end.day);
+  while (cursor.getTime() <= last.getTime()) {
+    addIfInRange(formatZohoLeaveDate(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return [...days];
+}
+
+/**
+ * Stamp approved-leave days onto Form P Date of Month_n cells (CL / EL / SL / L).
+ * Uses the same worker match as Form O so 3-part names like Patel Chandrakant Virabhai attach.
+ */
+export function applyFormPGJGujaratApprovedLeaveToDayColumns(
+  mappedData,
+  employeesForMapping,
+  tableHeaders,
+  approvedLeaveRecords,
+  options = {}
+) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  if (!Array.isArray(approvedLeaveRecords) || approvedLeaveRecords.length === 0) return 0;
+
+  const monthFrom = options.monthFrom || '';
+  const monthTo = options.monthTo || '';
+  const hdrs =
+    Array.isArray(tableHeaders) && tableHeaders.length > 0
+      ? tableHeaders
+      : buildFormPGJGujaratCanonicalHeaders();
+  const dayHeaders = hdrs
+    .map((header) => {
+      const m = String(header || '')
+        .trim()
+        .match(/^Date of Month_(\d{1,2})$/i);
+      if (!m) return null;
+      const day = parseInt(m[1], 10);
+      if (day < 1 || day > 31) return null;
+      return { header, day };
+    })
+    .filter(Boolean);
+  if (dayHeaders.length === 0) return 0;
+
+  let hits = 0;
+  mappedData.forEach((row, index) => {
+    if (!row || typeof row !== 'object') return;
+    const empItem = employeesForMapping?.[index];
+    const emp = unwrapPGJEmployee(empItem);
+    const workerName = String(row['Name of the Worker'] || row.__employeeLookupName || '').trim();
+
+    const matches = approvedLeaveRecords.filter((rec) => {
+      if (!rec) return false;
+      if (monthFrom && monthTo && !approvedLeaveRecordOverlapsFormOGJMonth(rec, monthFrom, monthTo)) {
+        return false;
+      }
+      return formOGJRecordMatchesWorker(rec, workerName, emp, {
+        collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
+      });
+    });
+    if (matches.length === 0) return;
+
+    let wrote = false;
+    matches.forEach((rec) => {
+      const code = formPGJLeaveCodeFromType(readApprovedLeaveLeaveType(rec));
+      collectFormPGJLeaveDayNumbers(rec, monthFrom, monthTo).forEach((day) => {
+        const col = dayHeaders.find((h) => h.day === day);
+        if (!col) return;
+        row[col.header] = code;
+        wrote = true;
+      });
+    });
+    if (wrote) hits += 1;
+  });
+  return hits;
+}
+
 export function enrichFormPGJGujaratPayrollRows(mappedData, employees, headers, helpers = {}) {
   const hdrs = Array.isArray(headers) && headers.length > 0 ? headers : buildFormPGJGujaratCanonicalHeaders();
   const {
@@ -1222,9 +1501,11 @@ export function enrichFormPGJGujaratDisplayHeader(formHeader, fileName, item, he
     ...(formHeader || {}),
     title: formHeader?.title || 'FORM P',
     formPGJGujaratTableLayout: true,
-    fields: Array.isArray(formHeader?.fields) && formHeader.fields.length > 0
-      ? formHeader.fields
-      : [{ label: 'Month', value: '', key: 'form_p_gj_month' }],
+    fields: ensureFormPGJGujaratHeaderFields(
+      Array.isArray(formHeader?.fields) && formHeader.fields.length > 0
+        ? formHeader.fields
+        : FORM_PGJ_DEFAULT_HEADER_FIELDS
+    ),
   };
 }
 
@@ -1308,9 +1589,10 @@ function formPGJTemplateBucket(label) {
     if (/minimum\s+rate/.test(n)) return 'skip';
     if (/total\s+production/.test(n)) return 'skip';
     if (/dearness/.test(n)) return 'skip';
-    if (/family\s+pension|loan|advances|signature|thumb/.test(n)) {
+    if (/family\s+pension|loan|advances/.test(n)) {
       return 'skip';
     }
+    if (/signature|thumb/.test(n)) return 'signature';
   }
   if (/actual\s+wages\s+paid/.test(n)) return 'basic';
   if (/house\s+rent/.test(n)) return 'hra';
@@ -1457,6 +1739,7 @@ export function detectFormPGJGujaratTableLayout(worksheet) {
     'otherDeductions',
     'totalDeduction',
     'paymentDate',
+    'signature',
     'esi',
     'overtimeHours',
     'overtimeEarnings',
@@ -1517,6 +1800,26 @@ export function detectFormPGJGujaratTableLayout(worksheet) {
 
   if (templateCols.length < 6) return null;
   return { headerRow, dataStartRow, templateCols, startCol, day1Col };
+}
+
+/** Count Date of Month marks that count as days worked (present / paid leave). */
+export function countFormPGJGujaratDaysWorkedFromAttendance(row) {
+  if (!row || typeof row !== 'object') return '';
+  let n = 0;
+  for (let d = 1; d <= 31; d += 1) {
+    const v = String(
+      row[`Date of Month_${d}`] ||
+        row[`Date of the Month_${d}`] ||
+        row[`Date of Month_${Number(d)}`] ||
+        ''
+    )
+      .trim()
+      .toUpperCase();
+    if (!v) continue;
+    if (/^(A|AB|ABSENT|WO|W\/O|OFF|HO|NH|FH)$/.test(v)) continue;
+    n += 1;
+  }
+  return n > 0 ? n : '';
 }
 
 function getFormPGJExportValueForBucket(row, bucket, idx = 0) {
@@ -1606,7 +1909,13 @@ function getFormPGJExportValueForBucket(row, bucket, idx = 0) {
     return row['Gross Amount Payable Rs.'] || '';
   }
   if (bucket === 'paidDays') {
-    return row['Total Days Worked'] || row['Total Days worked'] || '';
+    const direct =
+      row['Total Days Worked'] ||
+      row['Total Days worked'] ||
+      row.paidDays ||
+      '';
+    if (direct != null && String(direct).trim() !== '') return direct;
+    return countFormPGJGujaratDaysWorkedFromAttendance(row);
   }
   if (bucket === 'netPay') return row['Net Payable Rs.'] || '';
   if (bucket === 'paymentDate') return row['Date of Payment'] || '';
@@ -1616,6 +1925,7 @@ function getFormPGJExportValueForBucket(row, bucket, idx = 0) {
   if (bucket === 'incomeTax') return row['Income Tax Rs.'] || '';
   if (bucket === 'otherDeductions') return row['Other Deductions Rs.'] || '';
   if (bucket === 'totalDeduction') return row['Total Deduction Rs.'] || '';
+  if (bucket === 'signature') return '';
 
   // Generic: find row key whose template bucket matches
   for (const [k, v] of Object.entries(row)) {
@@ -1627,11 +1937,325 @@ function getFormPGJExportValueForBucket(row, bucket, idx = 0) {
   return '';
 }
 
+function findFormPGJGujaratSignatureColumn(worksheet, layout) {
+  if (!worksheet || !layout) return -1;
+  const fromTemplate = (layout.templateCols || []).find((c) => c?.bucket === 'signature');
+  if (fromTemplate?.col > 0) return fromTemplate.col;
+  const headerRow = layout.headerRow || 1;
+  const startCol = layout.startCol || 1;
+  const maxC = Math.max(80, worksheet.columnCount || 0, worksheet.actualColumnCount || 0);
+  for (let r = headerRow; r <= headerRow + 3; r += 1) {
+    for (let c = startCol; c <= startCol + 80 && c <= maxC; c += 1) {
+      const t = formPGJGujaratHeaderNorm(excelCellValueToString(worksheet.getCell(r, c)?.value));
+      if (t && (t.includes('signature') || t.includes('thumb impression'))) return c;
+    }
+  }
+  return -1;
+}
+
 /**
- * Write Form P rows into the original Gujarat muster-roll template
- * (Sr / Full Name / Designation / Age / Sex / Date of Entry / Working Hours /
- *  Interval for Rest / days 1–31 / wage summary) by detecting columns from headers.
+ * Fill Form P header Name of the Establishment / employer / Month on Excel download.
  */
+export function writeFormPGJGujaratHeaderMetaToExcelJsWorksheet(
+  worksheet,
+  headerFormData = {},
+  { headerRowEnd = 12 } = {}
+) {
+  if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return false;
+  const monthVal = String(
+    headerFormData.form_p_gj_month || headerFormData.form_x_month || ''
+  ).trim();
+  const employerVal = formPGJEmployerDisplayName(
+    headerFormData.form_p_gj_employer ||
+      headerFormData.statutory_principal_employer ||
+      headerFormData.statutory_employer_name_address ||
+      headerFormData.form_t_employer ||
+      ''
+  );
+  const establishmentVal = String(
+    headerFormData.form_p_gj_establishment ||
+      headerFormData.statutory_establishment_name_address ||
+      headerFormData.statutory_establishment_name ||
+      headerFormData.form_t_establishment_name_address ||
+      ''
+  ).trim();
+  if (!monthVal && !employerVal && !establishmentVal) return false;
+
+  const maxR = Math.max(1, Math.min(Number(headerRowEnd) || 12, worksheet.rowCount || 12));
+  const maxC = Math.min(20, Math.max(12, worksheet.columnCount || 12, worksheet.actualColumnCount || 12));
+  let wroteEmployer = false;
+  let wroteMonth = false;
+  let wroteEstablishment = false;
+
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= maxC; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).replace(/\s+/g, ' ').trim();
+      if (!raw) continue;
+      const labelOnly = raw.split(':')[0].trim();
+
+      if (
+        establishmentVal &&
+        /name\s+of\s+(?:the\s+)?establishment/i.test(labelOnly) &&
+        !/employer|already/i.test(labelOnly)
+      ) {
+        const cell = worksheet.getCell(r, c);
+        cell.value = `Name of the Establishment : ${establishmentVal}`;
+        wroteEstablishment = true;
+        continue;
+      }
+
+      if (
+        employerVal &&
+        /name\s+of\s+(?:the\s+)?employer/i.test(labelOnly) &&
+        !/address/i.test(labelOnly)
+      ) {
+        const cell = worksheet.getCell(r, c);
+        cell.value = `Name of the employer: ${employerVal}`;
+        wroteEmployer = true;
+        continue;
+      }
+
+      if (monthVal && /^month\s*:?\s*$/i.test(raw)) {
+        worksheet.getCell(r, c).value = `Month: ${monthVal}`;
+        wroteMonth = true;
+        continue;
+      }
+      if (monthVal && /^month\s*:/i.test(raw) && !/year/i.test(raw) && !/ending/i.test(raw)) {
+        worksheet.getCell(r, c).value = `Month: ${monthVal}`;
+        wroteMonth = true;
+      }
+    }
+  }
+  return wroteEmployer || wroteMonth || wroteEstablishment;
+}
+
+/** Show full Establishment / Employer text (wrap + wide merge). */
+export function ensureFormPGJGujaratHeaderIdentityRowsVisible(
+  worksheet,
+  { headerRowEnd = 12, mergeToCol = 12 } = {}
+) {
+  if (!worksheet) return false;
+  const maxR = Math.max(1, Math.min(Number(headerRowEnd) || 12, worksheet.rowCount || 12));
+  const mergeEnd = Math.max(8, Number(mergeToCol) || 12);
+  let applied = false;
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= 8; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value)
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!raw) continue;
+      const labelOnly = raw.split(':')[0].trim();
+      const isEst =
+        /name\s+of\s+(?:the\s+)?establishment/i.test(labelOnly) &&
+        !/employer|already/i.test(labelOnly);
+      const isEmp =
+        /name\s+of\s+(?:the\s+)?employer/i.test(labelOnly) && !/address/i.test(labelOnly);
+      if (!isEst && !isEmp) continue;
+      formPGJUnmergeCovering(worksheet, r, c, r, mergeEnd);
+      try {
+        if (mergeEnd > c) worksheet.mergeCells(r, c, r, mergeEnd);
+      } catch (_) {
+        /* already merged */
+      }
+      const cell = worksheet.getCell(r, c);
+      cell.alignment = {
+        ...(cell.alignment || {}),
+        wrapText: true,
+        vertical: 'top',
+        horizontal: 'left',
+      };
+      const lines = Math.max(2, Math.ceil(raw.length / 64));
+      const wsRow = worksheet.getRow(r);
+      if (wsRow) wsRow.height = Math.min(72, Math.max(Number(wsRow.height) || 0, lines * 16, 32));
+      applied = true;
+      break;
+    }
+  }
+  return applied;
+}
+
+/** Form P table header + body font on Excel/PDF download. */
+export const FORM_PGJ_TABLE_FONT_SIZE = 8;
+export const FORM_PGJ_DATE_OF_MONTH_GROUP_LABEL = 'Date of Month (9)';
+
+function formPGJIsDateOfMonthGroupLabel(text) {
+  const t = formPGJGujaratHeaderNorm(text);
+  if (!t) return false;
+  if (/date\s+of\s+payment/.test(t) || /entry\s+into\s+service/.test(t)) return false;
+  return /^date\s+of\s+(the\s+)?month/.test(t);
+}
+
+function formPGJUnmergeCovering(worksheet, r1, c1, r2, c2) {
+  const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
+  merges.forEach((label) => {
+    const parts = String(label || '').split(':');
+    if (parts.length !== 2) return;
+    try {
+      const tl = worksheet.getCell(parts[0]);
+      const br = worksheet.getCell(parts[1]);
+      if (!tl || !br || br.row < r1 || tl.row > r2 || br.col < c1 || tl.col > c2) return;
+      worksheet.unMergeCells(label);
+    } catch (_) {
+      /* ignore */
+    }
+  });
+}
+
+/**
+ * Merge Excel "Date of Month (9)" across the day 1–daysInMonth columns, like the Gujarat template.
+ */
+export function ensureFormPGJGujaratDateOfMonthGroupMerge(worksheet, layout, daysInMonth = 31) {
+  if (!worksheet || !layout?.headerRow) return false;
+  const headerRow = layout.headerRow;
+  const subRow = headerRow + 1;
+  const getMergeTopLeft = buildMergeTopLeftResolver(worksheet);
+  const getText = (r, c) => {
+    const tl = getMergeTopLeft(r, c);
+    return excelCellValueToString(worksheet.getCell(tl.r, tl.c)?.value).trim();
+  };
+  const subDirect = (c) => excelCellValueToString(worksheet.getCell(subRow, c)?.value).trim();
+  const startCol = layout.startCol || 1;
+  const maxC = Math.max(80, worksheet.columnCount || 0, worksheet.actualColumnCount || 0);
+  const days = clampFormPGJGujaratDaysInMonth(daysInMonth);
+
+  let bandStart = -1;
+  for (let c = startCol; c <= startCol + 70 && c <= maxC; c += 1) {
+    if (formPGJIsDateOfMonthGroupLabel(getText(headerRow, c))) {
+      bandStart = c;
+      break;
+    }
+  }
+  if (bandStart < 0 && layout.day1Col > 0) bandStart = layout.day1Col;
+  if (bandStart < 0) return false;
+
+  formPGJUnmergeCovering(worksheet, headerRow, bandStart, headerRow, bandStart + 30);
+
+  let bandEnd = bandStart;
+  for (let c = bandStart; c <= bandStart + 30 && c <= maxC; c += 1) {
+    const main = excelCellValueToString(worksheet.getCell(headerRow, c)?.value).trim();
+    const sub = formPGJGujaratHeaderNorm(subDirect(c)).replace(/[()]/g, '');
+    const isDateLabel = formPGJIsDateOfMonthGroupLabel(main) || formPGJIsDateOfMonthGroupLabel(getText(headerRow, c));
+    const dayNum = parseInt(sub, 10);
+    const isDay = /^\d{1,2}$/.test(sub) && dayNum >= 1 && dayNum <= 31;
+    if (isDay && dayNum > days) break;
+    if (isDay || (c === bandStart && isDateLabel)) {
+      bandEnd = c;
+      continue;
+    }
+    break;
+  }
+  if (!(bandEnd > bandStart)) return false;
+
+  formPGJUnmergeCovering(worksheet, headerRow, bandStart, headerRow, bandEnd);
+  for (let c = bandStart + 1; c <= bandEnd; c += 1) {
+    try {
+      worksheet.getCell(headerRow, c).value = null;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  try {
+    worksheet.mergeCells(headerRow, bandStart, headerRow, bandEnd);
+  } catch (_) {
+    /* already merged */
+  }
+  const cell = worksheet.getCell(headerRow, bandStart);
+  cell.value = FORM_PGJ_DATE_OF_MONTH_GROUP_LABEL;
+  cell.alignment = {
+    ...(cell.alignment || {}),
+    horizontal: 'center',
+    vertical: 'middle',
+    wrapText: true,
+  };
+  cell.font = {
+    ...(cell.font || {}),
+    bold: true,
+    size: FORM_PGJ_TABLE_FONT_SIZE,
+  };
+  return true;
+}
+
+/**
+ * Keep Date of Month day numbers 1..daysInMonth (June=30, July=31) and hide extras.
+ */
+export function applyFormPGJGujaratMonthDayColumns(worksheet, layout, daysInMonth = 31) {
+  if (!worksheet || !layout?.headerRow) return false;
+  const days = clampFormPGJGujaratDaysInMonth(daysInMonth);
+  const headerRow = layout.headerRow;
+  const subRow = headerRow + 1;
+  const dataStart = layout.dataStartRow || headerRow + 2;
+  const getMergeTopLeft = buildMergeTopLeftResolver(worksheet);
+  const getText = (r, c) => {
+    const tl = getMergeTopLeft(r, c);
+    return excelCellValueToString(worksheet.getCell(tl.r, tl.c)?.value).trim();
+  };
+  let bandStart = layout.day1Col > 0 ? layout.day1Col : -1;
+  if (bandStart < 0) {
+    const startCol = layout.startCol || 1;
+    const maxC = Math.max(80, worksheet.columnCount || 0, worksheet.actualColumnCount || 0);
+    for (let c = startCol; c <= startCol + 70 && c <= maxC; c += 1) {
+      if (formPGJIsDateOfMonthGroupLabel(getText(headerRow, c))) {
+        bandStart = c;
+        break;
+      }
+    }
+  }
+  if (!(bandStart > 0)) return false;
+
+  let changed = false;
+  for (let offset = 0; offset < 31; offset += 1) {
+    const col = bandStart + offset;
+    const sub = formPGJGujaratHeaderNorm(
+      excelCellValueToString(worksheet.getCell(subRow, col)?.value)
+    ).replace(/[()]/g, '');
+    const dayNum = parseInt(sub, 10);
+    const isDay = /^\d{1,2}$/.test(sub) && dayNum >= 1 && dayNum <= 31;
+    if (!isDay) continue;
+    if (dayNum <= days) {
+      try {
+        worksheet.getColumn(col).hidden = false;
+      } catch (_) {
+        /* ignore */
+      }
+      continue;
+    }
+    changed = true;
+    try {
+      worksheet.getColumn(col).hidden = true;
+    } catch (_) {
+      /* ignore */
+    }
+    for (let r = headerRow; r < dataStart; r += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, col)?.value).trim();
+      if (/^\(?\s*\d{1,2}\s*\)?$/.test(raw) && parseInt(raw.replace(/[()]/g, ''), 10) === dayNum) {
+        worksheet.getCell(r, col).value = null;
+      }
+    }
+    const lastClear = Math.max(dataStart + 40, worksheet.rowCount || dataStart);
+    for (let r = dataStart; r <= lastClear; r += 1) {
+      try {
+        worksheet.getCell(r, col).value = null;
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+  return changed;
+}
+
+function applyFormPGJGujaratTableFontSize(
+  worksheet,
+  { headerRow, lastRow, colFrom, colTo, size = FORM_PGJ_TABLE_FONT_SIZE } = {}
+) {
+  if (!worksheet || !(headerRow > 0) || !(lastRow >= headerRow) || !(colTo >= colFrom)) return;
+  for (let r = headerRow; r <= lastRow; r += 1) {
+    for (let c = colFrom; c <= colTo; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      cell.font = { ...(cell.font || {}), size };
+    }
+  }
+}
+
 export async function buildFormPGJGujaratWorkbookWithTemplateStyles({
   templateArrayBuffer,
   mappedData,
@@ -1640,9 +2264,12 @@ export async function buildFormPGJGujaratWorkbookWithTemplateStyles({
   formFileName,
   headerFormData,
   formatStatutoryDateDisplay = null,
+  daysInMonth = null,
 }) {
   const ExcelJS = (await import('exceljs')).default;
-  const { ensureExcelJSDataRowsWithBorders } = await import('../../utils/excelTableBorders');
+  const { applyExcelJSFullBoxBordersToRange, ensureExcelJSDataRowsWithBorders } = await import(
+    '../../utils/excelTableBorders'
+  );
   const { writeStatutoryHeaderFieldsToExcelJsWorksheet } = await import(
     '../../utils/statutorySiteCompanyHeaders'
   );
@@ -1655,18 +2282,41 @@ export async function buildFormPGJGujaratWorkbookWithTemplateStyles({
   const layout = detectFormPGJGujaratTableLayout(worksheet);
   if (!layout) throw new Error('Could not locate Gujarat Form P table header row.');
 
+  const monthDays = clampFormPGJGujaratDaysInMonth(
+    daysInMonth != null
+      ? daysInMonth
+      : resolveFormPGJGujaratDaysInMonth(
+          headerFormData?.form_p_gj_month || headerFormData?.form_x_month || '',
+          headerFormData?.form_x_year || headerFormData?.form_p_gj_year || ''
+        )
+  );
+
   const { dataStartRow, templateCols, startCol } = layout;
   const formatDate =
     typeof formatStatutoryDateDisplay === 'function'
       ? formatStatutoryDateDisplay
       : (v) => String(v || '').trim();
 
+  const parsedForWrite = parsedFormHeader
+    ? {
+        ...parsedFormHeader,
+        fields: ensureFormPGJGujaratHeaderFields(parsedFormHeader.fields),
+      }
+    : { fields: [...FORM_PGJ_DEFAULT_HEADER_FIELDS] };
+
   if (headerFormData && typeof headerFormData === 'object') {
     writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
       headerFormData,
-      parsedFormHeader,
+      parsedFormHeader: parsedForWrite,
       headerRowEnd: Math.max(1, layout.headerRow - 1),
       maxScanCols: 80,
+    });
+    writeFormPGJGujaratHeaderMetaToExcelJsWorksheet(worksheet, headerFormData, {
+      headerRowEnd: Math.max(1, layout.headerRow - 1),
+    });
+    ensureFormPGJGujaratHeaderIdentityRowsVisible(worksheet, {
+      headerRowEnd: Math.max(1, layout.headerRow - 1),
+      mergeToCol: Math.max(12, (layout.startCol || 2) + 10),
     });
   }
 
@@ -1679,8 +2329,12 @@ export async function buildFormPGJGujaratWorkbookWithTemplateStyles({
       )
   );
 
+  const signatureCol = findFormPGJGujaratSignatureColumn(worksheet, layout);
   const tableColMin = Math.min(...templateCols.map(({ col }) => col), startCol);
-  const tableColMax = Math.max(...templateCols.map(({ col }) => col));
+  const tableColMax = Math.max(
+    ...templateCols.map(({ col }) => col),
+    signatureCol > 0 ? signatureCol : 0
+  );
 
   // Unmerge vertical body merges so each employee keeps its own row.
   const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
@@ -1715,12 +2369,18 @@ export async function buildFormPGJGujaratWorkbookWithTemplateStyles({
     templateCols.forEach(({ col, bucket }) => {
       let val = getFormPGJExportValueForBucket(row, bucket, idx);
       if (bucket === 'sno') val = String(idx + 1);
+      if (String(bucket).startsWith('day:')) {
+        const dayNum = Number(String(bucket).split(':')[1]);
+        if (Number.isFinite(dayNum) && dayNum > monthDays) val = '';
+      }
       if (bucket === 'dateOfEntry' && val) val = formatDate(val);
       if (bucket === 'paymentDate' && val) val = formatDate(val);
       if (bucket === 'overtimeHours' || bucket === 'overtimeEarnings') {
         if (!val || String(val).trim() === '') val = FORM_PGJ_OVERTIME_DEFAULT;
       }
-      if (bucket === 'wageRate' || bucket === 'age' || bucket === 'sex') val = '';
+      if (bucket === 'wageRate' || bucket === 'age' || bucket === 'sex' || bucket === 'signature') {
+        val = '';
+      }
       if (val == null || val === '' || /^enter\s+/i.test(String(val).trim())) {
         worksheet.getCell(excelRow, col).value = '';
         return;
@@ -1747,7 +2407,25 @@ export async function buildFormPGJGujaratWorkbookWithTemplateStyles({
       templateRow: dataStartRow,
       templateBodyRows: 1,
     });
+    // Full box on Sr.No (B) through Signature/Thumb Impression (BI) for every data row.
+    applyExcelJSFullBoxBordersToRange(worksheet, {
+      rowFrom: dataStartRow,
+      rowTo: dataStartRow + rows.length - 1,
+      colFrom: tableColMin,
+      colTo: tableColMax,
+      borderStyle: 'thin',
+    });
   }
+
+  applyFormPGJGujaratMonthDayColumns(worksheet, layout, monthDays);
+  applyFormPGJGujaratTableFontSize(worksheet, {
+    headerRow: layout.headerRow,
+    lastRow: dataStartRow + Math.max(rows.length, 1) - 1,
+    colFrom: tableColMin,
+    colTo: tableColMax,
+    size: FORM_PGJ_TABLE_FONT_SIZE,
+  });
+  ensureFormPGJGujaratDateOfMonthGroupMerge(worksheet, layout, monthDays);
 
   const out = await workbook.xlsx.writeBuffer();
   return {

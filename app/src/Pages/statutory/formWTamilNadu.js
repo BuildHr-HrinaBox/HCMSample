@@ -1,3 +1,7 @@
+import { flattenPayrollEarningColumns, readPayrollScalar } from '../../utils/payrollEarnings';
+import { samplePayrollRowMatchesEmployeeId } from '../../utils/samplePayrollApi';
+import { collectForm10RowNameParts } from './form10TamilNadu';
+import { findFormXVIIITamilNaduRecordByFirstAndLastName } from './formXVIIITamilNaduWagesMuster';
 import { personNamesMatch } from './formFKarnataka';
 
 /**
@@ -622,4 +626,274 @@ export function writeFormWTamilNaduPeriodFieldsToExcelJsWorksheet(worksheet, pay
   }
 
   return wroteWage || wroteMonth || wroteYear;
+}
+
+export function formWTamilNaduHeaderNorm(header) {
+  return String(header || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/** FORM - W col: "Number of days worked". */
+export function isFormWTamilNaduDaysWorkedHeader(header) {
+  const h = formWTamilNaduHeaderNorm(header);
+  if (!h) return false;
+  if (/overtime|\bot\b|hours?\s+worked/.test(h)) return false;
+  if (/basic|dearness|allowance|wage|identification|employee\s*id|name/.test(h) && !/days/.test(h)) {
+    return false;
+  }
+  return (
+    (h.includes('number') && h.includes('days') && h.includes('worked')) ||
+    (h.includes('no') && h.includes('days') && h.includes('worked')) ||
+    (h.includes('days') && h.includes('worked')) ||
+    (/number\s+of\s+days/.test(h) && !/hours/.test(h)) ||
+    (/no\.?\s*of\s+days/.test(h) && !/hours/.test(h))
+  );
+}
+
+/** Prefer named "Number of days worked"; else the column between Employee ID and Basic Wage. */
+export function findFormWTamilNaduDaysWorkedHeaders(headers) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const named = hdrs.filter((h) => isFormWTamilNaduDaysWorkedHeader(h));
+  if (named.length > 0) return named;
+  const isId = (h) => {
+    const t = formWTamilNaduHeaderNorm(h);
+    return (
+      /identification|employee\s*id|emp\s*id|worker\s*id|employee\s*number/.test(t) &&
+      !/zoho/.test(t)
+    );
+  };
+  const isBasic = (h) => {
+    const t = formWTamilNaduHeaderNorm(h);
+    return t.includes('basic') && /wage|wag/.test(t);
+  };
+  const idIdx = hdrs.findIndex(isId);
+  const basicIdx = hdrs.findIndex(isBasic);
+  if (idIdx >= 0 && basicIdx === idIdx + 2) return [hdrs[idIdx + 1]];
+  if (idIdx >= 0 && basicIdx > idIdx + 1 && basicIdx - idIdx === 2) return [hdrs[idIdx + 1]];
+  return [];
+}
+
+function mergeFormWTamilNaduPayrollPayload(payrollRow) {
+  if (!payrollRow || typeof payrollRow !== 'object') return payrollRow;
+  const payload = payrollRow.payroll_payload;
+  if (typeof payload === 'string') {
+    try {
+      return { ...payrollRow, ...JSON.parse(payload) };
+    } catch {
+      return payrollRow;
+    }
+  }
+  if (payload && typeof payload === 'object') return { ...payrollRow, ...payload };
+  return payrollRow;
+}
+
+/** Sample Payroll Paid_days (flat row, payload, or common aliases). */
+export function resolveFormWTamilNaduPaidDays(payrollRow) {
+  if (!payrollRow || typeof payrollRow !== 'object' || payrollRow.fetch_error) return '';
+  const merged = mergeFormWTamilNaduPayrollPayload(payrollRow);
+  const nested =
+    merged.employee && typeof merged.employee === 'object' && !Array.isArray(merged.employee)
+      ? merged.employee
+      : null;
+  const sources = [flattenPayrollEarningColumns(merged), merged];
+  if (nested) sources.push(nested);
+  const keys = [
+    'Paid_days',
+    'paid_days',
+    'Paid Days',
+    'paidDays',
+    'PaidDays',
+    'days_worked',
+    'Days Worked',
+    'daysWorked',
+    'no_of_days_worked',
+    'effective_paid_days',
+  ];
+  const patterns = [
+    /^paid_days$/,
+    /^paiddays$/,
+    /paid_days/,
+    /daysworked/,
+    /days_present/,
+    /noofdayspresent/,
+    /effective_paid_days/,
+  ];
+  for (let i = 0; i < sources.length; i += 1) {
+    const src = sources[i];
+    if (!src || typeof src !== 'object') continue;
+    const raw = readPayrollScalar(src, keys, patterns);
+    if (raw === '' || raw == null) continue;
+    const num = Number(String(raw).replace(/,/g, '').trim());
+    if (Number.isFinite(num) && num >= 0) return num;
+  }
+  return '';
+}
+
+export function readFormWTamilNaduPayrollMonthIso(row) {
+  if (!row || typeof row !== 'object') return '';
+  const keys = [
+    'payroll_month',
+    'Payroll_Month',
+    'payrollMonth',
+    'salary_month',
+    'Salary_Month',
+    'yearmonth',
+    'year_month',
+    'YearMonth',
+    'monthFilter',
+    'MonthFilter',
+    'monthfilter',
+    'month',
+    'Month',
+  ];
+  for (let i = 0; i < keys.length; i += 1) {
+    const raw = String(row[keys[i]] ?? '').trim();
+    if (!raw) continue;
+    const iso = raw.match(/^(\d{4}-\d{2})/);
+    if (iso) return iso[1];
+  }
+  return '';
+}
+
+export function filterFormWTamilNaduPayrollRowsForMonth(records, monthIso) {
+  const rows = (Array.isArray(records) ? records : []).filter(
+    (row) => row && typeof row === 'object' && row.fetch_error !== true
+  );
+  const want = String(monthIso || '').trim();
+  if (!/^\d{4}-\d{2}$/.test(want)) return rows;
+  const tagged = rows.filter((row) => readFormWTamilNaduPayrollMonthIso(row));
+  if (tagged.length === 0) return rows;
+  const matched = rows.filter((row) => readFormWTamilNaduPayrollMonthIso(row) === want);
+  if (matched.length > 0) return matched;
+  // Fetcher often returns a single already-scoped Sample Payroll month while the
+  // form's primary month candidate differs (due date ±1). Keep that batch.
+  const taggedMonths = Array.from(
+    new Set(tagged.map((row) => readFormWTamilNaduPayrollMonthIso(row)).filter(Boolean))
+  );
+  if (taggedMonths.length === 1) return rows;
+  return matched;
+}
+
+function formWTamilNaduEmployeeIdCandidates(employeeOrRow, extraParts = null) {
+  const src = employeeOrRow && typeof employeeOrRow === 'object' ? employeeOrRow : {};
+  const extra = extraParts && typeof extraParts === 'object' ? extraParts : {};
+  return Array.from(
+    new Set(
+      [
+        resolveFormWTamilNaduEmployeeId(src),
+        extra.employeeId,
+        extra.EmployeeID,
+        src.EmployeeID,
+        src['Employee ID'],
+        src.employee_id,
+        src.employee_number,
+        src.Zoho_ID,
+      ]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+/** Sample Payroll match: fullname OR firstname + lastname (never first-name-only). */
+export function findFormWTamilNaduPayrollRowByFirstAndLastName(
+  employeeOrRow,
+  records,
+  extraParts = null,
+  options = {}
+) {
+  const monthIso = options.monthIso || options.payrollMonth || '';
+  const rows = filterFormWTamilNaduPayrollRowsForMonth(records, monthIso);
+  if (rows.length === 0) return null;
+  // Rows are already month-scoped (incl. single-batch fallback). Do not re-filter
+  // with Form XVIII's stricter month matcher, which can drop the Paid_days batch.
+  const named = findFormXVIIITamilNaduRecordByFirstAndLastName(
+    employeeOrRow,
+    rows,
+    extraParts,
+    { monthIso: '' }
+  );
+  if (named && !named.fetch_error) return named;
+  const ids = formWTamilNaduEmployeeIdCandidates(employeeOrRow, extraParts);
+  for (let i = 0; i < ids.length; i += 1) {
+    const hit = rows.find((row) => samplePayrollRowMatchesEmployeeId(row, ids[i]));
+    if (hit && !hit.fetch_error) return hit;
+  }
+  return null;
+}
+
+/**
+ * FORM - W "Number of days worked" ← Sample Payroll Paid_days.
+ * Match People / form row to payroll by firstname + lastname.
+ */
+export function applyFormWTamilNaduPaidDaysToMappedRows(
+  rows,
+  headers,
+  payrollRows = [],
+  options = {}
+) {
+  const hdrs = Array.isArray(headers) ? headers : [];
+  let daysHeaders = findFormWTamilNaduDaysWorkedHeaders(hdrs);
+  if (daysHeaders.length === 0 && Array.isArray(rows) && rows[0] && typeof rows[0] === 'object') {
+    daysHeaders = findFormWTamilNaduDaysWorkedHeaders(Object.keys(rows[0]));
+  }
+  if (daysHeaders.length === 0 || !Array.isArray(rows) || rows.length === 0) {
+    return { paidDaysHits: 0 };
+  }
+
+  const overwrite = options.overwrite !== false;
+  const monthIso = options.monthIso || options.payrollMonth || '';
+  const unwrapEmp =
+    typeof options.unwrapEmp === 'function'
+      ? options.unwrapEmp
+      : (item) => (item && (item.Employee || item.employee || item)) || null;
+  const employeesForMapping = Array.isArray(options.employeesForMapping)
+    ? options.employeesForMapping
+    : [];
+  const resolvePayrollRow =
+    typeof options.resolvePayrollRow === 'function' ? options.resolvePayrollRow : null;
+  const payrollList = filterFormWTamilNaduPayrollRowsForMonth(payrollRows, monthIso);
+  const idHeader = hdrs.find((h) => {
+    const t = formWTamilNaduHeaderNorm(h);
+    return (
+      /identification|employee\s*id|emp\s*id|worker\s*id|employee\s*number/.test(t) &&
+      !/zoho/.test(t)
+    );
+  });
+
+  const cellEmpty = (value) => {
+    const s = String(value ?? '').trim();
+    if (!s) return true;
+    return /^enter\b/i.test(s);
+  };
+
+  let paidDaysHits = 0;
+  rows.forEach((row, index) => {
+    if (!row || typeof row !== 'object') return;
+    const emp = unwrapEmp(employeesForMapping[index] || null);
+    const extraParts = {
+      ...collectForm10RowNameParts(row, hdrs),
+      employeeId: idHeader ? String(row[idHeader] ?? '').trim() : '',
+    };
+    const payrollRow = resolvePayrollRow
+      ? resolvePayrollRow(emp, row, index) || null
+      : findFormWTamilNaduPayrollRowByFirstAndLastName(emp || row, payrollList, extraParts, {
+          monthIso,
+        });
+    const paid = payrollRow && !payrollRow.fetch_error ? resolveFormWTamilNaduPaidDays(payrollRow) : '';
+    let filledRow = false;
+    daysHeaders.forEach((header) => {
+      const cur = String(row[header] ?? '').trim();
+      if (!overwrite && !cellEmpty(cur)) return;
+      if (paid !== '' && paid != null) {
+        row[header] = String(paid);
+        filledRow = true;
+      }
+    });
+    if (filledRow) paidDaysHits += 1;
+  });
+  return { paidDaysHits };
 }

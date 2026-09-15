@@ -228,8 +228,10 @@ export function findForm10PayrollRowByFirstAndLastName(employeeOrRow, payrollRow
  */
 export function karnatakaFirstAndLastNamesMatch(employeeOrRow, payrollRow, extraParts = null) {
   const pay = readForm10PersonNameParts(payrollRow);
-  if (!pay.firstName || !pay.lastName) return false;
-  const payCombo = `${pay.firstName} ${pay.lastName}`.trim();
+  const payHasSplit = Boolean(pay.firstName && pay.lastName);
+  const payCombo = payHasSplit
+    ? `${pay.firstName} ${pay.lastName}`.trim()
+    : String(pay.fullName || '').trim();
   if (!payCombo) return false;
 
   const emp = readForm10PersonNameParts(employeeOrRow);
@@ -238,7 +240,11 @@ export function karnatakaFirstAndLastNamesMatch(employeeOrRow, payrollRow, extra
   const lastName = emp.lastName || extra.lastName || '';
   const fullName = emp.fullName || extra.fullName || `${firstName} ${lastName}`.trim();
 
-  if (form10NameTokensMatch(firstName, pay.firstName) && form10NameTokensMatch(lastName, pay.lastName)) {
+  if (
+    payHasSplit &&
+    form10NameTokensMatch(firstName, pay.firstName) &&
+    form10NameTokensMatch(lastName, pay.lastName)
+  ) {
     return true;
   }
   const empCombo = `${firstName} ${lastName}`.trim();
@@ -250,8 +256,14 @@ export function karnatakaFirstAndLastNamesMatch(employeeOrRow, payrollRow, extra
   const empTokens = normForm10Name(firstName || fullName)
     .split(' ')
     .filter(Boolean);
-  const payFirstTokens = normForm10Name(pay.firstName).split(' ').filter(Boolean);
-  const payLastTokens = normForm10Name(pay.lastName).split(' ').filter(Boolean);
+  // Payroll employee_name-only rows still require a multi-token People name (never first-name-only).
+  if (!payHasSplit && empTokens.length < 2) return false;
+  const payFirstTokens = normForm10Name(payHasSplit ? pay.firstName : payCombo)
+    .split(' ')
+    .filter(Boolean);
+  const payLastTokens = payHasSplit
+    ? normForm10Name(pay.lastName).split(' ').filter(Boolean)
+    : [];
   if (empTokens.length >= 2 && payFirstTokens.length && payLastTokens.length) {
     const empHead = empTokens.slice(0, payFirstTokens.length).join(' ');
     const empTail = empTokens.slice(-payLastTokens.length).join(' ');

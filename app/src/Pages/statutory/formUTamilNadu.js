@@ -79,6 +79,21 @@ export function looksLikeFormUFilename(text) {
   return /(?:^|[^a-z0-9])form[\s._-]*u(?:[^a-z0-9]|$)/i.test(s) || /\bform\s+u\b/i.test(s);
 }
 
+/** True for Form U / Form_U_-_TamilNadu — never Form XIV/XV/XVI. */
+export function isFormUStatutoryDownloadHint(...parts) {
+  const blob = parts
+    .flat()
+    .filter((p) => p != null && String(p).trim() !== '')
+    .join(' ')
+    .toLowerCase();
+  if (!blob) return false;
+  const withoutLaterForms = blob.replace(
+    /form[\s._-]*u(?:iv|ix|i[vx]|x[ivx]{0,3})(?![a-z])/gi,
+    ' '
+  );
+  return looksLikeFormUFilename(withoutLaterForms) || /\bform\s*[-–—]?\s*u\b/i.test(withoutLaterForms);
+}
+
 export function looksLikeTamilNaduText(text) {
   const s = String(text || '').toLowerCase();
   return /tamil[\s._-]*nadu|tamilnadu/.test(s);
@@ -152,7 +167,10 @@ export function headersIndicateFormUTamilNaduTemplateLayout(headers) {
     /bank/.test(joined) &&
     (/email|e\s*mail/.test(joined) || /mobile/.test(joined)) &&
     /photo/.test(joined);
-  return hasAddress && (hasTnMiddle || hasTnTail);
+  const hasEmployeeIdLayout =
+    (/worker\s+identity/.test(joined) || /employee\s+identification/.test(joined)) &&
+    (/date\s+of\s+joining/.test(joined) || /designation/.test(joined));
+  return hasAddress && (hasTnMiddle || hasTnTail || hasEmployeeIdLayout);
 }
 
 /** Draft/template contamination: header cells contain employee names or VE IDs. */
@@ -450,7 +468,121 @@ function isMeaningfulExportCellValue(value) {
   if (!text) return false;
   if (/^enter\s+/i.test(text)) return false;
   if (/^select\s+/i.test(text)) return false;
+  if (/^\[object object\]$/i.test(text)) return false;
   return true;
+}
+
+function isFormUTamilNaduColumnIndexRow(row, headers = []) {
+  if (!row || typeof row !== 'object') return false;
+  const hdrList =
+    Array.isArray(headers) && headers.length > 0 ? headers.filter(Boolean) : Object.keys(row);
+  if (hdrList.length < 4) return false;
+  let sequentialHits = 0;
+  let filled = 0;
+  let allFilledAreNumeric = true;
+  for (let i = 0; i < hdrList.length; i += 1) {
+    const val = String(row[hdrList[i]] ?? '').trim();
+    if (!val) continue;
+    filled += 1;
+    if (!/^\d{1,2}$/.test(val)) allFilledAreNumeric = false;
+    if (/^\d{1,2}$/.test(val) && Number(val) === i + 1) sequentialHits += 1;
+  }
+  if (filled < 4 || !allFilledAreNumeric) return false;
+  return sequentialHits >= Math.min(4, filled);
+}
+
+/** Autofill grid may be objects, arrays, or `{0: 'Babu', 1: 'VE0147'}` after a spread. */
+export function coerceFormUTamilNaduRowToObject(row, headers = []) {
+  if (!row || typeof row !== 'object') return null;
+  const hdrs = Array.isArray(headers) ? headers.filter(Boolean) : [];
+  if (Array.isArray(row)) {
+    const obj = {};
+    if (hdrs.length) {
+      hdrs.forEach((header, i) => {
+        obj[header] = row[i] ?? '';
+      });
+    } else {
+      row.forEach((value, i) => {
+        obj[i] = value;
+      });
+    }
+    return obj;
+  }
+  const keys = Object.keys(row).filter((k) => !String(k).startsWith('__'));
+  const numericKeys = keys.filter((k) => /^\d+$/.test(String(k)));
+  const mostlyNumericKeys = keys.length > 0 && numericKeys.length >= Math.max(3, keys.length - 1);
+  if (mostlyNumericKeys && hdrs.length) {
+    const obj = { ...row };
+    hdrs.forEach((header, i) => {
+      const current = obj[header];
+      if (isMeaningfulExportCellValue(current)) return;
+      const indexed = row[i] ?? row[String(i)];
+      if (indexed != null && String(indexed).trim() !== '') obj[header] = indexed;
+    });
+    return obj;
+  }
+  return row;
+}
+
+/** Keep employee rows for Excel even when the modal stored arrays / numeric keys. */
+export function normalizeFormUTamilNaduMappedRowsForExcel(mappedData, headers = []) {
+  if (!Array.isArray(mappedData)) return [];
+  const hdrs = Array.isArray(headers) ? headers.filter(Boolean) : [];
+  const out = [];
+  mappedData.forEach((row) => {
+    const obj = coerceFormUTamilNaduRowToObject(row, hdrs);
+    if (!obj) return;
+    if (isFormUTamilNaduColumnIndexRow(obj, hdrs.length ? hdrs : Object.keys(obj))) return;
+    const vals = Object.keys(obj)
+      .filter((k) => !String(k).startsWith('__'))
+      .map((k) => String(obj[k] ?? '').trim())
+      .filter(Boolean);
+    if (vals.length === 0) return;
+    out.push(obj);
+  });
+  return out;
+}
+
+/**
+ * Prefer the visible FORM U / EMPLOYEE REGISTER tab. Hidden helper sheets can
+ * outscore it via raw text-cell count; PDF then shows data while Excel looks empty.
+ */
+export function scoreFormUTamilNaduSheetForExport({
+  sheetName = '',
+  sheetState = '',
+  tableAnchorScore = 0,
+  hasFormUTitle = false,
+  hasEmployeeRegisterTitle = false,
+  hasEmployeeTable = false
+} = {}) {
+  let score = Number(tableAnchorScore) || 0;
+  const name = String(sheetName || '').toLowerCase();
+  const hidden = sheetState === 'hidden' || sheetState === 'veryHidden';
+  if (hidden) score -= 1000;
+  if (looksLikeFormUFilename(name) || /(?:^|[^a-z0-9])form[\s._-]*u(?:[^a-z0-9]|$)/i.test(name)) {
+    score += 400;
+  }
+  if (hasFormUTitle) score += 120;
+  if (hasEmployeeRegisterTitle) score += 120;
+  if (hasEmployeeTable) score += 80;
+  return score;
+}
+
+/** Excel hides values written onto merged non-master cells; PDF can still read them. */
+export function writeFormUTamilNaduExcelVisibleCell(worksheet, row, col, value) {
+  if (!worksheet || !Number.isFinite(row) || !Number.isFinite(col) || row < 1 || col < 1) return;
+  let targetRow = row;
+  let targetCol = col;
+  try {
+    const cell = worksheet.getCell(row, col);
+    if (cell?.isMerged && cell.master) {
+      targetRow = cell.master.row || targetRow;
+      targetCol = cell.master.col || targetCol;
+    }
+  } catch (_) {
+    /* write to the requested cell */
+  }
+  worksheet.getCell(targetRow, targetCol).value = value;
 }
 
 /**
@@ -458,7 +590,9 @@ function isMeaningfulExportCellValue(value) {
  * Never use sourceHeaders[index] unless the alias bucket matches (avoids Photo→Email shifts).
  */
 export function resolveFormUTamilNaduExportCellValue(row, templateHeader, sourceHeaders = [], headerIndex = null) {
-  if (!row || typeof row !== 'object' || Array.isArray(row)) return '';
+  const coerced = coerceFormUTamilNaduRowToObject(row, sourceHeaders);
+  if (!coerced || typeof coerced !== 'object') return '';
+  row = coerced;
   const header = String(templateHeader || '').trim();
   if (!header) return '';
 
@@ -554,4 +688,113 @@ export function resolveFormUTamilNaduExportCellValue(row, templateHeader, source
   }
 
   return '';
+}
+
+function defaultExcelCellValueToString(val) {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'object') {
+    if (Array.isArray(val.richText)) return val.richText.map((rt) => rt?.text || '').join('');
+    if (val.text != null) return String(val.text);
+    if (val.result != null) return String(val.result);
+  }
+  return '';
+}
+
+/** Dummy "Column 1" keys from array grids must not replace TN template labels. */
+export function resolveFormUTamilNaduExportHeaders(headers) {
+  const list = (Array.isArray(headers) ? headers : []).map((h) => String(h || '').trim()).filter(Boolean);
+  if (list.length === 0) return [...FORM_U_TAMILNADU_HEADERS];
+  if (list.every((h) => /^column\s+\d+$/i.test(h))) return [...FORM_U_TAMILNADU_HEADERS];
+  return list;
+}
+
+function collectFormUTamilNaduTemplateColumns(worksheet, headerRow, startCol, cellToString) {
+  const cols = [];
+  const labels = [];
+  if (!worksheet || headerRow < 1 || startCol < 1) return { cols, labels };
+  let blankRun = 0;
+  for (let c = startCol; c <= 260; c += 1) {
+    const label = String(cellToString(worksheet.getCell(headerRow, c)?.value) || '').trim();
+    if (label) {
+      cols.push(c);
+      labels.push(label);
+      blankRun = 0;
+    } else if (cols.length > 0) {
+      blankRun += 1;
+      if (blankRun >= 20) break;
+    }
+  }
+  return { cols, labels };
+}
+
+/**
+ * Write employee rows into the visible Form U TN table (below the 1,2,3… index strip).
+ * @returns {{ totalRows: number, startRow: number }}
+ */
+export function fillFormUTamilNaduEmployeeTable({
+  worksheet,
+  headerRow,
+  startCol = 1,
+  numberingRowBelowHeader = false,
+  mappedData = [],
+  headersToUse = [],
+  excelCellValueToString = defaultExcelCellValueToString
+} = {}) {
+  if (!worksheet || headerRow < 1) return { totalRows: 0, startRow: headerRow + 1 };
+  const cellToString = excelCellValueToString || defaultExcelCellValueToString;
+  const exportHeaders = resolveFormUTamilNaduExportHeaders(headersToUse);
+  const objectRows = normalizeFormUTamilNaduMappedRowsForExcel(
+    Array.isArray(mappedData) ? mappedData : [],
+    exportHeaders
+  );
+  const startRow = numberingRowBelowHeader ? headerRow + 2 : headerRow + 1;
+  let { cols: tnTemplateCols, labels: tnTemplateLabels } = collectFormUTamilNaduTemplateColumns(
+    worksheet,
+    headerRow,
+    startCol,
+    cellToString
+  );
+  if (tnTemplateCols.length === 0) {
+    exportHeaders.forEach((header, idx) => {
+      tnTemplateCols.push(startCol + idx);
+      tnTemplateLabels.push(header);
+    });
+  }
+  const totalRows = objectRows.length;
+  if (totalRows === 0 || tnTemplateCols.length === 0) {
+    return { totalRows, startRow };
+  }
+
+  const tableColMin = Math.min(startCol, ...tnTemplateCols);
+  const tableColMax = Math.max(...tnTemplateCols);
+  const clearFrom = headerRow + 1;
+  const clearTo = startRow + totalRows + 20;
+  for (let r = clearFrom; r <= clearTo; r += 1) {
+    for (let c = tableColMin; c <= tableColMax; c += 1) {
+      writeFormUTamilNaduExcelVisibleCell(worksheet, r, c, '');
+    }
+  }
+
+  objectRows.forEach((rowObj, i) => {
+    const targetRow = startRow + i;
+    tnTemplateCols.forEach((col, j) => {
+      const label = tnTemplateLabels[j] || '';
+      let value = resolveFormUTamilNaduExportCellValue(rowObj, label, exportHeaders, j);
+      if ((value == null || String(value).trim() === '') && formUTamilNaduHeaderAliasBucket(label) === 'sno') {
+        value = i + 1;
+      }
+      if (value == null || value === '') return;
+      const writeValue =
+        formUTamilNaduHeaderAliasBucket(label) === 'sno' &&
+        (typeof value === 'number' ||
+          (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(String(value).trim())))
+          ? Number(value)
+          : String(value);
+      writeFormUTamilNaduExcelVisibleCell(worksheet, targetRow, col, writeValue);
+    });
+  });
+
+  return { totalRows, startRow };
 }

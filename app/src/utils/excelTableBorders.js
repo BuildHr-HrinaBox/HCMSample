@@ -528,6 +528,75 @@ function worksheetLooksLikeFormXVServiceCertificate(worksheet) {
   return hasFormXv && hasServiceCert;
 }
 
+/** AP CLRA Form XXI — Register of Fines (boxed table values stay left-aligned). */
+export function worksheetLooksLikeFormXXIAPRegisterOfFines(worksheet) {
+  if (!worksheet || typeof worksheet.getCell !== 'function') return false;
+  const parts = [];
+  const maxR = Math.min(Number(worksheet.rowCount) || 24, 24);
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= 16; c += 1) {
+      let value;
+      try {
+        value = worksheet.getCell(r, c)?.value;
+      } catch (_) {
+        continue;
+      }
+      const text = statutoryCellValueToPlainText(value);
+      if (text) parts.push(text);
+    }
+  }
+  const blob = `${String(worksheet.name || '')} ${parts.join(' ')}`.toLowerCase();
+  if (/form\s*[-._ ]*xxi\b/.test(blob) && /register\s+of\s+fines/.test(blob)) return true;
+  if (
+    /act\s*\/\s*omission\s+for\s+which\s+fine\s+imposed/.test(blob) &&
+    /date\s+on\s+which\s+fine\s+reali[sz]/.test(blob)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Tamil Nadu CLRA Form XVIII — Register of Wages-cum-Muster Roll. */
+export function worksheetLooksLikeFormXVIIITamilNadu(worksheet) {
+  if (!worksheet || typeof worksheet.getCell !== 'function') return false;
+  const parts = [String(worksheet.name || '')];
+  const maxR = Math.min(Number(worksheet.rowCount) || 20, 20);
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= 18; c += 1) {
+      try {
+        const text = statutoryCellValueToPlainText(worksheet.getCell(r, c)?.value);
+        if (text) parts.push(text);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  const blob = parts.join(' ').toLowerCase();
+  if (/form[\s._-]*xxviii(?![a-z])/.test(blob)) return false;
+  const isXviii = /form[\s._-]*xviii(?![a-z])/.test(blob) || /form[\s._-]*18(?!\d)/.test(blob);
+  const isWagesCumMuster =
+    /wages[\s._-]*cum[\s._-]*muster/.test(blob) ||
+    /register\s+of\s+wages[\s-]*cum[\s-]*muster/.test(blob);
+  const hasAttendancePair = /daily\s+attendance/.test(blob) && /total\s+attendance/.test(blob);
+  return (isXviii && (isWagesCumMuster || hasAttendancePair)) || (isWagesCumMuster && hasAttendancePair);
+}
+
+function findFormXVIIITamilNaduDataStartRow(worksheet) {
+  const maxR = Math.min(Number(worksheet?.rowCount) || 22, 22);
+  for (let r = 8; r <= maxR; r += 1) {
+    let numbered = 0;
+    for (let c = 1; c <= 18; c += 1) {
+      const t = statutoryCellValueToPlainText(worksheet.getCell(r, c)?.value).trim();
+      if (/^\d{1,2}$/.test(t)) {
+        const n = Number(t);
+        if (n >= 1 && n <= 16) numbered += 1;
+      }
+    }
+    if (numbered >= 8) return r + 1;
+  }
+  return 13;
+}
+
 /** Rajasthan Form 14 — Record of Hours of Work (table values left-aligned like template model). */
 export function worksheetLooksLikeForm14Rajasthan(worksheet) {
   if (!worksheet || typeof worksheet.getCell !== 'function') return false;
@@ -564,12 +633,31 @@ export function worksheetLooksLikeForm14Rajasthan(worksheet) {
  * - Form Number / Rule / Form Name → center
  * - Numeric values → right (except Form XV service-certificate table → center)
  * - Rajasthan Form 14 table / month-year → left (matches official template model)
+ * - Form XXI AP Register of Fines boxed cells → left
+ * - Form XVIII TN table body (below column-number row) → left
  * - No left-align override for other text (keeps template centering)
  */
 export function applyStatutoryDownloadContentAlignment(worksheet) {
   if (!worksheet) return;
   const formXvServiceCertificate = worksheetLooksLikeFormXVServiceCertificate(worksheet);
   const form14Rajasthan = worksheetLooksLikeForm14Rajasthan(worksheet);
+  const formXXIAPFines = worksheetLooksLikeFormXXIAPRegisterOfFines(worksheet);
+  const formXVIIITamilNadu = worksheetLooksLikeFormXVIIITamilNadu(worksheet);
+  const formXVIIIDataStart = formXVIIITamilNadu
+    ? findFormXVIIITamilNaduDataStartRow(worksheet)
+    : 0;
+  const sheetNameLower = String(worksheet?.name || '').toLowerCase();
+  let formIFinesProbe = ` ${sheetNameLower} `;
+  for (let r = 1; r <= 4; r += 1) {
+    for (let c = 1; c <= 10; c += 1) {
+      const t = statutoryCellValueToPlainText(worksheet.getCell(r, c)?.value);
+      if (t) formIFinesProbe += ` ${t}`;
+    }
+  }
+  const formITamilNaduFines =
+    /pw\s*form\s*i/.test(sheetNameLower) ||
+    (/register\s+of\s+fines/i.test(formIFinesProbe) &&
+      !/register\s+of\s+workmen|conferment/i.test(formIFinesProbe));
   worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
     row.eachCell({ includeEmpty: false }, (cell) => {
       const text = statutoryCellValueToPlainText(cell?.value);
@@ -590,6 +678,29 @@ export function applyStatutoryDownloadContentAlignment(worksheet) {
         next.horizontal = 'center';
         next.wrapText = /vide\s+rule/i.test(text) && text.length > 60 ? true : false;
         next.textRotation = 0;
+        cell.alignment = next;
+        return;
+      }
+
+      // Form I TN Register of Fines — table body (names + NIL) stays left.
+      if (formITamilNaduFines && rowNumber >= 5) {
+        next.horizontal = 'left';
+        next.wrapText = true;
+        cell.alignment = next;
+        return;
+      }
+
+      // Form XXI AP — every boxed cell (headers, S.No, NIL, names) stays left.
+      if (formXXIAPFines) {
+        next.horizontal = 'left';
+        cell.alignment = next;
+        return;
+      }
+
+      // Form XVIII TN — table body text/numbers sit left in each box.
+      if (formXVIIITamilNadu && formXVIIIDataStart > 0 && rowNumber >= formXVIIIDataStart) {
+        next.horizontal = 'left';
+        next.vertical = cell.alignment?.vertical || 'middle';
         cell.alignment = next;
         return;
       }

@@ -1,11 +1,23 @@
 import * as XLSX from 'xlsx';
 import { formatStatutoryHeaderLabelValueExport } from '../../utils/statutorySiteCompanyHeaders';
+import { readForm10PersonNameParts } from './form10TamilNadu';
 
 /** Tamil Nadu CLRA Form XVIII — Register of Wages-cum-Muster Roll [Rule 78(1)(a)(i)]. */
 
 export const FORM_XVIII_TN_TITLE = 'Form XVIII – Register of Wages-cum-Muster Roll';
 export const FORM_XVIII_TN_SUBTITLE = 'Form of Register of Wages-cum-Muster Roll';
 export const FORM_XVIII_TN_REFERENCE = '[See rule 78(1)(a)(i)]';
+/** Table body / header font on PDF download. */
+export const FORM_XVIII_TN_PDF_TABLE_FONT_SIZE = 10;
+export const FORM_XVIII_TN_AMOUNT_OF_WAGES_EARNED = 'Amount of wages earned';
+export const FORM_XVIII_TN_WAGES_CUM_MUSTER_TITLE_RE =
+  /form\s+of\s+register\s+of\s+wages[\s-]*cum[\s-]*muster\s+roll/i;
+/** Leftover template boxes after the 16-column register: Excel R–W (0-based). */
+export const FORM_XVIII_TN_TRAILING_COL_R0 = 17;
+export const FORM_XVIII_TN_TRAILING_COL_W0 = 22;
+/** Same band in ExcelJS (1-based). */
+export const FORM_XVIII_TN_TRAILING_COL_R1 = 18;
+export const FORM_XVIII_TN_TRAILING_COL_W1 = 23;
 
 export function formXVIIITamilNaduHeaderNorm(txt) {
   return String(txt || '')
@@ -28,6 +40,431 @@ export function matchesFormXVIIIHint(blob) {
 export function isFormXVIIITamilNaduContext(partsOrBlob) {
   const p = String(partsOrBlob || '').toLowerCase();
   return /tamil[\s._-]*nadu|tamilnadu|form_xviii[_\s-]*tamil|form[\s._-]*xviii[_\s-]*tamil/.test(p);
+}
+
+function formXVIIITamilNaduPdfBlob(metaLines, rows, sheetName, fileName) {
+  return [
+    ...(Array.isArray(metaLines) ? metaLines : []),
+    ...(Array.isArray(rows) ? rows.slice(0, 16).flat() : []),
+    sheetName || '',
+    fileName || '',
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+/** PDF download — Form XVIII wages-cum-muster (not Form W / XXVII / MP combined register). */
+export function looksLikeFormXVIIITamilNaduPdfContext(
+  metaLines,
+  rows,
+  sheetName = '',
+  fileName = ''
+) {
+  const blob = formXVIIITamilNaduPdfBlob(metaLines, rows, sheetName, fileName);
+  if (!blob.trim()) return false;
+  if (/form[\s._-]*xxviii(?![a-z])/.test(blob)) return false;
+  if (/combined\s+register/.test(blob) && /madhya|form[\s._-]*xviii[\s._-]*mp/.test(blob)) {
+    return false;
+  }
+  const isXviii =
+    /form[\s._-]*xviii(?![a-z])/.test(blob) || /form[\s._-]*18(?!\d)/.test(blob);
+  const isWagesCumMuster =
+    /wages[\s._-]*cum[\s._-]*muster/.test(blob) ||
+    /register\s+of\s+wages[\s-]*cum[\s-]*muster/.test(blob);
+  const hasAttendancePair =
+    /daily\s+attendance/.test(blob) && /total\s+attendance/.test(blob);
+  if (isXviii && (isWagesCumMuster || hasAttendancePair || isFormXVIIITamilNaduContext(blob))) {
+    return true;
+  }
+  return isWagesCumMuster && hasAttendancePair;
+}
+
+export function isFormXVIIITamilNaduWagesCumMusterTitle(text) {
+  return FORM_XVIII_TN_WAGES_CUM_MUSTER_TITLE_RE.test(
+    String(text || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
+}
+
+/** Keep "Form of Register of Wages-cum-Muster Roll" as one title line. */
+export function coalesceFormXVIIITamilNaduTitleLines(lines = []) {
+  const list = (Array.isArray(lines) ? lines : [])
+    .map((s) => String(s || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const out = [];
+  for (let i = 0; i < list.length; i += 1) {
+    const cur = list[i];
+    const next = list[i + 1] || '';
+    const joined = `${cur} ${next}`.replace(/\s+/g, ' ').trim();
+    if (/^form\s+of$/i.test(cur) && /^register\s+of\s+wages[\s-]*cum[\s-]*muster/i.test(next)) {
+      out.push(joined);
+      i += 1;
+      continue;
+    }
+    out.push(cur);
+  }
+  return out;
+}
+
+export function isFormXVIIITamilNaduAmountOfWagesEarnedGroupLabel(text) {
+  const s = formXVIIITamilNaduHeaderNorm(text);
+  if (!s) return false;
+  return /amount\s+of\s+wages?\s+earned/.test(s) || /^wages?\s+earned$/.test(s);
+}
+
+function formXVIIITamilNaduPdfLeafAt(rows, fromRow, toRow, col) {
+  for (let r = toRow; r >= fromRow && r < rows.length; r -= 1) {
+    const t = String(rows[r]?.[col] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!t) continue;
+    if (isFormXVIIITamilNaduAmountOfWagesEarnedGroupLabel(t)) continue;
+    if (/^\(?\s*\d{1,2}\s*\)?$/.test(t)) continue;
+    return t;
+  }
+  return '';
+}
+
+export function isFormXVIIITamilNaduWagesEarnedGroupLeafHeader(header) {
+  if (!header) return false;
+  if (isFormXVIIITamilNaduAmountOfWagesEarnedGroupLabel(header)) return false;
+  if (isFormXVIIITamilNaduDeductionsHeader(header)) return false;
+  if (isFormXVIIITamilNaduNetAmountPaidHeader(header)) return false;
+  if (isFormXVIIITamilNaduDailyRateHeader(header)) return false;
+  if (isFormXVIIITamilNaduDailyAttendanceHeader(header)) return false;
+  if (isFormXVIIITamilNaduTotalAttendanceHeader(header)) return false;
+  const s = formXVIIITamilNaduHeaderNorm(header);
+  return (
+    (s.includes('basic') && s.includes('wage')) ||
+    (s.includes('dearness') && s.includes('allowance')) ||
+    isFormXVIIITamilNaduOvertimeHeader(header) ||
+    isFormXVIIITamilNaduOtherCashPaymentsHeader(header) ||
+    isFormXVIIITamilNaduTotalAmountHeader(header)
+  );
+}
+
+/** PDF group banner: Amount of wages earned over Basic / DA / OT / Other cash / Total. */
+export function detectFormXVIIITamilNaduPdfGroupBands(
+  rows,
+  tableStart,
+  headerBandEnd,
+  colCount
+) {
+  const list = Array.isArray(rows) ? rows : [];
+  const start = Math.max(0, Number(tableStart) || 0);
+  const end = Math.max(start, Number(headerBandEnd) || start);
+  const cols = Math.max(0, Number(colCount) || 0);
+  if (!list.length || cols < 3) return [];
+
+  let labelRow = start;
+  let label = FORM_XVIII_TN_AMOUNT_OF_WAGES_EARNED;
+  let labelCol = -1;
+  for (let r = start; r <= end && r < list.length; r += 1) {
+    for (let c = 0; c < cols; c += 1) {
+      const t = String(list[r]?.[c] || '').replace(/\s+/g, ' ').trim();
+      if (isFormXVIIITamilNaduAmountOfWagesEarnedGroupLabel(t)) {
+        labelRow = r;
+        label = t;
+        labelCol = c;
+      }
+    }
+  }
+
+  let leafStart = -1;
+  let leafEnd = -1;
+  for (let c = 0; c < cols; c += 1) {
+    const leaf = formXVIIITamilNaduPdfLeafAt(list, start, end, c);
+    if (!isFormXVIIITamilNaduWagesEarnedGroupLeafHeader(leaf)) continue;
+    if (leafStart < 0) leafStart = c;
+    leafEnd = c;
+  }
+
+  const bandStart = labelCol >= 0 ? labelCol : leafStart;
+  const bandEnd = leafEnd >= 0 ? leafEnd : bandStart;
+  if (bandStart < 0 || bandEnd <= bandStart) return [];
+  return [
+    {
+      labelRow,
+      start: bandStart,
+      end: bandEnd,
+      label,
+    },
+  ];
+}
+
+function formXVIIITamilNaduNormName(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function formXVIIITamilNaduSplitFirstLast(text) {
+  const parts = formXVIIITamilNaduNormName(text).split(' ').filter(Boolean);
+  if (parts.length < 2) return { firstName: '', lastName: '' };
+  return { firstName: parts[0], lastName: parts[parts.length - 1] };
+}
+
+/** Map Form 25 / attendance / payroll rows onto FirstName+LastName match fields. */
+export function toFormXVIIITamilNaduNameMatchRecord(record) {
+  if (!record || typeof record !== 'object') return record;
+  const workerName = String(
+    record.nameOfTheWorker ||
+      record.NameOfTheWorker ||
+      record.employee_name ||
+      record.EmployeeName ||
+      record.Name ||
+      record.name ||
+      ''
+  ).trim();
+  if (!workerName) return record;
+  return {
+    ...record,
+    employee_name: record.employee_name || workerName,
+    EmployeeName: record.EmployeeName || workerName,
+    Name: record.Name || workerName,
+  };
+}
+
+/** First + last from People, form row, payroll, Form 25, or attendance. */
+export function readFormXVIIITamilNaduFirstLastParts(src, extraParts = null) {
+  const extra = extraParts && typeof extraParts === 'object' ? extraParts : {};
+  const wrapped = toFormXVIIITamilNaduNameMatchRecord(src) || {};
+  const parts = readForm10PersonNameParts(wrapped);
+  let firstName = formXVIIITamilNaduNormName(parts.firstName || extra.firstName || '');
+  let lastName = formXVIIITamilNaduNormName(parts.lastName || extra.lastName || '');
+  const fullName = formXVIIITamilNaduNormName(
+    parts.fullName || extra.fullName || `${firstName} ${lastName}`.trim()
+  );
+  if (!lastName && firstName.includes(' ')) {
+    const fromFirst = formXVIIITamilNaduSplitFirstLast(firstName);
+    if (fromFirst.lastName) {
+      firstName = fromFirst.firstName;
+      lastName = fromFirst.lastName;
+    }
+  }
+  if (!firstName || !lastName) {
+    const fromFull = formXVIIITamilNaduSplitFirstLast(fullName);
+    if (!firstName) firstName = fromFull.firstName;
+    if (!lastName) lastName = fromFull.lastName;
+  }
+  return { firstName, lastName, fullName };
+}
+
+export function formXVIIITamilNaduFirstLastKey(src, extraParts = null) {
+  const { firstName, lastName, fullName } = readFormXVIIITamilNaduFirstLastParts(src, extraParts);
+  const tokens = formXVIIITamilNaduNameTokens(fullName || `${firstName} ${lastName}`);
+  // Single-token fullname (e.g. "Nagaraju") is a valid match key.
+  if ((!firstName || !lastName) && tokens.length === 1 && fullName) {
+    return formXVIIITamilNaduNormName(fullName);
+  }
+  if (!firstName || !lastName) return '';
+  // Do not collapse "Selva Kumar P" / "Selva Pal" onto "Selva P".
+  if (tokens.length > 2) return formXVIIITamilNaduNormName(fullName);
+  if (lastName.length === 1 && tokens.length !== 2) return '';
+  return `${firstName} ${lastName}`;
+}
+
+/** Lookup keys: exact fullname and/or firstname + lastname (never first-name-only). */
+export function formXVIIITamilNaduAttendanceNameKeys(src, extraParts = null) {
+  const keys = new Set();
+  const flKey = formXVIIITamilNaduFirstLastKey(src, extraParts);
+  if (flKey) keys.add(flKey);
+  const { fullName, firstName, lastName } = readFormXVIIITamilNaduFirstLastParts(src, extraParts);
+  const full = formXVIIITamilNaduNormName(fullName);
+  if (full) keys.add(full);
+  if (firstName && lastName) keys.add(formXVIIITamilNaduNormName(`${firstName} ${lastName}`));
+  return Array.from(keys).filter(Boolean);
+}
+
+function formXVIIITamilNaduNameTokens(text) {
+  return formXVIIITamilNaduNormName(text)
+    .split(' ')
+    .filter(Boolean);
+}
+
+/**
+ * Daily / Total attendance + Sample Payroll: exact fullname OR firstname + lastname.
+ * Never first-name-only, ID, or last-token collapse of a longer name.
+ */
+export function formXVIIITamilNaduFirstAndLastNamesMatch(
+  employeeOrRow,
+  record,
+  extraParts = null
+) {
+  const left = readFormXVIIITamilNaduFirstLastParts(employeeOrRow, extraParts);
+  const right = readFormXVIIITamilNaduFirstLastParts(record);
+  const leftFull = formXVIIITamilNaduNormName(left.fullName);
+  const rightFull = formXVIIITamilNaduNormName(right.fullName);
+  if (leftFull && rightFull && leftFull === rightFull) return true;
+  if (!left.firstName || !left.lastName || !right.firstName || !right.lastName) return false;
+  if (left.firstName !== right.firstName || left.lastName !== right.lastName) return false;
+  const leftCombo = `${left.firstName} ${left.lastName}`;
+  const rightCombo = `${right.firstName} ${right.lastName}`;
+  const leftTokens = formXVIIITamilNaduNameTokens(left.fullName || leftCombo);
+  const rightTokens = formXVIIITamilNaduNameTokens(right.fullName || rightCombo);
+  // "Selva P" must not match "Selva Kumar P" / "Selva Pal P" (same first + last token).
+  if (leftTokens.length > 2 || rightTokens.length > 2) {
+    return formXVIIITamilNaduNormName(left.fullName) === formXVIIITamilNaduNormName(right.fullName);
+  }
+  // Last initial "P" must not stand in for Pal / Pandian / Prasad.
+  if (left.lastName.length === 1 || right.lastName.length === 1) {
+    return leftTokens.length === 2 && rightTokens.length === 2 && left.lastName === right.lastName;
+  }
+  return leftCombo === rightCombo;
+}
+
+/** Alias: fullname OR firstname + lastname (same rules as FirstAndLastNamesMatch). */
+export const formXVIIITamilNaduNamesMatch = formXVIIITamilNaduFirstAndLastNamesMatch;
+
+/** Sample Payroll Paid_days (flat row, payload, or common aliases). */
+export function resolveFormXVIIITamilNaduPaidDays(payrollRow) {
+  if (!payrollRow || typeof payrollRow !== 'object') return '';
+  let merged = payrollRow;
+  const payload = payrollRow.payroll_payload;
+  if (typeof payload === 'string') {
+    try {
+      merged = { ...payrollRow, ...JSON.parse(payload) };
+    } catch {
+      merged = payrollRow;
+    }
+  } else if (payload && typeof payload === 'object') {
+    merged = { ...payrollRow, ...payload };
+  }
+  const nested =
+    merged.employee && typeof merged.employee === 'object' && !Array.isArray(merged.employee)
+      ? merged.employee
+      : null;
+  const sources = nested ? [merged, nested] : [merged];
+  const keys = [
+    'paid_days',
+    'Paid_days',
+    'Paid Days',
+    'paidDays',
+    'PaidDays',
+    'days_worked',
+    'daysWorked',
+    'no_of_days_worked',
+  ];
+  for (let s = 0; s < sources.length; s += 1) {
+    const n = firstPayrollMoney(sources[s], keys);
+    if (n !== '') return n;
+  }
+  return '';
+}
+
+export function readFormXVIIITamilNaduPayrollMonthIso(row) {
+  if (!row || typeof row !== 'object') return '';
+  const keys = [
+    'payroll_month',
+    'Payroll_Month',
+    'payrollMonth',
+    'salary_month',
+    'Salary_Month',
+    'yearmonth',
+    'year_month',
+    'YearMonth',
+    'monthFilter',
+    'MonthFilter',
+    'monthfilter',
+    'month',
+    'Month',
+  ];
+  for (let i = 0; i < keys.length; i += 1) {
+    const raw = String(row[keys[i]] ?? '').trim();
+    if (!raw) continue;
+    const iso = raw.match(/^(\d{4}-\d{2})/);
+    if (iso) return iso[1];
+  }
+  return '';
+}
+
+export function filterFormXVIIITamilNaduPayrollRowsForMonth(records, monthIso) {
+  const rows = (Array.isArray(records) ? records : []).filter(
+    (row) => row && typeof row === 'object' && row.fetch_error !== true
+  );
+  const want = String(monthIso || '').trim();
+  if (!/^\d{4}-\d{2}$/.test(want)) return rows;
+  const tagged = rows.filter((row) => readFormXVIIITamilNaduPayrollMonthIso(row));
+  if (tagged.length === 0) return rows;
+  return rows.filter((row) => readFormXVIIITamilNaduPayrollMonthIso(row) === want);
+}
+
+export function findFormXVIIITamilNaduRecordByFirstAndLastName(
+  employeeOrRow,
+  records,
+  extraParts = null,
+  options = {}
+) {
+  const monthIso = options.monthIso || options.payrollMonth || '';
+  const rows = filterFormXVIIITamilNaduPayrollRowsForMonth(records, monthIso);
+  if (rows.length === 0) return null;
+  return (
+    rows.find((row) => formXVIIITamilNaduFirstAndLastNamesMatch(employeeOrRow, row, extraParts)) ||
+    null
+  );
+}
+
+function formXVIIITamilNaduAttendanceDateKey(rec, recordDateKey) {
+  if (typeof recordDateKey === 'function') {
+    const keyed = String(recordDateKey(rec) || '').trim();
+    if (keyed) return keyed.slice(0, 10);
+  }
+  if (!rec || typeof rec !== 'object') return '';
+  const raw =
+    rec.date ||
+    rec.Date ||
+    rec.attendanceDate ||
+    rec.AttendanceDate ||
+    rec.workDate ||
+    rec.WorkDate ||
+    rec.sdate ||
+    rec.Sdate ||
+    '';
+  const iso = String(raw).trim().match(/^(\d{4}-\d{2}-\d{2})/);
+  return iso ? iso[1] : '';
+}
+
+function formXVIIITamilNaduAttendanceLooksWorked(rec) {
+  if (!rec || typeof rec !== 'object') return false;
+  const status = String(
+    rec.status || rec.Status || rec.attendanceStatus || rec.AttendanceStatus || rec.dayStatus || ''
+  )
+    .trim()
+    .toLowerCase();
+  if (status && /absent|week\s*off|weekoff|\bwo\b|holiday|leave|\blop\b/.test(status)) {
+    if (!/present|half/.test(status)) return false;
+  }
+  return true;
+}
+
+/** Unique worked days in the selected month for FirstName+LastName (never first-name-only). */
+export function countFormXVIIITamilNaduWorkedDaysFromAttendance(
+  employeeOrRow,
+  records,
+  extraParts = null,
+  options = {}
+) {
+  const monthIso = String(options.monthIso || options.payrollMonth || '').trim();
+  const sdate = String(options.sdate || (monthIso ? `${monthIso}-01` : '')).trim();
+  const edate = String(options.edate || '').trim();
+  const isCountable =
+    typeof options.isCountableWorkedDay === 'function'
+      ? options.isCountableWorkedDay
+      : formXVIIITamilNaduAttendanceLooksWorked;
+  const byDate = new Map();
+  (Array.isArray(records) ? records : []).forEach((rec) => {
+    if (!formXVIIITamilNaduFirstAndLastNamesMatch(employeeOrRow, rec, extraParts)) return;
+    const dk = formXVIIITamilNaduAttendanceDateKey(rec, options.recordDateKey);
+    if (!dk) return;
+    if (sdate && dk < sdate) return;
+    if (edate && dk > edate) return;
+    if (!edate && monthIso && /^\d{4}-\d{2}$/.test(monthIso) && !dk.startsWith(monthIso)) return;
+    if (!isCountable(rec)) return;
+    byDate.set(dk, rec);
+  });
+  return byDate.size;
 }
 
 function buildFormXVIIIContextBlob(formHeader, rowItem, fileName, tableHeaders, sheetText) {
@@ -478,28 +915,38 @@ export function writeFormXVIIITamilNaduHeaderFieldsToSheetJs(
   }
 }
 
-/** Clear orphan bordered columns S–V (0-based 18–21) after the 16-column register band. */
+/** Clear leftover bordered columns R–W after the 16-column register band. */
 export function stripFormXVIIITamilNaduTrailingSheetColumns(ws, options = {}) {
   const writeCell = options.writeCell;
   if (!ws || typeof writeCell !== 'function') return;
   const clearFrom = Number.isFinite(Number(options.clearFromCol))
     ? Number(options.clearFromCol)
-    : 18;
+    : FORM_XVIII_TN_TRAILING_COL_R0;
   const clearThrough = Number.isFinite(Number(options.clearThroughCol))
     ? Number(options.clearThroughCol)
-    : 21;
+    : FORM_XVIII_TN_TRAILING_COL_W0;
   if (clearThrough < clearFrom) return;
   const rowEnd = Math.max(
     Number(options.maxRow) || 0,
-    (Number(options.dataStartRow) || 0) + (Number(options.dataRowCount) || 0) + 8
+    (Number(options.dataStartRow) || 0) + (Number(options.dataRowCount) || 0) + 8,
+    40
   );
+  if (Array.isArray(ws['!merges'])) {
+    ws['!merges'] = ws['!merges'].filter((m) => {
+      if (!m?.s || !m?.e) return true;
+      return !(m.e.c >= clearFrom && m.s.c <= clearThrough);
+    });
+  }
   for (let r = 0; r <= rowEnd; r += 1) {
     for (let c = clearFrom; c <= clearThrough; c += 1) {
       const ref = XLSX.utils.encode_cell({ r, c });
       writeCell(ref, '');
-      if (ws[ref]) {
-        delete ws[ref].s;
-      }
+      if (ws[ref]) delete ws[ref];
+    }
+  }
+  if (Array.isArray(ws['!cols'])) {
+    for (let c = clearFrom; c <= clearThrough; c += 1) {
+      ws['!cols'][c] = { wch: 0, hidden: true };
     }
   }
   if (ws['!ref']) {
@@ -509,6 +956,86 @@ export function stripFormXVIIITamilNaduTrailingSheetColumns(ws, options = {}) {
         range.e.c = Math.min(range.e.c, clearFrom - 1);
         ws['!ref'] = XLSX.utils.encode_range(range);
       }
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function formXVIIITamilNaduExcelJsScanBlob(worksheet) {
+  const parts = [String(worksheet?.name || '')];
+  const maxR = Math.min(Number(worksheet?.rowCount) || 20, 20);
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= 18; c += 1) {
+      try {
+        const raw = worksheet.getCell(r, c)?.value;
+        if (raw == null) continue;
+        if (typeof raw === 'string' || typeof raw === 'number') parts.push(String(raw));
+        else if (typeof raw === 'object' && Array.isArray(raw.richText)) {
+          parts.push(raw.richText.map((p) => p?.text || '').join(''));
+        } else if (typeof raw === 'object' && raw.text != null) {
+          parts.push(String(raw.text));
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return parts.join(' ');
+}
+
+export function worksheetLooksLikeFormXVIIITamilNaduWagesMuster(worksheet) {
+  if (!worksheet || typeof worksheet.getCell !== 'function') return false;
+  const blob = formXVIIITamilNaduExcelJsScanBlob(worksheet);
+  return looksLikeFormXVIIITamilNaduPdfContext([], [], worksheet.name || '', blob);
+}
+
+/** ExcelJS finalize: drop leftover R–W boxes (values, borders, merges, width). */
+export function stripFormXVIIITamilNaduTrailingExcelJsColumns(worksheet) {
+  if (!worksheetLooksLikeFormXVIIITamilNaduWagesMuster(worksheet)) return;
+  const fromCol = FORM_XVIII_TN_TRAILING_COL_R1;
+  const throughCol = FORM_XVIII_TN_TRAILING_COL_W1;
+  const rowTo = Math.max(Number(worksheet.rowCount) || 0, 48);
+  try {
+    const merges = Array.isArray(worksheet?.model?.merges) ? [...worksheet.model.merges] : [];
+    const colLettersToNum = (letters) =>
+      String(letters || '')
+        .toUpperCase()
+        .split('')
+        .reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0);
+    merges.forEach((range) => {
+      const m = String(range || '').match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+      if (!m) return;
+      const c1 = colLettersToNum(m[1]);
+      const c2 = colLettersToNum(m[3]);
+      if (c2 < fromCol || c1 > throughCol) return;
+      try {
+        worksheet.unMergeCells(range);
+      } catch {
+        /* ignore */
+      }
+    });
+  } catch {
+    /* ignore */
+  }
+  for (let r = 1; r <= rowTo; r += 1) {
+    for (let c = fromCol; c <= throughCol; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      cell.value = null;
+      cell.border = {};
+      try {
+        const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+        cell.style = { ...prev, border: {} };
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  for (let c = fromCol; c <= throughCol; c += 1) {
+    try {
+      const col = worksheet.getColumn(c);
+      col.hidden = true;
+      col.width = 0;
     } catch {
       /* ignore */
     }
@@ -550,6 +1077,7 @@ export function resolveFormXVIIITamilNaduWageMusterColumnHeaders(headers = []) {
 export function applyFormXVIIITamilNaduPayrollToExportRow(row, payrollRow, headers, options = {}) {
   if (!row || typeof row !== 'object' || !payrollRow || payrollRow.fetch_error) return row;
   const overwrite = options.overwrite !== false;
+  const skipAttendance = options.skipAttendance === true;
   const cols = resolveFormXVIIITamilNaduWageMusterColumnHeaders(headers);
   const out = { ...row };
   const setNum = (header, value) => {
@@ -564,14 +1092,16 @@ export function applyFormXVIIITamilNaduPayrollToExportRow(row, payrollRow, heade
   const net = firstPayrollMoney(payrollRow, ['net_pay', 'Net_Pay', 'netPay']);
   const basic = firstPayrollMoney(payrollRow, ['basic', 'basic_pay', 'Basic', 'basic_wage']);
   const hra = firstPayrollMoney(payrollRow, ['hra', 'hra_fbp', 'HRA']);
-  const paidDays = firstPayrollMoney(payrollRow, ['paid_days', 'Paid_days', 'paidDays']);
+  const paidDays = resolveFormXVIIITamilNaduPaidDays(payrollRow);
 
   setNum(cols.dailyRate, gross);
   setNum(cols.totalAmount, gross);
   setNum(cols.netAmountPaid, net);
   setNum(cols.basicWages, basic);
-  setNum(cols.dailyAttendance, paidDays);
-  setNum(cols.attendanceUnits, paidDays);
+  if (!skipAttendance) {
+    setNum(cols.dailyAttendance, paidDays);
+    setNum(cols.attendanceUnits, paidDays);
+  }
   if (cols.dearnessAllowance) {
     const da = firstPayrollMoney(payrollRow, ['da', 'dearness_allowance', 'dearness']);
     setNum(cols.dearnessAllowance, da);
@@ -594,7 +1124,7 @@ export function applyFormXVIIITamilNaduPayrollToExportRow(row, payrollRow, heade
 export function enrichFormXVIIITamilNaduPayrollExportRows(
   rows,
   headers,
-  { resolvePayrollRow, employees = [], overwrite = true } = {}
+  { resolvePayrollRow, employees = [], overwrite = true, skipAttendance = false } = {}
 ) {
   if (!Array.isArray(rows) || rows.length === 0) return [];
   return rows.map((row, index) => {
@@ -603,7 +1133,10 @@ export function enrichFormXVIIITamilNaduPayrollExportRows(
     const empItem = Array.isArray(employees) ? employees[index] : null;
     const payrollRow = resolver ? resolver(empItem, row, index) : null;
     if (payrollRow && !payrollRow.fetch_error) {
-      next = applyFormXVIIITamilNaduPayrollToExportRow(row, payrollRow, headers, { overwrite });
+      next = applyFormXVIIITamilNaduPayrollToExportRow(row, payrollRow, headers, {
+        overwrite,
+        skipAttendance,
+      });
     }
     return enrichFormXVIIITamilNaduExportRows([next], headers, { overwriteDeductions: true })[0];
   });

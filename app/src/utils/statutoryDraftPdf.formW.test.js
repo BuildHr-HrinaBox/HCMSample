@@ -381,6 +381,28 @@ describe('Form 26 nil-of-the-month PDF merge', () => {
     });
   });
 
+  test('Form 1 TN nil row ignores leftover payment date and still merges full width', () => {
+    const row = [
+      '1',
+      'Nill of the month',
+      'Jul 2026',
+      '',
+      '',
+      '',
+      '',
+      '31-07-2026',
+      '',
+      '',
+      '',
+      ''
+    ];
+    expect(resolveNilOfTheMonthPdfSpan(row, 12, 5, 4)).toEqual({
+      start: 0,
+      end: 11,
+      text: 'Nil of the Month Jul 2026'
+    });
+  });
+
   test('Form 1 TN nil row ignores signature date spill and still merges full width', () => {
     const row = [
       '1',
@@ -459,7 +481,7 @@ describe('Form C LWF PDF layout', () => {
       ['Form-C', '', '', '', ''],
       ['[See rule 29 of the Tamil Nadu Labour Welfare Fund Rules, 1973]', '', '', '', ''],
       ['Register of Fines and Unpaid Accumulations for the year - 2024', '', '', '', ''],
-      ['TN-Palani, Vayona Energy Pvt Ltd', '', '', '', ''],
+      ['Name of the Establishment : TN-Palani, Vayona Energy Pvt Ltd', '', '', '', ''],
       [
         'Details of Fines and Unpaid Accumulations (1)',
         'Quarter ending 31-March-2024 (2)',
@@ -477,6 +499,46 @@ describe('Form C LWF PDF layout', () => {
     expect(matrix.rows[matrix.tableStartRow][1]).toMatch(/quarter\s+ending/i);
     expect(isPureNilPdfText('Nil')).toBe(true);
     expect(isPureNilPdfText('NIL')).toBe(true);
+  });
+
+  test('PDF header keeps Name of the Establishment and drops signatory footer', () => {
+    const {
+      rewriteFormCTamilNaduLwfPdfHeader,
+      isFormCTamilNaduLwfPdfSignatoryRow,
+      buildStatutoryPdfHeaderModel
+    } = statutoryDraftPdfTestUtils;
+    const model = buildStatutoryPdfHeaderModel(
+      [
+        'Form-C',
+        '[See rule 29 of the Tamil Nadu Labour Welfare Fund Rules, 1973]',
+        'Register of Fines and Unpaid Accumulations for the year - 2026',
+        'Theni Site, Vayona Energy Pvt Ltd, 274 A, Rani mangammal main road',
+        'Authorised Signatory',
+        'Signature of Employer / Manager / Authorised Person'
+      ],
+      [
+        [
+          'Details of Fines and Unpaid Accumulations (1)',
+          'Quarter ending 31-March-2026 (2)',
+          'Quarter ending 30-June-2026 (3)',
+          'Quarter ending 30-September-2026 (4)',
+          'Quarter ending 31-December-2026 (5)'
+        ],
+        ['1. Total Realisations under fines', 'Nil', 'Nil', 'Nil', 'Nil'],
+        ['Authorised Signatory', '', '', '', ''],
+        ['Signature of Employer / Manager / Authorised Person', '', '', '', '']
+      ],
+      0,
+      'Form C'
+    );
+    expect(model.formCTamilNaduLwf).toBe(true);
+    expect(model.fields.some((f) => /Name of the Establishment\s*:/i.test(f))).toBe(true);
+    expect(model.fields.join('\n')).not.toMatch(/Authorised Signatory/i);
+    expect(model.fields.join('\n')).not.toMatch(/Signature of Employer/i);
+    expect(model.titles.join('\n')).not.toMatch(/Authorised Signatory/i);
+    expect(isFormCTamilNaduLwfPdfSignatoryRow(['Authorised Signatory'])).toBe(true);
+    const rewritten = rewriteFormCTamilNaduLwfPdfHeader(model.titles, model.fields);
+    expect(rewritten.fields[0]).toMatch(/^Name of the Establishment\s*:/);
   });
 
   test('detects unpaid accumulations footnote for placement above system note', () => {

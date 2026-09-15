@@ -18,10 +18,12 @@ import {
   applyFormTSEWorkbookOpenAtColumnA,
   prepareFormTSEWorkbookForDownload,
   prepareFormTSEDownloadHeaderData,
+  applyFormTSEKarnatakaAutofillFromSite,
   computeFormTSEKarnatakaTotalDeductions,
   FORM_T_KA_DEFAULT_PAYMENT_MODE,
   FORM_T_KA_OT_HOURS_NIL,
   FORM_T_KA_RULE_CITATION,
+  FORM_T_KA_HEADER_IDENTITY_FONT_SIZE,
   isFormTSEKarnatakaTotalOtHoursHeader,
   applyFormTSEKarnatakaOtHoursNilToMappedRows,
   resolveFormTSEKarnatakaDeductionTotalHeader,
@@ -177,6 +179,8 @@ describe('Form T Karnataka workbook write', () => {
     expect(String(ws.getCell(10, 1).value ?? '')).toMatch(/Karjol/i);
     expect(String(ws.getCell(11, 1).value ?? '')).toMatch(/Clean Wind/i);
     expect(ws.getCell(10, 1).alignment?.wrapText).toBe(true);
+    expect(Number(ws.getCell(10, 1).font?.size)).toBe(FORM_T_KA_HEADER_IDENTITY_FONT_SIZE);
+    expect(Number(ws.getCell(11, 1).font?.size)).toBe(FORM_T_KA_HEADER_IDENTITY_FONT_SIZE);
 
     // Table grid borders start at row 12 only — not on Month/Year header boxes (9–11).
     [9, 10, 11].forEach((row) => {
@@ -893,6 +897,20 @@ describe('Form T Karnataka workbook write', () => {
     expect(String(ws.getCell(11, 1).value ?? '')).toMatch(
       /Name and Address of employer\s*:\s*M\/s Clean Wind/
     );
+    expect(Number(ws.getCell(10, 1).font?.size)).toBe(FORM_T_KA_HEADER_IDENTITY_FONT_SIZE);
+    expect(Number(ws.getCell(11, 1).font?.size)).toBe(FORM_T_KA_HEADER_IDENTITY_FONT_SIZE);
+  });
+
+  it('fills Establishment/Employer from sibling statutory keys when form_t keys are blank', () => {
+    const out = applyFormTSEKarnatakaAutofillFromSite(
+      {
+        statutory_establishment_name_address: 'Bableshwar Hero Site, Karjol Village',
+        statutory_employer_name_address: 'M/s Clean Wind Power Bableshwar Pvt Ltd',
+      },
+      { monthYearText: '', establishmentText: '', employerText: '' }
+    );
+    expect(out.form_t_establishment_name_address).toMatch(/Bableshwar Hero Site/);
+    expect(out.form_t_employer).toMatch(/Clean Wind Power/);
   });
 
   it('prepareFormTSEWorkbookForDownload re-stamps Establishment/Employer on an existing buffer', async () => {
@@ -940,6 +958,27 @@ describe('Form T Karnataka workbook write', () => {
     );
     expect(out.form_t_establishment_name_address).toMatch(/Babaleshwar Hero Site/);
     expect(out.form_t_employer).toMatch(/Clean Wind Power/);
+  });
+
+  it('prepareFormTSEDownloadHeaderData fills blank Establishment/Employer from site/company', () => {
+    const out = prepareFormTSEDownloadHeaderData(
+      { form_t_month_year: 'July 2026' },
+      {
+        fields: [
+          { label: 'Name and address of the Establishment', key: 'form_t_establishment_name_address' },
+          { label: 'Name and Address of employer', key: 'form_t_employer' },
+        ],
+      },
+      {
+        monthYearText: 'July 2026',
+        establishmentText: 'Babaleshwar Hero Site, Karjol Village, Bijapur Dist',
+        employerText: 'M/s Clean Wind Power Bableshwar Pvt Ltd, Karjol Village',
+      }
+    );
+    expect(out.form_t_establishment_name_address).toMatch(/Babaleshwar Hero Site/);
+    expect(out.form_t_employer).toMatch(/Clean Wind Power/);
+    expect(out.statutory_establishment_name_address).toMatch(/Babaleshwar Hero Site/);
+    expect(out.statutory_employer_name_address).toMatch(/Clean Wind Power/);
   });
 
   it('writes Establishment/Employer to rows 10–11 even when row 3 has contract-carried label', () => {
@@ -1636,5 +1675,173 @@ describe('Form T Karnataka payroll column mapping', () => {
       'Mode of Payment Cash/ Cheque No.',
     ];
     expect(resolveFormTSEDownloadWriteHeaders(modalTruncated, templateFull)).toEqual(templateFull);
+  });
+});
+
+describe('Form T Karnataka export grid (Remarks cap + wage groups)', () => {
+  const boxBorder = {
+    top: { style: 'thin' },
+    left: { style: 'thin' },
+    bottom: { style: 'thin' },
+    right: { style: 'thin' },
+  };
+
+  function mergeCoversRow(ws, row, colFrom, colTo) {
+    const merges = Array.isArray(ws.model?.merges) ? ws.model.merges : [];
+    return merges.some((label) => {
+      const parts = String(label || '').split(':');
+      if (parts.length !== 2) return false;
+      const tl = ws.getCell(parts[0]);
+      const br = ws.getCell(parts[1]);
+      return tl.row === row && br.row === row && tl.col === colFrom && br.col === colTo;
+    });
+  }
+
+  it('strips leftover BS–CB boxes after Remarks (col 70)', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(9, 1).value = 'Month / Year';
+    ws.getCell(12, 1).value = 'S.NO';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    ws.getCell(12, 70).value = 'Remarks';
+    for (let r = 12; r <= 16; r += 1) {
+      for (let c = 70; c <= 80; c += 1) {
+        ws.getCell(r, c).border = { ...boxBorder };
+      }
+    }
+    ws.getCell(14, 71).value = 41;
+    ws.getCell(14, 80).value = 50;
+
+    finalizeFormTSEKarnatakaWorksheetExportBorders(ws, { colTo: 80, tableLastRow: 16 });
+
+    expect(String(ws.getCell(12, 70).value ?? '')).toMatch(/^Remarks$/i);
+    expect(excelJSCellHasBorder(ws.getCell(12, 70))).toBe(true);
+    expect(excelJSCellHasBorder(ws.getCell(12, 71))).toBe(false);
+    expect(excelJSCellHasBorder(ws.getCell(12, 80))).toBe(false);
+    expect(excelJSCellHasBorder(ws.getCell(15, 80))).toBe(false);
+    expect(String(ws.getCell(14, 71).value ?? '').trim()).toBe('');
+    expect(String(ws.getCell(12, 80).value ?? '').trim()).toBe('');
+  });
+
+  it('merges Earned wages and Deductions groups including TDS', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(9, 1).value = 'Month / Year';
+    ws.getCell(12, 1).value = 'S.NO';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    ws.getCell(12, 41).value = 'No. of payable days';
+    ws.getCell(12, 42).value = 'Total OT hours';
+    const earned = ['BASIC', 'HRA', 'Conveyance', 'Medical Allowance', 'Total'];
+    const deductions = [
+      'ESI',
+      'PF',
+      'PT',
+      'TDS',
+      'Society',
+      'Insurance',
+      'Salary Advance',
+      'Fines',
+      'Damages/Loss',
+      'Others',
+      'Total',
+    ];
+    earned.forEach((h, i) => {
+      ws.getCell(13, 43 + i).value = h;
+    });
+    deductions.forEach((h, i) => {
+      ws.getCell(13, 48 + i).value = h;
+    });
+    ws.getCell(13, 59).value = 'Net Amount Payable';
+    ws.getCell(13, 60).value = 'Mode of Payment Cash/ Cheque No.';
+    ws.getCell(13, 61).value = "Employee's signature or Thumb impression";
+    ws.getCell(13, 62).value = 'Remarks';
+
+    finalizeFormTSEKarnatakaWorksheetExportBorders(ws, { tableLastRow: 16 });
+
+    expect(String(ws.getCell(12, 43).value ?? '')).toMatch(/Earned wages and other allowances/i);
+    expect(String(ws.getCell(12, 48).value ?? '')).toMatch(/^Deductions$/i);
+    expect(mergeCoversRow(ws, 12, 43, 47)).toBe(true);
+    expect(mergeCoversRow(ws, 12, 48, 58)).toBe(true);
+    expect(String(ws.getCell(13, 43).value ?? '')).toMatch(/BASIC/i);
+    expect(String(ws.getCell(13, 51).value ?? '')).toMatch(/TDS/i);
+    expect(String(ws.getCell(13, 48).value ?? '')).toMatch(/^ESI$/i);
+    expect(String(ws.getCell(12, 41).value ?? '')).toMatch(/payable days/i);
+    expect(String(ws.getCell(13, 59).value ?? '')).toMatch(/Net Amount Payable/i);
+  });
+
+  it('copies row-12 wage leaves under the group banners', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(9, 1).value = 'Month / Year';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    ['BASIC', 'Conveyance', 'Total', 'ESI', 'PF', 'TDS', 'Total', 'Net Amount Payable', 'Remarks'].forEach(
+      (h, i) => {
+        ws.getCell(12, 43 + i).value = h;
+      }
+    );
+
+    finalizeFormTSEKarnatakaWorksheetExportBorders(ws, { tableLastRow: 16 });
+
+    expect(String(ws.getCell(12, 43).value ?? '')).toMatch(/Earned wages and other allowances/i);
+    expect(String(ws.getCell(12, 46).value ?? '')).toMatch(/^Deductions$/i);
+    expect(String(ws.getCell(13, 43).value ?? '')).toMatch(/BASIC/i);
+    expect(String(ws.getCell(13, 48).value ?? '')).toMatch(/TDS/i);
+    expect(mergeCoversRow(ws, 12, 43, 45)).toBe(true);
+    expect(mergeCoversRow(ws, 12, 46, 49)).toBe(true);
+  });
+
+  it('merges ATTENDANCE across calendar-day columns', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(9, 1).value = 'Month / Year';
+    ws.getCell(12, 1).value = 'S.NO';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    for (let d = 1; d <= 31; d += 1) {
+      const c = 9 + d;
+      ws.getCell(12, c).value =
+        'ATTENDANCE (Please mention the date of suspension of employees, if any)';
+      ws.getCell(13, c).value = d;
+    }
+    ws.getCell(12, 41).value = 'No. of payable days';
+
+    finalizeFormTSEKarnatakaWorksheetExportBorders(ws, { tableLastRow: 16 });
+
+    expect(String(ws.getCell(12, 10).value ?? '')).toMatch(
+      /ATTENDANCE \(Please mention the date of suspension of employees, if any\)/i
+    );
+    expect(mergeCoversRow(ws, 12, 10, 40)).toBe(true);
+    expect(Number(ws.getCell(13, 10).value)).toBe(1);
+    expect(Number(ws.getCell(13, 40).value)).toBe(31);
+    expect(String(ws.getCell(12, 41).value ?? '')).toMatch(/payable days/i);
+  });
+
+  it('makes title, headers, and table data bold', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form T');
+    ws.getCell(1, 1).value = 'FORM T';
+    ws.getCell(2, 1).value = 'COMBINED MUSTER ROLL CUM REGISTER OF WAGES';
+    ws.getCell(9, 1).value = 'Month / Year';
+    ws.getCell(12, 1).value = 'S.NO';
+    ws.getCell(12, 2).value = 'Name of Employee';
+    ws.getCell(15, 1).value = 1;
+    ws.getCell(15, 2).value = 'Issac Kanagaraj';
+    ws.getCell(15, 2).font = { bold: false };
+
+    finalizeFormTSEKarnatakaWorksheetExportBorders(ws, { tableLastRow: 16 });
+
+    expect(ws.getCell(1, 1).font?.bold).toBe(true);
+    expect(ws.getCell(2, 1).font?.bold).toBe(true);
+    expect(ws.getCell(3, 1).font?.bold).toBe(true);
+    expect(ws.getCell(12, 2).font?.bold).toBe(true);
+    expect(ws.getCell(15, 2).font?.bold).toBe(true);
+    expect(ws.getCell(15, 1).font?.bold).toBe(true);
   });
 });

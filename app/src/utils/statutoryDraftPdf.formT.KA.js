@@ -16,6 +16,75 @@ export const FORM_T_KA_PDF_IN_LIEU_LINES = [
   '4. Form XIII of Rule 43; Forms XVII, XVIII, XIX, XX, XXI, XXII of Rule 46(2)(a),(c) & (d) of Inter-state Migrant Workmen (Regulation of Employment and conditions of service) Karnataka Rules, 1981',
 ];
 
+/** Official KA identity leaves (image-2 Excel model). */
+export const FORM_T_KA_PDF_IDENTITY_HEADERS = [
+  'S.NO',
+  'Name and address of principal employer',
+  "Father / Husband's Name",
+  'Gender',
+  'Designation / Department',
+  'Date of Joining',
+  'ESI No.',
+  'UAN No.',
+  'Wages fixed including VDA',
+];
+
+export const FORM_T_KA_PDF_ATTENDANCE_LABEL =
+  'ATTENDANCE (Please mention the date of suspension of employees, if any)';
+
+export const FORM_T_KA_PDF_EARNED_WAGES_GROUP = 'Earned wages and other allowances';
+export const FORM_T_KA_PDF_DEDUCTIONS_GROUP = 'Deductions';
+
+export const FORM_T_KA_PDF_PAYABLE_OT_HEADERS = [
+  'No. of payable days',
+  'Total OT hours',
+];
+
+export const FORM_T_KA_PDF_EARNED_WAGE_LEAVES = [
+  'BASIC',
+  'DA/VDA',
+  'HRA',
+  'Conveyance',
+  'Medical Allowance',
+  'Attendance Bonus',
+  'Special Allowance',
+  'OT',
+  'NFH',
+  'Maternity Benefit',
+  'Others',
+  'Subsistence Allowance if any',
+  'Total',
+];
+
+export const FORM_T_KA_PDF_DEDUCTION_LEAVES = [
+  'ESI',
+  'PF',
+  'PT',
+  'Society',
+  'Insurance',
+  'Salary Advance',
+  'Fines',
+  'Damages',
+  'Others',
+  'Total',
+];
+
+export const FORM_T_KA_PDF_TRAILING_HEADERS = [
+  'Net Amount Payable',
+  'Mode of Payment Cash/ Cheque No.',
+  'Employee signature or thumb impression',
+];
+
+export const FORM_T_KA_PDF_DATE_LABEL = 'Date:';
+export const FORM_T_KA_PDF_SIGNATORY_LABEL = 'Authorised Signatory';
+
+export const FORM_T_KA_PDF_WAGE_LEAVES = [
+  ...FORM_T_KA_PDF_PAYABLE_OT_HEADERS,
+  ...FORM_T_KA_PDF_EARNED_WAGE_LEAVES,
+  ...FORM_T_KA_PDF_DEDUCTION_LEAVES,
+  ...FORM_T_KA_PDF_TRAILING_HEADERS,
+];
+
 const normalizeText = (value) =>
   String(value || '')
     .replace(/\s+/g, ' ')
@@ -180,26 +249,6 @@ const splitFieldValue = (text, spec) => {
   return cut;
 };
 
-export const extractFormTSEKarnatakaHeaderFields = (
-  metaLines = [],
-  rows = [],
-  tableStart = 0
-) => {
-  const lines = collectLines(metaLines, rows, tableStart);
-  const values = { monthYear: '', establishment: '', employer: '' };
-  lines.forEach((line) => {
-    FIELD_SPECS.forEach((spec) => {
-      if (values[spec.key]) return;
-      if (!spec.pattern.test(line)) return;
-      const inline = splitFieldValue(line, spec);
-      if (inline) values[spec.key] = inline;
-    });
-  });
-  return FIELD_SPECS.map((spec) =>
-    values[spec.key] ? `${spec.label} : ${values[spec.key]}` : `${spec.label} :`
-  );
-};
-
 const isTitleOrCitationLine = (text) => {
   const t = normalizeText(text);
   if (!t) return false;
@@ -209,6 +258,48 @@ const isTitleOrCitationLine = (text) => {
   if (/^in\s+lieu\s+of$/i.test(t)) return true;
   if (/^\s*[1-4]\.\s*form\b/i.test(t)) return true;
   return false;
+};
+
+const isFormTHeaderNoiseLine = (text) => {
+  const t = normalizeText(text);
+  if (!t) return true;
+  if (isTitleOrCitationLine(t)) return true;
+  if (isFormTSEKarnatakaTableHeaderRow([t])) return true;
+  if (/name\s+and\s+address\s+of\s+principal\s+employer/i.test(t) && /s\.?\s*no/i.test(t)) {
+    return true;
+  }
+  return false;
+};
+
+export const extractFormTSEKarnatakaHeaderFields = (
+  metaLines = [],
+  rows = [],
+  tableStart = 0
+) => {
+  const lines = collectLines(metaLines, rows, tableStart);
+  const values = { monthYear: '', establishment: '', employer: '' };
+  lines.forEach((line, idx) => {
+    if (isFormTHeaderNoiseLine(line)) return;
+    FIELD_SPECS.forEach((spec) => {
+      if (values[spec.key]) return;
+      if (!spec.pattern.test(line)) return;
+      let inline = splitFieldValue(line, spec);
+      if (!inline) {
+        const next = lines[idx + 1];
+        if (
+          next &&
+          !FIELD_SPECS.some((other) => other.pattern.test(next)) &&
+          !isFormTHeaderNoiseLine(next)
+        ) {
+          inline = next;
+        }
+      }
+      if (inline) values[spec.key] = inline;
+    });
+  });
+  return FIELD_SPECS.map((spec) =>
+    values[spec.key] ? `${spec.label} : ${values[spec.key]}` : `${spec.label} :`
+  );
 };
 
 const isLeakedFormXiiiTitle = (text) => {
@@ -224,6 +315,65 @@ const isLeakedFormXiiiTitle = (text) => {
 const isLoneDateFooter = (row) => {
   const filled = (Array.isArray(row) ? row : []).map(normalizeText).filter(Boolean);
   return filled.length === 1 && /^date\s*:?\s*$/i.test(filled[0]);
+};
+
+const isFormTPdfDateFooterText = (text) => {
+  const t = normalizeText(text);
+  if (!t) return false;
+  if (/date\s+of\s+joining|date\s+of\s+birth|date\s+of\s+suspension|date\s+of\s+payment/i.test(t)) {
+    return false;
+  }
+  return /^date\s*:/i.test(t) || /^date\s*$/i.test(t);
+};
+
+const isFormTPdfSignatoryFooterText = (text) => {
+  const t = normalizeText(text);
+  if (!t) return false;
+  if (/employee\s+signature|thumb\s+impression/i.test(t)) return false;
+  return (
+    /authori[sz]ed\s+signatory/i.test(t) ||
+    /signature\s+of\s+(?:the\s+)?employer/i.test(t) ||
+    /^for\s*\(/i.test(t)
+  );
+};
+
+const isFormTPdfFooterCellText = (text) =>
+  isFormTPdfDateFooterText(text) || isFormTPdfSignatoryFooterText(text);
+
+/** Date: / Authorised Signatory rows belong under the table box, not inside it. */
+export const isFormTSEKarnatakaPdfFooterOnlyRow = (row) => {
+  if (!Array.isArray(row)) return false;
+  if (
+    looksLikePdfEmployeeName(cellAt(row, 1)) ||
+    looksLikePdfEmployeeName(cellAt(row, FORM_T_KA_PDF_ATTENDANCE_START_COL0 + 1))
+  ) {
+    return false;
+  }
+  const filled = row.map(normalizeText).filter(Boolean);
+  if (!filled.length) return false;
+  if (isLoneDateFooter(row)) return true;
+  return filled.every((t) => isFormTPdfFooterCellText(t));
+};
+
+export const extractFormTSEKarnatakaPdfFooter = (rows = [], metaLines = []) => {
+  let date = FORM_T_KA_PDF_DATE_LABEL;
+  let signatory = FORM_T_KA_PDF_SIGNATORY_LABEL;
+  const consider = (text) => {
+    const t = normalizeText(text);
+    if (!t) return;
+    if (isFormTPdfDateFooterText(t)) {
+      const rest = t.replace(/^date\s*:?\s*/i, '').trim();
+      date = rest ? `Date: ${rest}` : FORM_T_KA_PDF_DATE_LABEL;
+    }
+    if (isFormTPdfSignatoryFooterText(t) && /authori[sz]ed\s+signatory/i.test(t)) {
+      signatory = FORM_T_KA_PDF_SIGNATORY_LABEL;
+    }
+  };
+  (metaLines || []).forEach(consider);
+  (rows || []).forEach((row) => {
+    (Array.isArray(row) ? row : [row]).forEach(consider);
+  });
+  return { date, signatory };
 };
 
 /** Official Form T: A–I identity, attendance starts at column J (0-based 9). */
@@ -244,6 +394,7 @@ const looksLikePdfEmployeeName = (text) => {
 
 const isFormTPdfHeaderOrIndexRow = (row) => {
   if (isFormTSEKarnatakaTableHeaderRow(row)) return true;
+  if (looksLikePdfEmployeeName(cellAt(row, 1))) return false;
   const filled = (Array.isArray(row) ? row : []).map(normalizeText).filter(Boolean);
   if (filled.filter((c) => /^\d{1,2}$/.test(c)).length >= 8) return true;
   return false;
@@ -316,6 +467,172 @@ const findTableStart = (rows) => {
   return 0;
 };
 
+export const detectFormTSEKarnatakaAttendanceBand = (
+  rows,
+  tableStart = 0,
+  headerBandEnd = 4,
+  colCount = 40
+) => {
+  const src = Array.isArray(rows) ? rows : [];
+  const cols = Math.max(1, Number(colCount) || 40);
+  const scanFrom = Math.max(0, Number(tableStart) || 0);
+  const scanTo = Math.min(Math.max(scanFrom, Number(headerBandEnd) || scanFrom + 4), src.length - 1);
+  let dayStart = FORM_T_KA_PDF_ATTENDANCE_START_COL0;
+  let dayEnd = -1;
+  let dayRow = -1;
+  for (let r = scanFrom; r <= scanTo; r += 1) {
+    const row = src[r] || [];
+    let start = -1;
+    const searchFrom = Math.max(0, FORM_T_KA_PDF_ATTENDANCE_START_COL0 - 1);
+    for (let c = searchFrom; c < cols; c += 1) {
+      if (String(row[c] || '').trim() === '1') {
+        start = c;
+        break;
+      }
+    }
+    if (start < 0) continue;
+    let end = start;
+    for (let n = 1; n <= 31; n += 1) {
+      const v = String(row[start + n - 1] || '').trim();
+      if (v === String(n)) {
+        end = start + n - 1;
+        continue;
+      }
+      if (!v && n > 1) continue;
+      break;
+    }
+    if (end - start + 1 >= 20) {
+      dayRow = r;
+      dayStart = start;
+      dayEnd = end;
+      break;
+    }
+  }
+  if (dayEnd < dayStart) {
+    dayStart = FORM_T_KA_PDF_ATTENDANCE_START_COL0;
+    dayEnd = FORM_T_KA_PDF_ATTENDANCE_START_COL0 + 30;
+  }
+  let labelRow = scanFrom;
+  for (let r = scanFrom; r <= scanTo; r += 1) {
+    const blob = (src[r] || []).join(' ').toLowerCase();
+    if (/attendance/.test(blob)) {
+      labelRow = r;
+      break;
+    }
+  }
+  return {
+    labelRow,
+    start: dayStart,
+    end: dayEnd,
+    dayRow,
+    label: FORM_T_KA_PDF_ATTENDANCE_LABEL,
+  };
+};
+
+const isFormTPdfGroupBannerText = (text) => {
+  const t = normalizeText(text).toLowerCase();
+  if (!t) return false;
+  if (/earned\s+wages(\s+and\s+other\s+allowances)?/.test(t)) return true;
+  if (/^deductions?$/.test(t)) return true;
+  return false;
+};
+
+const collectFormTPdfSourceWageLeaves = (src, dataStart, wageStart, maxCol) => {
+  const out = Array(maxCol).fill('');
+  const last = Math.min(Math.max(0, Number(dataStart) || 0), src.length);
+  for (let r = 0; r < last; r += 1) {
+    for (let c = wageStart; c < maxCol; c += 1) {
+      const raw = normalizeText(src[r]?.[c]);
+      if (!raw || /^\d{1,2}$/.test(raw) || /attendance/i.test(raw)) continue;
+      if (isFormTPdfGroupBannerText(raw)) continue;
+      out[c] = raw;
+    }
+  }
+  return out;
+};
+
+export const applyFormTSEKarnatakaOfficialTableHeaders = (rows, colCount) => {
+  const src = (Array.isArray(rows) ? rows : []).map((row) =>
+    Array.isArray(row) ? [...row] : []
+  );
+  if (!src.length) {
+    return { rows: src, colCount: Math.max(1, Number(colCount) || 1), attendanceBand: null };
+  }
+  const band = detectFormTSEKarnatakaAttendanceBand(src, 0, 5, colCount);
+  const wageStart = band.end + 1;
+  const payableStart = wageStart;
+  const earnedStart = payableStart + FORM_T_KA_PDF_PAYABLE_OT_HEADERS.length;
+  const earnedEnd = earnedStart + FORM_T_KA_PDF_EARNED_WAGE_LEAVES.length - 1;
+  const deductionStart = earnedEnd + 1;
+  const deductionEnd = deductionStart + FORM_T_KA_PDF_DEDUCTION_LEAVES.length - 1;
+  const trailingStart = deductionEnd + 1;
+  const wageColCount = FORM_T_KA_PDF_WAGE_LEAVES.length;
+  let dataStart = src.length;
+  for (let r = 0; r < src.length; r += 1) {
+    if (isFormTPdfHeaderOrIndexRow(src[r])) continue;
+    const serial = String(src[r]?.[0] || '').trim();
+    const name = String(src[r]?.[1] || '').trim();
+    if (/^\d{1,4}$/.test(serial) && looksLikePdfEmployeeName(name)) {
+      dataStart = r;
+      break;
+    }
+  }
+  if (dataStart >= src.length) {
+    const named = src.findIndex((row) => looksLikePdfEmployeeName(String(row?.[1] || '')));
+    dataStart = named >= 0 ? named : src.length;
+  }
+  const maxCol = Math.max(
+    Number(colCount) || 0,
+    band.end + 1,
+    trailingStart + FORM_T_KA_PDF_TRAILING_HEADERS.length,
+    40
+  );
+  const sourceLeaves = collectFormTPdfSourceWageLeaves(src, dataStart, wageStart, maxCol);
+  const banner = Array(maxCol).fill('');
+  FORM_T_KA_PDF_IDENTITY_HEADERS.forEach((header, i) => {
+    banner[i] = header;
+  });
+  banner[band.start] = FORM_T_KA_PDF_ATTENDANCE_LABEL;
+  FORM_T_KA_PDF_PAYABLE_OT_HEADERS.forEach((header, i) => {
+    banner[payableStart + i] = sourceLeaves[payableStart + i] || header;
+  });
+  banner[earnedStart] = FORM_T_KA_PDF_EARNED_WAGES_GROUP;
+  banner[deductionStart] = FORM_T_KA_PDF_DEDUCTIONS_GROUP;
+  FORM_T_KA_PDF_TRAILING_HEADERS.forEach((header, i) => {
+    banner[trailingStart + i] = sourceLeaves[trailingStart + i] || header;
+  });
+  const days = Array(maxCol).fill('');
+  for (let d = 0; d <= band.end - band.start; d += 1) {
+    days[band.start + d] = String(d + 1);
+  }
+  FORM_T_KA_PDF_EARNED_WAGE_LEAVES.forEach((header, i) => {
+    const col = earnedStart + i;
+    days[col] = sourceLeaves[col] || header;
+  });
+  FORM_T_KA_PDF_DEDUCTION_LEAVES.forEach((header, i) => {
+    const col = deductionStart + i;
+    days[col] = sourceLeaves[col] || header;
+  });
+  const index = Array(maxCol).fill('');
+  for (let i = 0; i < FORM_T_KA_PDF_IDENTITY_HEADERS.length; i += 1) {
+    index[i] = String(i + 1);
+  }
+  index[band.start] = '10';
+  for (let i = 0; i < wageColCount; i += 1) {
+    index[wageStart + i] = String(11 + i);
+  }
+  return {
+    rows: [banner, days, index, ...src.slice(dataStart)],
+    colCount: maxCol,
+    attendanceBand: {
+      labelRow: 0,
+      start: band.start,
+      end: band.end,
+      label: FORM_T_KA_PDF_ATTENDANCE_LABEL,
+    },
+  };
+};
+
 export const normalizeFormTSEKarnatakaPdfMatrix = (
   rows,
   colCount,
@@ -326,9 +643,13 @@ export const normalizeFormTSEKarnatakaPdfMatrix = (
   const detectedStart = findTableStart(src);
   const start = detectedStart > 0 ? detectedStart : Math.max(0, Number(tableStartRow) || 0);
   const preRows = src.slice(0, start);
+  const formTKAFooter = extractFormTSEKarnatakaPdfFooter(src, incomingMetaLines);
   const tableRows = shiftFormTSEKarnatakaPdfIdentityFromJToA(
-    src.slice(start).filter((row) => !isLoneDateFooter(row))
+    src.slice(start).filter((row) => !isFormTSEKarnatakaPdfFooterOnlyRow(row))
   );
+  const official = applyFormTSEKarnatakaOfficialTableHeaders(tableRows, colCount);
+  const finalTableRows = official.rows;
+  const attendanceBand = official.attendanceBand;
   const metaFromRows = preRows
     .map((row) =>
       (Array.isArray(row) ? row : [])
@@ -366,18 +687,20 @@ export const normalizeFormTSEKarnatakaPdfMatrix = (
     orderedMeta.push(line);
   });
 
-  let maxCol = Math.max(1, Number(colCount) || 0);
-  tableRows.forEach((row) => {
+  let maxCol = Math.max(1, Number(official.colCount) || Number(colCount) || 0);
+  finalTableRows.forEach((row) => {
     if (!Array.isArray(row)) return;
     maxCol = Math.max(maxCol, row.length);
   });
 
   return {
-    rows: tableRows.length ? tableRows : src,
+    rows: finalTableRows.length ? finalTableRows : src,
     colCount: maxCol,
     tableStartRow: 0,
     metaLines: orderedMeta,
     formTKALayout: true,
+    attendanceBand,
+    formTKAFooter,
   };
 };
 
@@ -390,5 +713,7 @@ export const applyFormTSEKarnatakaPdfNormalization = (target, normalized) => {
     target.metaLines = normalized.metaLines;
   }
   target.formTKALayout = true;
+  if (normalized.attendanceBand) target.attendanceBand = normalized.attendanceBand;
+  if (normalized.formTKAFooter) target.formTKAFooter = normalized.formTKAFooter;
   return target;
 };

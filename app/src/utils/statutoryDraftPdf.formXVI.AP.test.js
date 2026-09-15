@@ -22,6 +22,11 @@ describe('Form XVI AP PDF header alignment', () => {
     expect(model.rightFields[1]).not.toMatch(/Form XVI|VAYONA|Establishment|Principal Employer/i);
     expect(model.rightFields[0]).toMatch(/AP-Tadipatri/);
     expect(model.rightFields[0]).not.toMatch(/April 2026/);
+    expect(model.fields[0]).toMatch(
+      /Name and Address of the Establishment in\/ under which contract is carried on/i
+    );
+    expect(model.fields[0]).not.toMatch(/^Address of the Establishment/i);
+    expect(model.fields[0]).toMatch(/VIBRANT GREENTECH|VAYONA ENERGY PRIVATE LIMITED/i);
   });
 
   it('keeps only Nature/Location and month when the month cell dumps the full header', () => {
@@ -39,6 +44,26 @@ describe('Form XVI AP PDF header alignment', () => {
     expect(model.rightFields[0]).toBe('Nature and Location of work : AP-Tadipatri');
     expect(model.rightFields[1]).toBe('For the Month of : May 2026');
     expect(model.rightFields.join(' ')).not.toMatch(/VAYONA|Vide rule|Principal Employer|Establishment/i);
+  });
+
+  it('renames Address of the Establishment and uses the fetched company address', () => {
+    const rows = [
+      ['Form XVI - Muster Roll'],
+      ['Address of the Establishment : VAYONA ENERGY PRIVATE LIMITED'],
+      ['Name and Address of Contractor. : VAYONA ENERGY PRIVATE LIMITED'],
+      [
+        'Name and address of Principal Employer : VAYONA ENERGY PRIVATE LIMITED, Vayona Energy Pvt Ltd, 274 A, Rani mangammal main road, Theni, TamilNadu'
+      ],
+      ['Nature and Location of work : AP-Nimbagallu', 'For the Month of : August 2026'],
+      ['S.No', 'Name of the Employee', "Father's/ Husband's Name", 'Sex', 'Dates', '1', '2']
+    ];
+    const model = buildStatutoryPdfHeaderModel([], rows, 5, 'XVI-Muster Roll');
+    expect(model.fields[0]).toMatch(
+      /Name and Address of the Establishment in\/ under which contract is carried on/i
+    );
+    expect(model.fields[0]).not.toMatch(/^Address of the Establishment/i);
+    expect(model.fields[0]).toMatch(/274 A/);
+    expect(model.fields[0]).toMatch(/Theni/);
   });
 
   it('does not duplicate Form XVI - Muster Roll as two title bands', () => {

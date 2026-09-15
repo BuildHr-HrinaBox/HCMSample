@@ -116,6 +116,34 @@ describe('Form V Tamil Nadu Total Days Worked ← Paid_days', () => {
     expect(rows[0]['Total Hours Worked']).toBe('240');
     expect(rows[0]['Number of days on Loss of Pay']).toBe('1');
   });
+
+  test('clears 1 month(s) junk when Paid_days is missing', () => {
+    const {
+      applyFormVTamilNaduPaidDaysToRows: applyPaidDays,
+      isFormVTamilNaduJunkSummaryValue,
+      sanitizeFormVTamilNaduSummaryNumericValue,
+      computeFormVTamilNaduTotalHoursWorked,
+    } = require('./formVTamilNadu');
+    expect(isFormVTamilNaduJunkSummaryValue('1 month(s)')).toBe(true);
+    expect(sanitizeFormVTamilNaduSummaryNumericValue('1 month(s)')).toBe('');
+    expect(computeFormVTamilNaduTotalHoursWorked('1 month(s)')).toBe('');
+
+    const headers = ['Name', 'Total Days Worked', 'Total Hours Worked'];
+    const rows = [
+      {
+        Name: 'A',
+        'Total Days Worked': '1 month(s)',
+        'Total Hours Worked': '1 month(s)',
+      },
+    ];
+    const hits = applyPaidDays(rows, [{ EmployeeID: '1' }], headers, {
+      daysInMonth: 31,
+      resolvePayrollRow: () => null,
+    });
+    expect(hits).toBe(1);
+    expect(rows[0]['Total Days Worked']).toBe('');
+    expect(rows[0]['Total Hours Worked']).toBe('');
+  });
 });
 
 describe('Form V Tamil Nadu Excel day-column insert', () => {
@@ -332,5 +360,156 @@ describe('Form V Tamil Nadu Excel day-column insert', () => {
     });
     expect(blankCols).toEqual([40, 41, 42]);
     expect(blankCols).not.toContain(12);
+  });
+});
+
+describe('Form V Tamil Nadu period banner', () => {
+  test('builds full year period from selected month (not truncated 202)', () => {
+    const { buildFormVTamilNaduPeriodLine, writeFormVTamilNaduPeriodToWorksheet } = require('./formVTamilNadu');
+    expect(buildFormVTamilNaduPeriodLine('April', 2026)).toBe(
+      'For the period from 1st April 2026 to 30th April 2026'
+    );
+    expect(buildFormVTamilNaduPeriodLine('May', 2026)).toBe(
+      'For the period from 1st May 2026 to 31st May 2026'
+    );
+    expect(buildFormVTamilNaduPeriodLine('April', 202)).toBe('');
+  });
+
+  test('overwrites truncated template period cell on worksheet', async () => {
+    const ExcelJS = require('exceljs');
+    const { buildFormVTamilNaduPeriodLine, writeFormVTamilNaduPeriodToWorksheet } = require('./formVTamilNadu');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM V');
+    ws.getCell(3, 1).value = 'For the period from 1st April 202  to 30th April 202';
+    const line = buildFormVTamilNaduPeriodLine('April', 2026);
+    expect(writeFormVTamilNaduPeriodToWorksheet(ws, line, 12)).toBe(true);
+    expect(String(ws.getCell(3, 1).value)).toBe(
+      'For the period from 1st April 2026 to 30th April 2026'
+    );
+  });
+
+  test('centers FORM-V / REGISTER / period across full table width (not right-aligned)', async () => {
+    const ExcelJS = require('exceljs');
+    const {
+      buildFormVTamilNaduPeriodLine,
+      centerFormVTamilNaduTitleBannerRows,
+    } = require('./formVTamilNadu');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM V');
+    // Template-style merges only to AP (42); table grows to AQ (43) after day 31.
+    ws.mergeCells(1, 1, 1, 42);
+    ws.getCell(1, 1).value = 'FORM-V';
+    ws.getCell(1, 1).alignment = { horizontal: 'right', vertical: 'middle' };
+    ws.mergeCells(2, 1, 2, 42);
+    ws.getCell(2, 1).value = 'REGISTER OF EMPLOYMENT.';
+    ws.getCell(2, 1).alignment = { horizontal: 'right', vertical: 'middle' };
+    ws.mergeCells(3, 1, 3, 42);
+    ws.getCell(3, 1).value = '[See sub-rule (1) of rule (16)]';
+    ws.getCell(3, 1).alignment = { horizontal: 'right', vertical: 'middle' };
+    ws.mergeCells(4, 1, 4, 42);
+    ws.getCell(4, 1).value = 'For the period from 1st April 202  to 30th April 202';
+    ws.getCell(4, 1).alignment = { horizontal: 'right', vertical: 'middle' };
+
+    const line = buildFormVTamilNaduPeriodLine('May', 2026);
+    const result = centerFormVTamilNaduTitleBannerRows(ws, {
+      headerRowEnd: 8,
+      tableEndCol: 43,
+      periodText: line,
+    });
+    expect(result.centered).toBeGreaterThanOrEqual(4);
+    expect(result.endCol).toBe(43);
+    expect(String(ws.getCell(1, 1).value)).toMatch(/FORM/i);
+    expect(String(ws.getCell(2, 1).value)).toMatch(/REGISTER OF EMPLOYMENT/i);
+    expect(String(ws.getCell(4, 1).value)).toBe(line);
+    expect(ws.getCell(1, 1).alignment?.horizontal).toBe('center');
+    expect(ws.getCell(2, 1).alignment?.horizontal).toBe('center');
+    expect(ws.getCell(3, 1).alignment?.horizontal).toBe('center');
+    expect(ws.getCell(4, 1).alignment?.horizontal).toBe('center');
+  });
+});
+
+describe('Form V Tamil Nadu download hints', () => {
+  const {
+    isFormVStatutoryDownloadHint,
+    looksLikeFormVTamilNaduFilename,
+  } = require('./formVTamilNadu');
+
+  test('detects Form_V_-_TamilNadu.xlsx and Form V - TamilNadu', () => {
+    expect(looksLikeFormVTamilNaduFilename('Form_V_-_TamilNadu.xlsx')).toBe(true);
+    expect(looksLikeFormVTamilNaduFilename('Form V - TamilNadu.xlsx')).toBe(true);
+    expect(looksLikeFormVTamilNaduFilename('Form V.xlsx')).toBe(true);
+    expect(isFormVStatutoryDownloadHint('Form V - TamilNadu')).toBe(true);
+    expect(isFormVStatutoryDownloadHint('REGISTER OF EMPLOYMENT', 'Tamil Nadu')).toBe(true);
+    expect(isFormVStatutoryDownloadHint('Form_VI_-_TamilNadu.xlsx')).toBe(false);
+    expect(isFormVStatutoryDownloadHint('Form XXII Register of Employment', 'Andhra Pradesh')).toBe(
+      false
+    );
+    expect(isFormVStatutoryDownloadHint('Form 11 RJ Register of Employment')).toBe(false);
+  });
+});
+
+describe('Form V Tamil Nadu Excel visible writes', () => {
+  test('maps Name of the Employee from Autofill aliases and Present→P', () => {
+    const {
+      coerceFormVTamilNaduRowToObject,
+      formVTamilNaduIdentityColumnKind,
+      normalizeFormVTamilNaduAttendanceCode,
+      resolveFormVTamilNaduExportCellValue,
+      resolveFormVTamilNaduDayValue,
+    } = require('./formVTamilNadu');
+    expect(formVTamilNaduIdentityColumnKind('Name of the Employee')).toBe('name');
+    expect(formVTamilNaduIdentityColumnKind('Employee Identification No.')).toBe('empid');
+    expect(formVTamilNaduIdentityColumnKind('Time at which work commences')).toBe('commence');
+    expect(normalizeFormVTamilNaduAttendanceCode('Present')).toBe('P');
+    expect(normalizeFormVTamilNaduAttendanceCode('WO')).toBe('WO');
+
+    const headers = ['S.No', 'Name of the Employee', '1', '2'];
+    const arrayRow = [1, 'Priya Nair', 'P', 'A'];
+    const coerced = coerceFormVTamilNaduRowToObject(arrayRow, headers);
+    expect(resolveFormVTamilNaduExportCellValue(coerced, 'Name of the Employee', headers)).toBe('Priya Nair');
+    expect(resolveFormVTamilNaduDayValue(coerced, 1, headers)).toBe('P');
+    expect(
+      resolveFormVTamilNaduExportCellValue(
+        { 'Name of the person employed': 'Arun K' },
+        'Name of the Employee',
+        headers
+      )
+    ).toBe('Arun K');
+  });
+
+  test('writes employee name onto merged non-master cells so Excel shows it', async () => {
+    const ExcelJS = require('exceljs');
+    const {
+      locateFormVTamilNaduIdentityExcelColumns,
+      writeFormVTamilNaduExcelVisibleCell,
+    } = require('./formVTamilNadu');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM V');
+    ws.mergeCells(10, 1, 11, 1);
+    ws.getCell(10, 1).value = 'S.No';
+    ws.mergeCells(10, 2, 11, 2);
+    ws.getCell(10, 2).value = 'Name of the Employee';
+    ws.getCell(10, 3).value = 'Employee Identification No.';
+    ws.getCell(11, 7).value = 1;
+    ws.getCell(11, 8).value = 2;
+    ws.mergeCells(12, 2, 12, 3);
+
+    const identity = locateFormVTamilNaduIdentityExcelColumns(ws, {
+      headerRow: 10,
+      dayRow: 11,
+      firstDayCol: 7,
+      startCol: 1,
+      cellText: (cell) => String(cell?.value ?? ''),
+    });
+    expect(identity.sno).toBe(1);
+    expect(identity.name).toBe(2);
+    expect(identity.empid).toBe(3);
+
+    writeFormVTamilNaduExcelVisibleCell(ws, 12, 2, 'Priya Nair');
+    writeFormVTamilNaduExcelVisibleCell(ws, 12, 1, 1);
+    writeFormVTamilNaduExcelVisibleCell(ws, 12, 7, 'P');
+    expect(String(ws.getCell(12, 2).value)).toBe('Priya Nair');
+    expect(Number(ws.getCell(12, 1).value)).toBe(1);
+    expect(String(ws.getCell(12, 7).value)).toBe('P');
   });
 });

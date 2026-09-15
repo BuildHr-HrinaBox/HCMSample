@@ -12,6 +12,7 @@ import {
   buildFormITamilNaduSuspensionNilTableRows,
   cloneFormITamilNaduWorkmenWorksheetClean,
   FORM_I_TN_FINES_CANONICAL_HEADERS,
+  FORM_I_TN_SUSPENSION_TABLE_COLS,
   ensureFormITamilNaduDefaultEmployeeRows,
   ensureFormITamilNaduWorkmenTitleLayout,
   findFormITamilNaduSuspensionNilMonthYearHeader,
@@ -28,7 +29,10 @@ import {
   normalizeFormITamilNaduHeaderText,
   resolveFormITamilNaduWorkmenExportCellValue,
   safeFormIExcelJsCellText,
-  sheetLooksLikeFormITamilNaduWorkmenRegister
+  sheetLooksLikeFormITamilNaduWorkmenRegister,
+  stripFormITamilNaduSuspensionTrailingColumns,
+  resolveFormITamilNaduWorkbookSheetName,
+  repickFormITamilNaduWorkbookSheetIfNeeded
 } from './formITamilNadu';
 
 describe('Form I Tamil Nadu NIL defaults', () => {
@@ -37,7 +41,6 @@ describe('Form I Tamil Nadu NIL defaults', () => {
     'Date of suspension',
     'Date of revocation of suspension',
     'Rate at which subsistence allowance calculated and period for which calculation made',
-    'Amount of subsistence allowance paid and the date of payment',
     'Whether the employee had been exonerated or awarded any punishment',
     'Signature of employee with date for receiving money or postal acknowledgement of money order'
   ];
@@ -108,7 +111,7 @@ describe('Form I Tamil Nadu NIL defaults', () => {
     ).toBe(true);
   });
 
-  it('builds a single Nill of the month row with blank offence/date/amount columns', () => {
+  it('builds a single Nill of the month row with blank amount/date of payment', () => {
     expect(findFormITamilNaduSuspensionNilPrimaryHeader(suspensionHeaders)).toBe(nameHeader);
     expect(findFormITamilNaduSuspensionNilMonthYearHeader(suspensionHeaders, nameHeader)).toBe(
       emolumentsHeader
@@ -171,9 +174,9 @@ describe('Form I Tamil Nadu NIL defaults', () => {
     ]);
   });
 
-  it('clears Monthly emoluments, blanks offence/date/rate/amount columns, keeps NIL for remarks', () => {
+  it('clears Monthly emoluments, blanks offence/date/rate columns, keeps NIL for remarks', () => {
     const remarksHeader = nilHeaders[0];
-    const headers = [emolumentsHeader, ...blankHeaders, remarksHeader];
+    const headers = [emolumentsHeader, ...blankHeaders, amountPaidHeader, remarksHeader];
     const rows = [
       {
         [emolumentsHeader]: '51',
@@ -181,9 +184,9 @@ describe('Form I Tamil Nadu NIL defaults', () => {
         [blankHeaders[1]]: 'Enter Date of suspension',
         [blankHeaders[2]]: '2026-07-15',
         [rateHeader]: '   ',
-        [blankHeaders[4]]: '31-05-2026',
-        [blankHeaders[5]]: 'Awarded warning',
-        [blankHeaders[6]]: 'Enter Signature',
+        [amountPaidHeader]: '31-05-2026',
+        [blankHeaders[4]]: 'Awarded warning',
+        [blankHeaders[5]]: 'Enter Signature',
         [remarksHeader]: ''
       }
     ];
@@ -195,9 +198,9 @@ describe('Form I Tamil Nadu NIL defaults', () => {
         [blankHeaders[1]]: '',
         [blankHeaders[2]]: '2026-07-15',
         [rateHeader]: '',
-        [blankHeaders[4]]: '',
-        [blankHeaders[5]]: 'Awarded warning',
-        [blankHeaders[6]]: '',
+        [amountPaidHeader]: '',
+        [blankHeaders[4]]: 'Awarded warning',
+        [blankHeaders[5]]: '',
         [remarksHeader]: FORM_I_TAMIL_NADU_NIL_DEFAULT
       }
     ]);
@@ -402,6 +405,95 @@ describe('Form I Tamil Nadu Register of Workmen download helpers', () => {
   });
 });
 
+describe('Form I Tamil Nadu multi-sheet workbook sheet pick', () => {
+  const buildDualSheetWorkbook = () => {
+    // eslint-disable-next-line global-require
+    const XLSX = require('xlsx');
+    const wb = XLSX.utils.book_new();
+    const workmen = XLSX.utils.aoa_to_sheet([
+      ['FORM - I REGISTER OF WORKMEN'],
+      ['Name and Address of the Establishment:'],
+      [
+        'S No',
+        'Emp ID',
+        'Name and Address of the workman',
+        'Designation of the workmen',
+        'Whether Temporary',
+        'Date of first entry into service',
+        'Date on which he completed 480 days of service',
+        'Date on which made permanent',
+        'Remarks',
+        'Signature'
+      ]
+    ]);
+    const fines = XLSX.utils.aoa_to_sheet([
+      ['FORM I REGISTER OF FINES'],
+      ['Name of the Establishment:'],
+      [
+        'Sl.No',
+        'Name',
+        "Father's/ Husband's Name",
+        'Department of Gang',
+        'Act or omission for which fine imposed',
+        'Whether workman showed cause',
+        'Total wages',
+        'Amount of and Date on which fine imposed',
+        'Date on which fine realised',
+        'Remarks'
+      ]
+    ]);
+    XLSX.utils.book_append_sheet(wb, workmen, 'FORM 1');
+    XLSX.utils.book_append_sheet(wb, fines, 'PW Form I');
+    return wb;
+  };
+
+  it('prefers PW Form I when catalog asks for Register of Fines', () => {
+    const wb = buildDualSheetWorkbook();
+    const sheet = resolveFormITamilNaduWorkbookSheetName(wb, {
+      item: { formName: 'Form I', description: 'Register of Fines', act: 'Payment of Wages Act' },
+      fileName: 'Form_I_-_TamilNadu.xlsx'
+    });
+    expect(sheet).toBe('PW Form I');
+    expect(
+      repickFormITamilNaduWorkbookSheetIfNeeded(
+        wb,
+        {
+          item: { formName: 'Form I', description: 'Register of Fines' },
+          fileName: 'Form_I_-_TamilNadu.xlsx'
+        },
+        'FORM 1'
+      )
+    ).toBe('PW Form I');
+  });
+
+  it('prefers FORM 1 when catalog asks for Register of Workmen', () => {
+    const wb = buildDualSheetWorkbook();
+    expect(
+      resolveFormITamilNaduWorkbookSheetName(wb, {
+        item: {
+          formName: 'Form 1',
+          description: 'Register of Workmen',
+          act: 'Conferment of Permanent Status to Workmen'
+        },
+        fileName: 'Form_I_-_TamilNadu.xlsx'
+      })
+    ).toBe('FORM 1');
+  });
+
+  it('prefers FORM 1 when catalog is Register of Conferment Status', () => {
+    const wb = buildDualSheetWorkbook();
+    expect(
+      resolveFormITamilNaduWorkbookSheetName(wb, {
+        item: {
+          formName: 'Register of Conferment Status',
+          state: 'TamilNadu'
+        },
+        fileName: 'Form_I_-_TamilNadu.xlsx'
+      })
+    ).toBe('FORM 1');
+  });
+});
+
 describe('Form I Tamil Nadu Register of Workmen clean workbook', () => {
   it('does not treat suspension Form_I_-_TamilNadu as workmen defaults', () => {
     expect(
@@ -464,5 +556,34 @@ describe('Form I Tamil Nadu Register of Workmen clean workbook', () => {
       expect.arrayContaining(['A1:J1', 'A3:A4'])
     );
     expect(String(reload.worksheets[0].getCell(1, 1).value)).toMatch(/REGISTER OF WORKMEN/i);
+  });
+});
+
+describe('Form I Tamil Nadu subsistence trailing M–V boxes', () => {
+  it('clears bordered boxes past Signature (column L)', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('SA Form 1');
+    ws.getCell(1, 1).value = 'FORM 1 Register of Employees Placed under suspension';
+    ws.getCell(4, 12).value =
+      'Signature of employee with date for receiving money or postal acknowledgement of money order';
+    ws.getCell(6, 9).value = '31-07-2026';
+    const box = {
+      top: { style: 'thin' },
+      left: { style: 'thin' },
+      bottom: { style: 'thin' },
+      right: { style: 'thin' }
+    };
+    for (let c = 13; c <= 22; c += 1) {
+      ws.getCell(4, c).border = box;
+      ws.getCell(6, c).border = box;
+      ws.getCell(6, c).value = 'spill';
+    }
+    const keep = stripFormITamilNaduSuspensionTrailingColumns(ws, FORM_I_TN_SUSPENSION_TABLE_COLS);
+    expect(keep).toBe(12);
+    expect(String(ws.getCell(6, 9).value)).toBe('31-07-2026');
+    for (let c = 13; c <= 22; c += 1) {
+      expect(ws.getCell(6, c).value).toBeNull();
+      expect(ws.getCell(4, c).border?.top?.style || ws.getCell(6, c).border?.top?.style).toBeFalsy();
+    }
   });
 });

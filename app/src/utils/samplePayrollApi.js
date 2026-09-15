@@ -335,12 +335,48 @@ function pickPayrollGidNumber(row) {
   return '';
 }
 
+/** All employee identity codes on a Sample Payroll / payroll row (Zoho id + GID/VE/VF). */
+export function pickPayrollEmployeeIdCodes(row) {
+  if (!row || typeof row !== 'object') return [];
+  const flat = flattenPayrollEarningColumns(row);
+  const keys = [
+    'employee_id',
+    'employee_number',
+    'employeeId',
+    'EmployeeID',
+    'Employee ID',
+    'emp_id',
+    'EmpID',
+    'gidNumber',
+    'GIDNumber',
+    'gid_number',
+    'GID Number',
+    'GID_Number',
+  ];
+  const out = [];
+  const seen = new Set();
+  keys.forEach((key) => {
+    const value = flat[key] ?? row[key];
+    const raw = String(value ?? '').trim();
+    if (!raw) return;
+    const lower = raw.toLowerCase();
+    if (seen.has(lower)) return;
+    seen.add(lower);
+    out.push(raw);
+  });
+  return out;
+}
+
 export function samplePayrollRowMatchesEmployeeId(row, employeeId) {
   const id = String(employeeId || '').trim();
   if (!id || !row) return false;
+  const idLower = id.toLowerCase();
+  const codes = pickPayrollEmployeeIdCodes(row);
+  if (codes.some((code) => code === id || code.toLowerCase() === idLower)) return true;
+  // Legacy exact helpers (kept for callers/tests that only set one field).
   if (pickPayrollEmployeeId(row) === id) return true;
   const gid = pickPayrollGidNumber(row);
-  return gid && gid === id;
+  return Boolean(gid && (gid === id || gid.toLowerCase() === idLower));
 }
 
 function normalizePayrollMonthCandidates(monthCandidates) {

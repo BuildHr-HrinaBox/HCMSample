@@ -5,11 +5,14 @@ import {
   formXXIIIAPSEColumnWeight,
   formatFormXXIIIAPSEMoneyPdfValue,
   getFormXXIIIAPSEHeaderTitles,
+  isFormXXIIIAPSEAdminRow,
   isFormXXIIIAPSECenterValueHeader,
   isFormXXIIIAPSEMoneyHeader,
+  isFormXXIIIAPSETableHeaderRow,
   looksLikeFormXXIIIAPSEPdfContext,
   trimFormXXIIIAPSEEmptyPdfColumns
 } from './statutoryDraftPdf.formXXIII.AP.S&D.js';
+import * as XLSX from 'xlsx';
 
 describe('Form XXIII AP Shops & Establishment PDF layout helpers', () => {
   const meta = [
@@ -183,5 +186,94 @@ describe('Form XXIII AP Shops & Establishment PDF layout helpers', () => {
     expect(model.formXXIIIAPSE).toBe(true);
     expect(model.formXXIIIAPSEAdminLayout.establishmentValue).toContain('Nimbagallu Site');
     expect(model.titles.some((line) => /vide\s+rule\s*29/i.test(line))).toBe(true);
+  });
+
+  test('keeps S.No. and Name of the Employee as table columns, not establishment cells', () => {
+    const aoa = [
+      ['Form XXIII – Register of Wages'],
+      ['(Vide Rule 29(2) of A.P. Shops & Establishment Rules, 1990)'],
+      [
+        'Name of Establishment / Shop:',
+        'Nimbagallu Site, Vayona Energy Pvt Ltd',
+        '',
+        '',
+        '',
+        '',
+        '',
+        'Registration No.:',
+        '',
+        'Wage Period',
+        'From:',
+        '',
+        'To:',
+        ''
+      ],
+      [
+        'Address of the Establishment:',
+        'Vayona Energy Pvt Ltd, 274 A, Rani mangammal main road',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+        ''
+      ],
+      [
+        'S. No.',
+        'Name of the Employee',
+        'Date of Appointment',
+        'Rate of Wages',
+        'Normal Wages Earned',
+        'Wages Earned',
+        'Wages Earned for Overtime',
+        'Gross Wages Payable',
+        'Deductions if Any, and Reasons Thereof',
+        '',
+        'Actual Wages Paid',
+        'Date of Payment',
+        'Signature / Thumb Impression of Employee',
+        'Remarks'
+      ],
+      ['', '', '', '', '', '', '', '', 'Amount', 'Reason', '', '', '', ''],
+      [
+        '1',
+        'Jai Venkata Vignesh',
+        '10 Aug 2026',
+        '2822',
+        '73372',
+        '73372',
+        '',
+        '73372',
+        '3582',
+        '',
+        '69790',
+        '31-05-2026',
+        '',
+        ''
+      ]
+    ];
+    expect(isFormXXIIIAPSEAdminRow(aoa[2])).toBe(true);
+    expect(isFormXXIIIAPSETableHeaderRow(aoa[4])).toBe(true);
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const matrix = statutoryDraftPdfTestUtils.sheetToDenseMatrix(
+      ws,
+      'Form XXIII – Register of Wages'
+    );
+    const headerRow = matrix.rows[matrix.tableStartRow] || [];
+    expect(headerRow[0]).toMatch(/s\.?\s*no/i);
+    expect(headerRow[1]).toMatch(/name of the employee/i);
+    expect(headerRow[2]).toMatch(/date of appointment/i);
+    expect(matrix.metaLines.join(' ')).toMatch(/name of establishment/i);
+    expect(matrix.metaLines.join(' ')).toMatch(/nimbagallu site/i);
+    const dataRow = matrix.rows.find((row) => String(row?.[1] || '').includes('Jai Venkata Vignesh'));
+    expect(dataRow).toBeTruthy();
+    expect(String(dataRow[0])).toBe('1');
+    expect(String(dataRow[2])).toMatch(/10 Aug 2026/i);
   });
 });

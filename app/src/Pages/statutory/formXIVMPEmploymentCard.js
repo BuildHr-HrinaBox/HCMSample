@@ -924,10 +924,40 @@ export function applyFormXIVMPAutofillFromSite(headerData, siteContext = {}, opt
 export function formatFormXIVMPWorkmanName(emp = {}, payrollRow = null) {
   const payrollName = formatPayrollFirstAndLastName(payrollRow);
   if (payrollName) return payrollName;
-  const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || emp['First Name'] || '').trim();
-  const ln = String(emp.LastName || emp['LastName'] || emp.lastName || emp['Last Name'] || '').trim();
+  const fn = String(
+    emp.FirstName ||
+      emp['FirstName'] ||
+      emp.firstName ||
+      emp['First Name'] ||
+      emp.first_name ||
+      emp['first_name'] ||
+      ''
+  ).trim();
+  const ln = String(
+    emp.LastName ||
+      emp['LastName'] ||
+      emp.lastName ||
+      emp['Last Name'] ||
+      emp.last_name ||
+      emp['last_name'] ||
+      ''
+  ).trim();
   if (fn && ln) return `${fn} ${ln}`;
-  return fn || ln || String(emp.Name || emp['Name'] || emp.EmployeeName || emp['Employee Name'] || '').trim();
+  return (
+    fn ||
+    ln ||
+    String(
+      emp.employee_name ||
+        emp.EmployeeName ||
+        emp['Employee Name'] ||
+        emp.full_name ||
+        emp.DisplayName ||
+        emp['Display Name'] ||
+        emp.Name ||
+        emp['Name'] ||
+        ''
+    ).trim()
+  );
 }
 
 export function resolveFormXIVMPEmployeeSerialNumber(emp = {}, rowIndex = 0) {
@@ -935,10 +965,18 @@ export function resolveFormXIVMPEmployeeSerialNumber(emp = {}, rowIndex = 0) {
     emp.EmployeeID ||
       emp['EmployeeID'] ||
       emp['Employee ID'] ||
+      emp.employee_id ||
+      emp['employee_id'] ||
+      emp.Employee_ID ||
       emp.Employee_Number ||
       emp['Employee Number'] ||
+      emp.EmployeeNumber ||
       emp.EmployeeCode ||
       emp['Employee Code'] ||
+      emp.employee_number ||
+      emp.GIDNumber ||
+      emp.gid_number ||
+      emp['GID Number'] ||
       ''
   ).trim();
   if (fromEmp) return fromEmp;
@@ -1006,23 +1044,53 @@ export function withFormXIVGJNatureLocationDesignation(
   };
 }
 
+const FORM_XIV_MP_GROSS_PAY_KEYS = [
+  'gross_pay',
+  'Gross Pay',
+  'grossPay',
+  'total_earnings',
+  'monthly_gross_amount',
+  'Monthly Gross',
+  'monthlyGross',
+];
+const FORM_XIV_MP_GROSS_PAY_PATTERNS = [/^gross_pay$/, /^total_earnings$/, /^monthly_gross_amount$/];
+
 export function readFormXIVMPPayrollGrossPay(payrollRow) {
   if (!payrollRow || payrollRow.fetch_error) return '';
-  const flat = mergePayrollRunEmployeePayload(payrollRow);
-  const gross = readPayrollScalar(
-    flat,
-    ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings'],
-    [/^gross_pay$/, /^total_earnings$/]
-  );
-  if (gross !== '') return gross;
-  if (payrollRow !== flat) {
-    return readPayrollScalar(
-      payrollRow,
-      ['gross_pay', 'Gross Pay', 'grossPay', 'total_earnings'],
-      [/^gross_pay$/, /^total_earnings$/]
-    );
+  const merged = mergePayrollRunEmployeePayload(payrollRow);
+  const flat = flattenPayrollEarningColumns(merged);
+  const fromFlat = readPayrollScalar(flat, FORM_XIV_MP_GROSS_PAY_KEYS, FORM_XIV_MP_GROSS_PAY_PATTERNS);
+  if (fromFlat !== '') return fromFlat;
+  if (flat !== merged) {
+    const fromMerged = readPayrollScalar(merged, FORM_XIV_MP_GROSS_PAY_KEYS, FORM_XIV_MP_GROSS_PAY_PATTERNS);
+    if (fromMerged !== '') return fromMerged;
+  }
+  if (payrollRow !== merged) {
+    return readPayrollScalar(payrollRow, FORM_XIV_MP_GROSS_PAY_KEYS, FORM_XIV_MP_GROSS_PAY_PATTERNS);
   }
   return '';
+}
+
+/** People master salary when Sample Payroll has no gross/net for the workman. */
+export function resolveFormXIVMPPeopleSalary(emp = {}) {
+  const raw =
+    emp?.monthly_salary ??
+    emp?.['monthly_salary'] ??
+    emp?.MonthlySalary ??
+    emp?.['Monthly Salary'] ??
+    emp?.monthlySalary ??
+    emp?.BasicSalary ??
+    emp?.['Basic Salary'] ??
+    emp?.Basic ??
+    emp?.['Basic'] ??
+    emp?.CTC ??
+    emp?.['CTC'] ??
+    '';
+  const s = String(raw ?? '').replace(/[,₹]/g, '').trim();
+  if (!s) return '';
+  const n = Number(s);
+  if (Number.isFinite(n) && n > 0) return String(n);
+  return s;
 }
 
 export function readFormXIVMPPayrollNetPay(payrollRow) {
@@ -1128,6 +1196,9 @@ export function resolveFormXIVMPWageRate(emp = {}, payrollRow = null, options = 
     }
   }
 
+  const fromPeople = resolveFormXIVMPPeopleSalary(emp);
+  if (fromPeople) return fromPeople;
+
   const monthDefault = resolveFormXIVKarnatakaMonthDefaultWageRate(
     emp,
     options.monthCandidates,
@@ -1142,8 +1213,6 @@ export function resolveFormXIVMPWageRate(emp = {}, payrollRow = null, options = 
   );
   if (mpMonthDefault) return mpMonthDefault;
 
-  const fromEmp = emp.MonthlySalary || emp['Monthly Salary'] || emp.BasicSalary || emp['Basic Salary'] || '';
-  if (fromEmp != null && String(fromEmp).trim() !== '') return String(fromEmp).trim();
   return '';
 }
 
@@ -1250,6 +1319,32 @@ export function formatFormXIVMPEntryDate(emp = {}, formatDateFn = (v) => String(
   return formatDateFn(raw);
 }
 
+const resolveFormXIVMPMappingHeaders = (headers, helpers = {}) => {
+  const source = (Array.isArray(headers) ? headers : [])
+    .map((h) => String(h || '').trim())
+    .filter(Boolean);
+  if (source.some(isFormXIVMPWageRateHeader) || headersIndicateFormXIVMPTable(source)) {
+    return source;
+  }
+  return resolveFormXIVMPTableHeaders(headers, {
+    item: helpers.item ?? null,
+    fileName: helpers.fileName ?? helpers.formFileName ?? '',
+    formHeader: helpers.formHeader ?? helpers.parsedFormHeader ?? null,
+    sheetText: helpers.sheetText ?? '',
+  });
+};
+
+const writeFormXIVMPWageRateOnRow = (row, wageRateHeader, rate, allHeaders = []) => {
+  if (!row || !wageRateHeader || rate == null || String(rate).trim() === '') return;
+  const value = String(rate).trim();
+  row[wageRateHeader] = value;
+  (Array.isArray(allHeaders) ? allHeaders : []).forEach((header) => {
+    if (header && header !== wageRateHeader && isFormXIVMPWageRateHeader(header)) {
+      row[header] = value;
+    }
+  });
+};
+
 export function applyFormXIVMPEmployeeToRow(row, emp, headers, helpers = {}) {
   if (!row || !emp || !Array.isArray(headers)) return row;
   const {
@@ -1288,7 +1383,7 @@ export function applyFormXIVMPEmployeeToRow(row, emp, headers, helpers = {}) {
       return;
     }
     if (isFormXIVMPWageRateHeader(header)) {
-      out[header] = sanitizeValue(
+      const rate = sanitizeValue(
         resolveFormXIVMPWageRate(emp, payrollRow, {
           variant,
           monthCandidates: helpers.monthCandidates,
@@ -1298,6 +1393,7 @@ export function applyFormXIVMPEmployeeToRow(row, emp, headers, helpers = {}) {
           sheetText: helpers.sheetText ?? '',
         })
       );
+      writeFormXIVMPWageRateOnRow(out, header, rate, headers);
       return;
     }
     if (isFormXIVMPWagePeriodHeader(header)) {
@@ -1313,8 +1409,10 @@ export function applyFormXIVMPEmployeeToRow(row, emp, headers, helpers = {}) {
 
 /** Fill wage rate from pay-run gross_pay when rows were mapped without payroll. */
 export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpers = {}) {
-  const hdrs = resolveFormXIVMPTableHeaders(headers);
-  const wageRateHeader = hdrs.find(isFormXIVMPWageRateHeader);
+  const hdrs = resolveFormXIVMPMappingHeaders(headers, helpers);
+  const wageRateHeader =
+    (Array.isArray(headers) ? headers : []).find(isFormXIVMPWageRateHeader) ||
+    hdrs.find(isFormXIVMPWageRateHeader);
   if (!wageRateHeader) return 0;
   const variant =
     helpers.variant ||
@@ -1350,7 +1448,10 @@ export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpe
       ...wageRateHints,
     });
     if (rate) {
-      row[wageRateHeader] = sanitizeValue(rate);
+      writeFormXIVMPWageRateOnRow(row, wageRateHeader, sanitizeValue(rate), [
+        ...hdrs,
+        ...(Array.isArray(headers) ? headers : []),
+      ]);
       hits += 1;
     }
   });
@@ -4616,7 +4717,7 @@ export function writeFormXIVMPWorkmanFieldsToWorksheet(
 
 /** Preserve manual edits from the modal grid when rebuilding all employee rows for export. */
 export function mapFormXIVMPRowsFromEmployees(employees, headers, helpers = {}) {
-  const hdrs = resolveFormXIVMPTableHeaders(headers);
+  const hdrs = resolveFormXIVMPMappingHeaders(headers, helpers);
   const list = Array.isArray(employees) ? employees : [];
   const {
     sanitizeValue = (v) => String(v ?? '').trim(),

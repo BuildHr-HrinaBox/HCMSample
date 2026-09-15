@@ -178,4 +178,12 @@ describe('Form 10 Tamil Nadu firstname + lastname payroll mapping', () => {
     expect(resolve({ FirstName: 'Selva' })).toBeNull();
     expect(form10FirstAndLastNamesMatch(emp, pay)).toBe(false);
   });
+
+  test('Karnataka matches payroll employee_name when first/last are not split', () => {
+    const emp = { FirstName: 'Prakash', LastName: 'Talawar' };
+    const pay = { employee_name: 'Prakash Talawar', gross_pay: 74992 };
+    expect(karnatakaFirstAndLastNamesMatch(emp, pay)).toBe(true);
+    expect(findKarnatakaPayrollRowByFirstAndLastName(emp, [pay])).toEqual(pay);
+    expect(karnatakaFirstAndLastNamesMatch({ FirstName: 'Prakash' }, pay)).toBe(false);
+  });
 });

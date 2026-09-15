@@ -92,3 +92,18 @@ describe('samplePayrollApi caching', () => {
     expect(loaded.payrollMonth).toBe('2026-07');
   });
 });
+
+describe('samplePayrollRowMatchesEmployeeId', () => {
+  test('matches GID/VE code even when employee_id is Zoho numeric id', () => {
+    const row = {
+      employee_id: '347706200000108477',
+      employee_number: 'VE1430',
+      gidNumber: 'VE1430',
+      paid_days: 31,
+    };
+    expect(samplePayrollRowMatchesEmployeeId(row, 'VE1430')).toBe(true);
+    expect(samplePayrollRowMatchesEmployeeId(row, 've1430')).toBe(true);
+    expect(samplePayrollRowMatchesEmployeeId(row, '347706200000108477')).toBe(true);
+    expect(samplePayrollRowMatchesEmployeeId(row, 'VE9999')).toBe(false);
+  });
+});

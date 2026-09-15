@@ -17,7 +17,13 @@ export function statutoryHeaderLabelMatchKey(label) {
     .replace(/\s+/g, ' ')
     .trim();
   if (!compact) return '';
-  if (/name\s+and\s+address\s+of\s+contractor/.test(compact) && !/principal/.test(compact)) {
+  const squeezed = compact.replace(/\s+/g, '');
+  if (
+    !/principal/.test(compact) &&
+    (/name\s+and\s+address\s+of\s+contractor/.test(compact) ||
+      squeezed === 'nameandaddressofcontractor' ||
+      squeezed === 'nameandaddressofthecontractor')
+  ) {
     return 'statutory_contractor';
   }
   if (/name\s+and\s+location\s+of\s+(?:the\s+)?work\s*site|name\s+and\s+location\s+of\s+worksite/.test(compact)) {
@@ -26,8 +32,12 @@ export function statutoryHeaderLabelMatchKey(label) {
   if (/(?:name|nature)\s+and\s+location\s+of\s+work/.test(compact)) {
     return 'statutory_nature_location';
   }
-  // AP Form XIII template misspells "Establishment" as "Establishemnt".
-  if (/establ(?:ishment|ishemnt)\s+in.*under\s+which\s+contract/.test(compact)) {
+  // AP Form XIII / XVII: "Establishemnt" typo and split "in/" / "under which contract…" lines.
+  if (
+    /establ(?:ishment|ishemnt)\s+in.*under\s+which\s+contract/.test(compact) ||
+    /establ(?:ishment|ishemnt)\s+in$/.test(compact) ||
+    /^under\s+which\s+contract(\s+is\s+carried\s+on)?$/.test(compact)
+  ) {
     return 'statutory_establishment_contract';
   }
   if (/name\s+and\s+address\s+of\s+principal\s+employer/.test(compact) ||
@@ -44,10 +54,14 @@ export function statutoryHeaderLabelMatchKey(label) {
 
 export function buildSiteEstablishmentNameAndAddress(site) {
   if (!site || typeof site !== 'object') return '';
-  const name = String(site.siteName ?? site.SiteName ?? '').trim();
-  const addr = String(site.siteAddress ?? site.SiteAddress ?? '').trim();
-  const city = String(site.siteCity ?? site.SiteCity ?? '').trim();
-  const state = String(site.siteState ?? site.SiteState ?? '').trim();
+  const name = String(
+    site.siteName ?? site.SiteName ?? site.name ?? site.Name ?? ''
+  ).trim();
+  const addr = String(
+    site.siteAddress ?? site.SiteAddress ?? site.address ?? site.Address ?? ''
+  ).trim();
+  const city = String(site.siteCity ?? site.SiteCity ?? site.city ?? site.City ?? '').trim();
+  const state = String(site.siteState ?? site.SiteState ?? site.state ?? site.State ?? '').trim();
   const parts = [];
   if (name) parts.push(name);
   const addrLine = [addr, city, state].filter(Boolean).join(', ');
@@ -68,13 +82,49 @@ export function buildSiteLocationText(site) {
   return String(site.location ?? site.Location ?? '').trim();
 }
 
+function pickFirstNonEmptySiteText(site, keys) {
+  if (!site || typeof site !== 'object') return '';
+  for (let i = 0; i < keys.length; i += 1) {
+    const raw = site[keys[i]];
+    if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  }
+  return '';
+}
+
 /** Site Management contractor fields → combined name and address line. */
 export function buildSiteContractorNameAndAddress(site) {
   if (!site || typeof site !== 'object') return '';
-  const name = String(site.contractorName ?? site.ContractorName ?? '').trim();
-  const addr = String(site.contractorAddress ?? site.ContractorAddress ?? '').trim();
-  const city = String(site.contractorCity ?? site.ContractorCity ?? '').trim();
-  const state = String(site.contractorState ?? site.ContractorState ?? '').trim();
+  const nested =
+    site.contractor && typeof site.contractor === 'object' && !Array.isArray(site.contractor)
+      ? site.contractor
+      : site.Contractor && typeof site.Contractor === 'object' && !Array.isArray(site.Contractor)
+        ? site.Contractor
+        : null;
+  const name = pickFirstNonEmptySiteText(site, [
+    'contractorName',
+    'ContractorName',
+    'contractor_name',
+    'Contractor_Name',
+    'contractorname'
+  ]) || (typeof site.contractor === 'string' ? site.contractor.trim() : '') ||
+    (typeof site.Contractor === 'string' ? site.Contractor.trim() : '') ||
+    pickFirstNonEmptySiteText(nested, ['name', 'Name', 'contractorName', 'ContractorName']);
+  const addr = pickFirstNonEmptySiteText(site, [
+    'contractorAddress',
+    'ContractorAddress',
+    'contractor_address',
+    'Contractor_Address'
+  ]) || pickFirstNonEmptySiteText(nested, ['address', 'Address', 'contractorAddress']);
+  const city = pickFirstNonEmptySiteText(site, [
+    'contractorCity',
+    'ContractorCity',
+    'contractor_city'
+  ]);
+  const state = pickFirstNonEmptySiteText(site, [
+    'contractorState',
+    'ContractorState',
+    'contractor_state'
+  ]);
   const parts = [];
   if (name) parts.push(name);
   const addrLine = [addr, city, state].filter(Boolean).join(', ');
@@ -84,8 +134,13 @@ export function buildSiteContractorNameAndAddress(site) {
 
 export function isContractorHeaderLabel(label) {
   const compact = normalizeStatutoryHeaderLabel(label);
-  if (!compact || /principal/.test(compact)) return false;
-  return /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/.test(compact);
+  const squeezed = compact.replace(/\s+/g, '');
+  if (!compact || /principal/.test(compact) || squeezed.includes('principal')) return false;
+  return (
+    /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/.test(compact) ||
+    squeezed === 'nameandaddressofcontractor' ||
+    squeezed === 'nameandaddressofthecontractor'
+  );
 }
 
 /**
@@ -502,6 +557,10 @@ export function isEstablishmentNameHeaderLabel(label) {
   if (/principal\s+employer/.test(compact)) return false;
   if (/contractor/.test(compact)) return false;
   if (/factory/.test(compact)) return false;
+  // CLRA "establishment in/under which contract is carried on" (incl. split AP lines).
+  if (isEstablishmentContractCarriedHeaderLabel(label)) return false;
+  if (/establ(?:ishment|ishemnt)\s+in\b/.test(compact)) return false;
+  if (/under\s+which\s+contract/.test(compact)) return false;
   if (
     /^name\s+of\s+the\s+establishment$/.test(compact) ||
     /^name\s+of\s+establishment$/.test(compact) ||
@@ -519,7 +578,11 @@ export function isEstablishmentNameHeaderLabel(label) {
 export function isEstablishmentContractCarriedHeaderLabel(label) {
   const compact = normalizeStatutoryHeaderLabel(label);
   if (!compact) return false;
-  return /establ(?:ishment|ishemnt)\s+in.*under\s+which\s+contract/.test(compact);
+  return (
+    /establ(?:ishment|ishemnt)\s+in.*under\s+which\s+contract/.test(compact) ||
+    /establ(?:ishment|ishemnt)\s+in$/.test(compact) ||
+    /^under\s+which\s+contract(\s+is\s+carried\s+on)?$/.test(compact)
+  );
 }
 
 export function isEstablishmentAddressHeaderLabel(label) {
@@ -736,7 +799,7 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     kind: 'principal_employer'
   },
   {
-    match: /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i,
+    match: /name\s+and\s+address\s+of\s+(?:the\s+)?contractor|nameandaddressof(?:the)?contractor/i,
     label: '1. Name and Address of Contractor.',
     key: 'form_xxiii_contractor'
   },
@@ -747,7 +810,8 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
   },
   {
     // Tolerate AP Form XIII template typo "Establishemnt".
-    match: /establ(?:ishment|ishemnt)\s+in\s*\/?\s*under\s+which\s+contract\s+is\s+carried\s+on/i,
+    match:
+      /establ(?:ishment|ishemnt)\s+in(?:\s*\/?\s*under\s+which\s+contract\s+is\s+carried\s+on)?|under\s+which\s+contract\s+is\s+carried\s+on/i,
     label: '3. Name and address of establishment in/under which contract is carried on',
     key: 'form_xxiii_establishment_contract_carried'
   },
@@ -940,6 +1004,9 @@ export function applySiteCompanyHeaderAutofill(
     fillKey('form25_establishment', establishmentNameText, establishmentFillOpts);
     fillKey('form_xxiii_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
     fillKey('form_xiii_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
+    fillKey('form_xvi_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
+    fillKey('form_xvii_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
+    fillKey('form_xviii_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
   }
   if (establishmentAddressText) {
     STATUTORY_ESTABLISHMENT_ADDRESS_HEADER_KEYS.forEach((key) =>
@@ -956,8 +1023,23 @@ export function applySiteCompanyHeaderAutofill(
 
   const locationText = buildSiteLocationText(site);
   const registrationText = buildSiteRegistrationNumber(site);
+  const contractorText = buildSiteContractorNameAndAddress(site);
   if (locationText) {
     STATUTORY_NATURE_LOCATION_HEADER_KEYS.forEach((key) => fillKey(key, locationText));
+  }
+  if (contractorText) {
+    [
+      'form_xxi_contractor',
+      'form_xx_contractor',
+      'form_xvi_contractor',
+      'form_xvii_contractor',
+      'form_xviii_contractor',
+      'form_xxiii_contractor',
+      'form_xv_contractor',
+      'form25_contractor',
+      'form12_header_contractor',
+      'form10_header_contractor'
+    ].forEach((key) => fillKey(key, contractorText));
   }
   if (registrationText) {
     STATUTORY_REGISTRATION_HEADER_KEYS.forEach((key) => fillKey(key, registrationText));
@@ -973,7 +1055,10 @@ export function applySiteCompanyHeaderAutofill(
     if (!key) continue;
     let value = '';
     let fillOpts = {};
-    if (isEstablishmentNameHeaderLabel(field.label)) {
+    if (isEstablishmentContractCarriedHeaderLabel(field.label)) {
+      value = establishmentNameText;
+      fillOpts = establishmentFillOpts;
+    } else if (isEstablishmentNameHeaderLabel(field.label)) {
       value = establishmentNameText;
       fillOpts = establishmentFillOpts;
     } else if (isEstablishmentAddressHeaderLabel(field.label)) {
@@ -983,6 +1068,7 @@ export function applySiteCompanyHeaderAutofill(
       value = principalEmployerText;
       fillOpts = { force: true };
     } else if (isNatureLocationHeaderLabel(field.label)) value = locationText;
+    else if (isContractorHeaderLabel(field.label)) value = contractorText;
     else if (isRegistrationNoHeaderLabel(field.label)) value = registrationText;
     else if (isManagerInchargeHeaderLabel(field.label)) {
       value = inchargeName;
@@ -1098,7 +1184,17 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
     return tryKeys(['form_header_manager_incharge']);
   }
   if (/contractor/i.test(normalizeStatutoryHeaderLabel(label)) && !/principal/.test(normalizeStatutoryHeaderLabel(label))) {
-    const contractorVal = tryKeys(['form_xxiii_contractor', 'form_xviii_contractor', 'form_xvii_contractor', 'form_xvi_contractor']);
+    const contractorVal = tryKeys([
+      'form_xxi_contractor',
+      'form_xx_contractor',
+      'form_xxiii_contractor',
+      'form_xviii_contractor',
+      'form_xvii_contractor',
+      'form_xvi_contractor',
+      'form_xv_contractor',
+      'form25_contractor',
+      'statutory_contractor'
+    ]);
     if (contractorVal) return contractorVal;
     if (/name\s+and\s+address\s+of\s+contractor/.test(normalizeStatutoryHeaderLabel(label))) {
       return tryKeys(['form_xxiii_contractor']);

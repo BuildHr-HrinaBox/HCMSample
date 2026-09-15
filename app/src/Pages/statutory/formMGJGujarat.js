@@ -664,10 +664,52 @@ const findFormMGJLabelPosition = (worksheet, spec, _parsedFields, cellText) => {
 
 const restoreMGJTemplateLabels = (worksheet) => {
   if (!worksheet) return;
+  const cellText = (val) => String(val ?? '').trim();
   Object.entries(FORM_MGJ_TEMPLATE_LABEL_TEXT).forEach(([key, labelText]) => {
-    const pos = FORM_MGJ_CANONICAL_LABEL_POSITIONS[key];
+    const spec = FORM_MGJ_TEMPLATE_SPECS.find((s) => s.key === key);
+    const hits = [];
+    const ordinal = FORM_MGJ_EXPORT_ORDINALS[key];
+    if (ordinal) {
+      for (let r = 1; r <= 30; r += 1) {
+        const raw = cellText(worksheet.getCell(r, 2)?.value);
+        if (!raw) continue;
+        if (new RegExp(`^\\(?${ordinal}\\)?(?:[\\.)]|\\s|$)`, 'i').test(raw)) {
+          hits.push({ row: r, col: 2 });
+        }
+      }
+    }
+    const pos = hits[0] || FORM_MGJ_CANONICAL_LABEL_POSITIONS[key];
     if (!pos || !labelText) return;
     worksheet.getCell(pos.row, pos.col).value = labelText;
+    hits.slice(1).forEach((dup) => {
+      worksheet.getCell(dup.row, dup.col).value = '';
+    });
+    const canonical = FORM_MGJ_CANONICAL_LABEL_POSITIONS[key];
+    if (
+      spec &&
+      canonical &&
+      (canonical.row !== pos.row || canonical.col !== pos.col)
+    ) {
+      const canonRaw = cellText(worksheet.getCell(canonical.row, canonical.col)?.value);
+      if (canonRaw && matchesFormMGJSpecLabel(spec, canonRaw)) {
+        worksheet.getCell(canonical.row, canonical.col).value = '';
+      }
+    }
+  });
+};
+
+const unmergeMGJOverlappingLabelRow = (worksheet, labelRow) => {
+  if (!worksheet || labelRow < 1) return;
+  const ranges = parseExcelJsMergeRanges(worksheet);
+  ranges.forEach((m) => {
+    if (labelRow < m.top || labelRow > m.bottom) return;
+    if (m.right < FORM_MGJ_DEFAULT_VALUE_COL) return;
+    if (m.left >= FORM_MGJ_DEFAULT_VALUE_COL) return;
+    try {
+      worksheet.unMergeCells(m.top, m.left, m.bottom, m.right);
+    } catch (_) {
+      /* keep overlapping merge if ExcelJS rejects */
+    }
   });
 };
 
@@ -699,7 +741,10 @@ const resolveMGJInlineValueBounds = (worksheet, labelRow) => {
 const clearMGJExportValueSpill = (worksheet, cellText) => {
   if (!worksheet) return;
   FORM_MGJ_LEGACY_STACKED_ROWS.forEach((row) => {
-    for (let c = 2; c <= FORM_MGJ_VALUE_MAX_COL; c += 1) {
+    for (let c = FORM_MGJ_DEFAULT_VALUE_COL; c <= FORM_MGJ_VALUE_MAX_COL; c += 1) {
+      const raw = String(cellText(worksheet.getCell(row, c)?.value) || '').trim();
+      if (!raw) continue;
+      if (isMGJHeaderLabelBlob(raw)) continue;
       worksheet.getCell(row, c).value = '';
     }
   });
@@ -734,6 +779,7 @@ const setMGJCellValue = (worksheet, row, col, value, options = {}) => {
 
 const writeMGJInlineFieldValue = (worksheet, labelRow, value, options = {}) => {
   const { wrap = false } = options;
+  unmergeMGJOverlappingLabelRow(worksheet, labelRow);
   const bounds = resolveMGJInlineValueBounds(worksheet, labelRow);
   clearMGJValueBand(worksheet, bounds);
   ensureMGJCellRangeMerged(worksheet, bounds.top, bounds.left, bounds.bottom, bounds.right);

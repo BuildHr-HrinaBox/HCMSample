@@ -1,3 +1,4 @@
+import ExcelJS from 'exceljs';
 import {
   FORM_U_TAMILNADU_HEADERS,
   buildFormUTamilNaduCombinedBankDetails,
@@ -6,17 +7,26 @@ import {
   headersIndicateFormUTamilNaduTemplateLayout,
   isFormUTamilNaduCombinedBankHeader,
   isFormUTamilNaduEmployeeRegisterContext,
+  fillFormUTamilNaduEmployeeTable,
+  isFormUStatutoryDownloadHint,
   looksLikeFormUFilename,
   normalizeFormUTamilNaduEmployeeRegisterHeaders,
+  normalizeFormUTamilNaduMappedRowsForExcel,
   resolveFormUTamilNaduExportCellValue,
   resolveFormUTamilNaduPresentAddress,
   resolveFormUTamilNaduPermanentAddress,
-  resolveFormUTamilNaduBankAddress
+  resolveFormUTamilNaduBankAddress,
+  scoreFormUTamilNaduSheetForExport,
+  writeFormUTamilNaduExcelVisibleCell
 } from './formUTamilNadu';
 
 describe('Form U Tamil Nadu helpers', () => {
   test('detects Form_U_-_TamilNadu.xlsx filename (underscore after U)', () => {
     expect(looksLikeFormUFilename('Form_U_-_TamilNadu.xlsx')).toBe(true);
+    expect(isFormUStatutoryDownloadHint('Form U - TamilNadu (3).xlsx')).toBe(true);
+    expect(isFormUStatutoryDownloadHint('Employee Register', 'Form U - TamilNadu.xlsx')).toBe(true);
+    expect(isFormUStatutoryDownloadHint('Form XIV Tamil Nadu')).toBe(false);
+    expect(isFormUStatutoryDownloadHint('Form XVI')).toBe(false);
     expect(
       isFormUTamilNaduEmployeeRegisterContext({
         fileName: 'Form_U_-_TamilNadu.xlsx',
@@ -166,5 +176,139 @@ describe('Form U Tamil Nadu helpers', () => {
         expect.objectContaining({ key: 'form_x_year', label: 'Year:' })
       ])
     );
+  });
+
+  test('treats Employee Identification + present/permanent as TN template layout', () => {
+    expect(
+      headersIndicateFormUTamilNaduTemplateLayout([
+        'S.No',
+        'Name of the employee',
+        'Employee Identification No.',
+        'Gender',
+        'Date of Birth',
+        'Date of Joining',
+        'Designation',
+        'Present Address',
+        'Permanent address'
+      ])
+    ).toBe(true);
+  });
+
+  test('maps array / numeric-key autofill rows onto template labels for Excel', () => {
+    const headers = [
+      'S.No',
+      'Name of the employee',
+      'Employee Identification No.',
+      'Gender'
+    ];
+    const fromArray = normalizeFormUTamilNaduMappedRowsForExcel(
+      [[1, 'Babu', 'VE1111', 'Male']],
+      headers
+    );
+    expect(fromArray).toHaveLength(1);
+    expect(fromArray[0]['Name of the employee']).toBe('Babu');
+    expect(
+      resolveFormUTamilNaduExportCellValue(fromArray[0], 'Name of the employee', headers, 1)
+    ).toBe('Babu');
+    expect(
+      resolveFormUTamilNaduExportCellValue([1, 'Babu', 'VE1111', 'Male'], 'Worker Identity No.', headers, 2)
+    ).toBe('VE1111');
+
+    const fromNumericKeys = normalizeFormUTamilNaduMappedRowsForExcel(
+      [{ 0: 1, 1: 'P M', 2: 'VE1114', 3: 'Male' }],
+      headers
+    );
+    expect(fromNumericKeys[0]['Name of the employee']).toBe('P M');
+    expect(
+      normalizeFormUTamilNaduMappedRowsForExcel(
+        [
+          {
+            'S.No': '1',
+            'Name of the employee': '2',
+            'Employee Identification No.': '3',
+            Gender: '4'
+          }
+        ],
+        headers
+      )
+    ).toEqual([]);
+  });
+
+  test('prefers visible FORM U sheet over a hidden high-scoring helper sheet', () => {
+    const hiddenHelper = scoreFormUTamilNaduSheetForExport({
+      sheetName: 'Sheet3',
+      sheetState: 'hidden',
+      tableAnchorScore: 80,
+      hasEmployeeTable: true
+    });
+    const visibleFormU = scoreFormUTamilNaduSheetForExport({
+      sheetName: 'FORM U',
+      sheetState: 'visible',
+      tableAnchorScore: 40,
+      hasFormUTitle: true,
+      hasEmployeeRegisterTitle: true,
+      hasEmployeeTable: true
+    });
+    expect(visibleFormU).toBeGreaterThan(hiddenHelper);
+  });
+
+  test('writes Excel values onto the merge master so they are visible', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM U');
+    ws.mergeCells(10, 2, 10, 3);
+    writeFormUTamilNaduExcelVisibleCell(ws, 10, 3, 'Babu');
+    expect(ws.getCell(10, 2).value).toBe('Babu');
+  });
+
+  test('fills employee rows under the 1-2-3 index strip on the FORM U sheet', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM U');
+    ws.getCell(1, 8).value = 'FORM - U';
+    ws.getCell(2, 8).value = 'EMPLOYEE REGISTER';
+    ws.getCell(4, 1).value = 'Name and Address of the Establishment:';
+    ws.getCell(5, 1).value = 'Name and Address of the Employer:';
+    const headers = [
+      'S.No',
+      'Name of the employee',
+      'Employee Identification No.',
+      'Gender',
+      'Father / Spouse Name',
+      'Date of Birth',
+      'Date of Joining',
+      'Designation',
+      'Present Address',
+      'Permanent address'
+    ];
+    headers.forEach((label, i) => {
+      ws.getCell(8, i + 1).value = label;
+      ws.getCell(9, i + 1).value = i + 1;
+    });
+    const filled = fillFormUTamilNaduEmployeeTable({
+      worksheet: ws,
+      headerRow: 8,
+      startCol: 1,
+      numberingRowBelowHeader: true,
+      headersToUse: FORM_U_TAMILNADU_HEADERS,
+      mappedData: [
+        {
+          'S.No': 1,
+          'Name of the employee': 'Babu',
+          'Worker Identity No.': 'VE1111',
+          Gender: 'Male',
+          'Father / Spouse Name': 'PM MUTHU',
+          'Date of Birth': '02-Jul-80',
+          'Date of Joining': '01-Dec-2025',
+          Designation: 'Engineer',
+          'Present Address': '12 Main St',
+          'Permanent Address': '12 Main St'
+        }
+      ]
+    });
+    expect(filled.totalRows).toBe(1);
+    expect(filled.startRow).toBe(10);
+    expect(String(ws.getCell(10, 2).value)).toBe('Babu');
+    expect(String(ws.getCell(10, 3).value)).toBe('VE1111');
+    expect(String(ws.getCell(10, 4).value)).toBe('Male');
+    expect(String(ws.getCell(10, 8).value)).toBe('Engineer');
   });
 });

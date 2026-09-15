@@ -1,6 +1,115 @@
 /** Tamil Nadu LWF Form C — Register of Fines and Unpaid Accumulations (rule 29). */
 
 const FORM_C_SUBTITLE_BASE = 'Register of Fines and Unpaid Accumulations for the year';
+export const FORM_C_TN_ESTABLISHMENT_LABEL = 'Name of the Establishment';
+
+/** "Name of the Establishment : Theni Site, …" — keep the label for Excel + PDF. */
+export function formatFormCTamilNaduLwfEstablishmentLine(value) {
+  const val = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!val) return `${FORM_C_TN_ESTABLISHMENT_LABEL} :`;
+  if (/^name\s+of\s+the\s+establishment\s*:/i.test(val)) {
+    const rest = val.replace(/^name\s+of\s+the\s+establishment\s*:?\s*/i, '').trim();
+    return rest
+      ? `${FORM_C_TN_ESTABLISHMENT_LABEL} : ${rest}`
+      : `${FORM_C_TN_ESTABLISHMENT_LABEL} :`;
+  }
+  return `${FORM_C_TN_ESTABLISHMENT_LABEL} : ${val}`;
+}
+
+/** Signature / employer footer lines — must not appear on Form C PDF. */
+export function isFormCTamilNaduLwfPdfSignatoryText(text) {
+  const flat = String(text || '')
+    .replace(/_x000d_/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!flat) return false;
+  if (/^for\s*\(/i.test(flat)) return true;
+  if (/authori[sz]ed\s+signatory/i.test(flat)) return true;
+  if (/signature\s+of\s+employer/i.test(flat)) return true;
+  if (/manager\s*\/\s*authori[sz]ed\s+person/i.test(flat)) return true;
+  return false;
+}
+
+export function isFormCTamilNaduLwfPdfSignatoryRow(row) {
+  if (!Array.isArray(row)) return isFormCTamilNaduLwfPdfSignatoryText(row);
+  const filled = row
+    .map((c) => String(c || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (!filled.length) return false;
+  return filled.every((t) => isFormCTamilNaduLwfPdfSignatoryText(t));
+}
+
+/**
+ * Keep Form C titles + force "Name of the Establishment :" field.
+ * Drop Authorised Signatory / Signature of Employer footer lines from PDF header.
+ */
+export function rewriteFormCTamilNaduLwfPdfHeader(titles, fields) {
+  const titleList = Array.isArray(titles) ? titles : [];
+  const fieldList = Array.isArray(fields) ? fields : [];
+  const nextTitles = [];
+  const leftover = [];
+  let establishment = '';
+
+  const consider = (raw, asTitle) => {
+    const line = String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!line) return;
+    if (isFormCTamilNaduLwfPdfSignatoryText(line)) return;
+    if (/name\s+of\s+the\s+establishment/i.test(line)) {
+      const val = line.replace(/^name\s+of\s+the\s+establishment\s*:?\s*/i, '').trim();
+      if (val && !/^name\s+of\s+the\s+establishment$/i.test(val)) establishment = val;
+      return;
+    }
+    if (asTitle) {
+      if (/pvt\.?\s*ltd|private\s+limited|energy|road|district|taluk|theni\s+site/i.test(line)) {
+        leftover.push(line);
+        return;
+      }
+      nextTitles.push(line);
+      return;
+    }
+    leftover.push(line);
+  };
+
+  titleList.forEach((t) => consider(t, true));
+  fieldList.forEach((f) => consider(f, false));
+
+  if (!establishment) {
+    const companyLike = leftover.find((l) =>
+      /pvt\.?\s*ltd|private\s+limited|energy|road|district|taluk|theni\s+site/i.test(l)
+    );
+    if (companyLike) establishment = companyLike;
+  }
+
+  const nextFields = [formatFormCTamilNaduLwfEstablishmentLine(establishment)];
+  leftover.forEach((l) => {
+    if (
+      /pvt\.?\s*ltd|private\s+limited|energy|road|district|taluk|theni\s+site/i.test(l) &&
+      establishment
+    ) {
+      return;
+    }
+    if (isFormCTamilNaduLwfPdfSignatoryText(l)) return;
+    nextFields.push(l);
+  });
+
+  const seen = new Set();
+  return {
+    titles: nextTitles.filter((t) => {
+      const k = String(t || '').toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    }),
+    fields: nextFields.filter((f) => {
+      const k = String(f || '').toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    }),
+  };
+}
 
 export function resolveFormCLabourWelfareYear(selectedMonthStr, item, fallbackLine = '') {
   const fromDue = extractYearToken(item?.dueDate || item?.DueDate || '');
@@ -411,9 +520,14 @@ export function ensureFormCTamilNaduLwfEstablishmentLayout(worksheet, options = 
       .replace(/^name\s+of\s+the\s+establishment\s*:?\s*/i, '')
       .trim();
 
-  // Official Form C model shows the site/company identity left-aligned across the form width.
-  const display = stripEstLabel(establishmentText) || stripEstLabel(existing) || existing;
-  if (!display) return false;
+  // Keep "Name of the Establishment :" prefix (Excel + PDF), value left-aligned across form width.
+  const valueOnly = stripEstLabel(establishmentText) || stripEstLabel(existing) || '';
+  const display = valueOnly
+    ? formatFormCTamilNaduLwfEstablishmentLine(valueOnly)
+    : existing
+      ? formatFormCTamilNaduLwfEstablishmentLine(existing)
+      : '';
+  if (!display || display === `${FORM_C_TN_ESTABLISHMENT_LABEL} :`) return false;
 
   const mergeLabels = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
   mergeLabels.forEach((label) => {

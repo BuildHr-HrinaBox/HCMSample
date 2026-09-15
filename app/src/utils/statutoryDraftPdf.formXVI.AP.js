@@ -10,10 +10,10 @@ const normalizeFormXVIText = (text) =>
     .toLowerCase();
 
 const FORM_XVI_AP_LEFTOVER_HEADER_RE =
-  /\b(?:Form\s*XVI\b|Muster\s+Roll|Address\s+of\s+the\s+Establishment|Name\s+and\s+Address\s+of\s+Contractor|Name\s+and\s+address\s+of\s+Principal\s+Employer|\(?\s*Vide\s+rule)/i;
+  /\b(?:Form\s*XVI\b|Muster\s+Roll|Address\s+of\s+the\s+Establishment|Name\s+and\s+Address\s+of\s+the\s+Establishment|Name\s+and\s+Address\s+of\s+Contractor|Name\s+and\s+address\s+of\s+Principal\s+Employer|\(?\s*Vide\s+rule)/i;
 
 const FORM_XVI_AP_NATURE_CUT_RE =
-  /\b(?:For\s+the\s+Month\s+of|Form\s*XVI\b|Address\s+of\s+the\s+Establishment|Name\s+and\s+Address\s+of\s+Contractor|Name\s+and\s+address\s+of\s+Principal\s+Employer|\(?\s*Vide\s+rule)/i;
+  /\b(?:For\s+the\s+Month\s+of|Form\s*XVI\b|Address\s+of\s+the\s+Establishment|Name\s+and\s+Address\s+of\s+the\s+Establishment|Name\s+and\s+Address\s+of\s+Contractor|Name\s+and\s+address\s+of\s+Principal\s+Employer|\(?\s*Vide\s+rule)/i;
 
 const FORM_XVI_AP_MONTH_YEAR_RE =
   /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b/i;

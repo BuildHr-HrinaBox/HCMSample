@@ -7,7 +7,7 @@ import {
   collectApprovedLeaveIdentityKeys,
   getApprovedLeaveRecordUniqueKey,
   normalizeApprovedLeaveRecord,
-  normalizePersonNameKey,
+  personNamesMatchFirstLastStrict,
   resolveApprovedLeavePeriodForFormNGJ,
 } from './formFKarnataka';
 
@@ -55,14 +55,8 @@ export function normalizeFormOGJPeriodParentLabel(raw) {
   return text;
 }
 
-export function isFormOGJGujaratContext(
-  formHeader,
-  rowItem,
-  fileName,
-  sheetText = '',
-  tableHeaders = []
-) {
-  const parts = [
+function formOGJContextBlob(formHeader, rowItem, fileName, sheetText = '', tableHeaders = []) {
+  return [
     rowItem?.formName,
     rowItem?.FormName,
     rowItem?.formFileName,
@@ -77,8 +71,46 @@ export function isFormOGJGujaratContext(
     .filter((x) => x != null && String(x).trim() !== '')
     .join(' ')
     .toLowerCase();
+}
+
+/** Karnataka Form P is the accumulated-leave notice (same table as Gujarat Form O). */
+export function isFormPKarnatakaAccumulatedLeaveContext(
+  formHeader,
+  rowItem,
+  fileName,
+  sheetText = '',
+  tableHeaders = []
+) {
+  const parts = formOGJContextBlob(formHeader, rowItem, fileName, sheetText, tableHeaders);
+  if (!parts) return false;
+  if (/\bform[\s._-]*p[\s._-]*gj\b/.test(parts) || (/gujarat/.test(parts) && !/karnataka/.test(parts))) {
+    return false;
+  }
+  if (/muster[\s-]*roll/.test(parts) || /date\s+of\s+(the\s+)?month/.test(parts)) return false;
+  const isFormP = /\bform[\s._-]*p\b/.test(parts) || /form_p_/.test(parts);
+  const isKA =
+    /karnataka/.test(parts) ||
+    /form[\s._-]*p[\s._-]*ka\b/.test(parts) ||
+    /form_p_-_karnataka/.test(parts);
+  const hasLeaveTable =
+    /accumulated\s+leave/.test(parts) &&
+    (/sr\.?\s*no/.test(parts) || /period|perod/.test(parts) || /\bfrom\b/.test(parts));
+  return isFormP && isKA && hasLeaveTable;
+}
+
+export function isFormOGJGujaratContext(
+  formHeader,
+  rowItem,
+  fileName,
+  sheetText = '',
+  tableHeaders = []
+) {
+  const parts = formOGJContextBlob(formHeader, rowItem, fileName, sheetText, tableHeaders);
 
   if (/\bform\s*q\b|\bform_q\b|form[\s._-]*q[\s._-]*gj/.test(parts)) return false;
+  if (isFormPKarnatakaAccumulatedLeaveContext(formHeader, rowItem, fileName, sheetText, tableHeaders)) {
+    return true;
+  }
   if (/\bform\s*p\b|\bform_p\b|form[\s._-]*p[\s._-]*gj/.test(parts)) return false;
 
   const hasGujarat = /gujarat|\b_gj\b|form[\s._-]*o[\s._-]*gj|form_o_gj/.test(parts);
@@ -168,8 +200,8 @@ export function rebuildFormOGJGujaratTableHeadersFromSheet({
     const joined = parts.join(' ');
     if (
       /sr\.?\s*no/.test(joined) &&
-      /name\s+of\s+workers?/.test(joined) &&
-      /accumulated\s+leave/.test(joined)
+      /accumulated\s+leave/.test(joined) &&
+      (/name\s+of\s+workers?/.test(joined) || /period|perod/.test(joined) || /\bfrom\b/.test(joined))
     ) {
       headerRowIndex = r;
       break;
@@ -483,25 +515,7 @@ export function readFormOGJEmployeeNameParts(emp) {
  * Prefer FirstName+LastName when both are available (same as Form N).
  */
 export function formOGJPersonNamesMatchStrict(workerName, recordName, firstName = '', lastName = '') {
-  const recordNorm = normalizePersonNameKey(recordName);
-  if (!recordNorm) return false;
-
-  const fn = normalizePersonNameKey(firstName);
-  const ln = normalizePersonNameKey(lastName);
-  if (fn && ln) {
-    const recordParts = recordNorm.split(' ').filter(Boolean);
-    if (recordParts.length < 2) return false;
-    return recordParts[0] === fn && recordParts[recordParts.length - 1] === ln;
-  }
-
-  const a = normalizePersonNameKey(workerName);
-  if (!a) return false;
-  if (a === recordNorm) return true;
-
-  const aParts = a.split(' ').filter(Boolean);
-  const bParts = recordNorm.split(' ').filter(Boolean);
-  if (aParts.length < 2 || bParts.length < 2) return false;
-  return aParts[0] === bParts[0] && aParts[aParts.length - 1] === bParts[bParts.length - 1];
+  return personNamesMatchFirstLastStrict(workerName, recordName, firstName, lastName);
 }
 
 /** Only EmployeeID / Zoho People ids — never Role.ID or other shared codes. */
@@ -578,14 +592,14 @@ export function formOGJRecordMatchesWorker(record, workerName, emp, options = {}
   return nameMatched;
 }
 
-export function findApprovedLeaveForFormORow(
+export function findApprovedLeaveRecordsForFormORow(
   row,
   tableHeaders,
   approvedRecords,
   emp,
   options = {}
 ) {
-  if (!Array.isArray(approvedRecords) || approvedRecords.length === 0) return null;
+  if (!Array.isArray(approvedRecords) || approvedRecords.length === 0) return [];
 
   const canonicalHeaders = resolveFormOGJGujaratTableHeaders(tableHeaders);
   const workerHeader = canonicalHeaders.find(isFormOGJWorkerNameHeader) || '';
@@ -593,7 +607,7 @@ export function findApprovedLeaveForFormORow(
   const workerName = workerHeader
     ? String(row?.[workerHeader] ?? row?.__employeeLookupName ?? empFullName ?? '').trim()
     : String(row?.__employeeLookupName ?? empFullName ?? '').trim();
-  if (!workerName && !empFullName) return null;
+  if (!workerName && !empFullName) return [];
 
   const usedRecordKeys =
     options.usedRecordKeys instanceof Set ? options.usedRecordKeys : new Set();
@@ -613,17 +627,119 @@ export function findApprovedLeaveForFormORow(
       matches.push(rec);
     }
   }
+  return matches;
+}
+
+export function findApprovedLeaveForFormORow(
+  row,
+  tableHeaders,
+  approvedRecords,
+  emp,
+  options = {}
+) {
+  const matches = findApprovedLeaveRecordsForFormORow(
+    row,
+    tableHeaders,
+    approvedRecords,
+    emp,
+    options
+  );
   if (matches.length === 0) return null;
   if (matches.length === 1) return matches[0];
 
-  // Prefer leave whose Employee Name matches FirstName+LastName when several ID hits exist.
+  const workerHeader =
+    resolveFormOGJGujaratTableHeaders(tableHeaders).find(isFormOGJWorkerNameHeader) || '';
   const { first, last, full } = readFormOGJEmployeeNameParts(emp);
+  const workerName = workerHeader
+    ? String(row?.[workerHeader] ?? row?.__employeeLookupName ?? full ?? '').trim()
+    : String(row?.__employeeLookupName ?? full ?? '').trim();
   const nameForMatch = full || workerName;
   const nameExact = matches.find((rec) => {
     const { names } = collectApprovedLeaveIdentityKeys(rec);
     return names.some((rn) => formOGJPersonNamesMatchStrict(nameForMatch, rn, first, last));
   });
   return nameExact || matches[0];
+}
+
+function formatAggregatedLeaveCount(total) {
+  if (!Number.isFinite(total) || total <= 0) return '';
+  return String(Math.round(total * 100) / 100);
+}
+
+/** One period: "08-Jul-2026" or "21-Jul-2026 to 25-Jul-2026". */
+export function formatFormOGJLeavePeriodLabel(from, to) {
+  const start = String(from || '').trim();
+  const end = String(to || from || '').trim();
+  if (!start && !end) return '';
+  if (!end || start === end) return start || end;
+  return `${start} to ${end}`;
+}
+
+/**
+ * Several periods: "08-Jul-2026, 21-Jul-2026 to 25-Jul-2026".
+ */
+export function formatFormOGJLeavePeriodsDisplay(periods) {
+  const labels = (Array.isArray(periods) ? periods : [])
+    .map((p) => formatFormOGJLeavePeriodLabel(p?.from, p?.to))
+    .filter(Boolean);
+  return labels.join(', ');
+}
+
+/**
+ * Sum every matching approved leave in the month (1 day + 5 days → 6).
+ * Several periods display as "08-Jul-2026, 21-Jul-2026 to 25-Jul-2026".
+ */
+export function aggregateFormOGJApprovedLeaveMetrics(
+  records,
+  monthFrom = '',
+  monthTo = '',
+  bookedLimit = ''
+) {
+  const list = (Array.isArray(records) ? records : records ? [records] : []).filter(Boolean);
+  let total = 0;
+  const types = [];
+  const periods = [];
+
+  list.forEach((rec) => {
+    if (monthFrom && monthTo && !approvedLeaveRecordOverlapsFormOGJMonth(rec, monthFrom, monthTo)) {
+      return;
+    }
+    const metrics = resolveApprovedLeavePeriodForFormNGJ(rec, bookedLimit);
+    const n = Number(String(metrics.daysCount || '').replace(/,/g, '').trim());
+    if (Number.isFinite(n) && n > 0) total += n;
+    const start = String(metrics.from || '').trim();
+    const end = String(metrics.to || metrics.from || '').trim();
+    if (start || end) {
+      periods.push({
+        from: start,
+        to: end || start,
+        fromMs: zohoLeaveDateToMs(start) || zohoLeaveDateToMs(end),
+      });
+    }
+    const leaveType = readApprovedLeaveLeaveType(rec);
+    if (leaveType) types.push(leaveType);
+  });
+
+  periods.sort((a, b) => (a.fromMs || 0) - (b.fromMs || 0));
+
+  const bookedNum = Number(String(bookedLimit || '').replace(/,/g, '').trim());
+  if (Number.isFinite(bookedNum) && bookedNum > 0 && total > bookedNum) {
+    total = bookedNum;
+  }
+
+  const uniqueTypes = [...new Set(types.filter(Boolean))];
+  const periodDisplay = formatFormOGJLeavePeriodsDisplay(periods);
+  const single = periods.length <= 1;
+  const from = single ? periods[0]?.from || '' : periodDisplay;
+  const to = single ? periods[0]?.to || periods[0]?.from || '' : periodDisplay;
+  return {
+    daysCount: formatAggregatedLeaveCount(total),
+    from,
+    to,
+    periodDisplay,
+    periods,
+    leaveType: uniqueTypes.join(', '),
+  };
 }
 
 export function getFormOGJRowValueForHeader(row, header) {
@@ -673,16 +789,9 @@ export function applyFormOGJGujaratApprovedLeaveToRow(
   { overwrite = true, monthFrom = '', monthTo = '' } = {}
 ) {
   if (!row || !approvedRecord) return 0;
-  if (
-    monthFrom &&
-    monthTo &&
-    !approvedLeaveRecordOverlapsFormOGJMonth(approvedRecord, monthFrom, monthTo)
-  ) {
-    return 0;
-  }
-  // Prefer Days with LeaveCount > 0 for From/Till/count (same as Form N).
-  const metrics = resolveApprovedLeavePeriodForFormNGJ(approvedRecord);
-  const leaveType = readApprovedLeaveLeaveType(approvedRecord);
+  const records = Array.isArray(approvedRecord) ? approvedRecord : [approvedRecord];
+  const metrics = aggregateFormOGJApprovedLeaveMetrics(records, monthFrom, monthTo);
+  const leaveType = metrics.leaveType;
   const leaveCount = metrics.daysCount;
   const periodFrom = metrics.from;
   const periodTill = metrics.to;
@@ -759,14 +868,29 @@ export function applyFormOGJGujaratApprovedLeaveAutofill(
     const emp = empItem && (empItem.Employee || empItem.employee || empItem);
     const { full: empFullName } = readFormOGJEmployeeNameParts(emp);
     if (empFullName) row.__employeeLookupName = empFullName;
+    const empId = String(
+      emp?.Employee_ID ||
+        emp?.['Employee ID'] ||
+        emp?.employeeId ||
+        emp?.EmployeeID ||
+        emp?.Zoho_ID ||
+        ''
+    ).trim();
+    if (empId) row.__employeeLookupId = empId;
 
-    const approvedRecord = findApprovedLeaveForFormORow(row, canonicalHeaders, recordsToUse, emp, {
-      usedRecordKeys,
-      monthFrom,
-      monthTo,
-      collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
-    });
-    if (!approvedRecord) {
+    const approvedRecordsForRow = findApprovedLeaveRecordsForFormORow(
+      row,
+      canonicalHeaders,
+      recordsToUse,
+      emp,
+      {
+        usedRecordKeys,
+        monthFrom,
+        monthTo,
+        collectEmployeeIdCandidates: options.collectEmployeeIdCandidates,
+      }
+    );
+    if (!approvedRecordsForRow.length) {
       // Clear stale leave cells when no strict match (e.g. prior wrong shared Zoho ID).
       canonicalHeaders.forEach((header) => {
         if (isFormOGJSkipPeopleAutofillHeader(header)) row[header] = '';
@@ -774,12 +898,14 @@ export function applyFormOGJGujaratApprovedLeaveAutofill(
       return;
     }
 
-    const recordKey = getApprovedLeaveRecordUniqueKey(approvedRecord);
-    if (recordKey) usedRecordKeys.add(recordKey);
+    approvedRecordsForRow.forEach((approvedRecord) => {
+      const recordKey = getApprovedLeaveRecordUniqueKey(approvedRecord);
+      if (recordKey) usedRecordKeys.add(recordKey);
+    });
 
     const applied = applyFormOGJGujaratApprovedLeaveToRow(
       row,
-      approvedRecord,
+      approvedRecordsForRow,
       canonicalHeaders,
       { overwrite: options.overwrite !== false, monthFrom, monthTo }
     );
@@ -791,11 +917,19 @@ export function applyFormOGJGujaratApprovedLeaveAutofill(
 export function enrichFormOGJGujaratDisplayHeader(formHeader, fileName, rowItem, tableHeaders) {
   const ctx = isFormOGJGujaratContext(formHeader, rowItem, fileName, '', tableHeaders);
   if (!ctx) return formHeader;
+  const isPKA = isFormPKarnatakaAccumulatedLeaveContext(
+    formHeader,
+    rowItem,
+    fileName,
+    '',
+    tableHeaders
+  );
   return {
     ...(formHeader || {}),
-    title: formHeader?.title || 'FORM - O',
-    subtitle: formHeader?.subtitle || '(See rule 18)',
+    title: formHeader?.title || (isPKA ? 'FORM P' : 'FORM - O'),
+    subtitle: formHeader?.subtitle || (isPKA ? '' : '(See rule 18)'),
     formOGJGujaratTableLayout: true,
+    formPKarnatakaLeaveLayout: isPKA || !!formHeader?.formPKarnatakaLeaveLayout,
   };
 }
 
@@ -821,6 +955,11 @@ function formOGJHeaderAliasBucket(n) {
   if (/number\s+of\s+accumulated\s+leave/.test(norm)) return 'leaveCount';
   // Template typo "Name of accumulated leave" ≡ Number / LeaveCount
   if (/name\s+of\s+accumulated\s+leave/.test(norm)) return 'leaveCount';
+  // Generic parse can glue parent+child into "... From_From" / "... Till_Till".
+  if (/period|perod/.test(norm) && /\bfrom\b/.test(norm) && !/\b(till|to)\b/.test(norm)) {
+    return 'periodFrom';
+  }
+  if (/period|perod/.test(norm) && /\b(till|to)\b/.test(norm)) return 'periodTill';
   if (/accumulated\s+leave/.test(norm) && !/period|perod/.test(norm)) return 'leaveCount';
   if (/period|perod/.test(norm) && /accumulated/.test(norm) && /leave/.test(norm)) return 'periodBand';
   if (norm === 'from') return 'periodFrom';
@@ -1027,8 +1166,8 @@ function detectFormOGJGujaratTableLayout(worksheet, hints = {}) {
     const joined = parts.join(' ');
     if (
       /sr\.?\s*no/.test(joined) &&
-      /name\s+of\s+workers?/.test(joined) &&
-      /accumulated\s+leave/.test(joined)
+      /accumulated\s+leave/.test(joined) &&
+      (/name\s+of\s+workers?/.test(joined) || /period|perod/.test(joined) || /\bfrom\b/.test(joined))
     ) {
       headerRow = r;
       for (let c = 1; c <= 20; c += 1) {
@@ -1126,6 +1265,7 @@ export async function buildFormOGJGujaratWorkbookWithTemplateStyles({
   parsedDataStartIndex,
   parsedTableStartCol,
   formatStatutoryDateDisplay = null,
+  afterWorksheetReady = null,
 }) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateArrayBuffer);
@@ -1230,6 +1370,10 @@ export async function buildFormOGJGujaratWorkbookWithTemplateStyles({
       templateRow: dataStartRow,
       templateBodyRows: 1,
     });
+  }
+
+  if (typeof afterWorksheetReady === 'function') {
+    afterWorksheetReady(worksheet, { rows, layout });
   }
 
   const out = await workbook.xlsx.writeBuffer();

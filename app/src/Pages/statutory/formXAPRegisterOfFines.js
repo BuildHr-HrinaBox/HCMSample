@@ -8,9 +8,11 @@ import {
   excelJSCellHasBorder,
   excelJSCellHasFullBoxBorder,
   findExcelJSRemarksOrLastHeaderCol,
+  worksheetLooksLikeFormXXIAPRegisterOfFines,
 } from '../../utils/excelTableBorders';
 import {
   formatStatutoryHeaderLabelValueExport,
+  isContractorHeaderLabel,
   normalizeStatutoryHeaderLabel,
   resolveHeaderFieldExportValue,
   statutoryHeaderLabelMatchKey,
@@ -32,6 +34,10 @@ export const FORM_XX_AP_DEDUCTIONS_NIL_OF_MONTH_TEXT = 'Nill of the month';
 
 /** Default cell value for Form XX damage / recovery columns when no deduction case exists. */
 export const FORM_XX_AP_DEDUCTION_COLUMN_NIL_TEXT = 'NIL';
+
+export const FORM_XX_AP_CONTRACTOR_HEADER_KEY = 'form_xx_contractor';
+export const FORM_XXI_AP_CONTRACTOR_HEADER_KEY = 'form_xxi_contractor';
+export const FORM_XX_AP_DEFAULT_CONTRACTOR_NAME = 'VAYONA ENERGY PRIVATE LIMITED';
 
 export const FORM_X_AP_TEMPLATE_MISMATCH_MESSAGE =
   'This row is Form X (Shops & Establishment — Register of Fines) but the template file is Form XXI (Contract Labour — Register of Fines). Upload the correct Form X template in Form Master.';
@@ -1399,7 +1405,24 @@ function locateFormXXAPDataStartRowFromWorksheet(worksheet, headerBandEnd, start
   return r;
 }
 
-/** Match 2nd-image model: S.No/NIL centered; names & text left; vertical middle. */
+function applyFormXXAPCellAlignment(cell, horizontal) {
+  if (!cell) return;
+  const nextAlign = {
+    ...(cell.alignment || {}),
+    horizontal,
+    vertical: 'middle',
+    wrapText: !!(cell.alignment && cell.alignment.wrapText),
+  };
+  cell.alignment = nextAlign;
+  try {
+    const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+    cell.style = { ...prev, alignment: { ...(prev.alignment || {}), ...nextAlign } };
+  } catch (_) {
+    /* alignment property above is enough */
+  }
+}
+
+/** Form XX: S.No/NIL centered. Form XXI: every boxed cell left-aligned. */
 function applyFormXXAPDataRowAlignment(
   worksheet,
   { dataStartRow, dataRowCount, colFrom, colTo } = {}
@@ -1409,6 +1432,7 @@ function applyFormXXAPDataRowAlignment(
   const r1 = r0 + Math.max(1, Number(dataRowCount) || 1) - 1;
   const c0 = Math.max(1, Number(colFrom) || 1);
   const c1 = Math.max(c0, Number(colTo) || c0);
+  const leftAlignAll = worksheetLooksLikeFormXXIAPRegisterOfFines(worksheet);
   for (let r = r0; r <= r1; r += 1) {
     for (let c = c0; c <= c1; c += 1) {
       const cell = worksheet.getCell(r, c);
@@ -1416,22 +1440,34 @@ function applyFormXXAPDataRowAlignment(
       const isNil = /^n+i+l+\.?$/i.test(text);
       const isSerial =
         c === c0 && (text === '' || /^-?\d+(\.\d+)?$/.test(text));
-      const horizontal = isNil || isSerial ? 'center' : 'left';
-      const nextAlign = {
-        ...(cell.alignment || {}),
-        horizontal,
-        vertical: 'middle',
-        wrapText: !!(cell.alignment && cell.alignment.wrapText),
-      };
-      cell.alignment = nextAlign;
-      try {
-        const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
-        cell.style = { ...prev, alignment: { ...(prev.alignment || {}), ...nextAlign } };
-      } catch (_) {
-        /* alignment property above is enough */
+      const horizontal = leftAlignAll || !(isNil || isSerial) ? 'left' : 'center';
+      applyFormXXAPCellAlignment(cell, horizontal);
+    }
+  }
+}
+
+function applyFormXXIAPTableBoxLeftAlignment(
+  worksheet,
+  { headerRowFrom, headerRowTo, dataStartRow, dataRowCount, colFrom, colTo } = {}
+) {
+  if (!worksheet || !worksheetLooksLikeFormXXIAPRegisterOfFines(worksheet)) return;
+  const c0 = Math.max(1, Number(colFrom) || 1);
+  const c1 = Math.max(c0, Number(colTo) || c0);
+  const headerFrom = Math.max(1, Number(headerRowFrom) || 0);
+  const headerTo = Math.max(headerFrom, Number(headerRowTo) || 0);
+  if (headerFrom > 0) {
+    for (let r = headerFrom; r <= headerTo; r += 1) {
+      for (let c = c0; c <= c1; c += 1) {
+        applyFormXXAPCellAlignment(worksheet.getCell(r, c), 'left');
       }
     }
   }
+  applyFormXXAPDataRowAlignment(worksheet, {
+    dataStartRow,
+    dataRowCount,
+    colFrom: c0,
+    colTo: c1,
+  });
 }
 
 function findFormXXAPTemplateBodyBorderRow(worksheet, dataStartRow, colFrom, colTo, preferRow = 0) {
@@ -2521,6 +2557,121 @@ function locateFormXXDataStartRow(worksheet, columnHeaderRow, startCol, hdrCount
   return dataStartRow;
 }
 
+function isFormXXAPContractorPlaceholderValue(value) {
+  const s = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return true;
+  const squeezed = s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return (
+    /^name\s+and\s+address\s+of\s+(?:the\s+)?contractor\.?\s*$/i.test(s) ||
+    squeezed === 'nameandaddressofcontractor' ||
+    squeezed === 'nameandaddressofthecontractor'
+  );
+}
+
+function isFormXXAPContractorLabelText(raw) {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!s) return false;
+  const labelOnly = s.split(':')[0];
+  if (isContractorHeaderLabel(labelOnly) || isContractorHeaderLabel(s)) return true;
+  const squeezed = labelOnly.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return (
+    squeezed === 'nameandaddressofcontractor' ||
+    squeezed === 'nameandaddressofthecontractor' ||
+    (/nameandaddressof/.test(squeezed) &&
+      /contractor/.test(squeezed) &&
+      !/principal/.test(squeezed) &&
+      !/establishment/.test(squeezed))
+  );
+}
+
+/** Site / header contractor first; else VAYONA ENERGY PRIVATE LIMITED. */
+export function resolveFormXXAPContractorText(headerFormData, parsedFormHeader = null) {
+  const data = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+  const keys = [
+    FORM_XXI_AP_CONTRACTOR_HEADER_KEY,
+    FORM_XX_AP_CONTRACTOR_HEADER_KEY,
+    'form_xvi_contractor',
+    'form_xvii_contractor',
+    'form_xviii_contractor',
+    'form_xxiii_contractor',
+    'form_xv_contractor',
+    'form25_contractor',
+    'statutory_contractor'
+  ];
+  for (let i = 0; i < keys.length; i += 1) {
+    const v = String(data[keys[i]] ?? '').trim();
+    if (v && !isFormXXAPContractorPlaceholderValue(v)) return v;
+  }
+  for (const [key, raw] of Object.entries(data)) {
+    if (!/contractor/i.test(String(key || '')) || /principal/i.test(String(key || ''))) continue;
+    const v = String(raw ?? '').trim();
+    if (v && !isFormXXAPContractorPlaceholderValue(v)) return v;
+  }
+  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  for (let i = 0; i < fields.length; i += 1) {
+    const field = fields[i];
+    if (!field?.key) continue;
+    if (!isContractorHeaderLabel(field.label) && !/contractor/i.test(String(field.key || ''))) continue;
+    if (/principal/i.test(String(field.key || '')) || /principal/i.test(String(field.label || ''))) continue;
+    const v = resolveHeaderFieldExportValue(data, field);
+    if (v && !isFormXXAPContractorPlaceholderValue(v)) return v;
+  }
+  return FORM_XX_AP_DEFAULT_CONTRACTOR_NAME;
+}
+
+/**
+ * Form XX / XXI AP header band: write "Name and address of Contractor : {site / default}".
+ * Other admin labels (establishment, nature, principal employer) keep the generic writer.
+ */
+export function applyFormXXAPHeaderLayoutFixes(
+  worksheet,
+  { headerFormData, parsedFormHeader, headerRowEnd = 12, maxCol = 16 } = {}
+) {
+  if (!worksheet) return;
+  const contractor = resolveFormXXAPContractorText(headerFormData, parsedFormHeader);
+  if (!contractor) return;
+
+  const scanEnd = Math.max(10, Number(headerRowEnd) || 12);
+  const colLimit = Math.max(16, Number(maxCol) || 16);
+  let contractorLabel = null;
+
+  for (let r = 1; r <= scanEnd && !contractorLabel; r += 1) {
+    for (let c = 1; c <= colLimit; c += 1) {
+      const raw = formXXAPExcelCellText(worksheet.getCell(r, c)?.value);
+      if (!raw) continue;
+      if (
+        r <= 4 &&
+        /form\s*[-._ ]*xxi?\b|register\s+of\s+(?:fines|deductions)|vide\s+rule/i.test(raw)
+      ) {
+        continue;
+      }
+      if (isFormXXAPContractorLabelText(raw)) {
+        contractorLabel = { row: r, col: c, raw };
+        break;
+      }
+    }
+  }
+  if (!contractorLabel) {
+    // AP XXI / XX templates keep this label on the left meta band (row 5).
+    contractorLabel = { row: 5, col: 1, raw: 'Name and address of Contractor:' };
+  }
+
+  const cell = worksheet.getCell(contractorLabel.row, contractorLabel.col);
+  cell.value = formatStatutoryHeaderLabelValueExport(
+    'Name and address of Contractor',
+    contractorLabel.raw,
+    contractor
+  );
+  cell.alignment = {
+    ...(cell.alignment || {}),
+    wrapText: true,
+    vertical: 'middle',
+    horizontal: 'left'
+  };
+}
+
 /** Preserve original Form XX CLRA template styling (ExcelJS) while writing table rows. */
 export async function buildFormXXAPWorkbookWithTemplateStyles({
   templateArrayBuffer,
@@ -2745,6 +2896,14 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
     maxScanCols: 24,
     writeMode: headerWriteMode,
   });
+  if (!(Number(formCRajasthanTitleAnchorCol) > 0)) {
+    applyFormXXAPHeaderLayoutFixes(worksheet, {
+      headerFormData: headerValues,
+      parsedFormHeader,
+      headerRowEnd: columnHeaderRow,
+      maxCol: 16
+    });
+  }
 
   const sourceHeaders = normalizeFormXXAPExportHeaders(
     Array.isArray(headersToUse) ? headersToUse.filter(Boolean) : []
@@ -2851,6 +3010,14 @@ export async function buildFormXXAPWorkbookWithTemplateStyles({
       templateBodyRow: templateBodyBorderRow,
     });
   }
+  applyFormXXIAPTableBoxLeftAlignment(worksheet, {
+    headerRowFrom: columnHeaderRow,
+    headerRowTo: Math.max(columnHeaderRow, dataStartRow - 1),
+    dataStartRow,
+    dataRowCount: bodyRowCount,
+    colFrom: startCol,
+    colTo: tableColMax,
+  });
 
   // Rajasthan Form C keeps the legal note in the template body; it belongs only in PDF.
   if (Number(formCRajasthanTitleAnchorCol) > 0) {

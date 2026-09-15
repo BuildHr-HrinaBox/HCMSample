@@ -7,8 +7,12 @@ import {
   ensureFormCTamilNaduLwfEstablishmentLayout,
   ensureFormCTamilNaduLwfTableAlignment,
   ensureFormCTamilNaduLwfTitleLayout,
+  formatFormCTamilNaduLwfEstablishmentLine,
+  isFormCTamilNaduLwfPdfSignatoryRow,
+  isFormCTamilNaduLwfPdfSignatoryText,
   remapFormCLabourWelfareRowsToHeaders,
   resolveFormCLabourWelfareYear,
+  rewriteFormCTamilNaduLwfPdfHeader,
 } from './formCTamilNaduLwf';
 
 describe('Form C Tamil Nadu LWF year helpers', () => {
@@ -134,7 +138,7 @@ describe('Form C Tamil Nadu LWF download alignment', () => {
     expect(merges.some((m) => /^A4:E4$/i.test(m))).toBe(true);
   });
 
-  it('left-aligns establishment across the form and strips the label prefix', async () => {
+  it('left-aligns establishment across the form and keeps the label prefix', async () => {
     const ws = await buildFormCSheet();
     const ok = ensureFormCTamilNaduLwfEstablishmentLayout(ws, {
       headerRow: 11,
@@ -143,10 +147,42 @@ describe('Form C Tamil Nadu LWF download alignment', () => {
       establishmentText: 'TN-Palani, Vayona Energy Pvt Ltd, 274 A, Rani mangammal main road',
     });
     expect(ok).toBe(true);
-    expect(String(ws.getCell(5, 1).value)).toContain('TN-Palani, Vayona Energy Pvt Ltd');
-    expect(String(ws.getCell(5, 1).value)).not.toMatch(/^Name of the Establishment/i);
+    expect(String(ws.getCell(5, 1).value)).toMatch(
+      /^Name of the Establishment\s*:\s*TN-Palani, Vayona Energy Pvt Ltd/
+    );
     expect(ws.getCell(5, 1).alignment.horizontal).toBe('left');
     expect(ws.getCell(5, 1).alignment.wrapText).toBe(true);
+  });
+
+  it('formats establishment line with Name of the Establishment label', () => {
+    expect(formatFormCTamilNaduLwfEstablishmentLine('Theni Site, Vayona Energy Pvt Ltd')).toBe(
+      'Name of the Establishment : Theni Site, Vayona Energy Pvt Ltd'
+    );
+    expect(
+      formatFormCTamilNaduLwfEstablishmentLine(
+        'Name of the Establishment : Theni Site, Vayona Energy Pvt Ltd'
+      )
+    ).toBe('Name of the Establishment : Theni Site, Vayona Energy Pvt Ltd');
+  });
+
+  it('detects and strips Form C PDF signatory footer lines', () => {
+    expect(isFormCTamilNaduLwfPdfSignatoryText('Authorised Signatory')).toBe(true);
+    expect(
+      isFormCTamilNaduLwfPdfSignatoryText('Signature of Employer / Manager / Authorised Person')
+    ).toBe(true);
+    expect(isFormCTamilNaduLwfPdfSignatoryRow(['Authorised Signatory'])).toBe(true);
+    const rewritten = rewriteFormCTamilNaduLwfPdfHeader(
+      ['Form-C', 'Register of Fines and Unpaid Accumulations for the year - 2026'],
+      [
+        'Theni Site, Vayona Energy Pvt Ltd',
+        'Authorised Signatory',
+        'Signature of Employer / Manager / Authorised Person',
+      ]
+    );
+    expect(rewritten.fields[0]).toMatch(/^Name of the Establishment\s*:/);
+    expect(rewritten.fields.join('\n')).not.toMatch(/Authorised Signatory/i);
+    expect(rewritten.fields.join('\n')).not.toMatch(/Signature of Employer/i);
+    expect(rewritten.titles.join('\n')).not.toMatch(/Authorised Signatory/i);
   });
 
   it('centers Nil inside vertical merges matching each category block', async () => {

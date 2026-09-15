@@ -12,6 +12,7 @@ import {
   isFormXXVITamilNaduDayHeaderKey,
   isFormXXVITamilNaduHeaderFieldLayoutFormHeader,
   isFormXXVITamilNaduRateOfWagesHeaderKey,
+  isFormXXVITamilNaduWorkmanNameHeader,
   detectFormXXVITamilNaduDayColumnMap,
   ensureFormXXVITamilNaduDayColumnHeaders,
   readFormXXVITamilNaduCellValue,
@@ -98,6 +99,55 @@ describe('formXXVITamilNaduMuster worksite + employee name', () => {
     expect(
       getFormXXVITamilNaduEmployeeName({ EmployeeName: 'Rajesh Kumar', Name: 'Other' })
     ).toBe('Rajesh Kumar');
+  });
+
+  test('getFormXXVITamilNaduEmployeeName joins FirstName and LastName', () => {
+    expect(
+      getFormXXVITamilNaduEmployeeName({ FirstName: 'Rajesh', LastName: 'Kumar' })
+    ).toBe('Rajesh Kumar');
+    expect(
+      getFormXXVITamilNaduEmployeeName({ first_name: 'Raja', last_name: 'K' })
+    ).toBe('Raja K');
+    expect(
+      getFormXXVITamilNaduEmployeeName({
+        EmployeeName: 'Rajeshkumar',
+        FirstName: 'Rajesh',
+        LastName: 'Kumar'
+      })
+    ).toBe('Rajesh Kumar');
+    expect(getFormXXVITamilNaduEmployeeName({ EmployeeName: 'OnlyFirst' })).toBe('OnlyFirst');
+  });
+
+  test('isFormXXVITamilNaduWorkmanNameHeader matches Name of the Workman', () => {
+    expect(isFormXXVITamilNaduWorkmanNameHeader('Name of the Workman')).toBe(true);
+    expect(isFormXXVITamilNaduWorkmanNameHeader("Father's / Husband's Name")).toBe(false);
+    expect(isFormXXVITamilNaduWorkmanNameHeader('Name and Address of the Contractor')).toBe(false);
+  });
+
+  test('applyFormXXVITamilNaduPaidDaysToMappedRows writes FirstName + LastName into Name of the Workman', () => {
+    const headers = ['Name of the Workman', 'Number of Days Worked', 'Rate of Wages'];
+    const rows = [
+      { 'Name of the Workman': 'Rajeshkumar', 'Number of Days Worked': '', 'Rate of Wages': '' }
+    ];
+    applyFormXXVITamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [
+        {
+          employee_name: 'Rajeshkumar',
+          first_name: 'Rajesh',
+          last_name: 'Kumar',
+          paid_days: 26,
+          gross_pay: 25000
+        }
+      ],
+      {
+        overwrite: true,
+        employeesForMapping: [{ FirstName: 'Rajesh', LastName: 'Kumar' }]
+      }
+    );
+    expect(rows[0]['Name of the Workman']).toBe('Rajesh Kumar');
+    expect(rows[0]['Number of Days Worked']).toBe('26');
   });
 
   test('applyFormXXVITamilNaduAutofillFromSite fills worksite', () => {

@@ -32,10 +32,10 @@ export function statutoryHeaderLabelMatchKey(label) {
   if (/(?:name|nature)\s+and\s+location\s+of\s+work/.test(compact)) {
     return 'statutory_nature_location';
   }
-  // AP Form XIII / XVII: "Establishemnt" typo and split "in/" / "under which contract…" lines.
+  // AP Form XIII / XVII / RJ Form XV: "Establishemnt" / "establiishment" typos and split "in/" lines.
   if (
-    /establ(?:ishment|ishemnt)\s+in.*under\s+which\s+contract/.test(compact) ||
-    /establ(?:ishment|ishemnt)\s+in$/.test(compact) ||
+    /establ(?:[a-z]*ment|ishemnt)\s+in.*under\s+which\s+contract/.test(compact) ||
+    /establ(?:[a-z]*ment|ishemnt)\s+in$/.test(compact) ||
     /^under\s+which\s+contract(\s+is\s+carried\s+on)?$/.test(compact)
   ) {
     return 'statutory_establishment_contract';
@@ -132,6 +132,57 @@ export function buildSiteContractorNameAndAddress(site) {
   return parts.join(', ').trim();
 }
 
+function compactSiteMatchKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+/**
+ * Form C_RJ contractor fetch across Site Management rows.
+ * Match by site name OR Location (e.g. RJ-Fatehgarh-2) so contractor fills even when
+ * statutory row site name and Site.Location differ.
+ */
+export function resolveFormRJContractorText({ site = null, sites = [], siteName = '', locationHint = '', natureText = '' } = {}) {
+  const direct = buildSiteContractorNameAndAddress(site);
+  if (direct) return direct;
+
+  const list = Array.isArray(sites) ? sites : [];
+  const hints = [siteName, locationHint, natureText]
+    .concat(
+      site
+        ? [
+            site.siteName ?? site.SiteName,
+            site.location ?? site.Location,
+            site.name ?? site.Name,
+          ]
+        : []
+    )
+    .flatMap((v) => String(v || '').split(/[,;/|]+/))
+    .map((v) => v.trim())
+    .filter(Boolean);
+
+  for (let i = 0; i < hints.length; i += 1) {
+    const hintKey = compactSiteMatchKey(hints[i]);
+    if (!hintKey || hintKey.length < 2) continue;
+    for (let j = 0; j < list.length; j += 1) {
+      const row = list[j];
+      if (!row || typeof row !== 'object') continue;
+      const nameKey = compactSiteMatchKey(row.siteName ?? row.SiteName ?? row.name ?? row.Name);
+      const locKey = compactSiteMatchKey(row.location ?? row.Location);
+      const matched =
+        (nameKey && (nameKey === hintKey || nameKey.includes(hintKey) || hintKey.includes(nameKey))) ||
+        (locKey && (locKey === hintKey || locKey.includes(hintKey) || hintKey.includes(locKey)));
+      if (!matched) continue;
+      const text = buildSiteContractorNameAndAddress(row);
+      if (text) return text;
+    }
+  }
+
+  return '';
+}
+
 export function isContractorHeaderLabel(label) {
   const compact = normalizeStatutoryHeaderLabel(label);
   const squeezed = compact.replace(/\s+/g, '');
@@ -141,6 +192,63 @@ export function isContractorHeaderLabel(label) {
     squeezed === 'nameandaddressofcontractor' ||
     squeezed === 'nameandaddressofthecontractor'
   );
+}
+
+/** Form C_RJ + other Rajasthan CLRA forms — contractor name/address header keys. */
+export const FORM_RJ_CONTRACTOR_HEADER_KEYS = [
+  'form_xi_rj_contractor',
+  'form_xv_rj_contractor',
+  'form_a_rj_contractor',
+  'form_b_rj_contractor',
+  'form_xxiii_contractor',
+  'form_xv_contractor',
+  'form_xiv_mp_contractor',
+  'statutory_contractor'
+];
+
+/**
+ * Form C_RJ contractor fetch: Site Management contractorName + contractorAddress
+ * written onto every RJ "Name and address of the contractor" header key
+ * (Form XI_RJ, XIX_RJ via form_xxiii_contractor, XV_RJ, A_RJ, B_RJ, …).
+ *
+ * @param {object} headerData
+ * @param {object|null} site Primary site row
+ * @param {array} formHeaderFields
+ * @param {object} [options]
+ * @param {array} [options.sites] Full Site Management list (name/Location fallback)
+ * @param {string} [options.siteName]
+ * @param {string} [options.locationHint]
+ * @param {string} [options.natureText]
+ * @param {string} [options.contractorText] Pre-resolved contractor line
+ */
+export function applyFormCRJContractorFromSite(headerData, site, formHeaderFields = [], options = {}) {
+  if (!headerData || typeof headerData !== 'object') return headerData;
+  const opts = options && typeof options === 'object' ? options : {};
+  const contractorText =
+    String(opts.contractorText || '').trim() ||
+    resolveFormRJContractorText({
+      site,
+      sites: opts.sites,
+      siteName: opts.siteName,
+      locationHint: opts.locationHint,
+      natureText: opts.natureText,
+    });
+  if (!contractorText) return headerData;
+  const out = { ...headerData };
+  let changed = false;
+  FORM_RJ_CONTRACTOR_HEADER_KEYS.forEach((key) => {
+    if (String(out[key] ?? '').trim() === contractorText) return;
+    out[key] = contractorText;
+    changed = true;
+  });
+  const fields = Array.isArray(formHeaderFields) ? formHeaderFields : [];
+  for (const field of fields) {
+    if (!field?.key || !isContractorHeaderLabel(field.label)) continue;
+    if (String(out[field.key] ?? '').trim() === contractorText) continue;
+    out[field.key] = contractorText;
+    changed = true;
+  }
+  return changed ? out : headerData;
 }
 
 /**
@@ -574,13 +682,13 @@ export function isEstablishmentNameHeaderLabel(label) {
   return false;
 }
 
-/** "Name and address of establishment in/under which contract is carried on" (incl. Establishemnt typo). */
+/** "Name and address of establishment in/under which contract is carried on" (incl. Establishemnt / establiishment typos). */
 export function isEstablishmentContractCarriedHeaderLabel(label) {
   const compact = normalizeStatutoryHeaderLabel(label);
   if (!compact) return false;
   return (
-    /establ(?:ishment|ishemnt)\s+in.*under\s+which\s+contract/.test(compact) ||
-    /establ(?:ishment|ishemnt)\s+in$/.test(compact) ||
+    /establ(?:[a-z]*ment|ishemnt)\s+in.*under\s+which\s+contract/.test(compact) ||
+    /establ(?:[a-z]*ment|ishemnt)\s+in$/.test(compact) ||
     /^under\s+which\s+contract(\s+is\s+carried\s+on)?$/.test(compact)
   );
 }
@@ -706,6 +814,8 @@ export const STATUTORY_ESTABLISHMENT_ADDRESS_HEADER_KEYS = new Set([
 export const STATUTORY_PRINCIPAL_EMPLOYER_HEADER_KEYS = new Set([
   'form25_principal_employer',
   'form_xv_principal_employer',
+  'form_xv_rj_principal_employer',
+  'form_xi_rj_principal_employer',
   'form_xvi_principal_employer',
   'form_xvii_principal_employer',
   'form_xviii_principal_employer',
@@ -723,6 +833,8 @@ export const STATUTORY_FORM_X_YEAR_HEADER_KEYS = new Set(['form_x_year']);
 
 export const STATUTORY_NATURE_LOCATION_HEADER_KEYS = new Set([
   'form_xv_nature_location_work',
+  'form_xv_rj_nature_location',
+  'form_xi_rj_nature_location',
   'form_xvi_nature_location_work',
   'form_xvii_nature_location_work',
   'form_xviii_nature_location_work',
@@ -1001,6 +1113,8 @@ export function applySiteCompanyHeaderAutofill(
       fillKey(key, establishmentNameText, establishmentFillOpts)
     );
     fillKey('form_xv_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
+    fillKey('form_xv_rj_establishment', establishmentNameText, establishmentFillOpts);
+    fillKey('form_xi_rj_establishment', establishmentNameText, establishmentFillOpts);
     fillKey('form25_establishment', establishmentNameText, establishmentFillOpts);
     fillKey('form_xxiii_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
     fillKey('form_xiii_establishment_contract_carried', establishmentNameText, establishmentFillOpts);
@@ -1029,6 +1143,7 @@ export function applySiteCompanyHeaderAutofill(
   }
   if (contractorText) {
     [
+      'form_xiv_mp_contractor',
       'form_xxi_contractor',
       'form_xx_contractor',
       'form_xvi_contractor',
@@ -1036,9 +1151,14 @@ export function applySiteCompanyHeaderAutofill(
       'form_xviii_contractor',
       'form_xxiii_contractor',
       'form_xv_contractor',
+      'form_xi_rj_contractor',
+      'form_xv_rj_contractor',
+      'form_a_rj_contractor',
+      'form_b_rj_contractor',
       'form25_contractor',
       'form12_header_contractor',
-      'form10_header_contractor'
+      'form10_header_contractor',
+      'statutory_contractor'
     ].forEach((key) => fillKey(key, contractorText));
   }
   if (registrationText) {
@@ -1149,6 +1269,8 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
       'form_q_ka_employer',
       'statutory_principal_employer',
       'form25_principal_employer',
+      'form_xv_rj_principal_employer',
+      'form_xi_rj_principal_employer',
       'form_xv_principal_employer',
       'form_xvi_principal_employer',
       'form_xvii_principal_employer',
@@ -1185,6 +1307,11 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   }
   if (/contractor/i.test(normalizeStatutoryHeaderLabel(label)) && !/principal/.test(normalizeStatutoryHeaderLabel(label))) {
     const contractorVal = tryKeys([
+      'form_xi_rj_contractor',
+      'form_xv_rj_contractor',
+      'form_a_rj_contractor',
+      'form_b_rj_contractor',
+      'form_xiv_mp_contractor',
       'form_xxi_contractor',
       'form_xx_contractor',
       'form_xxiii_contractor',
@@ -1197,11 +1324,20 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
     ]);
     if (contractorVal) return contractorVal;
     if (/name\s+and\s+address\s+of\s+contractor/.test(normalizeStatutoryHeaderLabel(label))) {
-      return tryKeys(['form_xxiii_contractor']);
+      return tryKeys([
+        'form_xi_rj_contractor',
+        'form_xv_rj_contractor',
+        'form_a_rj_contractor',
+        'form_b_rj_contractor',
+        'form_xiv_mp_contractor',
+        'form_xxiii_contractor'
+      ]);
     }
   }
   if (isNatureLocationHeaderLabel(label)) {
     return tryKeys([
+      'form_xv_rj_nature_location',
+      'form_xi_rj_nature_location',
       'form_xxiii_nature_location_work',
       'form_xvii_nature_location_work',
       'form_xviii_nature_location_work',
@@ -1212,6 +1348,8 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   }
   if (isEstablishmentContractCarriedHeaderLabel(label)) {
     return tryKeys([
+      'form_xv_rj_establishment',
+      'form_xi_rj_establishment',
       'form_xiii_establishment_contract_carried',
       'form_xxiii_establishment_contract_carried',
       'form_xv_establishment_contract_carried',

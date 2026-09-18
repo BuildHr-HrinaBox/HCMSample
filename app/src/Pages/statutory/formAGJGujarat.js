@@ -317,17 +317,28 @@ function readEmployeeId(emp) {
   ]);
 }
 
-function readFirstName(emp) {
+function readMiddleName(emp) {
   return pickEmployeeValue(emp, [
+    'MiddleName',
+    'Middle Name',
+    'Middle_Name',
+    'middleName',
+    'middle_name',
+  ]);
+}
+
+function readFirstName(emp) {
+  const first = pickEmployeeValue(emp, [
     'FirstName',
     'First Name',
     'First_Name',
     'firstName',
-    'Name',
-    'Name1',
-    'Employee Name',
-    'Employee_Name',
+    'first_name',
   ]);
+  const middle = readMiddleName(emp);
+  const combined = [first, middle].filter(Boolean).join(' ').trim();
+  if (combined) return combined;
+  return pickEmployeeValue(emp, ['Name', 'Name1', 'Employee Name', 'Employee_Name', 'DisplayName']);
 }
 
 function readSurname(emp) {

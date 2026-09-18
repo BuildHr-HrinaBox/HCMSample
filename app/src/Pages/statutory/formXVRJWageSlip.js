@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { flattenPayrollEarningColumns, readPayrollNetPayForStatutory } from '../../utils/payrollEarnings';
 import { formatWorkmanNameAndGuardian } from './formXIXAPWageSlip';
 import { readFormXIVMPPayrollGrossPay } from './formXIVMPEmploymentCard';
+import { resolveHeaderFieldExportValue } from '../../utils/statutorySiteCompanyHeaders';
 
 /** Rajasthan CLRA Form XV — Wage Slip [Rule 77(2)(b)]. */
 
@@ -34,8 +35,9 @@ export const FORM_XV_RJ_HEADER_SPECS = [
   {
     key: 'form_xv_rj_establishment',
     label: 'Name and address of establishment in/under which contract is carried on',
+    // Tolerate template typos: establiishment / Establishemnt / etc.
     match:
-      /name\s+and\s+address\s+of\s+establishment[\s\S]{0,80}?contract\s+is\s+carried\s+on|establishment\s+in\s*\/\s*under\s+which/i,
+      /name\s+and\s+address\s+of\s+establ(?:[a-z]*ment|ishemnt)[\s\S]{0,80}?contract\s+is\s+carried\s+on|establ(?:[a-z]*ment|ishemnt)\s+in\s*\/\s*under\s+which/i,
   },
   {
     key: 'form_xv_rj_principal_employer',
@@ -104,9 +106,10 @@ export function isFormXVRJWageSlipContext(formHeader, rowItem, fileName, sheetTe
   }
 
   if (/form[\s._-]*xv[\s._-]*rj|\bxv[\s._-]*rj\b/i.test(blob)) return true;
-  if (/rajasthan/i.test(blob) && /form[\s._-]*xv(?![a-z])/i.test(blob)) return true;
+  if (/form[\s._-]*xv[\s._-]*mh|\bxv[\s._-]*mh\b/i.test(blob)) return true;
+  if (/(rajasthan|maharashtra)/i.test(blob) && /form[\s._-]*xv(?![a-z])/i.test(blob)) return true;
   if (
-    /rajasthan/i.test(blob) &&
+    /(rajasthan|maharashtra)/i.test(blob) &&
     /wage\s*slip|wages?\s+slip|rule\s*77\s*\(\s*2\s*\)\s*\(\s*b\s*\)/i.test(blob)
   ) {
     return true;
@@ -416,8 +419,7 @@ const setHeaderField = (headerData, key, value) => {
   const out = { ...(headerData || {}) };
   const text = String(value ?? '').trim();
   if (!text || !key) return out;
-  const cur = String(out[key] ?? '').trim();
-  if (!cur || /^enter\b/i.test(cur)) out[key] = text;
+  out[key] = text;
   return out;
 };
 
@@ -526,6 +528,15 @@ const labelMatchesSpec = (raw, spec) => {
   if (!cell) return false;
   const norm = formXVRJHeaderNorm(cell);
   if (spec.match.test(cell) || spec.match.test(norm)) return true;
+  if (
+    spec.key === 'form_xv_rj_establishment' &&
+    /establ(?:[a-z]*ment|ishemnt)/.test(norm) &&
+    /in/.test(norm) &&
+    /under/.test(norm) &&
+    /contract/.test(norm)
+  ) {
+    return true;
+  }
   if (spec.key === 'form_xv_rj_workman' && /name/.test(norm) && /father/.test(norm) && /workman/.test(norm)) {
     return true;
   }
@@ -565,12 +576,19 @@ export function rowHasMeaningfulFormXVRJExportData(row, headers) {
 const buildFormXVRJExportPairs = (mappedData, employeesOverride, hdrs) => {
   const rows = Array.isArray(mappedData) ? mappedData : [];
   const emps = Array.isArray(employeesOverride) ? employeesOverride : [];
-  const exportAllRoster = emps.length > 0 && emps.length === rows.length;
+  // Prefer one wage slip per employee roster (site-filtered), aligned by index.
+  if (emps.length > 0) {
+    return emps.map((emp, i) => ({
+      row: rows[i] && typeof rows[i] === 'object' ? rows[i] : {},
+      emp,
+      index: i,
+    }));
+  }
   const pairs = [];
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i];
-    if (!exportAllRoster && !rowHasMeaningfulFormXVRJExportData(row, hdrs)) continue;
-    pairs.push({ row, emp: emps[i] ?? null, index: i });
+    if (!rowHasMeaningfulFormXVRJExportData(row, hdrs)) continue;
+    pairs.push({ row, emp: null, index: i });
   }
   return pairs;
 };
@@ -611,13 +629,37 @@ const writeBesideLabel = (worksheet, row, labelCol, value, defaultValueCol = FOR
   setCellValue(worksheet, row, targetCol, value);
 };
 
+const FORM_XV_RJ_SITE_EXPORT_KEYS = new Set([
+  'form_xv_rj_contractor',
+  'form_xv_rj_establishment',
+  'form_xv_rj_nature_location',
+  'form_xv_rj_principal_employer',
+]);
+
+/** Strip trailing dotted underline from the label cell, then write the value beside it. */
+const writeFormXVRJLabelValue = (worksheet, row, labelCol, value) => {
+  const labelCell = worksheet.getCell(row, labelCol);
+  const labelRaw = excelCellValueToString(labelCell?.value).trim();
+  if (/[.…_·-]{4,}/u.test(labelRaw)) {
+    const cleaned = labelRaw
+      .replace(/[.…_·\-\s]{2,}$/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (cleaned) labelCell.value = cleaned;
+  }
+  writeBesideLabel(worksheet, row, labelCol, value);
+};
+
 export function writeFormXVRJHeaderFieldsToWorksheet(worksheet, headerFormData = {}, parsedFormHeader = null) {
   if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
   const parsedFields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
   const parsedByKey = new Map(parsedFields.map((f) => [f.key, f]));
 
   FORM_XV_RJ_HEADER_SPECS.forEach((spec) => {
-    const val = headerFormData[spec.key];
+    let val = headerFormData[spec.key];
+    if ((val == null || String(val).trim() === '') && FORM_XV_RJ_SITE_EXPORT_KEYS.has(spec.key)) {
+      val = resolveHeaderFieldExportValue(headerFormData, spec);
+    }
     if (val == null || String(val).trim() === '') return;
     const parsedField = parsedByKey.get(spec.key);
     if (parsedField?.labelRow != null) {
@@ -628,6 +670,8 @@ export function writeFormXVRJHeaderFieldsToWorksheet(worksheet, headerFormData =
         parsedField.valueCol != null ? parsedField.valueCol + 1 : FORM_XV_RJ_STACKED_VALUE_COL;
       if (parsedField.valueCol != null) {
         setCellValue(worksheet, targetRow, targetCol, val);
+      } else if (spec.key === 'form_xv_rj_establishment') {
+        writeFormXVRJLabelValue(worksheet, labelExcelRow, labelExcelCol, val);
       } else {
         writeBesideLabel(worksheet, labelExcelRow, labelExcelCol, val);
       }
@@ -637,7 +681,11 @@ export function writeFormXVRJHeaderFieldsToWorksheet(worksheet, headerFormData =
       for (let c = 1; c <= 10; c += 1) {
         const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
         if (!raw || !labelMatchesSpec(raw, spec)) continue;
-        writeBesideLabel(worksheet, r, c, val);
+        if (spec.key === 'form_xv_rj_establishment') {
+          writeFormXVRJLabelValue(worksheet, r, c, val);
+        } else {
+          writeBesideLabel(worksheet, r, c, val);
+        }
         return;
       }
     }

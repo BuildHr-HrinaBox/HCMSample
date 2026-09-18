@@ -1,7 +1,9 @@
 import ExcelJS from 'exceljs';
 import {
   FORM_A_RJ_CANONICAL_TABLE_HEADERS,
+  applyFormARajasthanContractorFromSite,
   buildFormARajasthanWorkbookWithTemplateStyles,
+  enrichFormARajasthanDisplayHeader,
   headersIndicateFormARajasthanTable,
   headersIndicateFormARajasthanHybridTemplate,
   isFormARajasthanContext,
@@ -94,6 +96,18 @@ describe('Form A RJ original template export', () => {
     ).toBe(true);
   });
 
+  test('detects Form A_MH context from filename', () => {
+    expect(
+      isFormARajasthanContext(
+        { title: 'FORM A', subtitle: 'FORMAT OF EMPLOYEE REGISTER' },
+        { formFileName: 'Form_A_MH_-_Maharashtra.xlsx', formName: 'Format of Employee Register' },
+        'Form_A_MH_-_Maharashtra.xlsx',
+        '',
+        FORM_A_RJ_CANONICAL_TABLE_HEADERS
+      )
+    ).toBe(true);
+  });
+
   test('does not treat Form XIV employment card as Form A RJ', () => {
     expect(
       isFormARajasthanContext(
@@ -138,6 +152,49 @@ describe('Form A RJ original template export', () => {
     expect(String(ws.getCell(3, 5).value || '')).toBe('FORMAT OF EMPLOYEE REGISTER');
   });
 
+  test('moves [See rule 2(1)] above FORM A out of column O', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM A');
+    ws.getCell(1, 15).value = '[See rule 2(1)]';
+    ws.getCell(2, 5).value = 'FORM A';
+    ws.getCell(3, 5).value = 'FORMAT OF EMPLOYEE REGISTER';
+    writeFormARajasthanTitleBandsInColumnsEG(ws, {});
+    expect(String(ws.getCell(1, 15).value || '')).toBe('');
+    expect(String(ws.getCell(1, 5).value || '')).toMatch(/see rule 2\(1\)/i);
+    expect(String(ws.getCell(2, 5).value || '')).toBe('FORM A');
+    expect(String(ws.getCell(3, 5).value || '')).toBe('FORMAT OF EMPLOYEE REGISTER');
+  });
+
+  test('places [Part-A: For all Establishments] left below FORMAT OF EMPLOYEE REGISTER', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM A');
+    ws.getCell(1, 15).value = '[See rule 2(1)]';
+    ws.getCell(2, 5).value = 'FORM A';
+    ws.getCell(3, 5).value = 'FORMAT OF EMPLOYEE REGISTER';
+    ws.getCell(4, 15).value = '[Part-A: For all Establishments]';
+    ws.getCell(5, 1).value = 'Name and address of establishment in / under which contract is carried on';
+    writeFormARajasthanTitleBandsInColumnsEG(ws, {});
+    expect(String(ws.getCell(4, 15).value || '')).toBe('');
+    expect(String(ws.getCell(3, 5).value || '')).toBe('FORMAT OF EMPLOYEE REGISTER');
+    expect(String(ws.getCell(4, 1).value || '')).toMatch(/part-?a.*establish/i);
+    expect(String(ws.getCell(4, 1).alignment?.horizontal || '')).toBe('left');
+    expect(String(ws.getCell(5, 1).value || '')).toMatch(/establishment/i);
+  });
+
+  test('inserts Part-A row when next row already has establishment field', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM A');
+    ws.getCell(1, 1).value = '[See rule 2(1)]';
+    ws.getCell(2, 1).value = 'FORM A';
+    ws.getCell(3, 1).value = 'FORMAT OF EMPLOYEE REGISTER';
+    ws.getCell(4, 1).value = 'Name and address of establishment in / under which contract is carried on';
+    writeFormARajasthanTitleBandsInColumnsEG(ws, {});
+    expect(String(ws.getCell(3, 5).value || '')).toBe('FORMAT OF EMPLOYEE REGISTER');
+    expect(String(ws.getCell(4, 1).value || '')).toMatch(/part-?a.*establish/i);
+    expect(String(ws.getCell(4, 1).alignment?.horizontal || '')).toBe('left');
+    expect(String(ws.getCell(5, 1).value || '')).toMatch(/establishment/i);
+  });
+
   test('fills original template columns without rewriting footer', async () => {
     const templateArrayBuffer = await buildBlankFormARjTemplate();
     const { blob, buffer } = await buildFormARajasthanWorkbookWithTemplateStyles({
@@ -171,16 +228,122 @@ describe('Form A RJ original template export', () => {
     await outWb.xlsx.load(buffer);
     const ws = outWb.worksheets[0];
 
+    expect(String(ws.getCell(1, 5).value || '')).toMatch(/see rule 2\(1\)/i);
     expect(String(ws.getCell(2, 5).value || '')).toBe('FORM A');
-    expect(String(ws.getCell(7, 3).value || '')).toBe('Name');
-    expect(String(ws.getCell(7, 2).value || '')).toBe('Employee Code');
+    expect(String(ws.getCell(3, 5).value || '')).toBe('FORMAT OF EMPLOYEE REGISTER');
+    expect(String(ws.getCell(4, 1).value || '')).toMatch(/part-?a.*establish/i);
+    expect(String(ws.getCell(4, 1).alignment?.horizontal || '')).toBe('left');
+    expect(String(ws.getCell(8, 3).value || '')).toBe('Name');
+    expect(String(ws.getCell(8, 2).value || '')).toBe('Employee Code');
     expect(Number(ws.getColumn(2).width || 0)).toBeLessThanOrEqual(12);
-    expect(String(ws.getCell(8, 1).value)).toBe('1');
-    expect(String(ws.getCell(8, 2).value)).toBe('E001');
-    expect(String(ws.getCell(8, 3).value)).toBe('Suryakanta');
-    expect(String(ws.getCell(8, 4).value)).toBe('Jana');
-    expect(String(ws.getCell(19, 1).value || '')).toMatch(/Highly Skilled/i);
-    expect(String(ws.getCell(8, 2).value || '')).not.toMatch(/Name of the workman/i);
+    expect(String(ws.getCell(9, 1).value)).toBe('1');
+    expect(String(ws.getCell(9, 2).value)).toBe('E001');
+    expect(String(ws.getCell(9, 3).value)).toBe('Suryakanta');
+    expect(String(ws.getCell(9, 4).value)).toBe('Jana');
+    expect(Number(ws.getRow(9).height || 0)).toBeGreaterThanOrEqual(30);
+    expect(String(ws.getCell(20, 1).value || '')).toMatch(/Highly Skilled/i);
+    expect(String(ws.getCell(9, 2).value || '')).not.toMatch(/Name of the workman/i);
+  });
+
+  test('Form A MH applies full box borders after PAN (ESIC IP onward)', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM A');
+    ws.getCell(1, 1).value = '[See rule 2(1)]';
+    ws.getCell(2, 1).value = 'FORM A';
+    ws.getCell(3, 1).value = 'FORMAT OF EMPLOYEE REGISTER';
+    ws.getCell(4, 1).value = '[Part-A: For all Establishments]';
+    ws.getCell(5, 1).value = 'Name of Establishment';
+    FORM_A_RJ_CANONICAL_TABLE_HEADERS.forEach((h, i) => {
+      ws.getCell(7, i + 1).value = h;
+    });
+    const mhExtra = ['ESIC IP', 'LWF', 'AADHAAR', 'Present Address', 'Permanent Address'];
+    mhExtra.forEach((h, i) => {
+      ws.getCell(7, 16 + i).value = h;
+    });
+    // Simulate MH template tall merge after PAN (no per-row boxes).
+    ws.mergeCells(8, 16, 18, 20);
+    for (let r = 8; r <= 18; r += 1) {
+      for (let c = 1; c <= 15; c += 1) {
+        ws.getCell(r, c).border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' },
+        };
+      }
+    }
+    ws.getCell(19, 1).value = '*(Highly Skilled/Skilled/Semi Skilled/Un Skilled)';
+    const templateArrayBuffer = await wb.xlsx.writeBuffer();
+
+    const { buffer } = await buildFormARajasthanWorkbookWithTemplateStyles({
+      templateArrayBuffer,
+      mappedData: [
+        {
+          'Sl. No.': 1,
+          'Employee Code': 'E001',
+          Name: 'A',
+          Surname: 'B',
+          PAN: 'ABCDE1234F',
+        },
+        {
+          'Sl. No.': 2,
+          'Employee Code': 'E002',
+          Name: 'C',
+          Surname: 'D',
+          PAN: 'FGHIJ5678K',
+        },
+      ],
+      headersToUse: FORM_A_RJ_CANONICAL_TABLE_HEADERS,
+      formFileName: 'Form_A_MH_-_Maharashtra.xlsx',
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(buffer);
+    const out = outWb.worksheets[0];
+    const hasFullBox = (cell) => {
+      const b = cell?.border || {};
+      return !!(b.top && b.left && b.bottom && b.right);
+    };
+    // Template already had Part-A on its own row — header stays at 7, data at 8+.
+    expect(String(out.getCell(8, 1).value)).toBe('1');
+    expect(String(out.getCell(9, 1).value)).toBe('2');
+    expect(hasFullBox(out.getCell(8, 15))).toBe(true); // PAN row 1
+    expect(hasFullBox(out.getCell(8, 16))).toBe(true); // ESIC IP row 1
+    expect(hasFullBox(out.getCell(8, 17))).toBe(true); // LWF row 1
+    expect(hasFullBox(out.getCell(9, 16))).toBe(true); // ESIC IP row 2
+    expect(hasFullBox(out.getCell(9, 18))).toBe(true); // AADHAAR row 2
+  });
+
+  test('writes Site Management contractor name and address like Form C_RJ', async () => {
+    const headerFormData = applyFormARajasthanContractorFromSite(
+      {},
+      {
+        contractorName: 'Vayona Contractor',
+        contractorAddress: 'Jaipur',
+        contractorState: 'Rajasthan',
+      }
+    );
+    const parsedFormHeader = enrichFormARajasthanDisplayHeader({
+      title: 'FORM A',
+      subtitle: 'FORMAT OF EMPLOYEE REGISTER',
+      fields: [{ label: 'Name and address of contractor', key: 'form_a_rj_contractor' }],
+    });
+    expect(headerFormData.form_a_rj_contractor).toBe('Vayona Contractor, Jaipur, Rajasthan');
+
+    const { buffer } = await buildFormARajasthanWorkbookWithTemplateStyles({
+      templateArrayBuffer: await buildBlankFormARjTemplate(),
+      mappedData: [{ 'Employee Code': 'E001', Name: 'Suryakanta', Surname: 'Jana' }],
+      headersToUse: FORM_A_RJ_CANONICAL_TABLE_HEADERS,
+      headerFormData,
+      parsedFormHeader,
+    });
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(buffer);
+    const ws = outWb.worksheets[0];
+    const contractorCell = String(ws.getCell(6, 1).value || '');
+    expect(contractorCell.toLowerCase()).toContain('contractor');
+    expect(contractorCell).toContain('Vayona Contractor');
+    expect(contractorCell).toContain('Jaipur');
   });
 
   test('repairs hybrid template: Employee Code narrow, Name in column C, codes in B', async () => {
@@ -221,15 +384,16 @@ describe('Form A RJ original template export', () => {
     const ws = outWb.worksheets[0];
 
     expect(String(ws.getCell(2, 5).value || '')).toBe('FORM A');
-    expect(String(ws.getCell(7, 2).value || '')).toBe('Employee Code');
-    expect(String(ws.getCell(7, 3).value || '')).toBe('Name');
+    expect(String(ws.getCell(4, 1).value || '')).toMatch(/part-?a.*establish/i);
+    expect(String(ws.getCell(8, 2).value || '')).toBe('Employee Code');
+    expect(String(ws.getCell(8, 3).value || '')).toBe('Name');
     expect(Number(ws.getColumn(2).width || 0)).toBeLessThanOrEqual(12);
-    expect(String(ws.getCell(8, 2).value || '')).toBe('VE0705');
-    expect(String(ws.getCell(8, 3).value || '')).toBe('Suryakanta');
-    expect(String(ws.getCell(9, 2).value || '')).toBe('VE0706');
-    expect(String(ws.getCell(9, 3).value || '')).toBe('Prem Shankar');
-    expect(String(ws.getCell(8, 2).value || '')).not.toMatch(/Name of the workman/i);
-    expect(String(ws.getCell(14, 2).value || '')).not.toMatch(/Remarks/i);
+    expect(String(ws.getCell(9, 2).value || '')).toBe('VE0705');
+    expect(String(ws.getCell(9, 3).value || '')).toBe('Suryakanta');
+    expect(String(ws.getCell(10, 2).value || '')).toBe('VE0706');
+    expect(String(ws.getCell(10, 3).value || '')).toBe('Prem Shankar');
+    expect(String(ws.getCell(9, 2).value || '')).not.toMatch(/Name of the workman/i);
+    expect(String(ws.getCell(15, 2).value || '')).not.toMatch(/Remarks/i);
   });
 
   test('detects Form XIV employment card sheet pattern', async () => {
@@ -272,10 +436,11 @@ describe('Form A RJ original template export', () => {
     const outWb = new ExcelJS.Workbook();
     await outWb.xlsx.load(buffer);
     const out = outWb.worksheets[0];
-    expect(String(out.getCell(6, 3).value || '')).toBe('Name');
-    expect(String(out.getCell(7, 2).value || '')).toBe('VE0705');
-    expect(String(out.getCell(7, 3).value || '')).toBe('Suryakanta');
-    expect(String(out.getCell(7, 2).value || '')).not.toMatch(/Name of the workman/i);
+    expect(String(out.getCell(4, 1).value || '')).toMatch(/part-?a.*establish/i);
+    expect(String(out.getCell(7, 3).value || '')).toBe('Name');
+    expect(String(out.getCell(8, 2).value || '')).toBe('VE0705');
+    expect(String(out.getCell(8, 3).value || '')).toBe('Suryakanta');
+    expect(String(out.getCell(8, 2).value || '')).not.toMatch(/Name of the workman/i);
   });
 
   test('detects hybrid template headers without Name column', () => {
@@ -327,8 +492,8 @@ describe('Form A RJ original template export', () => {
     const outWb = new ExcelJS.Workbook();
     await outWb.xlsx.load(buffer);
     const ws = outWb.worksheets[0];
-    expect(String(ws.getCell(8, 2).value || '')).toBe('VE0705');
-    expect(String(ws.getCell(8, 3).value || '')).toBe('Suryakanta');
+    expect(String(ws.getCell(9, 2).value || '')).toBe('VE0705');
+    expect(String(ws.getCell(9, 3).value || '')).toBe('Suryakanta');
   });
 
   test('parsedTableStartCol hint does not shift data away from column A', async () => {
@@ -352,10 +517,42 @@ describe('Form A RJ original template export', () => {
     const outWb = new ExcelJS.Workbook();
     await outWb.xlsx.load(buffer);
     const ws = outWb.worksheets[0];
-    expect(String(ws.getCell(8, 1).value)).toBe('1');
-    expect(String(ws.getCell(8, 2).value || '')).toBe('VE0705');
-    expect(String(ws.getCell(8, 3).value || '')).toBe('Suryakanta');
-    expect(String(ws.getCell(8, 4).value || '')).toBe('Jana');
+    expect(String(ws.getCell(9, 1).value)).toBe('1');
+    expect(String(ws.getCell(9, 2).value || '')).toBe('VE0705');
+    expect(String(ws.getCell(9, 3).value || '')).toBe('Suryakanta');
+    expect(String(ws.getCell(9, 4).value || '')).toBe('Jana');
+  });
+
+  test('writes Site Management contractor name and address like Form C_RJ', async () => {
+    const headerFormData = applyFormARajasthanContractorFromSite(
+      {},
+      {
+        contractorName: 'Vayona Contractor',
+        contractorAddress: 'Jaipur',
+        contractorState: 'Rajasthan',
+      }
+    );
+    const parsedFormHeader = enrichFormARajasthanDisplayHeader({
+      title: 'FORM A',
+      subtitle: 'FORMAT OF EMPLOYEE REGISTER',
+      fields: [{ label: 'Name and address of contractor', key: 'form_a_rj_contractor' }],
+    });
+    expect(headerFormData.form_a_rj_contractor).toBe('Vayona Contractor, Jaipur, Rajasthan');
+
+    const { buffer } = await buildFormARajasthanWorkbookWithTemplateStyles({
+      templateArrayBuffer: await buildBlankFormARjTemplate(),
+      mappedData: [{ 'Employee Code': 'E001', Name: 'Suryakanta', Surname: 'Jana' }],
+      headersToUse: FORM_A_RJ_CANONICAL_TABLE_HEADERS,
+      headerFormData,
+      parsedFormHeader,
+    });
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(buffer);
+    const ws = outWb.worksheets[0];
+    const contractorCell = String(ws.getCell(6, 1).value || '');
+    expect(contractorCell.toLowerCase()).toContain('contractor');
+    expect(contractorCell).toContain('Vayona Contractor');
+    expect(contractorCell).toContain('Jaipur');
   });
 
   test('maps Name from hybrid Nature of work column in modal rows', async () => {
@@ -384,7 +581,7 @@ describe('Form A RJ original template export', () => {
     const outWb = new ExcelJS.Workbook();
     await outWb.xlsx.load(buffer);
     const ws = outWb.worksheets[0];
-    expect(String(ws.getCell(8, 2).value || '')).toBe('VE0705');
-    expect(String(ws.getCell(8, 3).value || '')).toBe('Suryakanta');
+    expect(String(ws.getCell(9, 2).value || '')).toBe('VE0705');
+    expect(String(ws.getCell(9, 3).value || '')).toBe('Suryakanta');
   });
 });

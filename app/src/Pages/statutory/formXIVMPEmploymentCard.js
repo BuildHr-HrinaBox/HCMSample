@@ -15,7 +15,17 @@ import {
   getLatestCachedPayrollTableRows,
 } from '../../utils/statutoryAutofillCache';
 import { fetchPayrollTableRowsForMonths } from '../../utils/payrollTable';
-import { filterFormXIXMPEligiblePayrollRows } from './formXIXMPWageSlip';
+import {
+  buildFormXIXMPPayrollRowResolver,
+  collectEmployeeNameCandidates,
+  filterFormXIXMPEligiblePayrollRows,
+  resolveFormXIXMPPayrollRowForEmployee,
+  resolvePayrollRowByDisplayName,
+} from './formXIXMPWageSlip';
+import {
+  formBRJNamesMatch,
+  resolveFormBRajasthanPayrollRowForEmployee,
+} from './formBRajasthan';
 import { personNamesMatch } from './formFKarnataka';
 import { formatPayrollFirstAndLastName } from './form10TamilNadu';
 import { isAprilPayrollMonthCandidates } from './formQKarnataka';
@@ -38,6 +48,18 @@ export const FORM_XIV_MP_CANONICAL_TABLE_HEADERS = [
   'Wage period',
   'Tenure of employment',
   'Remarks',
+];
+
+/** Rajasthan Form X [Rule 75] Employment Card — official tabular column headers. */
+export const FORM_XIV_RJ_CANONICAL_TABLE_HEADERS = [
+  'Name of the workman',
+  'Sl. No. of the register of workman employed',
+  'Nature of employment/designation',
+  'Wage rate (with particular of unit), in case of place work',
+  'Wage period',
+  'Period of employment',
+  'Remarks',
+  'Signature of contractor',
 ];
 
 /** Gujarat CLRA Form XIV — vertical numbered workman fields (Rule 76, Central & Gujarat Rules). */
@@ -91,9 +113,10 @@ export function isFormXRajasthanEmploymentCardContext(formHeader, rowItem, fileN
   if (/form[\s._-]*xi(?![vix])/i.test(parts) || /\bxi_rj\b/i.test(parts)) return false;
   if (/service\s+certificate/i.test(parts) && !/employment\s+card/i.test(parts)) return false;
   if (/form[\s._-]*x[\s._-]*rj/i.test(parts) || /\bx_rj\b/i.test(parts)) return true;
+  if (/form[\s._-]*x[\s._-]*mh/i.test(parts) || /\bx_mh\b/i.test(parts)) return true;
   if (/see\s+rule\s+75/i.test(parts) && /employment\s+card/i.test(parts)) return true;
   if (
-    /rajasthan/.test(parts) &&
+    /(rajasthan|maharashtra)/.test(parts) &&
     /employment\s+card/i.test(parts) &&
     /form[\s._-]*x\b/i.test(parts) &&
     !/form[\s._-]*xiv/i.test(parts) &&
@@ -290,7 +313,10 @@ export function headersIndicateFormXIVMPTable(tableHeaders) {
   return (
     /name\s+of\s+the\s+workman/.test(joined) &&
     (/serial\s+(?:no\.?|number)\s+in\s+the\s+register/.test(joined) ||
-      /s\.?\s*no\.?\s+in\s+the\s+register/.test(joined)) &&
+      /s\.?\s*no\.?\s+in\s+the\s+register/.test(joined) ||
+      /sl\.?\s*no\.?\s+of\s+the\s+register/.test(joined) ||
+      (/register\s+of\s+workmen?\s+employed/.test(joined) &&
+        /(?:s\.?\s*no|sl\.?\s*no|serial)/.test(joined))) &&
     (/nature\s+of\s+employ/.test(joined) || /designat/.test(joined))
   );
 }
@@ -361,6 +387,11 @@ const orderFormXIVMPWorkmanTableHeaders = (headers) => {
   workman.forEach((h, i) => {
     if (!used.has(i)) ordered.push(h);
   });
+  // Keep non-workman columns (e.g. Form X_RJ "Signature of contractor") in original order after workman fields.
+  const workmanSet = new Set(workman);
+  list.forEach((h) => {
+    if (!workmanSet.has(h)) ordered.push(h);
+  });
   return ordered.length >= 3 ? ordered : list;
 };
 
@@ -384,7 +415,7 @@ export function resolveFormXIVMPTableHeaders(tableHeaders, hints = {}) {
   if (variant === 'rj') {
     return headersIndicateFormXIVMPTable(trimmed) && trimmed.length > 0
       ? orderFormXIVMPWorkmanTableHeaders(trimmed)
-      : [...FORM_XIV_MP_CANONICAL_TABLE_HEADERS];
+      : [...FORM_XIV_RJ_CANONICAL_TABLE_HEADERS];
   }
   if (headersIndicateFormXIVGJTable(trimmed) || headersIndicateFormXIVMPTable(trimmed)) {
     return orderFormXIVMPWorkmanTableHeaders(trimmed);
@@ -403,7 +434,8 @@ export function isFormXIVMPSerialNumberHeader(h) {
   return (
     /serial\s+(?:no\.?|number)\s+in\s+the\s+register/.test(s) ||
     /s\.?\s*no\.?\s+in\s+the\s+register/.test(s) ||
-    (/register\s+of\s+workmen\s+employed/.test(s) && /s\.?\s*no/.test(s))
+    /sl\.?\s*no\.?\s+of\s+the\s+register/.test(s) ||
+    (/register\s+of\s+workmen?\s+employed/.test(s) && /(?:s\.?\s*no|sl\.?\s*no|serial)/.test(s))
   );
 }
 
@@ -424,10 +456,12 @@ export function isFormXIVMPNatureDesignationHeader(h) {
 
 export function isFormXIVMPWageRateHeader(h) {
   const s = formXIVMPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
+  if (/wage\s+period/.test(s)) return false;
   return (
     /wage\s*[''']?\s*rate/.test(s) ||
     (/wage/.test(s) && /piece/.test(s)) ||
-    (/wage/.test(s) && /particular/.test(s) && !/period/.test(s))
+    (/wage/.test(s) && /place\s+work/.test(s)) ||
+    (/wage/.test(s) && /particular/.test(s))
   );
 }
 
@@ -438,7 +472,8 @@ export function isFormXIVMPWagePeriodHeader(h) {
 
 export function isFormXIVMPTenureHeader(h) {
   const s = formXIVMPHeaderNorm(h).replace(/^\d+[\.\)]\s*/, '');
-  return /tenure\s+of\s+employ/.test(s);
+  // Form X_RJ uses "Period of employment"; Form XIV uses "Tenure of employment".
+  return /tenure\s+of\s+employ/.test(s) || /period\s+of\s+employ/.test(s);
 }
 
 export function isFormXIVMPRemarksHeader(h) {
@@ -491,6 +526,10 @@ export const FORM_XIV_MP_HEADER_SPECS = [
 const isNarrativeBlob = (raw) => {
   const n = formXIVMPHeaderNorm(raw);
   if (!n) return false;
+  // Form X_RJ dotted header lines (contractor etc.) are labels, not narrative.
+  if (FORM_XIV_MP_HEADER_SPECS.some((spec) => spec.match.test(n) || spec.match.test(String(raw || '')))) {
+    return false;
+  }
   return (
     /^form\s*xiv\b/i.test(n) ||
     /employment\s+card/i.test(n) ||
@@ -587,7 +626,9 @@ const findHeaderLabelCell = (
       if (!raw || isNarrativeBlob(raw) || isTableLabelBlob(raw)) continue;
       const norm = formXIVMPHeaderNorm(raw);
       if (!matchRe.test(norm) && !matchRe.test(raw)) continue;
-      if (norm.length > 120) continue;
+      // Form X_RJ contractor line embeds a long dotted leader in the label cell — ignore dots for length.
+      const normWithoutLeaders = norm.replace(/[\s.…·_]+/gu, ' ').trim();
+      if (normWithoutLeaders.length > 120) continue;
       const read = readValueBelowOrBesideLabel(
         getMergedAwareCellText,
         r,
@@ -828,7 +869,12 @@ export function resolveFormXIVMPHeaderFieldLayout(parsed, workbook, hints = {}) 
   const item = hints.item || null;
   const fileName = hints.fileName || hints.formFileName || '';
   const sheetText = hints.sheetText || '';
-  if (!isFormXIVMPEmploymentCardContext(formHeader, item, fileName, sheetText)) return null;
+  if (
+    !isFormXIVMPEmploymentCardContext(formHeader, item, fileName, sheetText) &&
+    !isFormXRajasthanEmploymentCardContext(formHeader, item, fileName, sheetText)
+  ) {
+    return null;
+  }
 
   const accessor = buildWorkbookMergedCellAccessor(workbook, hints);
   const getMergedAwareCellText = accessor?.getMergedAwareCellText ?? null;
@@ -901,6 +947,21 @@ export function isFormXIVPlaceholderCell(text) {
   return false;
 }
 
+/** True when headerFormData still holds a template label / dotted leader instead of real site data. */
+export function isFormXIVMPHeaderValueEmptyOrPlaceholder(text) {
+  if (isFormXIVPlaceholderCell(text)) return true;
+  const s = String(text ?? '').trim();
+  if (!s) return true;
+  return FORM_XIV_MP_HEADER_SPECS.some((spec) => {
+    if (!spec.match.test(s)) return false;
+    const remainder = s
+      .replace(spec.match, '')
+      .replace(/[\s.…·_]+/gu, '')
+      .trim();
+    return remainder.length < 3;
+  });
+}
+
 export function applyFormXIVMPAutofillFromSite(headerData, siteContext = {}, options = {}) {
   const { onlyEmpty = false } = options;
   const {
@@ -910,11 +971,15 @@ export function applyFormXIVMPAutofillFromSite(headerData, siteContext = {}, opt
     principalEmployerText = '',
   } = siteContext;
   let out = { ...(headerData || {}) };
-  const assign = (key, value) => {
-    if (onlyEmpty && String(out[key] ?? '').trim()) return;
+  const assign = (key, value, force = false) => {
+    if (!force && onlyEmpty && !isFormXIVMPHeaderValueEmptyOrPlaceholder(out[key])) return;
     out = setHeaderField(out, key, value);
   };
-  assign('form_xiv_mp_contractor', contractorText);
+  // Site Management → CONTRACTOR DETAILS (name + address) is the only source for this field.
+  const siteContractor = String(contractorText || '').trim();
+  if (siteContractor) {
+    assign('form_xiv_mp_contractor', siteContractor, true);
+  }
   assign('form_xiv_mp_establishment', establishmentText);
   assign('form_xiv_mp_nature_location', natureLocationText);
   assign('form_xiv_mp_principal_employer', principalEmployerText);
@@ -922,42 +987,73 @@ export function applyFormXIVMPAutofillFromSite(headerData, siteContext = {}, opt
 }
 
 export function formatFormXIVMPWorkmanName(emp = {}, payrollRow = null) {
+  const readParts = (src) => {
+    if (!src || typeof src !== 'object' || src.fetch_error) {
+      return { firstName: '', middleName: '', lastName: '' };
+    }
+    return {
+      firstName: String(
+        src.FirstName ||
+          src['FirstName'] ||
+          src.firstName ||
+          src['First Name'] ||
+          src.first_name ||
+          src['first_name'] ||
+          ''
+      ).trim(),
+      middleName: String(
+        src.MiddleName ||
+          src['MiddleName'] ||
+          src.middleName ||
+          src['Middle Name'] ||
+          src.middle_name ||
+          src.Middle_Name ||
+          ''
+      ).trim(),
+      lastName: String(
+        src.LastName ||
+          src['LastName'] ||
+          src.lastName ||
+          src['Last Name'] ||
+          src.last_name ||
+          src['last_name'] ||
+          ''
+      ).trim(),
+    };
+  };
+  const payrollParts = readParts(payrollRow);
+  const payrollFull = [payrollParts.firstName, payrollParts.middleName, payrollParts.lastName]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  if (payrollFull) return payrollFull;
   const payrollName = formatPayrollFirstAndLastName(payrollRow);
   if (payrollName) return payrollName;
-  const fn = String(
-    emp.FirstName ||
-      emp['FirstName'] ||
-      emp.firstName ||
-      emp['First Name'] ||
-      emp.first_name ||
-      emp['first_name'] ||
+  const payrollEmployeeName = String(
+    payrollRow?.employee_name ||
+      payrollRow?.EmployeeName ||
+      payrollRow?.['Employee Name'] ||
+      payrollRow?.full_name ||
       ''
   ).trim();
-  const ln = String(
-    emp.LastName ||
-      emp['LastName'] ||
-      emp.lastName ||
-      emp['Last Name'] ||
-      emp.last_name ||
-      emp['last_name'] ||
+  if (payrollEmployeeName) return payrollEmployeeName;
+  const empParts = readParts(emp);
+  const peopleFull = [empParts.firstName, empParts.middleName, empParts.lastName]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  if (peopleFull) return peopleFull;
+  return String(
+    emp.employee_name ||
+      emp.EmployeeName ||
+      emp['Employee Name'] ||
+      emp.full_name ||
+      emp.DisplayName ||
+      emp['Display Name'] ||
+      emp.Name ||
+      emp['Name'] ||
       ''
   ).trim();
-  if (fn && ln) return `${fn} ${ln}`;
-  return (
-    fn ||
-    ln ||
-    String(
-      emp.employee_name ||
-        emp.EmployeeName ||
-        emp['Employee Name'] ||
-        emp.full_name ||
-        emp.DisplayName ||
-        emp['Display Name'] ||
-        emp.Name ||
-        emp['Name'] ||
-        ''
-    ).trim()
-  );
 }
 
 export function resolveFormXIVMPEmployeeSerialNumber(emp = {}, rowIndex = 0) {
@@ -1338,12 +1434,91 @@ const writeFormXIVMPWageRateOnRow = (row, wageRateHeader, rate, allHeaders = [])
   if (!row || !wageRateHeader || rate == null || String(rate).trim() === '') return;
   const value = String(rate).trim();
   row[wageRateHeader] = value;
-  (Array.isArray(allHeaders) ? allHeaders : []).forEach((header) => {
-    if (header && header !== wageRateHeader && isFormXIVMPWageRateHeader(header)) {
+  const aliasHeaders = [
+    ...(Array.isArray(allHeaders) ? allHeaders : []),
+    FORM_XIV_MP_CANONICAL_TABLE_HEADERS.find(isFormXIVMPWageRateHeader),
+    FORM_XIV_RJ_CANONICAL_TABLE_HEADERS.find(isFormXIVMPWageRateHeader),
+    'Wage rate (with particular of unit), in case of place work',
+    'Wage rate with particulars or unit, in case of piece of work',
+  ].filter(Boolean);
+  aliasHeaders.forEach((header) => {
+    if (header && isFormXIVMPWageRateHeader(header)) {
       row[header] = value;
     }
   });
 };
+
+/**
+ * Form XIV / Form X_RJ/MH wage-rate payroll match.
+ * Same-name people (same or other location) use Form B rules: ID first, then unique location.
+ */
+export function resolveFormXIVMPPayrollRowForWageRate(emp, payrollRows, formRow = null) {
+  const rows = Array.isArray(payrollRows) ? payrollRows : [];
+  if (!emp || rows.length === 0) return null;
+
+  const byFullName = resolveFormBRajasthanPayrollRowForEmployee(emp, rows);
+  if (byFullName && !byFullName.fetch_error) return byFullName;
+
+  const primary = resolveFormXIXMPPayrollRowForEmployee(emp, rows);
+  if (primary && !primary.fetch_error) {
+    const sameName = rows.filter((row) => row && !row.fetch_error && formBRJNamesMatch(emp, row));
+    if (sameName.length <= 1) return primary;
+    const picked = resolveFormBRajasthanPayrollRowForEmployee(emp, sameName);
+    if (picked) return picked;
+  }
+
+  const nameCandidates = [
+    ...collectEmployeeNameCandidates(emp),
+    formatFormXIVMPWorkmanName(emp),
+    formRow?.__employeeLookupName,
+  ]
+    .map((n) => String(n || '').trim())
+    .filter(Boolean);
+
+  if (formRow && typeof formRow === 'object') {
+    Object.keys(formRow).forEach((key) => {
+      if (!isFormXIVMPWorkmanNameHeader(key)) return;
+      const n = String(formRow[key] || '').trim();
+      if (n && !/^enter\b/i.test(n)) nameCandidates.push(n);
+    });
+  }
+
+  const uniqueNames = [...new Set(nameCandidates)];
+  for (let i = 0; i < uniqueNames.length; i += 1) {
+    const hit = resolvePayrollRowByDisplayName(uniqueNames[i], rows);
+    if (!hit || hit.fetch_error) continue;
+    const sameName = rows.filter((row) => row && !row.fetch_error && formBRJNamesMatch(emp, row));
+    if (sameName.length <= 1 && formBRJNamesMatch(emp, hit)) return hit;
+    const picked = resolveFormBRajasthanPayrollRowForEmployee(emp, sameName.length ? sameName : rows);
+    if (picked) return picked;
+  }
+
+  for (let i = 0; i < uniqueNames.length; i += 1) {
+    const candidate = uniqueNames[i];
+    const fuzzy = rows.find((row) => {
+      if (!row || row.fetch_error) return false;
+      if (formBRJNamesMatch(emp, row)) return true;
+      const payrollName =
+        String(row.employee_name || row['employee_name'] || '').trim() ||
+        [
+          row.first_name || row.FirstName || '',
+          row.middle_name || row.MiddleName || '',
+          row.last_name || row.LastName || '',
+        ]
+          .map((v) => String(v || '').trim())
+          .filter(Boolean)
+          .join(' ') ||
+        formatPayrollFirstAndLastName(row);
+      return payrollName && personNamesMatch(candidate, payrollName);
+    });
+    if (!fuzzy) continue;
+    const sameName = rows.filter((row) => row && !row.fetch_error && formBRJNamesMatch(emp, row));
+    if (sameName.length <= 1) return fuzzy;
+    const picked = resolveFormBRajasthanPayrollRowForEmployee(emp, sameName);
+    if (picked) return picked;
+  }
+  return null;
+}
 
 export function applyFormXIVMPEmployeeToRow(row, emp, headers, helpers = {}) {
   if (!row || !emp || !Array.isArray(headers)) return row;
@@ -1360,6 +1535,13 @@ export function applyFormXIVMPEmployeeToRow(row, emp, headers, helpers = {}) {
   const wagePeriod = formatFormXIVMPWagePeriod(selectedMonth, item, wagePeriodLine);
   const variant =
     helpers.variant ||
+    resolveFormXIVExportVariant(
+      helpers.formHeader ?? helpers.parsedFormHeader ?? null,
+      item,
+      helpers.fileName ?? helpers.formFileName ?? '',
+      helpers.sheetText ?? '',
+      headers
+    ) ||
     (headersIndicateFormXIVGJTable(headers) || headers.some(isFormXIVMPEntryDateHeader) ? 'gj' : 'mp');
   headers.forEach((header) => {
     if (isFormXIVMPSkipAutofillHeader(header)) {
@@ -1407,6 +1589,62 @@ export function applyFormXIVMPEmployeeToRow(row, emp, headers, helpers = {}) {
   return out;
 }
 
+/** One payroll row per workman for Form XIV / Form X_RJ/MH wage-rate autofill. */
+export function buildFormXIVMPPayrollRowResolver(payrollRows) {
+  const rows = Array.isArray(payrollRows) ? payrollRows : [];
+  const primary = buildFormXIXMPPayrollRowResolver(rows);
+  const usedFallback = new Set();
+  const rowKey = (row) =>
+    String(
+      row?.employee_id ||
+        row?.employee_number ||
+        row?.EmployeeID ||
+        `${row?.first_name || ''}|${row?.middle_name || ''}|${row?.last_name || ''}|${row?.employee_name || ''}|${row?.gross_pay || ''}`
+    ).trim();
+
+  return (emp, formRow) => {
+    const byFullName = resolveFormBRajasthanPayrollRowForEmployee(emp, rows);
+    if (byFullName && !byFullName.fetch_error) {
+      const key = rowKey(byFullName);
+      if (key) usedFallback.add(key);
+      return byFullName;
+    }
+
+    const hit = primary(emp);
+    if (hit && !hit.fetch_error) {
+      const sameName = rows.filter((row) => row && !row.fetch_error && formBRJNamesMatch(emp, row));
+      if (sameName.length > 1) {
+        const picked = resolveFormBRajasthanPayrollRowForEmployee(emp, sameName);
+        if (picked) {
+          const key = rowKey(picked);
+          if (key) usedFallback.add(key);
+          return picked;
+        }
+      } else {
+        const key = rowKey(hit);
+        if (key) usedFallback.add(key);
+        return hit;
+      }
+    }
+
+    const available = rows.filter((row) => {
+      const key = rowKey(row);
+      return !key || !usedFallback.has(key);
+    });
+    const fallback = resolveFormXIVMPPayrollRowForWageRate(
+      emp,
+      available.length > 0 ? available : rows,
+      formRow
+    );
+    if (fallback && !fallback.fetch_error) {
+      const key = rowKey(fallback);
+      if (key) usedFallback.add(key);
+      return fallback;
+    }
+    return null;
+  };
+}
+
 /** Fill wage rate from pay-run gross_pay when rows were mapped without payroll. */
 export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpers = {}) {
   const hdrs = resolveFormXIVMPMappingHeaders(headers, helpers);
@@ -1416,6 +1654,13 @@ export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpe
   if (!wageRateHeader) return 0;
   const variant =
     helpers.variant ||
+    resolveFormXIVExportVariant(
+      helpers.formHeader ?? helpers.parsedFormHeader ?? null,
+      helpers.item ?? null,
+      helpers.fileName ?? helpers.formFileName ?? '',
+      helpers.sheetText ?? '',
+      hdrs
+    ) ||
     (headersIndicateFormXIVGJTable(hdrs) || hdrs.some(isFormXIVMPEntryDateHeader) ? 'gj' : 'mp');
   const {
     resolvePayrollRow = null,
@@ -1427,6 +1672,7 @@ export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpe
     formHeader = null,
     parsedFormHeader = null,
     sheetText = '',
+    payrollRows = null,
   } = helpers;
   const wageRateHints = buildFormXIVKarnatakaWageRateHints({
     item,
@@ -1435,13 +1681,24 @@ export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpe
     sheetText,
   });
   if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  const fallbackResolver =
+    Array.isArray(payrollRows) && payrollRows.length > 0
+      ? buildFormXIVMPPayrollRowResolver(payrollRows)
+      : null;
   let hits = 0;
   mappedData.forEach((row, rowIndex) => {
     const empItem = employees[rowIndex];
     const emp = empItem?.Employee || empItem?.employee || empItem;
-    if (!overwrite && String(row?.[wageRateHeader] ?? '').trim()) return;
-    const payrollRow =
+    const existing = getFormXIVMPRowValueForHeader(row, wageRateHeader);
+    if (!overwrite && existing) return;
+    let payrollRow =
       typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, row, rowIndex) : null;
+    if ((!payrollRow || payrollRow.fetch_error) && fallbackResolver) {
+      payrollRow = fallbackResolver(emp, row);
+    }
+    if ((!payrollRow || payrollRow.fetch_error) && Array.isArray(payrollRows) && payrollRows.length > 0) {
+      payrollRow = resolveFormXIVMPPayrollRowForWageRate(emp, payrollRows, row);
+    }
     const rate = resolveFormXIVMPWageRate(emp, payrollRow && !payrollRow.fetch_error ? payrollRow : null, {
       variant,
       monthCandidates,
@@ -1453,6 +1710,12 @@ export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpe
         ...(Array.isArray(headers) ? headers : []),
       ]);
       hits += 1;
+    } else if (existing && overwrite) {
+      // Keep any alias-key wage rate visible under the UI column header.
+      writeFormXIVMPWageRateOnRow(row, wageRateHeader, existing, [
+        ...hdrs,
+        ...(Array.isArray(headers) ? headers : []),
+      ]);
     }
   });
   return hits;
@@ -1467,7 +1730,7 @@ export const FORM_XIV_MP_WORKMAN_FIELD_SPECS = [
   },
   {
     label: 'Serial number in the register of workmen employed',
-    match: /serial\s+(?:no\.?|number)\s+in\s+the\s+register|s\.?\s*no\.?\s+in\s+the\s+register/i,
+    match: /serial\s+(?:no\.?|number)\s+in\s+the\s+register|s\.?\s*no\.?\s+in\s+the\s+register|sl\.?\s*no\.?\s+of\s+the\s+register/i,
     rowTest: isFormXIVMPSerialNumberHeader,
   },
   {
@@ -1477,7 +1740,7 @@ export const FORM_XIV_MP_WORKMAN_FIELD_SPECS = [
   },
   {
     label: "Wage rate with particulars or unit, in case of piece of work",
-    match: /wage\s*['']?\s*rate|piece\s+of\s+work/i,
+    match: /wage\s*['']?\s*rate|piece\s+of\s+work|place\s+work|particular/i,
     rowTest: isFormXIVMPWageRateHeader,
   },
   {
@@ -1487,7 +1750,7 @@ export const FORM_XIV_MP_WORKMAN_FIELD_SPECS = [
   },
   {
     label: 'Tenure of employment',
-    match: /tenure\s+of\s+employ/i,
+    match: /tenure\s+of\s+employ|period\s+of\s+employ/i,
     rowTest: isFormXIVMPTenureHeader,
   },
   {
@@ -1852,7 +2115,72 @@ const detectFormXRajasthanWorksheetLayout = (worksheet, maxScanRow = 24) => {
   return contractorLabelInB && tableHeaderRow;
 };
 
+const FORM_XIV_RJ_DOT_LEADER_RE = /(?:\.{3,}|…{2,}|[.…·_]{6,})/u;
+
+const stripFormXIVRJHeaderLeader = (text) =>
+  String(text || '')
+    .replace(/\s*(?:\.{3,}|…{2,}|[.…·_]{6,}).*$/u, '')
+    .replace(/[\s.…·_]+$/u, '')
+    .trim();
+
+/** Form X_RJ: label + dotted fill-in share one (often wide-merged) cell — e.g. contractor line. */
+const isFormXIVRJInlineDottedHeaderLabel = (raw) => {
+  const s = String(raw || '').trim();
+  if (!s || !FORM_XIV_RJ_DOT_LEADER_RE.test(s)) return false;
+  return FORM_XIV_MP_HEADER_SPECS.some((spec) => spec.match.test(s) || spec.match.test(formXIVMPHeaderNorm(s)));
+};
+
+/** True when column C (value col) sits inside the label merge — cannot hold a separate value. */
+const formXIVRJLabelMergeCoversValueCol = (worksheet, labelRow, labelCol) => {
+  const ranges = parseExcelJsMergeRanges(worksheet);
+  const labelMerge = ranges.find(
+    (m) =>
+      labelRow >= m.top &&
+      labelRow <= m.bottom &&
+      labelCol >= m.left &&
+      labelCol <= m.right
+  );
+  if (!labelMerge) return false;
+  return (
+    FORM_XIV_RJ_HEADER_VALUE_COL >= labelMerge.left &&
+    FORM_XIV_RJ_HEADER_VALUE_COL <= labelMerge.right
+  );
+};
+
+const writeFormXIVRJInlineHeaderValue = (worksheet, labelRow, labelCol, value) => {
+  const text = String(value ?? '').trim();
+  if (!text || labelRow < 1 || labelCol < 1) return;
+  if (isFormXIVMPHeaderValueEmptyOrPlaceholder(text)) return;
+  const topLeft = resolveGJMergeTopLeft(worksheet, labelRow, labelCol);
+  const raw = formXIVMPExcelCellValueToString(
+    worksheet.getCell(topLeft.row, topLeft.col)?.value
+  ).trim();
+  const matchedSpec = FORM_XIV_MP_HEADER_SPECS.find(
+    (spec) => spec.match.test(raw) || spec.match.test(formXIVMPHeaderNorm(raw))
+  );
+  const clean =
+    stripFormXIVRJHeaderLeader(raw) ||
+    matchedSpec?.label ||
+    'Name and address of contractor';
+  // Keep the template's dotted leader length so alignment stays the same.
+  const leaderMatch = raw.match(FORM_XIV_RJ_DOT_LEADER_RE);
+  const leader = leaderMatch ? leaderMatch[0] : '.'.repeat(40);
+  const cell = worksheet.getCell(topLeft.row, topLeft.col);
+  cell.value = `${clean}${leader} ${text}`;
+  cell.alignment = {
+    ...(cell.alignment || {}),
+    horizontal: 'left',
+    vertical: 'middle',
+    wrapText: true,
+    shrinkToFit: false,
+  };
+};
+
 const resolveFormXRJHeaderValueCell = (worksheet, labelRow, labelCol) => {
+  // Prefer the official RJ value column (C) when it is free of the label merge.
+  if (!formXIVRJLabelMergeCoversValueCol(worksheet, labelRow, labelCol)) {
+    return resolveGJMergeTopLeft(worksheet, labelRow, FORM_XIV_RJ_HEADER_VALUE_COL);
+  }
   const targetCol = findFormXIVValueColumnBesideLabel(
     worksheet,
     labelRow,
@@ -1871,13 +2199,17 @@ const clearFormXRJHeaderValueMerge = (worksheet, labelRow, labelCol) => {
   );
   if (!merge) {
     const cellStr = formXIVMPExcelCellValueToString(worksheet.getCell(row, col)?.value).trim();
-    if (isFormXIVPlaceholderCell(cellStr)) worksheet.getCell(row, col).value = '';
+    if (isFormXIVPlaceholderCell(cellStr) || isFormXIVMPHeaderValueEmptyOrPlaceholder(cellStr)) {
+      worksheet.getCell(row, col).value = '';
+    }
     return;
   }
   for (let r = merge.top; r <= merge.bottom; r += 1) {
     for (let c = merge.left; c <= merge.right; c += 1) {
       const cellStr = formXIVMPExcelCellValueToString(worksheet.getCell(r, c)?.value).trim();
-      if (!cellStr || isFormXIVPlaceholderCell(cellStr)) worksheet.getCell(r, c).value = '';
+      if (!cellStr || isFormXIVPlaceholderCell(cellStr) || isFormXIVMPHeaderValueEmptyOrPlaceholder(cellStr)) {
+        worksheet.getCell(r, c).value = '';
+      }
     }
   }
 };
@@ -1885,6 +2217,17 @@ const clearFormXRJHeaderValueMerge = (worksheet, labelRow, labelCol) => {
 const writeFormXIVRJBoxedHeaderValue = (worksheet, labelRow, labelCol, value) => {
   const text = String(value ?? '').trim();
   if (!text || labelRow < 1) return;
+  if (isFormXIVMPHeaderValueEmptyOrPlaceholder(text)) return;
+  const labelRaw = formXIVMPExcelCellValueToString(worksheet.getCell(labelRow, labelCol)?.value).trim();
+  const dottedContractor =
+    isFormXIVRJInlineDottedHeaderLabel(labelRaw) ||
+    (/name\s+and\s+address\s+.*contractor/i.test(labelRaw) && FORM_XIV_RJ_DOT_LEADER_RE.test(labelRaw));
+  // Official Form X_RJ: keep dotted contractor label in B untouched; put value in C like other headers.
+  // Only fall back to inline when a wide merge covers column C (value would land off-form).
+  if (dottedContractor && formXIVRJLabelMergeCoversValueCol(worksheet, labelRow, labelCol)) {
+    writeFormXIVRJInlineHeaderValue(worksheet, labelRow, labelCol, text);
+    return;
+  }
   clearFormXRJHeaderValueMerge(worksheet, labelRow, labelCol);
   const { row, col } = resolveFormXRJHeaderValueCell(worksheet, labelRow, labelCol);
   const bounds = resolveFormXRJDataBoxBounds(worksheet, row, col);
@@ -1918,10 +2261,18 @@ const resolveFormXRJTableHeaderMatchCol = (worksheet, headerRow, header) => {
     if (isFormXIVMPNatureDesignationHeader(header) && /nature/.test(cellNorm) && /employ|designat/.test(cellNorm)) {
       return c;
     }
-    if (isFormXIVMPWageRateHeader(header) && /wage/.test(cellNorm) && /rate|piece|place/.test(cellNorm)) return c;
+    if (
+      isFormXIVMPWageRateHeader(header) &&
+      /wage/.test(cellNorm) &&
+      /rate|piece|place|particular/.test(cellNorm) &&
+      !/wage\s+period/.test(cellNorm)
+    ) {
+      return c;
+    }
     if (isFormXIVMPWagePeriodHeader(header) && /wage\s+period/.test(cellNorm)) return c;
     if (isFormXIVMPTenureHeader(header) && /tenure|period\s+of\s+employ/.test(cellNorm)) return c;
     if (isFormXIVMPRemarksHeader(header) && /remark/.test(cellNorm)) return c;
+    if (/signature/.test(formXIVMPHeaderNorm(header)) && /signature/.test(cellNorm)) return c;
   }
   return -1;
 };
@@ -1977,9 +2328,25 @@ const resolveFormXRJDataBoxBounds = (worksheet, dataStartRow, col) => {
       topLeft.col <= m.right
   );
   if (merge) {
-    return { top: merge.top, bottom: merge.bottom, left: merge.left, right: merge.right };
+    // Keep vertical merges for tall boxes, but never spill across table columns
+    // (Nature of employment must not paint into Wage rate).
+    return { top: merge.top, bottom: merge.bottom, left: topLeft.col, right: topLeft.col };
   }
   return { top: topLeft.row, bottom: topLeft.row + 3, left: topLeft.col, right: topLeft.col };
+};
+
+const isFormXRJNumericWageRateValue = (raw) => {
+  const s = String(raw ?? '')
+    .replace(/[,₹]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return false;
+  if (/[a-z]/i.test(s) && !/^(rs\.?|inr)\b/i.test(s)) {
+    const stripped = s.replace(/^(rs\.?|inr)\s*/i, '').trim();
+    if (/[a-z]/i.test(stripped)) return false;
+  }
+  const num = Number(String(s).replace(/[^\d.]/g, ''));
+  return Number.isFinite(num) && num > 0;
 };
 
 const setFormXRJTableBoxCellValue = (worksheet, dataStartRow, col, value) => {
@@ -2047,8 +2414,22 @@ const writeFormXIVRJTableRowToWorksheet = (worksheet, row, layout) => {
   hdrs.forEach((header, j) => {
     const col = columnByHeader[j];
     if (!col || col < 1) return;
-    const val = getFormXIVMPRowValueForHeader(row, header);
+    let val = getFormXIVMPRowValueForHeader(row, header);
+    // Autofill may store wage rate under the template "place work" key or MP "piece of work" key.
+    if (!val && isFormXIVMPWageRateHeader(header)) {
+      for (const [k, v] of Object.entries(row)) {
+        if (String(k || '').startsWith('__')) continue;
+        if (!isFormXIVMPWageRateHeader(k)) continue;
+        const hit = String(v ?? '').trim();
+        if (hit) {
+          val = hit;
+          break;
+        }
+      }
+    }
     if (!val) return;
+    // Wage rate: only write real amounts — leave blank when missing (never designation text).
+    if (isFormXIVMPWageRateHeader(header) && !isFormXRJNumericWageRateValue(val)) return;
     setFormXRJTableBoxCellValue(worksheet, dataStartRow, col, val);
   });
 };
@@ -2057,6 +2438,22 @@ const clearFormXRJTableDataRows = (worksheet, layout) => {
   if (!worksheet || !layout) return;
   const { dataStartRow, columnByHeader } = layout;
   const usedCols = [...new Set(columnByHeader.filter((col) => col > 0))];
+  // Break horizontal merges that span multiple table columns (Nature must not fill Wage rate).
+  const ranges = parseExcelJsMergeRanges(worksheet);
+  ranges.forEach((m) => {
+    if (!m || m.right <= m.left) return;
+    if (m.bottom < dataStartRow || m.top > dataStartRow + 8) return;
+    let hits = 0;
+    usedCols.forEach((col) => {
+      if (col >= m.left && col <= m.right) hits += 1;
+    });
+    if (hits < 2) return;
+    try {
+      worksheet.unMergeCells(m.top, m.left, m.bottom, m.right);
+    } catch (_) {
+      /* ignore already-unmerged */
+    }
+  });
   usedCols.forEach((col) => {
     const bounds = resolveFormXRJDataBoxBounds(worksheet, dataStartRow, col);
     for (let r = bounds.top; r <= bounds.bottom; r += 1) {
@@ -4330,6 +4727,8 @@ export function writeFormXIVMPHeaderFieldsToWorksheet(worksheet, headerFormData 
   FORM_XIV_MP_HEADER_SPECS.forEach((spec) => {
     const val = headerFormData[spec.key];
     if (val == null || String(val).trim() === '') return;
+    // Never write template dotted labels back onto the sheet as "values".
+    if (isFormXIVMPHeaderValueEmptyOrPlaceholder(val)) return;
 
     const labelPos = gjBoxedLayout
       ? findFormXIVGJHeaderLabelPosition(worksheet, spec, parsedFields)

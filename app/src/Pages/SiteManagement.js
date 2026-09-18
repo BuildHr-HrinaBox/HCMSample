@@ -11,6 +11,8 @@ import {
   isOrgWideSiteViewer,
   siteIndustry,
   siteInchargeEmail,
+  siteInchargeEmailForLoginDisplay,
+  siteInchargeEmailsForLoginDisplay,
   siteStateFromRecord,
 } from '../utils/siteInchargeScope';
 import { INDIAN_CITIES } from '../utils/indianCities';
@@ -474,7 +476,10 @@ function digitsOnly(s) {
 const SITE_FORM_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
 
 function splitInchargeEmails(value) {
-  const emails = String(value || '').split(',').map((email) => email.trim());
+  const raw = String(value ?? '');
+  if (!raw.trim()) return [''];
+  // Keep empty segments so "+" can show a blank input (e.g. "a@b.com, ").
+  const emails = raw.split(/[,;\n\r|]+/).map((email) => email.trim());
   return emails.length ? emails : [''];
 }
 
@@ -798,7 +803,14 @@ const SiteManagement = ({ userEmail, userRole }) => {
     };
     const cellValue = (site, key) => {
       if (key === 'companyName') return siteCompanyName(site) || site.companyName || '';
-      if (key === 'inchargeEmail') return siteInchargeEmail(site) || site.inchargeEmail || '';
+      if (key === 'inchargeEmail') {
+        return (
+          siteInchargeEmailForLoginDisplay(site, loginEmailNorm, userRole) ||
+          siteInchargeEmail(site) ||
+          site.inchargeEmail ||
+          ''
+        );
+      }
       if (key === 'industry') return siteIndustry(site) || site.industry || '';
       if (key === 'location') return siteLocation(site) || site.location || '';
       if (key === 'sitePostalCode') {
@@ -887,6 +899,12 @@ const SiteManagement = ({ userEmail, userRole }) => {
       if (data.status === 'success' && data.data && Array.isArray(data.data.siteDetails)) {
         setSites(data.data.siteDetails);
         localStorage.setItem('siteManagementData', JSON.stringify(data.data.siteDetails));
+        // Keep Statutory site cache in sync so Form X_RJ contractor autofill sees CONTRACTOR DETAILS.
+        try {
+          localStorage.setItem('statutorySiteDetails_v1', JSON.stringify(data.data.siteDetails));
+        } catch (_) {
+          /* ignore quota */
+        }
       } else {
         setSites([]);
       }
@@ -1050,7 +1068,11 @@ const SiteManagement = ({ userEmail, userRole }) => {
       contractorState: site.contractorState || '',
       inchargeName: site.inchargeName || '',
       inchargePhone: site.inchargePhone || '',
-      inchargeEmail: siteInchargeEmail(site) || site.inchargeEmail || '',
+      inchargeEmail:
+        siteInchargeEmailForLoginDisplay(site, loginEmailNorm, userRole) ||
+        siteInchargeEmail(site) ||
+        site.inchargeEmail ||
+        '',
       inchargeDesignation: site.inchargeDesignation || '',
       industry: normalizeSiteIndustryLabel(siteIndustry(site) || site.industry || ''),
       sandERCNumber: siteSandERCNumber(site) || site.sandERCNumber || '',
@@ -1366,7 +1388,9 @@ const SiteManagement = ({ userEmail, userRole }) => {
 
   const addInchargeEmail = () => {
     const emails = splitInchargeEmails(formRef.current.inchargeEmail);
-    setForm((prev) => ({ ...prev, inchargeEmail: `${emails.join(', ')}, ` }));
+    if (emails[emails.length - 1] === '') return;
+    emails.push('');
+    setForm((prev) => ({ ...prev, inchargeEmail: emails.join(', ') }));
   };
 
   const removeInchargeEmail = (index) => {
@@ -1421,7 +1445,7 @@ const SiteManagement = ({ userEmail, userRole }) => {
         contractorState: form.contractorState.trim(),
         inchargeName: form.inchargeName.trim(),
         inchargePhone: form.inchargePhone.trim(),
-        inchargeEmail: form.inchargeEmail.trim(),
+        inchargeEmail: splitInchargeEmails(form.inchargeEmail).filter(Boolean).join(', '),
         inchargeDesignation: form.inchargeDesignation.trim(),
         industry: normalizeSiteIndustryLabel(form.industry),
         sandERCNumber: rcFieldVisibility.showSandERC ? form.sandERCNumber.trim() : '',
@@ -2316,8 +2340,19 @@ const SiteManagement = ({ userEmail, userRole }) => {
                             <td>{site.unitNo || '—'}</td>
                             <td>{site.inchargeName || '—'}</td>
                             <td>{site.inchargePhone || '—'}</td>
-                            <td className="site-management-td-email" title={siteInchargeEmail(site)}>
-                              {siteInchargeEmail(site) || '—'}
+                            <td
+                              className="site-management-td-email"
+                              title={siteInchargeEmailForLoginDisplay(site, loginEmailNorm, userRole)}
+                            >
+                              {(() => {
+                                const emails = siteInchargeEmailsForLoginDisplay(
+                                  site,
+                                  loginEmailNorm,
+                                  userRole
+                                );
+                                if (emails.length === 0) return '—';
+                                return emails.join(', ');
+                              })()}
                             </td>
                             <td className="site-management-td-industry" title={siteIndustry(site)}>
                               {siteIndustry(site) || '—'}

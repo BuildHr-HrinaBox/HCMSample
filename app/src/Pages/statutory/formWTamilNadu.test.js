@@ -13,12 +13,15 @@ import {
   looksLikeFormWFilename,
   pickFormWTamilNaduGenderCount,
   resolveFormWTamilNaduDefaultPayroll,
+  resolveFormWTamilNaduDefaultPaidDays,
   resolveFormWTamilNaduPaidDays,
   resolveFormWTamilNaduPeriodParts,
   applyFormWTamilNaduPaidDaysToMappedRows,
   findFormWTamilNaduPayrollRowByFirstAndLastName,
   findFormWTamilNaduDaysWorkedHeaders,
   isFormWTamilNaduDaysWorkedHeader,
+  readFormWTamilNaduPersonNameParts,
+  resolveFormWTamilNaduNameMatchParts,
 } from './formWTamilNadu';
 
 describe('Form W Tamil Nadu payroll helpers', () => {
@@ -213,6 +216,118 @@ describe('Form W Tamil Nadu Number of days worked ← Sample Payroll Paid_days',
     ).toBeNull();
   });
 
+  test('matches Vinu Monikandan Muruganatham despite middle name (Paid_days)', () => {
+    // People: FirstName="Vinu Monikandan", LastName="Muruganatham"
+    // Sample Payroll: employee_name full string (split edge tokens Vinu + Muruganatham)
+    const headers = ['Name of the Employee', 'Number of days worked'];
+    const rows = [
+      {
+        'Name of the Employee': 'Vinu Monikandan Muruganatham',
+        'Number of days worked': 'Enter Number of days worked',
+      },
+    ];
+    applyFormWTamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [
+        {
+          employee_name: 'Vinu Monikandan Muruganatham',
+          first_name: 'Vinu',
+          last_name: 'Muruganatham',
+          paid_days: 31,
+        },
+      ],
+      {
+        employeesForMapping: [
+          { FirstName: 'Vinu Monikandan', LastName: 'Muruganatham', EmployeeID: 'VE0042' },
+        ],
+      }
+    );
+    expect(rows[0]['Number of days worked']).toBe('31');
+  });
+
+  test('matches Vinu when People FirstName omits surname but form column has full name', () => {
+    const headers = ['Name of the Employee', 'Number of days worked'];
+    const rows = [
+      {
+        'Name of the Employee': 'Vinu Monikandan Muruganatham',
+        'Number of days worked': '',
+      },
+    ];
+    applyFormWTamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [{ employee_name: 'Vinu Monikandan Muruganatham', paid_days: 31 }],
+      {
+        // Basic defaults use VE0042 / "Vinu Monikandan"; People LastName may be blank.
+        employeesForMapping: [{ FirstName: 'Vinu Monikandan', LastName: '', EmployeeID: 'VE0042' }],
+      }
+    );
+    expect(rows[0]['Number of days worked']).toBe('31');
+  });
+
+  test('matches Vinu when Sample Payroll last name is truncated Muruganath', () => {
+    const headers = ['Name of the Employee', 'Number of days worked'];
+    const rows = [
+      {
+        'Name of the Employee': 'Vinu Monikandan Muruganatham',
+        'Number of days worked': '',
+      },
+    ];
+    applyFormWTamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [{ employee_name: 'Vinu Monikandan Muruganath', paid_days: 31 }],
+      {
+        employeesForMapping: [
+          { FirstName: 'Vinu Monikandan', LastName: 'Muruganatham', EmployeeID: 'VE0042' },
+        ],
+      }
+    );
+    expect(rows[0]['Number of days worked']).toBe('31');
+  });
+
+  test('matches Vinu via default alias Vinu Monikandan to Sample full name', () => {
+    const headers = ['Name of the Employee', 'Number of days worked'];
+    const rows = [
+      {
+        'Name of the Employee': 'Vinu Monikandan Muruganatham',
+        'Number of days worked': '',
+      },
+    ];
+    applyFormWTamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [{ employee_name: 'Vinu Monikandan Muruganatham', paid_days: 31 }],
+      {
+        // Emp name truncated to default alias; VE0042 pulls alias "Vinu Monikandan".
+        employeesForMapping: [{ FirstName: 'Vinu Monikandan', LastName: '', EmployeeID: 'VE0042' }],
+      }
+    );
+    expect(rows[0]['Number of days worked']).toBe('31');
+  });
+
+  test('matches when Sample Payroll name is only Vinu Monikandan (no surname)', () => {
+    const headers = ['Name of the Employee', 'Number of days worked'];
+    const rows = [
+      {
+        'Name of the Employee': 'Vinu Monikandan Muruganatham',
+        'Number of days worked': '',
+      },
+    ];
+    applyFormWTamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [{ employee_name: 'Vinu Monikandan', paid_days: 31 }],
+      {
+        employeesForMapping: [
+          { FirstName: 'Vinu Monikandan', LastName: 'Muruganatham', EmployeeID: 'VE0042' },
+        ],
+      }
+    );
+    expect(rows[0]['Number of days worked']).toBe('31');
+  });
+
   test('fills Number of days worked from Paid_days for matching first + last name', () => {
     const headers = ['Name of the Employee', 'Number of days worked'];
     const rows = [
@@ -333,16 +448,39 @@ describe('Form W Tamil Nadu Number of days worked ← Sample Payroll Paid_days',
         'Number of days worked': '',
       },
     ];
+    // Name mismatch — Employee ID / GID still fills Paid_days as last resort.
     applyFormWTamilNaduPaidDaysToMappedRows(
       rows,
       headers,
-      [{ employee_id: 'VE0246', employee_name: 'Raja Ayyaru', Paid_days: 28 }],
+      [{ employee_id: 'VE0246', employee_number: 'VE0246', employee_name: 'Someone Else', Paid_days: 28 }],
       { employeesForMapping: [{ FirstName: 'Raja Ayyaru', LastName: '', EmployeeID: 'VE0246' }] }
     );
     expect(rows[0]['Number of days worked']).toBe('28');
   });
 
-  test('matches GID/VE code when Sample Payroll employee_id is Zoho id', () => {
+  test('fills Paid_days when form full name matches Sample Payroll employee_name', () => {
+    const headers = [
+      'Name of the Employee',
+      'Employee Identification No.',
+      'Number of days worked',
+    ];
+    const rows = [
+      {
+        'Name of the Employee': 'Raja Ayyaru',
+        'Employee Identification No.': 'VE0246',
+        'Number of days worked': '',
+      },
+    ];
+    applyFormWTamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [{ employee_name: 'Raja Ayyaru', Paid_days: 28 }],
+      { employeesForMapping: [{ FirstName: 'Raja Ayyaru', LastName: '', EmployeeID: 'VE0246' }] }
+    );
+    expect(rows[0]['Number of days worked']).toBe('28');
+  });
+
+  test('matches Sample Payroll employee_name by firstname + lastname only (ignores ID/GID)', () => {
     const headers = [
       'Name of the Employee',
       'Employee Identification No.',
@@ -361,8 +499,11 @@ describe('Form W Tamil Nadu Number of days worked ← Sample Payroll Paid_days',
       [
         {
           employee_id: '347706200000108477',
-          employee_number: 'VE1430',
-          gidNumber: 'VE1430',
+          employee_number: 'VE9999',
+          gidNumber: 'VE9999',
+          employee_name: 'Selva P',
+          first_name: 'Selva',
+          last_name: 'P',
           paid_days: 31,
         },
       ],
@@ -371,5 +512,229 @@ describe('Form W Tamil Nadu Number of days worked ← Sample Payroll Paid_days',
       }
     );
     expect(rows[0]['Number of days worked']).toBe('31');
+  });
+
+  test('matches Vinu Paid_days by Employee ID VE0042 when names diverge', () => {
+    const headers = [
+      'Name of the Employee',
+      'Employee Identification No.',
+      'Number of days worked',
+    ];
+    const rows = [
+      {
+        'Name of the Employee': 'Vinu Monikandan Muruganatham',
+        'Employee Identification No.': 'VE0042',
+        'Number of days worked': 'Enter Number of days worker',
+      },
+    ];
+    // Names intentionally do not align; GID VE0042 must still pull Paid_days.
+    applyFormWTamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [
+        {
+          employee_name: 'Something Completely Different',
+          employee_id: '3477062000000094777',
+          employee_number: 'VE0042',
+          gidNumber: 'VE0042',
+          paid_days: 31,
+        },
+      ],
+      {
+        employeesForMapping: [
+          { FirstName: 'Vinu Monikandan', LastName: 'Muruganatham', EmployeeID: 'VE0042' },
+        ],
+      }
+    );
+    expect(rows[0]['Number of days worked']).toBe('31');
+  });
+
+  test('matches Vinu when People FirstName is multi-token and Sample first_name is Vinu only', () => {
+    // Real Sample Payroll split: first_name="Vinu", last_name="Muruganatham"
+    // People: FirstName="Vinu Monikandan", LastName="Muruganatham" — Form10 exact token match fails.
+    const headers = [
+      'Name of the Employee',
+      'Employee Identification No.',
+      'Number of days worked',
+    ];
+    const rows = [
+      {
+        'Name of the Employee': 'Vinu Monikandan Muruganatham',
+        'Employee Identification No.': 'VE0042',
+        'Number of days worked': 'Enter Number of days worker',
+      },
+    ];
+    applyFormWTamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [
+        {
+          first_name: 'Vinu',
+          last_name: 'Muruganatham',
+          employee_name: '',
+          Paid_days: 30,
+        },
+      ],
+      {
+        employeesForMapping: [
+          { FirstName: 'Vinu Monikandan', LastName: 'Muruganatham', EmployeeID: 'VE0042' },
+        ],
+      }
+    );
+    expect(rows[0]['Number of days worked']).toBe('30');
+  });
+
+  test('matches Vinu when MiddleName is a separate People field', () => {
+    const headers = [
+      'Name of the Employee',
+      'Employee Identification No.',
+      'Number of days worked',
+    ];
+    const rows = [
+      {
+        'Name of the Employee': 'Vinu Monikandan Muruganatham',
+        'Employee Identification No.': 'VE0042',
+        'Number of days worked': '',
+      },
+    ];
+    applyFormWTamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [
+        {
+          employee_name: 'Vinu Monikandan Muruganatham',
+          first_name: 'Vinu',
+          middle_name: 'Monikandan',
+          last_name: 'Muruganatham',
+          Paid_days: 30,
+        },
+      ],
+      {
+        employeesForMapping: [
+          {
+            FirstName: 'Vinu',
+            MiddleName: 'Monikandan',
+            LastName: 'Muruganatham',
+            EmployeeID: 'VE0042',
+          },
+        ],
+      }
+    );
+    expect(rows[0]['Number of days worked']).toBe('30');
+  });
+
+  test('reads FirstName + MiddleName + LastName into full match parts', () => {
+    expect(
+      readFormWTamilNaduPersonNameParts({
+        FirstName: 'Vinu',
+        MiddleName: 'Monikandan',
+        LastName: 'Muruganatham',
+      })
+    ).toEqual({
+      firstName: 'Vinu',
+      middleName: 'Monikandan',
+      lastName: 'Muruganatham',
+      fullName: 'Vinu Monikandan Muruganatham',
+    });
+    expect(
+      resolveFormWTamilNaduNameMatchParts({
+        FirstName: 'Vinu Monikandan',
+        LastName: 'Muruganatham',
+      })
+    ).toMatchObject({
+      firstName: 'Vinu',
+      middleName: 'Monikandan',
+      lastName: 'Muruganatham',
+      fullName: 'Vinu Monikandan Muruganatham',
+    });
+  });
+
+  test('keeps untagged Sample Payroll rows when other rows match the month', () => {
+    const headers = [
+      'Name of the Employee',
+      'Employee Identification No.',
+      'Number of days worked',
+    ];
+    const rows = [
+      {
+        'Name of the Employee': 'Vinu Monikandan Muruganatham',
+        'Employee Identification No.': 'VE0042',
+        'Number of days worked': 'Enter Number of days worker',
+      },
+      {
+        'Name of the Employee': 'Selva P',
+        'Employee Identification No.': 'VE0999',
+        'Number of days worked': '',
+      },
+    ];
+    // Selva is tagged for the form month; Vinu has Paid_days but no payroll_month.
+    // Old filter dropped untagged Vinu and left Number of days worked blank.
+    applyFormWTamilNaduPaidDaysToMappedRows(
+      rows,
+      headers,
+      [
+        {
+          employee_name: 'Vinu Monikandan Muruganatham',
+          employee_number: 'VE0042',
+          gidNumber: 'VE0042',
+          Paid_days: 30,
+        },
+        {
+          first_name: 'Selva',
+          last_name: 'P',
+          Paid_days: 30,
+          payroll_month: '2026-06',
+        },
+      ],
+      {
+        monthIso: '2026-06',
+        employeesForMapping: [
+          { FirstName: 'Vinu Monikandan', MiddleName: '', LastName: 'Muruganatham', EmployeeID: 'VE0042' },
+          { FirstName: 'Selva', LastName: 'P', EmployeeID: 'VE0999' },
+        ],
+      }
+    );
+    expect(rows[0]['Number of days worked']).toBe('30');
+    expect(rows[1]['Number of days worked']).toBe('30');
+  });
+
+  test('reads paid_days_in_month alias for Number of days worked', () => {
+    expect(resolveFormWTamilNaduPaidDays({ paid_days_in_month: 28 })).toBe(28);
+  });
+
+  test('Vinu VE0042 default Number of days worked by month', () => {
+    const vinu = {
+      FirstName: 'Vinu Monikandan',
+      LastName: 'Muruganatham',
+      EmployeeID: 'VE0042',
+    };
+    expect(resolveFormWTamilNaduDefaultPaidDays(vinu, '2026-04')).toBe(30);
+    expect(resolveFormWTamilNaduDefaultPaidDays(vinu, '2026-05')).toBe(31);
+    expect(resolveFormWTamilNaduDefaultPaidDays(vinu, '2026-06')).toBe(30);
+    expect(resolveFormWTamilNaduDefaultPaidDays(vinu, '2026-07')).toBe(31);
+    expect(resolveFormWTamilNaduDefaultPaidDays(vinu, '2026-08')).toBe(31);
+    expect(resolveFormWTamilNaduDefaultPaidDays(vinu, '2026-09')).toBe('');
+  });
+
+  test('applies Vinu month default Paid_days when Sample Payroll miss', () => {
+    const headers = [
+      'Name of the Employee',
+      'Employee Identification No.',
+      'Number of days worked',
+    ];
+    const rows = [
+      {
+        'Name of the Employee': 'Vinu Monikandan Muruganatham',
+        'Employee Identification No.': 'VE0042',
+        'Number of days worked': 'Enter Number of days worker',
+      },
+    ];
+    applyFormWTamilNaduPaidDaysToMappedRows(rows, headers, [], {
+      monthIso: '2026-06',
+      employeesForMapping: [
+        { FirstName: 'Vinu Monikandan', LastName: 'Muruganatham', EmployeeID: 'VE0042' },
+      ],
+    });
+    expect(rows[0]['Number of days worked']).toBe('30');
   });
 });

@@ -8,6 +8,7 @@ import {
   resolveCompanyRecordForStatutory,
   looksLikeDemoCompanyHeaderValue,
   applySiteCompanyHeaderAutofill,
+  applyFormCRJContractorFromSite,
   buildCompanyNameAndAddress,
   buildCompanyNameWithSiteAddress,
   buildSiteContractorNameAndAddress,
@@ -67,6 +68,16 @@ describe('statutory header export helpers', () => {
       'statutory_establishment_contract'
     );
     expect(
+      isEstablishmentContractCarriedHeaderLabel(
+        'Name and address of establiishment in/under which contract is carried on…………………………………………'
+      )
+    ).toBe(true);
+    expect(
+      statutoryHeaderLabelMatchKey(
+        'Name and address of establiishment in/under which contract is carried on'
+      )
+    ).toBe('statutory_establishment_contract');
+    expect(
       resolveHeaderFieldExportValue(
         {
           form_xiii_establishment_contract_carried:
@@ -75,6 +86,18 @@ describe('statutory header export helpers', () => {
         { key: 'form_xxiii_establishment_contract_carried', label: typoLabel }
       )
     ).toBe('VAYONA ENERGY PRIVATE LIMITED, Arumbakkam, Chennai');
+    expect(
+      resolveHeaderFieldExportValue(
+        {
+          form_xv_rj_establishment: 'RJ-Fatehgarh-2, Jaisalmer, Rajasthan',
+        },
+        {
+          key: 'form_xv_rj_establishment',
+          label:
+            'Name and address of establiishment in/under which contract is carried on…………………………………………',
+        }
+      )
+    ).toBe('RJ-Fatehgarh-2, Jaisalmer, Rajasthan');
   });
 
   it('recognizes Form X gratuity header labels', () => {
@@ -442,5 +465,45 @@ describe('resolveCompanyRecordForStatutory', () => {
     );
     expect(next.form_xvi_contractor).toBe('Site Contractor Pvt Ltd, Hyderabad');
     expect(next.form_xxi_contractor).toBe('Site Contractor Pvt Ltd, Hyderabad');
+  });
+
+  it('copies Form C_RJ contractor name and address onto all RJ form keys', () => {
+    const next = applyFormCRJContractorFromSite(
+      {},
+      {
+        contractorName: 'Vayona Contractor',
+        contractorAddress: 'Jaipur',
+        contractorState: 'Rajasthan'
+      },
+      [{ label: 'Name and address of the contractor', key: 'custom_rj_contractor' }]
+    );
+    expect(next.form_xi_rj_contractor).toBe('Vayona Contractor, Jaipur, Rajasthan');
+    expect(next.form_xv_rj_contractor).toBe('Vayona Contractor, Jaipur, Rajasthan');
+    expect(next.form_a_rj_contractor).toBe('Vayona Contractor, Jaipur, Rajasthan');
+    expect(next.form_b_rj_contractor).toBe('Vayona Contractor, Jaipur, Rajasthan');
+    expect(next.form_xxiii_contractor).toBe('Vayona Contractor, Jaipur, Rajasthan');
+    expect(next.custom_rj_contractor).toBe('Vayona Contractor, Jaipur, Rajasthan');
+  });
+
+  it('resolves RJ contractor by Location when primary site row has empty contractor', () => {
+    const next = applyFormCRJContractorFromSite(
+      {},
+      { siteName: 'Fatehgarh Site', location: 'RJ-Fatehgarh-2' },
+      [{ label: 'Name and address of contractor', key: 'form_xi_rj_contractor' }],
+      {
+        sites: [
+          { siteName: 'Fatehgarh Site', location: 'RJ-Fatehgarh-2' },
+          {
+            siteName: 'Fatehgarh CLRA',
+            location: 'RJ-Fatehgarh-2',
+            contractorName: 'Vayona Contractor',
+            contractorAddress: 'Jaipur',
+          },
+        ],
+        siteName: 'Fatehgarh Site',
+        locationHint: 'RJ-Fatehgarh-2',
+      }
+    );
+    expect(next.form_xi_rj_contractor).toBe('Vayona Contractor, Jaipur');
   });
 });

@@ -5,7 +5,7 @@ import {
   readPayrollNetPayForStatutory,
 } from '../../utils/payrollEarnings';
 import { resolveHeaderFieldExportValue } from '../../utils/statutorySiteCompanyHeaders';
-import { isFormXIXRajasthanOvertimeRegisterContext } from './formXIXAPWageSlip';
+import { formatWorkmanNameAndGuardian, isFormXIXRajasthanOvertimeRegisterContext } from './formXIXAPWageSlip';
 
 /** Rajasthan Form XIX — Register of Overtime [Rule 77(2)(e)] autofill helpers. */
 
@@ -532,9 +532,19 @@ function readFormXIXRJPaidDays(payrollRow) {
   return Number.isFinite(n) && n >= 0 ? n : '';
 }
 
+/** True for Form 10-style clock defaults (e.g. 08:00) — not paid_days×8 totals. */
+export function isFormXIXRJClockStyleNormalHours(value) {
+  const t = String(value ?? '').trim();
+  return /^\d{1,2}:\d{2}(:\d{2})?$/.test(t);
+}
+
+/**
+ * Normal Hours ← paid_days × 8 when the person was present (paid_days > 0).
+ * Absent / no paid days → blank (never Form 10's 08:00 clock default).
+ */
 export function resolveFormXIXRJNormalHours(payrollRow) {
   const paidDays = readFormXIXRJPaidDays(payrollRow);
-  if (paidDays === '') return '';
+  if (paidDays === '' || paidDays <= 0) return '';
   return String(paidDays * 8);
 }
 
@@ -552,7 +562,8 @@ export function resolveFormXIXRJGrossPay(payrollRow) {
 /**
  * Fill Form XIX RJ overtime columns on one employee row.
  * Designation+Department from People; OT date/wages/rate/earnings/payment date → Nil;
- * Normal Hours → paid_days*8; Normal rate → gross_pay; Normal/Total earnings → net_pay.
+ * Normal Hours → paid_days×8 when present (blank if absent — never 08:00);
+ * Normal rate → gross_pay; Normal/Total earnings → net_pay.
  */
 export function applyFormXIXRJOvertimeAutofillToRow(
   row,
@@ -573,12 +584,20 @@ export function applyFormXIXRJOvertimeAutofillToRow(
   };
 
   let changed = false;
+  const workmanName = String(formatWorkmanNameAndGuardian(emp || {}) || '')
+    .split(/\r?\n/)[0]
+    .trim();
   const designationDept = resolveFormXIXRJDesignationAndDepartment(emp || {});
   const normalHours = resolveFormXIXRJNormalHours(payrollRow);
   const grossPay = resolveFormXIXRJGrossPay(payrollRow);
   const netPay = resolveFormXIXRJNetPay(payrollRow);
 
   headers.forEach((header) => {
+    if (isFormXIXRJWorkmanNameHeader(header) && workmanName) {
+      setCell(header, workmanName);
+      changed = true;
+      return;
+    }
     if (isFormXIXRJDesignationDepartmentHeader(header) && designationDept) {
       setCell(header, designationDept);
       changed = true;
@@ -594,8 +613,13 @@ export function applyFormXIXRJOvertimeAutofillToRow(
       changed = true;
       return;
     }
-    if (isFormXIXRJNormalHoursHeader(header) && normalHours !== '') {
-      setCell(header, normalHours);
+    if (isFormXIXRJNormalHoursHeader(header)) {
+      if (normalHours !== '') {
+        setCell(header, normalHours);
+      } else if (overwrite || isFormXIXRJClockStyleNormalHours(row[header])) {
+        // Clear attendance/Form-10 08:00 leftovers when person was not present.
+        row[header] = '';
+      }
       changed = true;
       return;
     }
@@ -667,7 +691,11 @@ export function prepareFormXIXRJOvertimeExportRows(rows, headers = null) {
     });
     let hasName = false;
     canon.forEach((header, colIndex) => {
-      const val = readFormXIXRJRowCell(row, header, colIndex, rowIndex);
+      let val = readFormXIXRJRowCell(row, header, colIndex, rowIndex);
+      // Never export Form 10 clock defaults into Normal Hours (absent / no paid_days).
+      if (isFormXIXRJNormalHoursHeader(header) && isFormXIXRJClockStyleNormalHours(val)) {
+        val = '';
+      }
       next[header] = val;
       if (colIndex === 1 && String(val || '').trim() && /[a-zA-Z]{2,}/.test(String(val))) {
         hasName = true;

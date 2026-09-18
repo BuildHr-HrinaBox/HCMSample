@@ -14,6 +14,7 @@ import {
 } from './formCGJGujarat';
 import {
   enrichEstablishmentPrincipalEmployerHeaderFields,
+  FORM_RJ_CONTRACTOR_HEADER_KEYS,
 } from '../../utils/statutorySiteCompanyHeaders';
 
 /** Rajasthan Form C — Register of Deductions for Damage or Loss (Contract Labour). */
@@ -49,13 +50,19 @@ export function isFormCRajasthanContext(
 
   if (/gujarat|\b_gj\b|form[\s._-]*c[\s._-]*gj|form_c_gj/.test(parts)) return false;
 
+  // Form_C_MH / Form_C_RJ — underscore after C breaks \bform…c\b.
+  if (/form[\s._-]*c[\s._-]*(rj|mh)\b|form_c_(rj|mh)\b/.test(parts)) return true;
+
   const hasRajasthan =
     /rajasthan|\b_rj\b|form[\s._-]*c[\s._-]*rj|form_c_rj/.test(parts);
-  const hasFormC = /\bform[\s._-]*c\b/.test(parts);
+  const hasMaharashtra =
+    /maharashtra|\b_mh\b|form[\s._-]*c[\s._-]*mh|form_c_mh/.test(parts);
+  const hasFormC =
+    /form[\s._-]*c(?=[\s._-]|$)/.test(parts) || /\bform[\s._-]*c\b/.test(parts);
 
-  if (hasRajasthan && hasFormC) return true;
+  if ((hasRajasthan || hasMaharashtra) && hasFormC) return true;
   if (
-    hasRajasthan &&
+    (hasRajasthan || hasMaharashtra) &&
     blobIndicatesRegisterOfDeductionsForDamage(parts, tableHeaders) &&
     !/\bform[\s._-]*a\b/.test(parts)
   ) {
@@ -136,21 +143,33 @@ export function prepareFormCRajasthanDownloadHeaderData(
   siteContext = {}
 ) {
   const out = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
-  const { establishmentText = '', periodText = '' } = siteContext;
+  const { establishmentText = '', periodText = '', contractorText = '' } = siteContext;
   if (establishmentText) {
     out.statutory_establishment_name = establishmentText;
     out.form_c_rj_establishment = establishmentText;
   }
   if (periodText) out.form_c_rj_month_year = periodText;
+  // Same Site Management contractor line Form C_RJ uses — copy onto every RJ form key.
+  if (contractorText) {
+    FORM_RJ_CONTRACTOR_HEADER_KEYS.forEach((key) => {
+      out[key] = contractorText;
+    });
+  }
   const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
   fields.forEach((field) => {
     const key = field?.key;
-    if (!key || String(out[key] ?? '').trim()) return;
-    if (isFormCRajasthanEstablishmentHeaderLabel(field.label) && establishmentText) {
-      out[key] = establishmentText;
+    if (!key) return;
+    if (!String(out[key] ?? '').trim()) {
+      if (isFormCRajasthanEstablishmentHeaderLabel(field.label) && establishmentText) {
+        out[key] = establishmentText;
+      }
+      if (/month\s*\/\s*year/i.test(String(field.label || '')) && periodText) {
+        out[key] = periodText;
+      }
     }
-    if (/month\s*\/\s*year/i.test(String(field.label || '')) && periodText) {
-      out[key] = periodText;
+    if (contractorText && /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i.test(String(field.label || '')) &&
+        !/principal/i.test(String(field.label || ''))) {
+      out[key] = contractorText;
     }
   });
   return out;

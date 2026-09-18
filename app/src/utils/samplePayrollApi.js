@@ -270,10 +270,20 @@ export function mapSamplePayrollRecordToPayrollRow(record, meta = null) {
     'professional_tax',
   ]);
   const payDate = pickSamplePayrollPayDate(record, meta);
+  const nameParts = String(employeeName || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const firstName = nameParts[0] || '';
+  const lastName = nameParts.length >= 2 ? nameParts[nameParts.length - 1] : '';
   return flattenPayrollEarningColumns({
     employee_name: employeeName,
     full_name: employeeName,
     name: employeeName,
+    first_name: firstName,
+    last_name: lastName,
+    FirstName: firstName,
+    LastName: lastName,
     employee_id: employeeId,
     employee_number: gidNumber || employeeId,
     GIDNumber: gidNumber,
@@ -286,6 +296,8 @@ export function mapSamplePayrollRecordToPayrollRow(record, meta = null) {
     DateofBirth: record.dateofBirth,
     dateofBirth: record.dateofBirth,
     paid_days: record.paidDays,
+    Paid_days: record.paidDays,
+    paidDays: record.paidDays,
     basic,
     earned_basic: basic,
     Basic: basic,
@@ -310,6 +322,8 @@ export function mapSamplePayrollRecordToPayrollRow(record, meta = null) {
     professional_tax: professionalTax,
     ProfessionalTax: professionalTax,
     payrollMonth: record.payrollMonth,
+    payroll_month: record.payrollMonth,
+    Payroll_Month: record.payrollMonth,
     pay_date: payDate,
     payDate,
     payment_date: payDate,

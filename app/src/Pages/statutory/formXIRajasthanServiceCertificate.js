@@ -12,6 +12,8 @@ import {
   readFormXIVMPPayrollNetPay,
 } from './formXIVMPEmploymentCard';
 import { flattenPayrollEarningColumns, readPayrollScalar } from '../../utils/payrollEarnings';
+import { resolveHeaderFieldExportValue } from '../../utils/statutorySiteCompanyHeaders';
+import { applyExcelJSFullBoxBordersToRange } from '../../utils/excelTableBorders';
 
 /** Rajasthan CLRA Form XI — Service Certificate [Rule 76]; per-employee ZIP export. */
 
@@ -183,7 +185,9 @@ export function isFormXIRajasthanServiceCertificateContext(
   }
   if (
     /rajasthan|\bxi[\s._-]*rj\b|form[\s._-]*xi[\s._-]*rj/i.test(parts) ||
-    /\bxi_rj\b/i.test(parts)
+    /\bxi_rj\b/i.test(parts) ||
+    /maharashtra|\bxi[\s._-]*mh\b|form[\s._-]*xi[\s._-]*mh/i.test(parts) ||
+    /\bxi_mh\b/i.test(parts)
   ) {
     return true;
   }
@@ -600,6 +604,7 @@ export function readFormXIRJPayrollPaidDays(payrollRow) {
 }
 
 export function resolveFormXIRJRateOfWage(payrollRow) {
+  // Daily rate from monthly gross ÷ 26. Blank only when gross pay is missing.
   const grossRaw = readFormXIVMPPayrollGrossPay(payrollRow);
   const gross = Number(String(grossRaw || '').replace(/,/g, '').trim());
   if (!Number.isFinite(gross) || gross <= 0) return '';
@@ -806,7 +811,10 @@ const writeHeaderFieldsToWorksheet = (worksheet, headerFormData = {}, parsedFiel
   };
 
   FORM_XI_RJ_HEADER_SPECS.forEach((spec) => {
-    const val = headerFormData?.[spec.key];
+    let val = headerFormData?.[spec.key];
+    if ((val == null || String(val).trim() === '') && spec.key === 'form_xi_rj_contractor') {
+      val = resolveHeaderFieldExportValue(headerFormData, spec);
+    }
     if (val == null || String(val).trim() === '') return;
     const parsedField = parsedByKey.get(spec.key);
     if (parsedField?.labelRow != null) {
@@ -885,8 +893,78 @@ const writeTableRowToWorksheet = (worksheet, row, layout) => {
     const col = columnByHeader[j];
     if (!col || col < 1) return;
     const val = getFormXIRJRowValueForHeader(row, header);
-    if (!val) return;
+    // Always clear Rate of wages / Remarks / empty To when missing so template
+    // sample values do not leak into Excel → PDF.
+    const forceBlank =
+      !val &&
+      (isFormXIRJRateOfWageHeader(header) ||
+        isFormXIRJRemarksHeader(header) ||
+        isFormXIRJPeriodToHeader(header));
+    if (!val && !forceBlank) return;
+    const cell = worksheet.getCell(dataStartRow, col);
+    if (!val) {
+      cell.value = '';
+      return;
+    }
     setCellValue(worksheet, dataStartRow, col, val);
+  });
+};
+
+/**
+ * Full thin box borders on the Form XI RJ employment table
+ * (Serial No. … Remarks header band + index row + data / blank body box).
+ */
+const applyFormXIRJTableFullBorders = (worksheet, layout, dataRowCount = 1) => {
+  if (!worksheet || !layout) return;
+  const cols = (layout.columnByHeader || []).filter((c) => Number(c) > 0);
+  if (!cols.length) return;
+  const colFrom = Math.min(...cols);
+  const colTo = Math.max(...cols);
+
+  let rowFrom = Math.max(1, Number(layout.headerRow) || 1);
+  for (let r = Math.max(1, rowFrom - 5); r < rowFrom; r += 1) {
+    let hit = false;
+    for (let c = colFrom; c <= colTo; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value);
+      if (
+        /serial\s*no|total\s+period|nature\s+of\s+work|rate\s+of\s+wages|remarks|days\s+worked/i.test(
+          raw
+        )
+      ) {
+        hit = true;
+        break;
+      }
+    }
+    if (hit) {
+      rowFrom = r;
+      break;
+    }
+  }
+
+  const dataStart = Math.max(rowFrom, Number(layout.dataStartRow) || rowFrom + 1);
+  let rowTo = dataStart + Math.max(1, Number(dataRowCount) || 1) - 1;
+  // Keep any pre-drawn empty body boxes under the first data row.
+  for (let r = rowTo + 1; r <= dataStart + 8; r += 1) {
+    let anyBorder = false;
+    for (let c = colFrom; c <= colTo; c += 1) {
+      const b = worksheet.getCell(r, c)?.border;
+      if (b?.top?.style || b?.bottom?.style || b?.left?.style || b?.right?.style) {
+        anyBorder = true;
+        break;
+      }
+    }
+    if (!anyBorder) break;
+    rowTo = r;
+  }
+  // Always leave at least one blank bordered row under data for the certificate box.
+  rowTo = Math.max(rowTo, dataStart + Math.max(1, Number(dataRowCount) || 1));
+
+  applyExcelJSFullBoxBordersToRange(worksheet, {
+    rowFrom,
+    rowTo,
+    colFrom,
+    colTo,
+    borderStyle: 'thin',
   });
 };
 
@@ -911,17 +989,18 @@ export async function buildFormXIRJWorkbookWithTemplateStyles({
   const parsedFields = parsedFormHeader?.fields || [];
 
   writeHeaderFieldsToWorksheet(worksheet, headerFormData, parsedFields);
-  if (employeeRow) {
-    const tableLayout = resolveTableExportLayout(worksheet, hdrs);
-    if (tableLayout) {
-      writeTableRowToWorksheet(worksheet, employeeRow, tableLayout);
-    }
+  const tableLayout = resolveTableExportLayout(worksheet, hdrs);
+  if (employeeRow && tableLayout) {
+    writeTableRowToWorksheet(worksheet, employeeRow, tableLayout);
+  }
+  if (tableLayout) {
+    applyFormXIRJTableFullBorders(worksheet, tableLayout, 1);
   }
 
   const out = await workbook.xlsx.writeBuffer();
   const fileName =
     formFileName ||
-    parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
+    parsedFormHeader?.title?.replace(/[^a-zA-Z0-9]+/g, '_') ||
     `Form_XI_RJ_${Date.now()}.xlsx`;
   const blob = new Blob([out], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -992,11 +1071,17 @@ const formXIRJToCellRef = (row, col) => `${formXIRJColToLetter(col)}${row}`;
 
 const formXIRJUpsertInlineStrCell = (sheetXml, cellRef, value) => {
   const text = formXIRJEscapeXml(formXIRJSanitizeExportText(value));
+  const cellRe = new RegExp(`<c\\s+r="${cellRef}"([^>/]*)(?:/>|>([\\s\\S]*?)</c>)`, 'i');
+  const existing = sheetXml.match(cellRe);
+  let styleAttr = '';
+  if (existing) {
+    const styleMatch = String(existing[1] || '').match(/\ss="(\d+)"/i);
+    if (styleMatch) styleAttr = ` s="${styleMatch[1]}"`;
+  }
   const cellXml = text
-    ? `<c r="${cellRef}" t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`
-    : `<c r="${cellRef}"/>`;
-  const cellRe = new RegExp(`<c\\s+r="${cellRef}"[^>]*(?:/>|>[\\s\\S]*?</c>)`, 'i');
-  if (cellRe.test(sheetXml)) {
+    ? `<c r="${cellRef}"${styleAttr} t="inlineStr"><is><t xml:space="preserve">${text}</t></is></c>`
+    : `<c r="${cellRef}"${styleAttr}/>`;
+  if (existing) {
     return sheetXml.replace(cellRe, cellXml);
   }
   const rowNum = cellRef.replace(/^[A-Z]+/i, '');
@@ -1129,6 +1214,10 @@ async function prepareFormXIRJFastZipTemplate({
 
   const positions = resolveFormXIRJFastExportPositions(worksheet, parsedFormHeader, hdrs);
   clearFormXIRJPerEmployeeValueCells(worksheet, positions);
+  const tableLayout = resolveTableExportLayout(worksheet, hdrs);
+  if (tableLayout) {
+    applyFormXIRJTableFullBorders(worksheet, tableLayout, 1);
+  }
 
   const preparedBuffer = await workbook.xlsx.writeBuffer();
   const templateZip = await JSZip.loadAsync(preparedBuffer);

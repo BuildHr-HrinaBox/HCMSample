@@ -6,8 +6,11 @@ const {
   looksLikeFormXRajasthanEmploymentCardPdfContext,
   buildFormXRajasthanEmploymentHeaderModel,
   trimFormXRajasthanEmploymentLeadingBlankPdfColumns,
+  sanitizeFormXRajasthanEmploymentPdfDataRows,
   looksLikeFormXIRajasthanServiceCertificatePdfContext,
   buildFormXIRajasthanServiceHeaderModel,
+  trimFormXIRajasthanLeadingBlankPdfColumns,
+  sanitizeFormXIRajasthanServiceCertificatePdfDataRows,
   looksLikeFormXVRajasthanWageSlipPdfContext,
   buildFormXVRajasthanWageSlipHeaderModel,
   normalizeFormXIVEmploymentCardPdfMatrix,
@@ -44,6 +47,34 @@ describe('Form XIV Employment Card PDF layout', () => {
     expect(model.titles).not.toContain('RJ-Fatehgarh-2');
   });
 
+  test('marks Form X_RJ Employment Card header model for taller PDF header boxes', () => {
+    const metaLines = [
+      'FORM X',
+      '[See Rule 75]',
+      'Employment Card',
+      'Name and address of contractor',
+      'VAYONA ENERGY PRIVATE LIMITED',
+      'Nature and location of work',
+      'RJ-Fatehgarh-2',
+    ];
+    const rows = [
+      [
+        'Name of the workman',
+        'Sl. No. of the register of workman employed',
+        'Nature of employment/designation',
+        'Wage rate (with particular of unit), in case of place work',
+        'Wage period',
+        'Period of employment',
+        'Remarks',
+        'Signature of contractor',
+      ],
+      ['1', '2', '3', '4', '5', '6', '7', '8'],
+      ['Darshan Darji', 'VE0576', 'Engineer', '70524', 'May 2026', 'From 01 Dec 2025', '', ''],
+    ];
+    const headerModel = buildStatutoryPdfHeaderModel(metaLines, rows, 0, 'Form_X_RJ_Rajasthan.xlsx');
+    expect(headerModel.formXRajasthanEmployment).toBe(true);
+  });
+
   test('removes the empty leading table column from Rajasthan Form X', () => {
     const rows = [
       ['', 'Name of the workman', 'Sl. No. of the register of workman employed'],
@@ -57,6 +88,47 @@ describe('Form XIV Employment Card PDF layout', () => {
       'Sl. No. of the register of workman employed'
     ]);
     expect(out.rows[2]).toEqual(['Darshan Darji', 'VE0576']);
+  });
+
+  test('clears spilled designation from Wage rate and keeps real numeric rates', () => {
+    const rows = [
+      [
+        'Name of the workman',
+        'Sl. No. of the register of workman employed',
+        'Nature of employment/designation',
+        'Wage rate (with particular of unit), in case of place work',
+        'Wage period',
+        'Period of employment',
+        'Remarks',
+        'Signature of contractor',
+      ],
+      ['1', '2', '3', '4', '5', '6', '7', '8'],
+      [
+        'Suryakanta Jana',
+        'VE1225',
+        'Junior Engineer',
+        'Junior Engineer',
+        'May 2026',
+        'From 15 Dec 2025',
+        'From 15 Dec 2025',
+        '',
+      ],
+      [
+        'Darshan Darji',
+        'VE0576',
+        'Engineer',
+        '70524',
+        'May 2026',
+        'From 01 Dec 2025',
+        '',
+        '',
+      ],
+    ];
+    const sanitized = sanitizeFormXRajasthanEmploymentPdfDataRows(rows, 8, 0);
+    expect(sanitized[2][3]).toBe('');
+    expect(sanitized[2][2]).toBe('Junior Engineer');
+    expect(sanitized[2][6]).toBe('');
+    expect(sanitized[3][3]).toBe('70524');
   });
 
   test('pairs Rajasthan Form XI Service Certificate headings with values', () => {
@@ -80,6 +152,42 @@ describe('Form XIV Employment Card PDF layout', () => {
     expect(model.titles).not.toContain('Sample');
   });
 
+  test('removes the leading blank column from Form XI RJ Service Certificate tables', () => {
+    const rows = [
+      ['FORM XI', '', '', ''],
+      ['[See Rule 76]', '', '', ''],
+      ['Service Certificate', '', '', ''],
+      ['', 'Serial No.', 'From', 'To'],
+      ['', '1', '2', '3'],
+      ['', '4', '01-12-2025', ''],
+    ];
+    expect(
+      looksLikeFormXIRajasthanServiceCertificatePdfContext(
+        ['FORM XI', '[See Rule 76]', 'Service Certificate'],
+        rows,
+        'Form_XI_RJ.xlsx'
+      )
+    ).toBe(true);
+    const out = trimFormXIRajasthanLeadingBlankPdfColumns(rows, 4, 3);
+    expect(out.colCount).toBe(3);
+    expect(out.rows[3]).toEqual(['Serial No.', 'From', 'To']);
+    expect(out.rows[5]).toEqual(['4', '01-12-2025', '']);
+  });
+
+  test('Form XI RJ PDF blanks Rate of wages when missing or spilled designation', () => {
+    const rows = [
+      ['Serial No.', 'Nature of work done', 'Rate of wages (with particulars of unit in case of piece work)', 'Remarks'],
+      ['1', '2', '3', '4'],
+      ['4', 'Engineer', 'Engineer', ''],
+      ['5', 'Manager', '', ''],
+      ['6', 'Operator', '2712.46', ''],
+    ];
+    const sanitized = sanitizeFormXIRajasthanServiceCertificatePdfDataRows(rows, 4, 0);
+    expect(sanitized[2][2]).toBe('');
+    expect(sanitized[3][2]).toBe('');
+    expect(sanitized[4][2]).toBe('2712.46');
+  });
+
   test('pairs Rajasthan Form XV Wage Slip headings with values', () => {
     const metaLines = [
       'FORM XV', '[See Rule 77(2)(b)]', 'Wages Slip', 'Sample', 'RJ-Fatehgarh-2',
@@ -93,11 +201,101 @@ describe('Form XIV Employment Card PDF layout', () => {
     ];
     expect(looksLikeFormXVRajasthanWageSlipPdfContext(metaLines, [], 'Form_XV_RJ.xlsx')).toBe(true);
     const model = buildFormXVRajasthanWageSlipHeaderModel(metaLines);
+    expect(model.titles).toEqual(['FORM XV', '[See Rule 77(2)(b)]', 'Wages Slip']);
     expect(model.fields[0]).toBe('Name and address of contractor: Sample');
     expect(model.fields[1]).toBe('Name and location of work: RJ-Fatehgarh-2');
+    expect(model.fields[2]).toBe(
+      'Name and address of establishment in/under which contract is carried on: Rajasthan establishment address'
+    );
     expect(model.fields[4]).toMatch(/workman: Janga Babu Kotaiah$/i);
     expect(model.fields[6]).toBe('For the week/fortnight/month: July 2026');
     expect(model.titles).not.toContain('Sample');
+  });
+
+  test('Form XV RJ PDF keeps Excel title band and drops leftover name/token titles', () => {
+    const metaLines = [
+      'Lalbabu Singh',
+      'VE1580',
+      'Name and address of contractor', 'VAYONA ENERGY PRIVATE LIMITED',
+      'Name and location of work', 'RJ-Fatehgarh-2',
+      'Name and address of establiishment in/under which contract is carried on…………………………………………',
+      'Fatehgarh Site, Jaisalmer, Rajasthan',
+      'Name and address of principal employer',
+      'RSEPL HYBRID POWER ONER ONE LIMITED, Fatehgarh, Rajasthan',
+      "Name and Father's name of the workman", 'Purendra Kumar Singh',
+      'Sex and identification token/ticket No.', 'Male',
+      'VE1580',
+      'For the week/fortnight/month', '31-05-2026',
+    ];
+    const model = buildFormXVRajasthanWageSlipHeaderModel(metaLines);
+    expect(model.titles).toEqual(['FORM XV', '[See Rule 77(2)(b)]', 'Wages Slip']);
+    expect(model.titles).not.toContain('Lalbabu Singh');
+    expect(model.titles).not.toContain('VE1580');
+    expect(model.fields[0]).toMatch(/contractor: VAYONA ENERGY PRIVATE LIMITED$/i);
+    expect(model.fields[2]).toMatch(/Fatehgarh Site/);
+    expect(model.fields[5]).toMatch(/Male\s+VE1580/i);
+    expect(model.fields[6]).toBe('For the week/fortnight/month: 31-05-2026');
+  });
+
+  test("Form XV RJ PDF keeps father's name from Excel multiline workman cell", () => {
+    const metaLines = [
+      'FORM XV',
+      '[See Rule 77(2)(b)]',
+      'Wages Slip',
+      'Name and address of contractor',
+      'VAYONA ENERGY PRIVATE LIMITED',
+      'Name and location of work',
+      'RJ-Fatehgarh-2',
+      'Name and address of establishment in/under which contract is carried on',
+      'Fatehgarh Site, Rajasthan',
+      'Name and address of principal employer',
+      'RSEPL HYBRID POWER ONER ONE LIMITED',
+      "Name and Father's name of the workman",
+      'Purendra Kumar Singh\nLalbabu Singh',
+      'Sex and identification token/ticket No.',
+      'Male\nVE1580',
+      'For the week/fortnight/month',
+      '31-05-2026',
+    ];
+    const model = buildFormXVRajasthanWageSlipHeaderModel(metaLines);
+    expect(model.fields[4]).toContain('Purendra Kumar Singh');
+    expect(model.fields[4]).toContain('Lalbabu Singh');
+    expect(model.fields[4]).toMatch(/Purendra Kumar Singh\nLalbabu Singh/);
+    expect(model.fields[5]).toMatch(/Male\s+VE1580/i);
+  });
+
+  test("Form XV RJ PDF appends father's name when Excel exports it as the next meta line", () => {
+    const metaLines = [
+      "Name and Father's name of the workman",
+      'Purendra Kumar Singh',
+      'Lalbabu Singh',
+      'Sex and identification token/ticket No.',
+      'Male',
+      'VE1580',
+    ];
+    const model = buildFormXVRajasthanWageSlipHeaderModel(metaLines);
+    expect(model.fields[4]).toBe("Name and Father's name of the workman: Purendra Kumar Singh\nLalbabu Singh");
+    expect(model.fields[5]).toMatch(/Male\s+VE1580/i);
+  });
+
+  test('Form XV RJ establishment typo label and ignores sample name/token leftovers', () => {
+    const metaLines = [
+      'FORM XV', '[See Rule 77(2)(b)]', 'Wages Slip',
+      'Name and address of contractor', 'VAYONA ENERGY PRIVATE LIMITED',
+      'Name and location of work', 'RJ-Fatehgarh-2',
+      'Name and address of establiishment in/under which contract is carried on…………………………………………',
+      'Lalbabu Singh',
+      'VE1580',
+      'RJ-Fatehgarh-2, Jaisalmer, Rajasthan',
+      'Name and address of principal employer',
+      'RSEPL HYBRID POWER ONER ONE LIMITED, Fatehgarh, Rajasthan',
+    ];
+    const model = buildFormXVRajasthanWageSlipHeaderModel(metaLines);
+    expect(model.titles).toEqual(['FORM XV', '[See Rule 77(2)(b)]', 'Wages Slip']);
+    expect(model.fields[2]).toBe(
+      'Name and address of establishment in/under which contract is carried on: RJ-Fatehgarh-2, Jaisalmer, Rajasthan'
+    );
+    expect(model.fields[2]).not.toMatch(/Lalbabu Singh|VE1580/);
   });
 
   test('detects Form XIV Employment Card context', () => {

@@ -8,6 +8,8 @@ import {
 } from './CLRA';
 
 const SITE_DETAILS_CACHE_KEY = 'statutorySiteDetails_v1';
+/** Site Management page writes full rows (incl. contractor) here on fetch/save. */
+const SITE_MANAGEMENT_UI_CACHE_KEY = 'siteManagementData';
 const PEOPLE_CACHE_KEY = 'statutoryPeopleData_v3';
 const PEOPLE_CACHE_TTL_MS = 5 * 60 * 1000;
 const PEOPLE_PAGE_SIZE = 300;
@@ -26,20 +28,102 @@ let peopleInflight = null;
 const formTemplateCache = new Map();
 const formTemplateInflight = new Map();
 
+function siteRecordNameKey(site) {
+  return String(site?.siteName ?? site?.SiteName ?? site?.name ?? site?.Name ?? '')
+    .trim()
+    .toLowerCase();
+}
+
+function siteRecordIdKey(site) {
+  return String(site?.id ?? site?.ID ?? site?.ROWID ?? '').trim();
+}
+
+/** Latest Site Management UI rows (contractor name/address included after Edit Site save). */
+export function readSiteManagementUiCache() {
+  try {
+    const cached = localStorage.getItem(SITE_MANAGEMENT_UI_CACHE_KEY);
+    if (!cached) return [];
+    const parsed = JSON.parse(cached);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+/**
+ * Prefer Site Management CONTRACTOR DETAILS onto statutory site rows.
+ * Statutory cache / bootstrap meta sometimes omits contractorName after list fetch.
+ */
+export function mergeSiteDetailsWithContractorFields(details, uiSites = null) {
+  const local = Array.isArray(uiSites) ? uiSites : readSiteManagementUiCache();
+  const base = Array.isArray(details) ? details : [];
+  if (local.length === 0) return base;
+  if (base.length === 0) return local;
+
+  const locationKey = (site) =>
+    String(site?.location ?? site?.Location ?? '')
+      .trim()
+      .toLowerCase();
+
+  return base.map((site) => {
+    if (!site || typeof site !== 'object') return site;
+    const id = siteRecordIdKey(site);
+    const name = siteRecordNameKey(site);
+    const loc = locationKey(site);
+    const hit = local.find((s) => {
+      if (!s || typeof s !== 'object') return false;
+      const hid = siteRecordIdKey(s);
+      if (id && hid && id === hid) return true;
+      const hname = siteRecordNameKey(s);
+      if (name && hname && name === hname) return true;
+      const hloc = locationKey(s);
+      return Boolean(loc && hloc && loc === hloc);
+    });
+    if (!hit) return site;
+    const pick = (a, b) => {
+      const av = String(a ?? '').trim();
+      const bv = String(b ?? '').trim();
+      // UI cache wins when present — Edit Site is the source of truth for contractor.
+      return bv || av || '';
+    };
+    return {
+      ...site,
+      contractorName: pick(site.contractorName ?? site.ContractorName, hit.contractorName ?? hit.ContractorName),
+      contractorAddress: pick(
+        site.contractorAddress ?? site.ContractorAddress,
+        hit.contractorAddress ?? hit.ContractorAddress
+      ),
+      contractorCity: pick(site.contractorCity ?? site.ContractorCity, hit.contractorCity ?? hit.ContractorCity),
+      contractorState: pick(
+        site.contractorState ?? site.ContractorState,
+        hit.contractorState ?? hit.ContractorState
+      ),
+      contractorEmail: pick(site.contractorEmail ?? site.ContractorEmail, hit.contractorEmail ?? hit.ContractorEmail),
+      contractorPhone: pick(site.contractorPhone ?? site.ContractorPhone, hit.contractorPhone ?? hit.ContractorPhone),
+    };
+  });
+}
+
 export function readSiteDetailsCache() {
-  if (Array.isArray(siteDetailsMemory) && siteDetailsMemory.length > 0) return siteDetailsMemory;
+  if (Array.isArray(siteDetailsMemory) && siteDetailsMemory.length > 0) {
+    return mergeSiteDetailsWithContractorFields(siteDetailsMemory);
+  }
   try {
     const cached = localStorage.getItem(SITE_DETAILS_CACHE_KEY);
-    if (!cached) return null;
+    if (!cached) {
+      const fromUi = readSiteManagementUiCache();
+      return fromUi.length > 0 ? fromUi : null;
+    }
     const parsed = JSON.parse(cached);
     if (Array.isArray(parsed) && parsed.length > 0) {
       siteDetailsMemory = parsed;
-      return parsed;
+      return mergeSiteDetailsWithContractorFields(parsed);
     }
   } catch (_) {
     /* ignore */
   }
-  return null;
+  const fromUi = readSiteManagementUiCache();
+  return fromUi.length > 0 ? fromUi : null;
 }
 
 export function writeSiteDetailsCache(details) {
@@ -60,13 +144,14 @@ export function fetchSiteDetails(options = {}) {
 
   siteDetailsInflight = fetch('/server/sitemanagement_function/sitemanagement', { cache: 'no-store' })
     .then(async (resp) => {
-      if (!resp.ok) return cached || [];
+      if (!resp.ok) return cached || mergeSiteDetailsWithContractorFields([]) || [];
       const json = await resp.json().catch(() => ({}));
       const details = Array.isArray(json?.data?.siteDetails) ? json.data.siteDetails : [];
       if (details.length > 0) writeSiteDetailsCache(details);
-      return details.length > 0 ? details : cached || [];
+      const merged = mergeSiteDetailsWithContractorFields(details.length > 0 ? details : cached || []);
+      return merged.length > 0 ? merged : cached || [];
     })
-    .catch(() => cached || [])
+    .catch(() => cached || mergeSiteDetailsWithContractorFields([]) || [])
     .finally(() => {
       siteDetailsInflight = null;
     });

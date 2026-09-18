@@ -9,6 +9,10 @@ import {
 } from '../../utils/excelTableBorders';
 import { flattenPayrollEarningColumns, readPayrollScalar } from '../../utils/payrollEarnings';
 import {
+  collectForm10RowNameParts,
+  findForm10PayrollRowByFirstAndLastName,
+} from './form10TamilNadu';
+import {
   enrichEstablishmentPrincipalEmployerHeaderFields,
   excelCellValueToString,
   writeStatutoryHeaderFieldsToExcelJsWorksheet,
@@ -813,13 +817,17 @@ function formDGJRowNameCandidates(row, headers) {
 function formDGJNamesLooselyMatch(a, b) {
   if (!a || !b) return false;
   if (a === b) return true;
-  if (a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a))) return true;
-  return false;
+  // Require multi-token names (first + last). Never match first-name-only.
+  const aParts = String(a).split(/\s+/).filter(Boolean);
+  const bParts = String(b).split(/\s+/).filter(Boolean);
+  if (aParts.length < 2 || bParts.length < 2) return false;
+  return aParts[0] === bParts[0] && aParts[aParts.length - 1] === bParts[bParts.length - 1];
 }
 
 /**
  * Fill Summary No. of Days from Sample Payroll Paid_days,
  * and Remarks No. of Hours = Summary No. of Days × 8.
+ * Match payroll by FirstName AND LastName only (never employee ID / first-name-only).
  * @returns {number} rows updated
  */
 export function applyFormDGJGujaratPaidDaysToRows(
@@ -845,30 +853,26 @@ export function applyFormDGJGujaratPaidDaysToRows(
   const overwrite = options.overwrite !== false;
   const payrollList = Array.isArray(options.payrollRows) ? options.payrollRows : [];
 
-  const payrollByName = new Map();
-  payrollList.forEach((pr) => {
-    const paid = readFormDGJGujaratPaidDays(pr);
-    if (paid === '') return;
-    formDGJPayrollNameCandidates(pr).forEach((k) => {
-      if (!payrollByName.has(k)) payrollByName.set(k, pr);
-    });
-  });
-
   const resolvePayrollForRow = (row, index) => {
+    const emp = unwrapEmp(Array.isArray(employeesForMapping) ? employeesForMapping[index] : null);
+    const extraParts = collectForm10RowNameParts(row, headers);
     if (resolvePayrollRow) {
-      const emp = unwrapEmp(Array.isArray(employeesForMapping) ? employeesForMapping[index] : null);
       const payrollRow = resolvePayrollRow(emp, row, index);
       if (payrollRow && !payrollRow.fetch_error && readFormDGJGujaratPaidDays(payrollRow) !== '') {
         return payrollRow;
       }
     }
-    const rowNames = formDGJRowNameCandidates(row, headers);
-    for (let i = 0; i < rowNames.length; i += 1) {
-      if (payrollByName.has(rowNames[i])) return payrollByName.get(rowNames[i]);
-    }
-    for (let i = 0; i < rowNames.length; i += 1) {
-      for (const [pk, pr] of payrollByName.entries()) {
-        if (formDGJNamesLooselyMatch(rowNames[i], pk)) return pr;
+    const byName = findForm10PayrollRowByFirstAndLastName(emp || row, payrollList, extraParts);
+    if (byName && readFormDGJGujaratPaidDays(byName) !== '') return byName;
+
+    // Last resort: full-name first+last token match against payroll name candidates.
+    const rowNames = formDGJRowNameCandidates(row, headers).filter((n) => n.split(/\s+/).length >= 2);
+    for (let i = 0; i < payrollList.length; i += 1) {
+      const pr = payrollList[i];
+      if (!pr || pr.fetch_error || readFormDGJGujaratPaidDays(pr) === '') continue;
+      const payNames = formDGJPayrollNameCandidates(pr).filter((n) => n.split(/\s+/).length >= 2);
+      if (rowNames.some((rn) => payNames.some((pn) => formDGJNamesLooselyMatch(rn, pn)))) {
+        return pr;
       }
     }
     return null;

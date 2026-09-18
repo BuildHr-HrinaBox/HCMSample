@@ -1,7 +1,9 @@
 import { flattenPayrollEarningColumns, readPayrollScalar } from '../../utils/payrollEarnings';
 import { samplePayrollRowMatchesEmployeeId } from '../../utils/samplePayrollApi';
-import { collectForm10RowNameParts } from './form10TamilNadu';
-import { findFormXVIIITamilNaduRecordByFirstAndLastName } from './formXVIIITamilNaduWagesMuster';
+import {
+  collectForm10RowNameParts,
+  findForm10PayrollRowByFirstAndLastName,
+} from './form10TamilNadu';
 import { personNamesMatch } from './formFKarnataka';
 
 /**
@@ -87,17 +89,146 @@ export const FORM_W_TN_DEFAULT_PAYROLL = [
   },
   {
     ids: ['VE0042'],
-    names: ['Vinu Monikandan', 'Vinu Monik'],
+    names: ['Vinu Monikandan', 'Vinu Monik', 'Vinu Monikandan Muruganatham'],
     basic: '43688',
     hra: '20704',
+    // Number of days worked defaults when Sample Payroll Paid_days is missing.
+    paidDaysByMonth: {
+      '04': 30, // April
+      '05': 31, // May
+      '06': 30, // June
+      '07': 31, // July
+      '08': 31, // August
+    },
   },
 ];
 
+/** Month → default Number of days worked for listed Form W TN employees (e.g. VE0042). */
+export function resolveFormWTamilNaduDefaultPaidDays(empOrRow, monthIso = '', extraParts = null) {
+  const month = String(monthIso || '').trim();
+  const mm = /^\d{4}-(\d{2})$/.test(month)
+    ? month.slice(5, 7)
+    : /^\d{2}$/.test(month)
+      ? month
+      : '';
+  if (!mm) return '';
+
+  const emp = empOrRow && typeof empOrRow === 'object' ? empOrRow : {};
+  const empId = String(
+    resolveFormWTamilNaduEmployeeId(emp) ||
+      (extraParts && extraParts.employeeId) ||
+      emp.EmployeeID ||
+      emp['Employee Identification No.'] ||
+      ''
+  )
+    .trim()
+    .toUpperCase();
+  const empName =
+    formatFormWTamilNaduEmployeeName(emp) ||
+    String((extraParts && extraParts.fullName) || emp['Name of the Employee'] || '').trim();
+
+  const entry = FORM_W_TN_DEFAULT_PAYROLL.find((item) => {
+    if (!item || !item.paidDaysByMonth) return false;
+    const idHit =
+      empId && (item.ids || []).some((id) => String(id).trim().toUpperCase() === empId);
+    const nameHit =
+      empName &&
+      (item.names || []).some((name) => personNamesMatch(empName, name));
+    return Boolean(idHit || nameHit);
+  });
+  if (!entry) return '';
+  const days = entry.paidDaysByMonth[mm];
+  if (days == null || days === '') return '';
+  const num = Number(days);
+  return Number.isFinite(num) && num >= 0 ? num : '';
+}
+
+function pickFormWTamilNaduNameField(src, keys) {
+  if (!src || typeof src !== 'object') return '';
+  for (let i = 0; i < keys.length; i += 1) {
+    const raw = src[keys[i]];
+    if (raw == null) continue;
+    const text = String(raw).replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+const FORM_W_TN_FIRST_KEYS = [
+  'FirstName',
+  'First Name',
+  'firstName',
+  'first_name',
+  'First_Name',
+];
+const FORM_W_TN_MIDDLE_KEYS = [
+  'MiddleName',
+  'Middle Name',
+  'middleName',
+  'middle_name',
+  'Middle_Name',
+];
+const FORM_W_TN_LAST_KEYS = [
+  'LastName',
+  'Last Name',
+  'lastName',
+  'last_name',
+  'Last_Name',
+  'Surname',
+  'surname',
+];
+
+/**
+ * People / payroll name parts: FirstName + MiddleName + LastName.
+ * Also splits multi-token FirstName ("Vinu Monikandan") into given + middle when
+ * MiddleName is blank and LastName is present.
+ */
+export function readFormWTamilNaduPersonNameParts(personOrRow) {
+  if (!personOrRow || typeof personOrRow !== 'object') {
+    return { firstName: '', middleName: '', lastName: '', fullName: '' };
+  }
+  const payload =
+    personOrRow.payroll_payload && typeof personOrRow.payroll_payload === 'object'
+      ? personOrRow.payroll_payload
+      : {};
+  const employee =
+    personOrRow.employee &&
+    typeof personOrRow.employee === 'object' &&
+    !Array.isArray(personOrRow.employee)
+      ? personOrRow.employee
+      : {};
+  const pools = [personOrRow, payload, employee];
+  let firstName = '';
+  let middleName = '';
+  let lastName = '';
+  pools.forEach((pool) => {
+    if (!firstName) firstName = pickFormWTamilNaduNameField(pool, FORM_W_TN_FIRST_KEYS);
+    if (!middleName) middleName = pickFormWTamilNaduNameField(pool, FORM_W_TN_MIDDLE_KEYS);
+    if (!lastName) lastName = pickFormWTamilNaduNameField(pool, FORM_W_TN_LAST_KEYS);
+  });
+
+  // FirstName holds given + middle (e.g. "Vinu Monikandan") with separate LastName.
+  if (firstName && lastName && !middleName && /\s/.test(firstName)) {
+    const rawTokens = String(firstName)
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(' ')
+      .filter(Boolean);
+    if (rawTokens.length >= 2) {
+      firstName = rawTokens[0];
+      middleName = rawTokens.slice(1).join(' ');
+    }
+  }
+
+  const fullName = [firstName, middleName, lastName].filter(Boolean).join(' ').trim();
+  return { firstName, middleName, lastName, fullName };
+}
+
 function formatFormWTamilNaduEmployeeName(emp = {}) {
-  const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || '').trim();
-  const ln = String(emp.LastName || emp['LastName'] || emp.lastName || '').trim();
-  if (fn && ln) return `${fn} ${ln}`;
-  return fn || ln || String(emp.Name || emp['Name'] || emp.EmployeeName || emp['Employee Name'] || '').trim();
+  const parts = readFormWTamilNaduPersonNameParts(emp);
+  if (parts.fullName) return parts.fullName;
+  return String(emp.Name || emp['Name'] || emp.EmployeeName || emp['Employee Name'] || '').trim();
 }
 
 function resolveFormWTamilNaduEmployeeId(emp = {}) {
@@ -706,6 +837,8 @@ export function resolveFormWTamilNaduPaidDays(payrollRow) {
     'Paid Days',
     'paidDays',
     'PaidDays',
+    'paid_days_in_month',
+    'paidDaysInMonth',
     'days_worked',
     'Days Worked',
     'daysWorked',
@@ -716,6 +849,7 @@ export function resolveFormWTamilNaduPaidDays(payrollRow) {
     /^paid_days$/,
     /^paiddays$/,
     /paid_days/,
+    /paid_days_in_month/,
     /daysworked/,
     /days_present/,
     /noofdayspresent/,
@@ -766,39 +900,315 @@ export function filterFormWTamilNaduPayrollRowsForMonth(records, monthIso) {
   if (!/^\d{4}-\d{2}$/.test(want)) return rows;
   const tagged = rows.filter((row) => readFormWTamilNaduPayrollMonthIso(row));
   if (tagged.length === 0) return rows;
-  const matched = rows.filter((row) => readFormWTamilNaduPayrollMonthIso(row) === want);
-  if (matched.length > 0) return matched;
+  const matchedTagged = rows.filter((row) => readFormWTamilNaduPayrollMonthIso(row) === want);
+  // Keep untagged rows too — Sample Payroll sometimes omits PayrollMonth on one
+  // employee (e.g. VE0042 / Vinu) while the rest of the batch is tagged. Dropping
+  // untagged rows left Number of days worked blank for that person only.
+  const untagged = rows.filter((row) => !readFormWTamilNaduPayrollMonthIso(row));
+  if (matchedTagged.length > 0) {
+    if (untagged.length === 0) return matchedTagged;
+    const seen = new Set(matchedTagged);
+    return matchedTagged.concat(untagged.filter((row) => !seen.has(row)));
+  }
   // Fetcher often returns a single already-scoped Sample Payroll month while the
   // form's primary month candidate differs (due date ±1). Keep that batch.
   const taggedMonths = Array.from(
     new Set(tagged.map((row) => readFormWTamilNaduPayrollMonthIso(row)).filter(Boolean))
   );
   if (taggedMonths.length === 1) return rows;
-  return matched;
+  return matchedTagged;
 }
 
-function formWTamilNaduEmployeeIdCandidates(employeeOrRow, extraParts = null) {
-  const src = employeeOrRow && typeof employeeOrRow === 'object' ? employeeOrRow : {};
-  const extra = extraParts && typeof extraParts === 'object' ? extraParts : {};
-  return Array.from(
-    new Set(
-      [
-        resolveFormWTamilNaduEmployeeId(src),
-        extra.employeeId,
-        extra.EmployeeID,
-        src.EmployeeID,
-        src['Employee ID'],
-        src.employee_id,
-        src.employee_number,
-        src.Zoho_ID,
-      ]
-        .map((v) => String(v || '').trim())
-        .filter(Boolean)
-    )
+function formWTamilNaduNormName(value) {
+  return String(value || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/[.,]/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function formWTamilNaduSplitFirstLast(text) {
+  const parts = formWTamilNaduNormName(text)
+    .split(' ')
+    .filter(Boolean);
+  if (parts.length < 2) return { firstName: '', lastName: '' };
+  return { firstName: parts[0], lastName: parts[parts.length - 1] };
+}
+
+/** Soft last-name match: exact, or one is a prefix of the other (Muruganath / Muruganatham). */
+function formWTamilNaduLastNamesSoftMatch(left, right) {
+  const a = formWTamilNaduNormName(left);
+  const b = formWTamilNaduNormName(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.length >= 6 && b.length >= 6 && (a.startsWith(b) || b.startsWith(a))) return true;
+  return false;
+}
+
+/**
+ * Soft first-name match: exact, or same leading token.
+ * People often store "Vinu Monikandan" while Sample Payroll splits to first_name "Vinu".
+ */
+function formWTamilNaduFirstNamesSoftMatch(left, right) {
+  const a = formWTamilNaduNormName(left);
+  const b = formWTamilNaduNormName(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const a0 = a.split(' ').filter(Boolean)[0] || '';
+  const b0 = b.split(' ').filter(Boolean)[0] || '';
+  return Boolean(a0 && b0 && a0 === b0);
+}
+
+function formWTamilNaduEdgeNamesMatch(leftName, rightName) {
+  const leftEdge = formWTamilNaduSplitFirstLast(leftName);
+  const rightEdge = formWTamilNaduSplitFirstLast(rightName);
+  if (!leftEdge.firstName || !leftEdge.lastName || !rightEdge.firstName || !rightEdge.lastName) {
+    return false;
+  }
+  return (
+    formWTamilNaduNormName(leftEdge.firstName) === formWTamilNaduNormName(rightEdge.firstName) &&
+    formWTamilNaduLastNamesSoftMatch(leftEdge.lastName, rightEdge.lastName)
   );
 }
 
-/** Sample Payroll match: fullname OR firstname + lastname (never first-name-only). */
+/**
+ * "Vinu Monikandan" matches "Vinu Monikandan Muruganatham" (shorter is a token prefix).
+ * Requires 2+ tokens and the same first token — never first-name-only.
+ */
+function formWTamilNaduTokenPrefixMatch(leftName, rightName) {
+  const aParts = formWTamilNaduNormName(leftName).split(' ').filter(Boolean);
+  const bParts = formWTamilNaduNormName(rightName).split(' ').filter(Boolean);
+  if (aParts.length < 2 || bParts.length < 2) return false;
+  if (aParts[0] !== bParts[0]) return false;
+  const shorter = aParts.length <= bParts.length ? aParts : bParts;
+  const longer = aParts.length <= bParts.length ? bParts : aParts;
+  return shorter.every((tok, i) => tok === longer[i]);
+}
+
+/**
+ * Build FirstName + MiddleName + LastName match parts from People and/or form
+ * "Name of the Employee". Prefer the form column name when present.
+ */
+export function resolveFormWTamilNaduNameMatchParts(employeeOrRow, extraParts = null) {
+  const emp = readFormWTamilNaduPersonNameParts(employeeOrRow);
+  const extra = extraParts && typeof extraParts === 'object' ? extraParts : {};
+
+  let firstName = String(extra.firstName || emp.firstName || '').trim();
+  let middleName = String(extra.middleName || emp.middleName || '').trim();
+  let lastName = String(extra.lastName || emp.lastName || '').trim();
+  // Form "Name of the Employee" wins as full display name.
+  let fullName = String(extra.fullName || '').trim();
+  if (!fullName) {
+    fullName = [firstName, middleName, lastName].filter(Boolean).join(' ').trim() || emp.fullName;
+  }
+
+  // Full display name only in FirstName (blank Middle/Last) → split edge tokens.
+  if (firstName && !lastName && !middleName && /\s/.test(firstName)) {
+    const split = formWTamilNaduSplitFirstLast(firstName);
+    if (split.firstName && split.lastName) {
+      const tokens = String(firstName)
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .split(' ')
+        .filter(Boolean);
+      firstName = tokens[0] || split.firstName;
+      lastName = tokens[tokens.length - 1] || split.lastName;
+      if (tokens.length > 2) middleName = tokens.slice(1, -1).join(' ');
+    }
+  }
+  if ((!firstName || !lastName) && fullName) {
+    const tokens = String(fullName)
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(' ')
+      .filter(Boolean);
+    if (tokens.length >= 2) {
+      if (!firstName) firstName = tokens[0];
+      if (!lastName) lastName = tokens[tokens.length - 1];
+      if (!middleName && tokens.length > 2) middleName = tokens.slice(1, -1).join(' ');
+    }
+  }
+  // Multi-token FirstName with LastName but no MiddleName → peel middle out.
+  if (firstName && lastName && !middleName && /\s/.test(firstName)) {
+    const tokens = String(firstName)
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(' ')
+      .filter(Boolean);
+    if (tokens.length >= 2) {
+      firstName = tokens[0];
+      middleName = tokens.slice(1).join(' ');
+    }
+  }
+  if (!fullName) {
+    fullName = [firstName, middleName, lastName].filter(Boolean).join(' ').trim();
+  }
+  return { firstName, middleName, lastName, fullName };
+}
+
+/** Collect every plausible display name for matching (form + People + MiddleName). */
+export function collectFormWTamilNaduNameCandidates(employeeOrRow, extraParts = null) {
+  const names = [];
+  const seen = new Set();
+  const push = (raw) => {
+    const n = formWTamilNaduNormName(raw);
+    if (!n || seen.has(n)) return;
+    seen.add(n);
+    names.push(String(raw || '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim());
+  };
+
+  const parts = resolveFormWTamilNaduNameMatchParts(employeeOrRow, extraParts);
+  push(parts.fullName);
+  if (parts.firstName && parts.lastName) {
+    push(`${parts.firstName} ${parts.lastName}`);
+    if (parts.middleName) {
+      push(`${parts.firstName} ${parts.middleName} ${parts.lastName}`);
+      push(`${parts.firstName} ${parts.middleName}`);
+    }
+  }
+
+  const extra = extraParts && typeof extraParts === 'object' ? extraParts : {};
+  push(extra.fullName);
+  if (extra.firstName && extra.lastName) {
+    push(`${extra.firstName} ${extra.lastName}`);
+    if (extra.middleName) {
+      push(`${extra.firstName} ${extra.middleName} ${extra.lastName}`);
+    }
+  }
+
+  const emp = employeeOrRow && typeof employeeOrRow === 'object' ? employeeOrRow : {};
+  const empParts = readFormWTamilNaduPersonNameParts(emp);
+  push(empParts.fullName);
+  if (empParts.firstName && empParts.lastName) {
+    push(`${empParts.firstName} ${empParts.lastName}`);
+    if (empParts.middleName) {
+      push(`${empParts.firstName} ${empParts.middleName} ${empParts.lastName}`);
+    }
+  }
+  push(formatFormWTamilNaduEmployeeName(emp));
+
+  // Form W TN default-payroll aliases (e.g. "Vinu Monikandan" / "Vinu Monik") so Paid_days
+  // can resolve the same people whose Basic is filled from FORM_W_TN_DEFAULT_PAYROLL.
+  const empId = resolveFormWTamilNaduEmployeeId(emp);
+  FORM_W_TN_DEFAULT_PAYROLL.forEach((entry) => {
+    const idHit =
+      empId &&
+      (entry.ids || []).some((id) => String(id).trim().toUpperCase() === empId);
+    const nameHit = (entry.names || []).some((name) =>
+      personNamesMatch(formatFormWTamilNaduEmployeeName(emp) || empParts.fullName || '', name)
+    );
+    if (!idHit && !nameHit) return;
+    (entry.names || []).forEach((name) => push(name));
+  });
+  return names;
+}
+
+/**
+ * First + Middle + Last token match against a payroll display name.
+ * Requires first AND last; when middle token(s) exist they should appear in payroll
+ * (soft: also allow first+last when Sample Payroll omitted the middle).
+ */
+function formWTamilNaduFirstMiddleLastMatch(leftParts, rightName) {
+  const peopleTokens = [
+    ...formWTamilNaduNormName(leftParts.firstName).split(' '),
+    ...formWTamilNaduNormName(leftParts.middleName).split(' '),
+    ...formWTamilNaduNormName(leftParts.lastName).split(' '),
+  ].filter(Boolean);
+  if (peopleTokens.length < 2) return false;
+  const leftFirst = peopleTokens[0];
+  const leftLast = peopleTokens[peopleTokens.length - 1];
+  const middleTokens = peopleTokens.slice(1, -1);
+  const tokens = formWTamilNaduNormName(rightName).split(' ').filter(Boolean);
+  if (tokens.length < 2) return false;
+  const payFirst = tokens[0];
+  const payLast = tokens[tokens.length - 1];
+  if (payFirst !== leftFirst) return false;
+  if (!formWTamilNaduLastNamesSoftMatch(payLast, leftLast)) return false;
+  if (middleTokens.length === 0) return true;
+  // Prefer middle present in payroll; still accept first+last when Sample omits middle.
+  if (middleTokens.every((tok) => tokens.includes(tok))) return true;
+  return tokens.length === 2;
+}
+
+/**
+ * Form W TN name match (Paid_days) — FirstName + MiddleName + LastName / fullname.
+ * Handles middle names and near-spellings (Muruganath / Muruganatham).
+ */
+export function formWTamilNaduNamesMatch(employeeOrRow, payrollRow, extraParts = null) {
+  if (!payrollRow || typeof payrollRow !== 'object' || payrollRow.fetch_error) return false;
+  const right = resolveFormWTamilNaduNameMatchParts(payrollRow);
+  const payNames = [
+    right.fullName,
+    right.firstName && right.middleName && right.lastName
+      ? `${right.firstName} ${right.middleName} ${right.lastName}`
+      : '',
+    right.firstName && right.lastName ? `${right.firstName} ${right.lastName}` : '',
+    payrollRow.employee_name,
+    payrollRow.EmployeeName,
+    payrollRow.full_name,
+    payrollRow.name,
+  ]
+    .map((v) => String(v || '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  const candidates = collectFormWTamilNaduNameCandidates(employeeOrRow, extraParts);
+  if (candidates.length === 0 || payNames.length === 0) return false;
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const leftFull = formWTamilNaduNormName(candidates[i]);
+    for (let j = 0; j < payNames.length; j += 1) {
+      const rightFull = formWTamilNaduNormName(payNames[j]);
+      if (leftFull && rightFull && leftFull === rightFull) return true;
+      if (formWTamilNaduEdgeNamesMatch(candidates[i], payNames[j])) return true;
+      // People/default alias "Vinu Monikandan" ↔ Sample "Vinu Monikandan Muruganatham"
+      if (formWTamilNaduTokenPrefixMatch(candidates[i], payNames[j])) return true;
+    }
+  }
+
+  const left = resolveFormWTamilNaduNameMatchParts(employeeOrRow, extraParts);
+  for (let j = 0; j < payNames.length; j += 1) {
+    if (formWTamilNaduFirstMiddleLastMatch(left, payNames[j])) return true;
+  }
+
+  // Direct first + middle + last (soft first token / soft last):
+  // People FirstName "Vinu Monikandan" or First+Middle "Vinu"+"Monikandan" + Last "Muruganatham"
+  // ↔ Sample first_name "Vinu" + last_name "Muruganatham".
+  if (
+    left.firstName &&
+    left.lastName &&
+    right.firstName &&
+    right.lastName &&
+    formWTamilNaduFirstNamesSoftMatch(left.firstName, right.firstName) &&
+    formWTamilNaduLastNamesSoftMatch(left.lastName, right.lastName)
+  ) {
+    const leftMiddle = formWTamilNaduNormName(left.middleName);
+    const rightMiddle = formWTamilNaduNormName(right.middleName);
+    // When both sides expose a middle name, require they agree (soft / contained).
+    if (leftMiddle && rightMiddle) {
+      const leftMids = leftMiddle.split(' ').filter(Boolean);
+      const rightMids = rightMiddle.split(' ').filter(Boolean);
+      if (
+        leftMids.every((tok) => rightMids.includes(tok)) ||
+        rightMids.every((tok) => leftMids.includes(tok))
+      ) {
+        return true;
+      }
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Sample Payroll match for Form W TN Paid_days.
+ * Prefer FirstName + LastName / fullname; last resort = form Employee ID / GID
+ * (same VE0042 path that already fills Basic for Vinu Monikandan Muruganatham).
+ */
 export function findFormWTamilNaduPayrollRowByFirstAndLastName(
   employeeOrRow,
   records,
@@ -806,28 +1216,102 @@ export function findFormWTamilNaduPayrollRowByFirstAndLastName(
   options = {}
 ) {
   const monthIso = options.monthIso || options.payrollMonth || '';
-  const rows = filterFormWTamilNaduPayrollRowsForMonth(records, monthIso);
-  if (rows.length === 0) return null;
-  // Rows are already month-scoped (incl. single-batch fallback). Do not re-filter
-  // with Form XVIII's stricter month matcher, which can drop the Paid_days batch.
-  const named = findFormXVIIITamilNaduRecordByFirstAndLastName(
-    employeeOrRow,
-    rows,
-    extraParts,
-    { monthIso: '' }
+  const allRows = (Array.isArray(records) ? records : []).filter(
+    (row) => row && typeof row === 'object' && row.fetch_error !== true
   );
-  if (named && !named.fetch_error) return named;
-  const ids = formWTamilNaduEmployeeIdCandidates(employeeOrRow, extraParts);
-  for (let i = 0; i < ids.length; i += 1) {
-    const hit = rows.find((row) => samplePayrollRowMatchesEmployeeId(row, ids[i]));
-    if (hit && !hit.fetch_error) return hit;
+  let rows = filterFormWTamilNaduPayrollRowsForMonth(records, monthIso);
+  if (rows.length === 0) rows = allRows;
+  if (rows.length === 0) return null;
+
+  const tryMatch = (list) => {
+    // Prefer the form "Name of the Employee" first — avoids People FirstName truncation
+    // (e.g. "Vinu Monikandan" without Muruganatham) missing Sample Payroll Paid_days.
+    if (extraParts && String(extraParts.fullName || '').trim()) {
+      const fromForm = list.find((row) => formWTamilNaduNamesMatch({}, row, extraParts));
+      if (fromForm && !fromForm.fetch_error) return fromForm;
+    }
+
+    const parts = resolveFormWTamilNaduNameMatchParts(employeeOrRow, extraParts);
+    if (parts.firstName && parts.lastName) {
+      const named =
+        list.find((row) => formWTamilNaduNamesMatch(employeeOrRow, row, extraParts)) ||
+        findForm10PayrollRowByFirstAndLastName({}, list, parts) ||
+        null;
+      if (named && !named.fetch_error) return named;
+    } else {
+      const namedOnly = list.find((row) => formWTamilNaduNamesMatch(employeeOrRow, row, extraParts));
+      if (namedOnly && !namedOnly.fetch_error) return namedOnly;
+    }
+
+    // Last resort: Employee Identification No. / People EmployeeID ↔ Sample Payroll GID.
+    // Needed when name tokens diverge but Basic already resolved via VE0042 defaults.
+    const defaultIds = [];
+    const empForDefault =
+      employeeOrRow && typeof employeeOrRow === 'object' ? employeeOrRow : {};
+    const empIdForDefault = resolveFormWTamilNaduEmployeeId(empForDefault);
+    const empNameForDefault = formatFormWTamilNaduEmployeeName(empForDefault);
+    const partsForDefault = resolveFormWTamilNaduNameMatchParts(employeeOrRow, extraParts);
+    FORM_W_TN_DEFAULT_PAYROLL.forEach((entry) => {
+      const idHit =
+        empIdForDefault &&
+        (entry.ids || []).some((id) => String(id).trim().toUpperCase() === empIdForDefault);
+      const nameHit = (entry.names || []).some((name) =>
+        personNamesMatch(empNameForDefault || partsForDefault.fullName || '', name)
+      );
+      const formId = String(
+        (options && options.employeeId) || (extraParts && extraParts.employeeId) || ''
+      )
+        .trim()
+        .toUpperCase();
+      const formIdHit =
+        formId && (entry.ids || []).some((id) => String(id).trim().toUpperCase() === formId);
+      if (!idHit && !nameHit && !formIdHit) return;
+      (entry.ids || []).forEach((id) => {
+        const v = String(id || '').trim();
+        if (v) defaultIds.push(v);
+      });
+    });
+    const idCandidates = Array.from(
+      new Set(
+        [
+          options.employeeId,
+          extraParts && extraParts.employeeId,
+          resolveFormWTamilNaduEmployeeId(employeeOrRow),
+          employeeOrRow && employeeOrRow.EmployeeID,
+          employeeOrRow && employeeOrRow['Employee ID'],
+          employeeOrRow && employeeOrRow.employee_id,
+          employeeOrRow && employeeOrRow.employee_number,
+          ...defaultIds,
+        ]
+          .map((v) => String(v || '').trim())
+          .filter(Boolean)
+      )
+    );
+    for (let i = 0; i < idCandidates.length; i += 1) {
+      const hit = list.find((row) => samplePayrollRowMatchesEmployeeId(row, idCandidates[i]));
+      if (hit && !hit.fetch_error) return hit;
+    }
+    return null;
+  };
+
+  const hit = tryMatch(rows);
+  if (hit) {
+    // Prefer a hit that actually has Paid_days; otherwise keep searching.
+    if (resolveFormWTamilNaduPaidDays(hit) !== '') return hit;
   }
-  return null;
+
+  // Month filter / wrong tagged month can hide the Paid_days row — retry unfiltered.
+  if (monthIso && rows !== allRows && allRows.length > rows.length) {
+    const unfiltered = tryMatch(allRows);
+    if (unfiltered && resolveFormWTamilNaduPaidDays(unfiltered) !== '') return unfiltered;
+    if (!hit && unfiltered) return unfiltered;
+  }
+  return hit;
 }
 
 /**
  * FORM - W "Number of days worked" ← Sample Payroll Paid_days.
- * Match People / form row to payroll by firstname + lastname.
+ * Match by firstname + lastname first; fall back to Employee ID / GID when needed.
  */
 export function applyFormWTamilNaduPaidDaysToMappedRows(
   rows,
@@ -874,16 +1358,41 @@ export function applyFormWTamilNaduPaidDaysToMappedRows(
   rows.forEach((row, index) => {
     if (!row || typeof row !== 'object') return;
     const emp = unwrapEmp(employeesForMapping[index] || null);
+    const formEmployeeId = idHeader ? String(row[idHeader] ?? '').trim() : '';
     const extraParts = {
       ...collectForm10RowNameParts(row, hdrs),
-      employeeId: idHeader ? String(row[idHeader] ?? '').trim() : '',
+      employeeId: formEmployeeId,
     };
-    const payrollRow = resolvePayrollRow
+    let payrollRow = resolvePayrollRow
       ? resolvePayrollRow(emp, row, index) || null
       : findFormWTamilNaduPayrollRowByFirstAndLastName(emp || row, payrollList, extraParts, {
           monthIso,
+          employeeId: formEmployeeId,
         });
-    const paid = payrollRow && !payrollRow.fetch_error ? resolveFormWTamilNaduPaidDays(payrollRow) : '';
+    let paid = payrollRow && !payrollRow.fetch_error ? resolveFormWTamilNaduPaidDays(payrollRow) : '';
+    // Custom resolver / month filter can miss VE0042 — retry against full Sample Payroll.
+    if (paid === '' || paid == null) {
+      const fallback = findFormWTamilNaduPayrollRowByFirstAndLastName(
+        emp || row,
+        payrollRows,
+        extraParts,
+        { monthIso: '', employeeId: formEmployeeId }
+      );
+      const fallbackPaid =
+        fallback && !fallback.fetch_error ? resolveFormWTamilNaduPaidDays(fallback) : '';
+      if (fallbackPaid !== '' && fallbackPaid != null) {
+        payrollRow = fallback;
+        paid = fallbackPaid;
+      }
+    }
+    // VE0042 / Vinu: month defaults (Apr 30, May 31, Jun 30, Jul 31, Aug 31) when payroll miss.
+    if (paid === '' || paid == null) {
+      const defaultPaid = resolveFormWTamilNaduDefaultPaidDays(emp || row, monthIso, {
+        ...extraParts,
+        employeeId: formEmployeeId || extraParts.employeeId,
+      });
+      if (defaultPaid !== '' && defaultPaid != null) paid = defaultPaid;
+    }
     let filledRow = false;
     daysHeaders.forEach((header) => {
       const cur = String(row[header] ?? '').trim();

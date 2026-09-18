@@ -4,18 +4,78 @@ import {
   FORM_XIX_RJ_DEFAULT_TABLE_START_COL0,
   FORM_XIX_RJ_TABLE_HEADERS,
   applyFormXIXRJOriginalTemplateLayoutToExcelJs,
+  applyFormXIXRJOvertimeAutofillToRow,
   buildFormXIXRJExportColMap,
   isFormXIXRJOvertimeAutofillContext,
   mapFormXIXRJHeadersToSheetJsCols,
   mapFormXIXRJHeadersToTemplateCols,
   prepareFormXIXRJOvertimeExportRows,
+  resolveFormXIXRJNormalHours,
   resolveFormXIXRJTableHeaders,
   writeFormXIXRJHeaderValuesOntoOriginalLabels,
 } from './formXIXRJOvertime';
-import { isFormXIXRajasthanOvertimeRegisterContext } from './formXIXAPWageSlip';
+import { formatWorkmanNameAndGuardian, isFormXIXRajasthanOvertimeRegisterContext } from './formXIXAPWageSlip';
 
 const gridRead = (grid) => (r, c) =>
   grid[r] && grid[r][c] != null ? String(grid[r][c]) : '';
+
+describe('Form XIX RJ Normal Hours', () => {
+  test('uses paid_days × 8 when present', () => {
+    expect(resolveFormXIXRJNormalHours({ paid_days: 31 })).toBe('248');
+    expect(resolveFormXIXRJNormalHours({ paid_days: 1 })).toBe('8');
+  });
+
+  test('writes FirstName + MiddleName + LastName into Name of workman', () => {
+    const row = {};
+    applyFormXIXRJOvertimeAutofillToRow(
+      row,
+      { FirstName: 'Prem', MiddleName: 'Shankar', LastName: 'Menaria' },
+      FORM_XIX_RJ_TABLE_HEADERS,
+      { paid_days: 26, gross_pay: 18000, net_pay: 15000 }
+    );
+    expect(row['Name of workman']).toBe('Prem Shankar Menaria');
+    expect(formatWorkmanNameAndGuardian({ FirstName: 'Ram', MiddleName: 'Kumar', LastName: 'Sharma' })).toBe(
+      'Ram Kumar Sharma'
+    );
+  });
+
+  test('detects Form_XIX_MH filename', () => {
+    expect(
+      isFormXIXRajasthanOvertimeRegisterContext(
+        { title: 'FORM XIX', subtitle: 'Register of Overtime' },
+        { formFileName: 'Form_XIX_MH_-_Maharashtra.xlsx', formName: 'Register of Overtime' },
+        'Form_XIX_MH_-_Maharashtra.xlsx',
+        ''
+      )
+    ).toBe(true);
+  });
+
+  test('stays blank when absent or unpaid (never 08:00)', () => {
+    expect(resolveFormXIXRJNormalHours({ paid_days: 0 })).toBe('');
+    expect(resolveFormXIXRJNormalHours({})).toBe('');
+    expect(resolveFormXIXRJNormalHours(null)).toBe('');
+  });
+
+  test('export strips clock-style 08:00 leftovers from Normal Hours', () => {
+    const rows = [
+      {
+        'Serial No.': '1',
+        'Name of workman': 'Ram Lal',
+        'Normal Hours': '08:00',
+        'Normal rate': '12000',
+      },
+      {
+        'Serial No.': '2',
+        'Name of workman': 'Sita Devi',
+        'Normal Hours': '240',
+        'Normal rate': '15000',
+      },
+    ];
+    const out = prepareFormXIXRJOvertimeExportRows(rows, FORM_XIX_RJ_TABLE_HEADERS);
+    expect(out[0]['Normal Hours']).toBe('');
+    expect(out[1]['Normal Hours']).toBe('240');
+  });
+});
 
 describe('Form XIX RJ original template column map', () => {
   test('does not treat Form XXIII overtime files as Form XIX RJ', () => {

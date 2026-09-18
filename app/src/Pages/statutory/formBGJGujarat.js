@@ -8,9 +8,12 @@ import {
 import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
 import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
 import {
+  collectForm10RowNameParts,
+  findForm10PayrollRowByFirstAndLastName,
+} from './form10TamilNadu';
+import {
   resolveFormXIXMPPayrollRowForEmployee,
   resolveFormXIXMPPayrollRowsForAutofill,
-  resolvePayrollRowByFormTableName,
 } from './formXIXMPWageSlip';
 
 /** Gujarat Form B — Register of Wages (Shops & Establishments). */
@@ -836,9 +839,8 @@ export function enrichFormBGJGujaratPayrollRows(mappedData, employees, headers, 
     let payrollRow =
       typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp, row, rowIndex) : null;
     if ((!payrollRow || payrollRow.fetch_error) && Array.isArray(payrollRows) && payrollRows.length > 0) {
-      payrollRow = resolvePayrollRowByFormTableName(row, headers, payrollRows, {
-        isNameHeader: isFormBGJNameHeader,
-      });
+      const extraParts = collectForm10RowNameParts(row, hdrs);
+      payrollRow = findForm10PayrollRowByFirstAndLastName(emp || row, payrollRows, extraParts);
     }
     const merged = applyFormBGJGujaratEmployeeToRow(row, emp, hdrs, {
       sanitizeValue,

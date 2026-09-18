@@ -3,7 +3,9 @@ import JSZip from 'jszip';
 import {
   FORM_XIV_GJ_CANONICAL_TABLE_HEADERS,
   FORM_XIV_MP_CANONICAL_TABLE_HEADERS,
+  FORM_XIV_RJ_CANONICAL_TABLE_HEADERS,
   allocateUniqueFormXIVMPDownloadFileName,
+  applyFormXIVMPAutofillFromSite,
   buildFormXIVGJNatureLocationWithDesignation,
   buildFormXIVMPPerEmployeeDownload,
   buildFormXIVMPWorkbookWithTemplateStyles,
@@ -11,12 +13,19 @@ import {
   detectFormXIVStackedWorkmanLayout,
   enrichFormXIVMPPayrollRows,
   finalizeFormXIVMadhyaPradeshWorksheet,
+  formatFormXIVMPWorkmanName,
   isFormXIVKarnatakaContext,
+  isFormXIVMPSerialNumberHeader,
+  isFormXIVMPTenureHeader,
+  isFormXIVMPWageRateHeader,
+  isFormXRajasthanEmploymentCardContext,
   mapFormXIVMPRowsFromEmployees,
   resolveFormXIVExportVariant,
+  resolveFormXIVMPTableHeaders,
   resolveFormXIVMPWageRate,
   resolveFormXIVMPWorkmanFieldPositions,
   resolveFormXIVVariant,
+  resolveFormXRJTableExportLayout,
   writeFormXIVMPHeaderFieldsToWorksheet,
   writeFormXIVMPWorkmanFieldsToWorksheet,
 } from './formXIVMPEmploymentCard';
@@ -1449,5 +1458,347 @@ describe('Form XIV wage rate autofill', () => {
     });
     expect(hits).toBe(1);
     expect(mapped[0][wageHeader]).toBe('74992');
+  });
+});
+
+describe('Form X_RJ Employment Card contractor header', () => {
+  async function buildFormXRJEmploymentCardSheet() {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form X');
+    ws.getCell(2, 5).value = 'FORM X';
+    ws.getCell(3, 5).value = '[See Rule 75]';
+    ws.getCell(4, 5).value = 'Employment Card';
+    // Official RJ template: contractor label + dotted leader in one wide-merged cell.
+    ws.getCell(6, 2).value =
+      'Name and address of contractor' + '.'.repeat(80);
+    ws.mergeCells(6, 2, 6, 9);
+    ws.getCell(8, 2).value = 'Nature and location of work';
+    ws.getCell(10, 2).value =
+      'Name and address of Establishment in/under which contract is carried on';
+    ws.getCell(12, 2).value = 'Name and address of Principal Employer';
+    const headers = [
+      'Name of the workman',
+      'Sl. No. of the register of workman employed',
+      'Nature of employment/designation',
+      'Wage rate (with particular of unit), in case of place work',
+      'Wage period',
+      'Period of employment',
+      'Remarks',
+      'Signature of contractor',
+    ];
+    headers.forEach((h, i) => {
+      ws.getCell(15, i + 2).value = h;
+      ws.getCell(16, i + 2).value = String(i + 1);
+    });
+    return { wb, ws };
+  }
+
+  it('detects Form X_RJ Employment Card context', () => {
+    expect(
+      isFormXRajasthanEmploymentCardContext(
+        { title: 'FORM X', subtitle: 'Employment Card', reference: '[See Rule 75]' },
+        { formName: 'Form X_RJ', state: 'Rajasthan' },
+        'Form_X_RJ.xlsx',
+        'FORM X [See Rule 75] Employment Card'
+      )
+    ).toBe(true);
+  });
+
+  it('detects Form X_MH Employment Card context', () => {
+    expect(
+      isFormXRajasthanEmploymentCardContext(
+        { title: 'FORM X', subtitle: 'Employment Card', reference: '[See Rule 75]' },
+        { formName: 'Form X_MH', state: 'Maharashtra' },
+        'Form_X_MH.xlsx',
+        'FORM X [See Rule 75] Employment Card'
+      )
+    ).toBe(true);
+  });
+
+  it('builds workman name from FirstName + MiddleName + LastName', () => {
+    expect(
+      formatFormXIVMPWorkmanName({
+        FirstName: 'Prem',
+        MiddleName: 'Shankar',
+        LastName: 'Menaria',
+      })
+    ).toBe('Prem Shankar Menaria');
+    expect(
+      formatFormXIVMPWorkmanName(
+        { FirstName: 'Prem', LastName: 'Menaria' },
+        { first_name: 'Prem', middle_name: 'Shankar', last_name: 'Menaria' }
+      )
+    ).toBe('Prem Shankar Menaria');
+  });
+
+  it('writes contractor onto the dotted label cell, not past a wide merge', async () => {
+    const { ws } = await buildFormXRJEmploymentCardSheet();
+    writeFormXIVMPHeaderFieldsToWorksheet(
+      ws,
+      {
+        form_xiv_mp_contractor: 'VAYONA ENERGY PRIVATE LIMITED',
+        form_xiv_mp_nature_location: 'RJ-Fatehgarh-2',
+        form_xiv_mp_establishment: 'RSEPL HYBRID',
+        form_xiv_mp_principal_employer: 'RSEPL HYBRID',
+      },
+      { formXIVVariant: 'rj', fields: [] }
+    );
+
+    // Wide merge covers column C → value stays on the dotted label cell (inline).
+    const contractorCell = String(ws.getCell(6, 2).value || '');
+    expect(contractorCell).toMatch(/name\s+and\s+address\s+of\s+contractor/i);
+    expect(contractorCell).toMatch(/VAYONA ENERGY PRIVATE LIMITED/i);
+    // Must not leave the value only beyond the merged band (col 10+).
+    expect(String(ws.getCell(6, 10).value || '')).not.toMatch(/VAYONA/i);
+    expect(String(ws.getCell(8, 3).value || '') || String(ws.getCell(8, 4).value || '')).toMatch(
+      /RJ-Fatehgarh-2/
+    );
+  });
+
+  it('keeps dotted contractor label and writes value into column C when C is free', async () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form X');
+    ws.getCell(2, 5).value = 'FORM X';
+    ws.getCell(3, 5).value = '[See Rule 75]';
+    ws.getCell(4, 5).value = 'Employment Card';
+    // Screenshot layout: tall dotted label in B only (not merged across C).
+    const dottedLabel =
+      'Name and address of contractor' + '.'.repeat(80);
+    ws.getCell(6, 2).value = dottedLabel;
+    ws.getCell(11, 2).value = 'Nature and location of work';
+    ws.getCell(12, 2).value = 'Name and address of Establishment in/under which contract is carried on';
+    ws.getCell(13, 2).value = 'Name and address of Principal Employer';
+    [
+      'Name of the workman',
+      'Sl. No. of the register of workman employed',
+      'Nature of employment/designation',
+      'Wage rate',
+      'Wage period',
+      'Period of employment',
+      'Remarks',
+    ].forEach((h, i) => {
+      ws.getCell(15, i + 2).value = h;
+    });
+
+    writeFormXIVMPHeaderFieldsToWorksheet(
+      ws,
+      {
+        form_xiv_mp_contractor: 'VAYONA ENERGY PRIVATE LIMITED',
+        form_xiv_mp_nature_location: 'RJ-Fatehgarh-2',
+        form_xiv_mp_establishment: 'RSEPL HYBRID',
+        form_xiv_mp_principal_employer: 'RSEPL HYBRID',
+      },
+      { formXIVVariant: 'rj', fields: [] }
+    );
+
+    // Alignment preserved: dotted label cell unchanged.
+    expect(String(ws.getCell(6, 2).value || '')).toBe(dottedLabel);
+    expect(String(ws.getCell(6, 3).value || '')).toMatch(/VAYONA ENERGY PRIVATE LIMITED/i);
+    expect(String(ws.getCell(11, 3).value || '')).toMatch(/RJ-Fatehgarh-2/);
+  });
+
+  it('overwrites dotted label residue when onlyEmpty autofill runs', () => {
+    const next = applyFormXIVMPAutofillFromSite(
+      {
+        form_xiv_mp_contractor:
+          'Name and address of contractor' + '.'.repeat(60),
+      },
+      { contractorText: 'VAYONA ENERGY PRIVATE LIMITED' },
+      { onlyEmpty: true }
+    );
+    expect(next.form_xiv_mp_contractor).toBe('VAYONA ENERGY PRIVATE LIMITED');
+  });
+
+  it('forces Site Management contractor over company/establishment text', () => {
+    const next = applyFormXIVMPAutofillFromSite(
+      {
+        form_xiv_mp_contractor:
+          'RSEPL HYBRID POWER ONE LIMITED - Adani, RSEPL HYBRID, Chennai, Rajasthan',
+        form_xiv_mp_establishment:
+          'RSEPL HYBRID POWER ONE LIMITED - Adani, RSEPL HYBRID, Chennai, Rajasthan',
+      },
+      {
+        contractorText: 'VAYONA ENERGY PRIVATE LIMITED',
+        establishmentText:
+          'RSEPL HYBRID POWER ONE LIMITED - Adani, RSEPL HYBRID, Chennai, Rajasthan',
+      },
+      { onlyEmpty: true }
+    );
+    expect(next.form_xiv_mp_contractor).toBe('VAYONA ENERGY PRIVATE LIMITED');
+    expect(next.form_xiv_mp_establishment).toMatch(/RSEPL HYBRID/);
+  });
+});
+
+describe('Form X_RJ Employment Card wage rate Excel download', () => {
+  const rjWageHeader = 'Wage rate (with particular of unit), in case of place work';
+  const rjHints = {
+    formHeader: { title: 'FORM X', subtitle: 'Employment Card', reference: '[See Rule 75]' },
+    item: { formName: 'Form X_RJ', state: 'Rajasthan' },
+    fileName: 'Form_X_RJ.xlsx',
+    sheetText: 'FORM X [See Rule 75] Employment Card',
+  };
+
+  async function buildFormXRJEmploymentCardTemplateBuffer() {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form X');
+    ws.getCell(2, 5).value = 'FORM X';
+    ws.getCell(3, 5).value = '[See Rule 75]';
+    ws.getCell(4, 5).value = 'Employment Card';
+    ws.getCell(6, 2).value = 'Name and address of contractor' + '.'.repeat(40);
+    ws.getCell(8, 2).value = 'Nature and location of work';
+    ws.getCell(10, 2).value =
+      'Name and address of Establishment in/under which contract is carried on';
+    ws.getCell(12, 2).value = 'Name and address of Principal Employer';
+    FORM_XIV_RJ_CANONICAL_TABLE_HEADERS.forEach((h, i) => {
+      ws.getCell(15, i + 2).value = h;
+      ws.getCell(16, i + 2).value = String(i + 1);
+    });
+    // Stale template sample in wage-rate box — must be overwritten by autofill.
+    ws.getCell(17, 5).value = '999';
+    const buffer = await wb.xlsx.writeBuffer();
+    return buffer;
+  }
+
+  it('recognizes Form X_RJ place-work wage rate and Sl.No / Period headers', () => {
+    expect(isFormXIVMPWageRateHeader(rjWageHeader)).toBe(true);
+    expect(isFormXIVMPSerialNumberHeader('Sl. No. of the register of workman employed')).toBe(true);
+    expect(isFormXIVMPTenureHeader('Period of employment')).toBe(true);
+    const resolved = resolveFormXIVMPTableHeaders(FORM_XIV_RJ_CANONICAL_TABLE_HEADERS, rjHints);
+    expect(resolved.find(isFormXIVMPWageRateHeader)).toMatch(/place work/i);
+    expect(resolveFormXIVExportVariant(
+      rjHints.formHeader,
+      rjHints.item,
+      rjHints.fileName,
+      rjHints.sheetText,
+      resolved
+    )).toBe('rj');
+  });
+
+  it('maps payroll gross_pay onto the place-work wage rate column header', () => {
+    const rows = mapFormXIVMPRowsFromEmployees(
+      [{ FirstName: 'Suryakanta', LastName: 'Jana', Designation: 'Junior Engineer', EmployeeID: 'VE1225' }],
+      FORM_XIV_RJ_CANONICAL_TABLE_HEADERS,
+      {
+        selectedMonth: 'June',
+        item: { dueDate: '30-06-2026', formName: 'Form X_RJ', state: 'Rajasthan' },
+        fileName: 'Form_X_RJ.xlsx',
+        formHeader: rjHints.formHeader,
+        sheetText: rjHints.sheetText,
+        resolvePayrollRow: () => ({
+          employee_name: 'Suryakanta Jana',
+          gross_pay: 41412,
+        }),
+      }
+    );
+    expect(rows[0][rjWageHeader]).toBe('41412');
+  });
+
+  it('autofills wage rate for Suryakanta when People GID blocks strict payroll match', () => {
+    const headers = FORM_XIV_RJ_CANONICAL_TABLE_HEADERS;
+    const employees = [
+      {
+        FirstName: 'Suryakanta',
+        LastName: 'Jana',
+        Designation: 'Junior Engineer',
+        EmployeeID: 'VE1225',
+        GID_Number: 'GID-MISMATCH-999',
+      },
+    ];
+    const mapped = mapFormXIVMPRowsFromEmployees(employees, headers, {
+      selectedMonth: 'June',
+      item: { dueDate: '30-06-2026', formName: 'Form X_RJ', state: 'Rajasthan' },
+      fileName: 'Form_X_RJ.xlsx',
+      formHeader: rjHints.formHeader,
+      sheetText: rjHints.sheetText,
+      resolvePayrollRow: null,
+    });
+    expect(String(mapped[0][rjWageHeader] || '').trim()).toBe('');
+
+    const payrollRows = [
+      {
+        first_name: 'Suryakanta',
+        last_name: 'Jana',
+        employee_name: 'Suryakanta Jana',
+        employee_id: 'VE1225',
+        gross_pay: 41412,
+        // No matching People GID — strict XIX matcher would skip; Form XIV must still fill Autofill.
+      },
+    ];
+    const hits = enrichFormXIVMPPayrollRows(mapped, employees, headers, {
+      overwrite: true,
+      payrollRows,
+      item: { formName: 'Form X_RJ', state: 'Rajasthan' },
+      fileName: 'Form_X_RJ.xlsx',
+      formHeader: rjHints.formHeader,
+      sheetText: rjHints.sheetText,
+    });
+    expect(hits).toBe(1);
+    expect(mapped[0][rjWageHeader]).toBe('41412');
+  });
+
+  it('writes autofilled wage rate into the Form X_RJ Excel wage-rate column', async () => {
+    const templateBuffer = await buildFormXRJEmploymentCardTemplateBuffer();
+    const { buffer } = await buildFormXIVMPWorkbookWithTemplateStyles({
+      templateArrayBuffer: templateBuffer,
+      mappedData: [
+        {
+          'Name of the workman': 'Suryakanta Jana',
+          'Sl. No. of the register of workman employed': 'VE1225',
+          'Nature of employment/designation': 'Junior Engineer',
+          [rjWageHeader]: '41412',
+          'Wage period': 'June 2026',
+          'Period of employment': 'From 15 Dec 2025',
+        },
+      ],
+      headersToUse: FORM_XIV_RJ_CANONICAL_TABLE_HEADERS,
+      parsedFormHeader: {
+        ...rjHints.formHeader,
+        formXIVVariant: 'rj',
+      },
+      formFileName: 'Form_X_RJ.xlsx',
+      headerFormData: {
+        form_xiv_mp_contractor: 'VAYONA',
+        form_xiv_mp_nature_location: 'RJ-Fatehgarh-2',
+        form_xiv_mp_establishment: 'RSEPL HYBRID',
+        form_xiv_mp_principal_employer: 'RSEPL HYBRID',
+      },
+      rowItem: rjHints.item,
+      sheetText: rjHints.sheetText,
+    });
+
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(buffer);
+    const ws = outWb.worksheets[0];
+    const layout = resolveFormXRJTableExportLayout(ws, FORM_XIV_RJ_CANONICAL_TABLE_HEADERS);
+    expect(layout).toBeTruthy();
+    const wageCol = layout.columnByHeader[layout.hdrs.findIndex(isFormXIVMPWageRateHeader)];
+    expect(wageCol).toBeGreaterThan(0);
+    const written = String(ws.getCell(layout.dataStartRow, wageCol).value || '').trim();
+    expect(written).toBe('41412');
+  });
+
+  it('writes wage rate when autofill stored it under the MP piece-work key', async () => {
+    const templateBuffer = await buildFormXRJEmploymentCardTemplateBuffer();
+    const { buffer } = await buildFormXIVMPWorkbookWithTemplateStyles({
+      templateArrayBuffer: templateBuffer,
+      mappedData: [
+        {
+          'Name of the workman': 'Suryakanta Jana',
+          'Wage rate with particulars or unit, in case of piece of work': '41412',
+        },
+      ],
+      headersToUse: FORM_XIV_RJ_CANONICAL_TABLE_HEADERS,
+      parsedFormHeader: { ...rjHints.formHeader, formXIVVariant: 'rj' },
+      formFileName: 'Form_X_RJ.xlsx',
+      headerFormData: {},
+      rowItem: rjHints.item,
+      sheetText: rjHints.sheetText,
+    });
+    const outWb = new ExcelJS.Workbook();
+    await outWb.xlsx.load(buffer);
+    const ws = outWb.worksheets[0];
+    const layout = resolveFormXRJTableExportLayout(ws, FORM_XIV_RJ_CANONICAL_TABLE_HEADERS);
+    const wageCol = layout.columnByHeader[layout.hdrs.findIndex(isFormXIVMPWageRateHeader)];
+    expect(String(ws.getCell(layout.dataStartRow, wageCol).value || '').trim()).toBe('41412');
   });
 });

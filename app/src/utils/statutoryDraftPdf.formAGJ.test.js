@@ -3,6 +3,7 @@ import { statutoryDraftPdfTestUtils } from './statutoryDraftPdf';
 const {
   buildStatutoryPdfHeaderModel,
   looksLikeFormAGJGujaratPdfContext,
+  looksLikeFormAPdfContext,
   isFormAGJGujaratOuterFootnoteText,
   reorderFormAGJPdfHeaderFields,
   FORM_AGJ_GJ_AGE_NOTE,
@@ -30,6 +31,16 @@ describe('Form A GJ PDF layout', () => {
         'Form_A_RJ'
       )
     ).toBe(false);
+  });
+
+  it('detects Rajasthan Form A employee register PDF context', () => {
+    expect(
+      looksLikeFormAPdfContext(
+        ['FORM A', 'FORMAT OF EMPLOYEE REGISTER', '[See rule 2(1)]'],
+        [['Employee Code', 'Category (HS/S/SS/US)']],
+        'Form_A_RJ_-_Rajasthan.xlsx'
+      )
+    ).toBe(true);
   });
 
   it('recognizes Form A GJ outer footnote texts', () => {

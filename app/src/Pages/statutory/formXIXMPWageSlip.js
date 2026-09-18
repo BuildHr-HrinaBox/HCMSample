@@ -513,11 +513,27 @@ function payrollRowMatchesGidCandidates(gidCandidates, payrollRow) {
 
 export function collectEmployeeNameCandidates(emp) {
   if (!emp || typeof emp !== 'object') return [];
-  const fn = String(emp.FirstName || emp['FirstName'] || '').trim();
-  const ln = String(emp.LastName || emp['LastName'] || '').trim();
+  const fn = String(
+    emp.FirstName || emp['FirstName'] || emp.firstName || emp['First Name'] || ''
+  ).trim();
+  const mn = String(
+    emp.MiddleName ||
+      emp['MiddleName'] ||
+      emp.middleName ||
+      emp['Middle Name'] ||
+      emp.middle_name ||
+      emp.Middle_Name ||
+      ''
+  ).trim();
+  const ln = String(
+    emp.LastName || emp['LastName'] || emp.lastName || emp['Last Name'] || ''
+  ).trim();
   const names = [];
+  const full = [fn, mn, ln].filter(Boolean).join(' ').trim();
+  if (full) names.push(normPersonName(full));
   if (fn || ln) names.push(normPersonName(`${fn} ${ln}`.trim()));
   if (fn && ln) names.push(normPersonName(`${ln} ${fn}`.trim()));
+  if (fn && mn && ln) names.push(normPersonName(`${ln} ${fn} ${mn}`.trim()));
   const displayName = normPersonName(
     emp.DisplayName ||
       emp['Display Name'] ||
@@ -668,9 +684,24 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
     if (hit) return hit;
   }
 
-  const fn = String(emp.FirstName || emp['FirstName'] || '').trim().toLowerCase();
-  const ln = String(emp.LastName || emp['LastName'] || '').trim().toLowerCase();
-  const combo = normPersonName(`${fn} ${ln}`);
+  const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || emp['First Name'] || '')
+    .trim()
+    .toLowerCase();
+  const mn = String(
+    emp.MiddleName ||
+      emp['MiddleName'] ||
+      emp.middleName ||
+      emp['Middle Name'] ||
+      emp.middle_name ||
+      ''
+  )
+    .trim()
+    .toLowerCase();
+  const ln = String(emp.LastName || emp['LastName'] || emp.lastName || emp['Last Name'] || '')
+    .trim()
+    .toLowerCase();
+  const combo = normPersonName([fn, mn, ln].filter(Boolean).join(' '));
+  const comboNoMiddle = normPersonName(`${fn} ${ln}`);
   const displayName = normPersonName(
     emp.DisplayName ||
       emp['Display Name'] ||
@@ -679,9 +710,12 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
       emp['Employee Name'] ||
       ''
   );
-  const legacyNameCandidates = [combo, displayName].filter(Boolean);
+  const legacyNameCandidates = [combo, comboNoMiddle, displayName].filter(Boolean);
   if (fn && ln) {
     legacyNameCandidates.push(normPersonName(`${ln} ${fn}`));
+  }
+  if (fn && mn && ln) {
+    legacyNameCandidates.push(normPersonName(`${ln} ${fn} ${mn}`));
   }
   if (legacyNameCandidates.length > 0) {
     hit =
@@ -689,13 +723,24 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
         if (!row || row.fetch_error) return false;
         const payrollName = payrollRowDisplayName(row);
         if (!payrollName) return false;
-        const rfn = String(row.first_name || row.firstName || row['First Name'] || '').trim().toLowerCase();
-        const rln = String(row.last_name || row.lastName || row['Last Name'] || '').trim().toLowerCase();
-        const rcombo = normPersonName(`${rfn} ${rln}`);
+        const rfn = String(row.first_name || row.firstName || row['First Name'] || '')
+          .trim()
+          .toLowerCase();
+        const rmn = String(
+          row.middle_name || row.middleName || row['Middle Name'] || row.MiddleName || ''
+        )
+          .trim()
+          .toLowerCase();
+        const rln = String(row.last_name || row.lastName || row['Last Name'] || '')
+          .trim()
+          .toLowerCase();
+        const rcombo = normPersonName([rfn, rmn, rln].filter(Boolean).join(' '));
+        const rcomboNoMiddle = normPersonName(`${rfn} ${rln}`);
         return legacyNameCandidates.some(
           (candidate) =>
             payrollName === candidate ||
             rcombo === candidate ||
+            rcomboNoMiddle === candidate ||
             personNamesMatch(candidate, payrollName)
         );
       }) || null;

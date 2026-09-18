@@ -13,11 +13,39 @@ export function siteInchargeEmail(s) {
   return String(s.inchargeEmail ?? s.InchargeEmail ?? s.incharge_email ?? '').trim();
 }
 
+/**
+ * All Incharge Mail Ids on a site (supports comma / semicolon / newline / space-separated lists).
+ * Example: "2217002@nec.edu.in, ashwath021104@gmail.com" → both addresses.
+ */
 export function siteInchargeEmails(s) {
-  return siteInchargeEmail(s)
-    .split(',')
+  const raw = siteInchargeEmail(s);
+  if (!raw) return [];
+  const fromRegex = raw.match(/[^\s,;<>]+@[^\s,;<>]+/g);
+  if (fromRegex && fromRegex.length > 0) {
+    return [...new Set(fromRegex.map((email) => normalizeEmail(email)).filter(Boolean))];
+  }
+  return raw
+    .split(/[,;\n\r|]+/)
     .map((email) => normalizeEmail(email))
     .filter(Boolean);
+}
+
+/**
+ * Mail Ids shown in Site Management for the current login.
+ * When the login email is on the site, show ONLY that address (hide co-incharge emails).
+ * Org admins viewing sites where they are not listed still see the full Mail Id list.
+ */
+export function siteInchargeEmailsForLoginDisplay(site, loginEmail, userRole) {
+  const all = siteInchargeEmails(site);
+  if (!all.length) return [];
+  const loginNorm = normalizeEmail(loginEmail);
+  if (loginNorm && all.includes(loginNorm)) return [loginNorm];
+  if (isOrgWideSiteViewer(userRole)) return all;
+  return all;
+}
+
+export function siteInchargeEmailForLoginDisplay(site, loginEmail, userRole) {
+  return siteInchargeEmailsForLoginDisplay(site, loginEmail, userRole).join(', ');
 }
 
 export function siteIndustry(s) {
@@ -32,7 +60,88 @@ export function siteStateFromRecord(s) {
 
 export function siteNameFromSiteRecord(s) {
   if (!s || typeof s !== 'object') return '';
-  return String(s.siteName ?? s.SiteName ?? '').trim();
+  return (
+    String(s.siteName ?? s.SiteName ?? '').trim() ||
+    String(s.location ?? s.Location ?? '').trim()
+  );
+}
+
+/** Location field from Site Management (RJ-Fatehgarh-2, GJ-Maliya, …). */
+export function siteLocationFromSiteRecord(s) {
+  if (!s || typeof s !== 'object') return '';
+  return String(s.location ?? s.Location ?? '').trim();
+}
+
+/**
+ * Distinct Site Management identities for a login Mail Id.
+ * Uses Site Name, falls back to Location, and disambiguates duplicate names
+ * across states (two rows both named "Fatehgarh Site" → use Location).
+ */
+export function buildLoginInchargeSiteRecords(siteDetails, loginEmail) {
+  const loginNorm = normalizeEmail(loginEmail);
+  const list = Array.isArray(siteDetails) ? siteDetails : [];
+  const mine = loginNorm
+    ? list.filter((s) => siteInchargeEmails(s).includes(loginNorm))
+    : [];
+  const drafts = mine
+    .map((s) => {
+      const rawName = String(s.siteName ?? s.SiteName ?? '').trim();
+      const location = siteLocationFromSiteRecord(s);
+      const siteState = siteStateFromRecord(s);
+      const industry = siteIndustry(s);
+      const siteName = rawName || location;
+      if (!siteName) return null;
+      return {
+        siteName,
+        rawName,
+        location,
+        siteState,
+        industry,
+        actCategory: industryLabelToActCategory(industry)
+      };
+    })
+    .filter(Boolean);
+
+  const nameCounts = new Map();
+  drafts.forEach((r) => {
+    const k = String(r.siteName || '')
+      .trim()
+      .toLowerCase();
+    if (!k) return;
+    nameCounts.set(k, (nameCounts.get(k) || 0) + 1);
+  });
+
+  const byKey = new Map();
+  drafts.forEach((r) => {
+    let display = r.siteName;
+    const nameKey = String(r.siteName || '')
+      .trim()
+      .toLowerCase();
+    if ((nameCounts.get(nameKey) || 0) > 1 && r.location) {
+      display = r.location;
+    }
+    const uniq = [
+      String(r.siteState || '')
+        .trim()
+        .toLowerCase(),
+      String(display || '')
+        .trim()
+        .toLowerCase(),
+      String(r.location || '')
+        .trim()
+        .toLowerCase()
+    ].join('|');
+    if (!byKey.has(uniq)) {
+      byKey.set(uniq, {
+        siteName: display,
+        siteState: r.siteState,
+        industry: r.industry,
+        actCategory: r.actCategory,
+        location: r.location
+      });
+    }
+  });
+  return [...byKey.values()];
 }
 
 function normScopeToken(value) {
@@ -227,23 +336,12 @@ export function buildInchargeSiteScopeFromList(sites, loginEmail) {
   return { stateLabels, industryLabels, mine };
 }
 
-function siteMatchesInchargeStateIndustry(site, stateLabels, industryLabels) {
-  const st = siteStateFromRecord(site);
-  const ind = siteIndustry(site);
-  const stateOk =
-    !stateLabels.length ||
-    stateLabels.some(
-      (label) => normalizeStateCompareKey(label) === normalizeStateCompareKey(st)
-    );
-  const industryOk =
-    !industryLabels.length || sectorMatchesInchargeSiteIndustries(ind, industryLabels);
-  return stateOk && industryOk;
-}
-
 /**
  * Site Management table rows visible to the current login.
- * Incharge users see only their assigned state + industry (e.g. Tamil Nadu · Shops and Establishment).
- * App User without an Incharge assignment sees none; org admins see all.
+ * Any site whose Mail Id list includes the login email is shown (multi-email OK).
+ * Example: Mail Id "a@x.com, b@y.com" → login b@y.com still sees that site.
+ * App User with no matching Mail Id sees none; App Administrator / HR Admin with no
+ * personal assignment still see all sites (org-wide management).
  */
 export function filterSitesForLoginUser(sites, loginEmail, userRole) {
   const list = Array.isArray(sites) ? sites : [];
@@ -252,11 +350,8 @@ export function filterSitesForLoginUser(sites, loginEmail, userRole) {
     return isOrgWideSiteViewer(userRole) ? list : [];
   }
 
-  const scope = buildInchargeSiteScopeFromList(list, loginNorm);
-  if (scope) {
-    const { stateLabels, industryLabels, mine } = scope;
-    return mine.filter((s) => siteMatchesInchargeStateIndustry(s, stateLabels, industryLabels));
-  }
+  const mine = list.filter((s) => siteInchargeEmails(s).includes(loginNorm));
+  if (mine.length > 0) return mine;
 
   if (isOrgWideSiteViewer(userRole)) return list;
   return [];

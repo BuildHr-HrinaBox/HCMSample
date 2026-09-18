@@ -1,6 +1,13 @@
 import ExcelJS from 'exceljs';
-import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
-import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
+import {
+  applyExcelJSFullBoxBordersToRange,
+  ensureExcelJSDataRowsWithBorders,
+} from '../../utils/excelTableBorders';
+import {
+  applyFormCRJContractorFromSite,
+  enrichEstablishmentPrincipalEmployerHeaderFields,
+  writeStatutoryHeaderFieldsToExcelJsWorksheet,
+} from '../../utils/statutorySiteCompanyHeaders';
 import {
   formAGJGujaratHeaderNorm,
   formAGJHeaderAliasBucket,
@@ -52,6 +59,10 @@ const FORM_A_RJ_TITLE_COL_FROM = 5; // E
 const FORM_A_RJ_TITLE_COL_TO = 7; // G
 const FORM_A_RJ_DEFAULT_MAIN_TITLE = 'FORM A';
 const FORM_A_RJ_DEFAULT_SUBTITLE = 'FORMAT OF EMPLOYEE REGISTER';
+const FORM_A_RJ_SEE_RULE_TEXT = '[See rule 2(1)]';
+const FORM_A_RJ_PART_A_TEXT = '[Part-A: For all Establishments]';
+/** Employee data rows need extra height so wrapped DOB / designation stay readable. */
+const FORM_A_RJ_DATA_ROW_HEIGHT = 32;
 const FORM_A_RJ_TABLE_START_COL = 1; // A
 
 /** Narrow Employee Code; Name immediately after (column C). */
@@ -91,7 +102,19 @@ function sheetTextLooksLikeFormARJSubtitle(text) {
   return /format\s+of\s+employee/.test(n);
 }
 
-/** Move FORM A / subtitle title band into columns E–G (official RJ template). */
+function sheetTextLooksLikeFormARJSeeRule(text) {
+  if (isPlaceholderBandText(text)) return false;
+  const n = formAGJGujaratHeaderNorm(text);
+  return /see\s*rule\s*2/.test(n);
+}
+
+function sheetTextLooksLikeFormARJPartA(text) {
+  if (isPlaceholderBandText(text)) return false;
+  const n = formAGJGujaratHeaderNorm(text);
+  return /part\s*[-\s]?a\b/.test(n) && /establish/.test(n);
+}
+
+/** Move See-rule / FORM A / subtitle / Part-A into columns E–G (Part-A below subtitle). */
 export function writeFormARajasthanTitleBandsInColumnsEG(worksheet, parsedFormHeader = {}) {
   if (!worksheet) return;
   const getMergeTopLeft = buildMergeTopLeftResolver(worksheet);
@@ -111,52 +134,214 @@ export function writeFormARajasthanTitleBandsInColumnsEG(worksheet, parsedFormHe
       ? parsedSubtitle
       : FORM_A_RJ_DEFAULT_SUBTITLE;
 
+  let seeRuleRow = -1;
+  let seeRuleText = FORM_A_RJ_SEE_RULE_TEXT;
   let mainRow = -1;
   let subRow = -1;
+  let partARow = -1;
+  let partAText = FORM_A_RJ_PART_A_TEXT;
+  // Scan far enough for Form A MH extras (ESIC / LWF / Photo / Signature).
+  const titleScanColTo = Math.max(FORM_A_RJ_TITLE_COL_TO + 30, 40);
   for (let r = 1; r <= 12; r += 1) {
-    for (let c = 1; c <= FORM_A_RJ_TITLE_COL_TO + 6; c += 1) {
+    for (let c = 1; c <= titleScanColTo; c += 1) {
       const raw = getMergedAwareCellText(r, c);
       if (!raw || isPlaceholderBandText(raw)) continue;
+      if (seeRuleRow < 0 && sheetTextLooksLikeFormARJSeeRule(raw)) {
+        seeRuleRow = r;
+        seeRuleText = raw;
+      }
       if (mainRow < 0 && sheetTextLooksLikeFormARJMainTitle(raw)) mainRow = r;
       if (subRow < 0 && sheetTextLooksLikeFormARJSubtitle(raw)) subRow = r;
+      if (partARow < 0 && sheetTextLooksLikeFormARJPartA(raw)) {
+        partARow = r;
+        partAText = raw;
+      }
     }
   }
   if (mainRow < 0) mainRow = 2;
   if (subRow < 0) subRow = 3;
+  // Always place See-rule citation on the row above FORM A (never leave it in column O).
+  if (seeRuleRow < 0 || seeRuleRow >= mainRow) {
+    seeRuleRow = Math.max(1, mainRow - 1);
+  }
+  if (seeRuleRow === mainRow) {
+    if (mainRow > 1) {
+      seeRuleRow = mainRow - 1;
+    } else {
+      mainRow = 2;
+      if (subRow <= mainRow) subRow = 3;
+      seeRuleRow = 1;
+    }
+  }
+
+  const rowLooksLikeEstablishmentField = (row) => {
+    for (let c = 1; c <= 8; c += 1) {
+      const raw = getMergedAwareCellText(row, c);
+      if (!raw) continue;
+      if (sheetTextLooksLikeFormARJPartA(raw)) continue;
+      if (sheetTextLooksLikeFormARJSeeRule(raw)) continue;
+      if (sheetTextLooksLikeFormARJMainTitle(raw)) continue;
+      if (sheetTextLooksLikeFormARJSubtitle(raw)) continue;
+      if (/name\s+(and\s+address\s+)?of|establishment|contractor|principal\s+employer/i.test(raw)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Part-A always sits directly under FORMAT OF EMPLOYEE REGISTER (own row).
+  if (partARow < 0 || partARow <= subRow) {
+    const candidate = subRow + 1;
+    if (rowLooksLikeEstablishmentField(candidate)) {
+      try {
+        worksheet.spliceRows(candidate, 0, []);
+      } catch (_) {
+        /* ignore */
+      }
+      partARow = candidate;
+    } else {
+      partARow = candidate;
+    }
+  }
+
+  const clearMatchingTextInRow = (row, matcher) => {
+    for (let c = 1; c <= titleScanColTo; c += 1) {
+      const raw = getMergedAwareCellText(row, c);
+      if (!raw || !matcher(raw)) continue;
+      const tl = getMergeTopLeft(row, c);
+      worksheet.getCell(tl.r, tl.c).value = '';
+    }
+  };
 
   const clearTitleFromLeft = (row, kind) => {
+    // Part-A writes into column A — do not clear the destination band.
+    if (kind === 'partA') return;
     for (let c = 1; c < FORM_A_RJ_TITLE_COL_FROM; c += 1) {
       const raw = getMergedAwareCellText(row, c);
       if (!raw) continue;
       const match =
         kind === 'subtitle'
           ? sheetTextLooksLikeFormARJSubtitle(raw)
-          : sheetTextLooksLikeFormARJMainTitle(raw);
+          : kind === 'seeRule'
+            ? sheetTextLooksLikeFormARJSeeRule(raw)
+            : sheetTextLooksLikeFormARJMainTitle(raw);
       if (!match) continue;
       const tl = getMergeTopLeft(row, c);
       worksheet.getCell(tl.r, tl.c).value = '';
     }
   };
 
+  // Clear See-rule / Part-A text left in far-right columns across the title band.
+  const clearScanTo = Math.max(12, mainRow, subRow, seeRuleRow, partARow);
+  for (let r = 1; r <= clearScanTo; r += 1) {
+    clearMatchingTextInRow(r, sheetTextLooksLikeFormARJSeeRule);
+    clearMatchingTextInRow(r, sheetTextLooksLikeFormARJPartA);
+  }
+
   const writeBand = (row, text, kind) => {
     clearTitleFromLeft(row, kind);
+    // Part-A must sit on the left (col A); other title bands stay in E–G.
+    const colFrom = kind === 'partA' ? 1 : FORM_A_RJ_TITLE_COL_FROM;
+    const colTo = kind === 'partA' ? 4 : FORM_A_RJ_TITLE_COL_TO;
     try {
-      worksheet.unMergeCells(row, FORM_A_RJ_TITLE_COL_FROM, row, FORM_A_RJ_TITLE_COL_TO);
+      worksheet.unMergeCells(row, colFrom, row, colTo);
     } catch (_) {
       /* not merged */
     }
     try {
-      worksheet.mergeCells(row, FORM_A_RJ_TITLE_COL_FROM, row, FORM_A_RJ_TITLE_COL_TO);
+      worksheet.mergeCells(row, colFrom, row, colTo);
     } catch (_) {
       /* ignore */
     }
-    const cell = worksheet.getCell(row, FORM_A_RJ_TITLE_COL_FROM);
+    const cell = worksheet.getCell(row, colFrom);
     cell.value = text;
-    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    cell.alignment = {
+      horizontal: kind === 'partA' ? 'left' : 'center',
+      vertical: 'middle',
+      wrapText: true,
+    };
   };
 
+  writeBand(seeRuleRow, seeRuleText || FORM_A_RJ_SEE_RULE_TEXT, 'seeRule');
   writeBand(mainRow, mainText, 'main');
   writeBand(subRow, subText, 'subtitle');
+  writeBand(partARow, partAText || FORM_A_RJ_PART_A_TEXT, 'partA');
+}
+
+/** Last non-empty header column (Form A MH keeps ESIC IP…Signature after PAN). */
+export function findFormARegisterHeaderColTo(worksheet, headerRow, startCol = FORM_A_RJ_TABLE_START_COL) {
+  if (!worksheet || headerRow < 1) return FORM_A_RJ_BUCKET_COL_ORDER.length;
+  const getMergeTopLeft = buildMergeTopLeftResolver(worksheet);
+  let last = startCol + FORM_A_RJ_BUCKET_COL_ORDER.length - 1;
+  for (let c = startCol; c <= startCol + 40; c += 1) {
+    const tl = getMergeTopLeft(headerRow, c);
+    const raw = excelCellValueToString(worksheet.getCell(tl.r, tl.c)?.value).trim();
+    if (raw) last = c;
+  }
+  return last;
+}
+
+/** Break vertical merges in the employee data band so each row gets its own box. */
+export function unmergeFormARegisterDataBand(worksheet, rowFrom, rowTo, colFrom, colTo) {
+  if (!worksheet || rowFrom < 1 || rowTo < rowFrom || colTo < colFrom) return;
+
+  const colLettersToNum = (letters) =>
+    String(letters || '')
+      .toUpperCase()
+      .split('')
+      .reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0);
+
+  const collectRanges = () => {
+    const out = [];
+    const raw = worksheet.model?.merges;
+    if (Array.isArray(raw)) {
+      raw.forEach((range) => {
+        const m = String(range || '').match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
+        if (!m) return;
+        out.push({
+          ref: range,
+          top: Math.min(Number(m[2]), Number(m[4])),
+          bottom: Math.max(Number(m[2]), Number(m[4])),
+          left: Math.min(colLettersToNum(m[1]), colLettersToNum(m[3])),
+          right: Math.max(colLettersToNum(m[1]), colLettersToNum(m[3])),
+        });
+      });
+    }
+    const dict = worksheet._merges;
+    if (dict && typeof dict === 'object') {
+      Object.keys(dict).forEach((key) => {
+        const entry = dict[key];
+        const top = Number(entry?.top || entry?.model?.top);
+        const left = Number(entry?.left || entry?.model?.left);
+        const bottom = Number(entry?.bottom || entry?.model?.bottom);
+        const right = Number(entry?.right || entry?.model?.right);
+        if (![top, left, bottom, right].every((n) => Number.isFinite(n) && n >= 1)) return;
+        out.push({ ref: key, top, left, bottom, right });
+      });
+    }
+    return out;
+  };
+
+  collectRanges().forEach((m) => {
+    const overlapsRow = m.bottom >= rowFrom && m.top <= rowTo;
+    const overlapsCol = m.right >= colFrom && m.left <= colTo;
+    if (!overlapsRow || !overlapsCol) return;
+    if (m.bottom <= m.top) return; // single-row merge — keep
+    try {
+      if (m.ref && typeof worksheet.unMergeCells === 'function') {
+        worksheet.unMergeCells(m.ref);
+      }
+    } catch (_) {
+      /* try numeric */
+    }
+    try {
+      if (typeof worksheet.unMergeCells === 'function') {
+        worksheet.unMergeCells(m.top, m.left, m.bottom, m.right);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  });
 }
 
 function cellTextLooksLikeEmploymentCardBodyLabel(text) {
@@ -322,19 +507,29 @@ export function isFormARajasthanContext(
   if (/gujarat|\b_gj\b|form[\s._-]*a[\s._-]*gj|form_a_gj/.test(parts)) return false;
   if (/maternity\s+benefit|register\s+of\s+muster\s+roll/.test(parts)) return false;
 
+  // Form_A_MH / Form_A_RJ — underscore after A breaks \bform…a\b.
+  if (/form[\s._-]*a[\s._-]*(rj|mh)\b|form_a_(rj|mh)\b/.test(parts)) return true;
+
   const hasRajasthan =
     /rajasthan|\brj\b|form[\s._-]*a[\s._-]*rj|form_a_rj/.test(parts);
-  const hasFormA = /\bform[\s._-]*a\b/.test(parts);
+  const hasMaharashtra =
+    /maharashtra|\b_mh\b|form[\s._-]*a[\s._-]*mh|form_a_mh/.test(parts);
+  const hasFormA =
+    /form[\s._-]*a(?=[\s._-]|$)/.test(parts) || /\bform[\s._-]*a\b/.test(parts);
   const hasEmployeeWorkmanFormat =
     /format\s+of\s+employee/.test(parts) ||
     (/employee\s*\/\s*workman\s*\/\s*worker/.test(parts) &&
       !/register\s+of\s+wages|rate\s+of\s+wage/.test(parts));
 
-  // Rajasthan Form A — even when the uploaded template still has employment-card body labels.
-  if (hasRajasthan && (hasFormA || hasEmployeeWorkmanFormat)) return true;
-  if (hasRajasthan && /\bform_a_rj\b/.test(parts)) return true;
-  if (hasRajasthan && headersIndicateFormARajasthanTable(tableHeaders)) return true;
-  if (headersIndicateFormARajasthanHybridTemplate(tableHeaders) && (hasRajasthan || hasEmployeeWorkmanFormat || hasFormA)) {
+  // Rajasthan / Maharashtra Form A — even when the uploaded template still has employment-card body labels.
+  if ((hasRajasthan || hasMaharashtra) && (hasFormA || hasEmployeeWorkmanFormat)) return true;
+  if (hasRajasthan && /form_a_rj/.test(parts)) return true;
+  if (hasMaharashtra && /form_a_mh/.test(parts)) return true;
+  if ((hasRajasthan || hasMaharashtra) && headersIndicateFormARajasthanTable(tableHeaders)) return true;
+  if (
+    headersIndicateFormARajasthanHybridTemplate(tableHeaders) &&
+    (hasRajasthan || hasMaharashtra || hasEmployeeWorkmanFormat || hasFormA)
+  ) {
     return true;
   }
 
@@ -343,6 +538,26 @@ export function isFormARajasthanContext(
   }
 
   return false;
+}
+
+/** Same contractor header field Form C_RJ uses, so Site Management name+address can bind. */
+export function enrichFormARajasthanDisplayHeader(formHeader) {
+  const base = formHeader && typeof formHeader === 'object' ? { ...formHeader } : {};
+  let fields = enrichEstablishmentPrincipalEmployerHeaderFields(base.fields || []);
+  const hasContractor = fields.some((field) =>
+    /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i.test(String(field?.label || ''))
+  );
+  if (!hasContractor) {
+    fields = [
+      ...fields,
+      { label: 'Name and address of contractor', value: '', key: 'form_a_rj_contractor' },
+    ];
+  }
+  return { ...base, fields };
+}
+
+export function applyFormARajasthanContractorFromSite(headerData, site, formHeaderFields = []) {
+  return applyFormCRJContractorFromSite(headerData, site, formHeaderFields);
 }
 
 export function resolveFormARajasthanTableHeaders(tableHeaders) {
@@ -741,6 +956,9 @@ export async function buildFormARajasthanWorkbookWithTemplateStyles({
     // Hybrid templates (table header + employment-card body labels) are repaired in place.
   }
 
+  // Title bands may insert a Part-A row — detect table layout after that shift.
+  writeFormARajasthanTitleBandsInColumnsEG(worksheet, parsedFormHeader);
+
   const layout = detectFormARajasthanTableLayout(worksheet, {
     parsedHeaderRowIndex,
     parsedDataStartIndex,
@@ -750,7 +968,6 @@ export async function buildFormARajasthanWorkbookWithTemplateStyles({
 
   const { dataStartRow, templateCols, footerStartRow, headerRow } = layout;
 
-  writeFormARajasthanTitleBandsInColumnsEG(worksheet, parsedFormHeader);
   applyFormARajasthanCanonicalHeadersAndWidths(worksheet, headerRow, FORM_A_RJ_TABLE_START_COL);
 
   // Keep original establishment fields above the table.
@@ -808,14 +1025,29 @@ export async function buildFormARajasthanWorkbookWithTemplateStyles({
 
   const tableColMin = Math.min(...templateCols.map(({ col }) => col));
   const tableColMax = Math.max(...templateCols.map(({ col }) => col));
+  // Form A MH (and similar) keep ESIC IP / LWF / AADHAAR… after PAN — border the full header span.
+  const fullTableColTo = Math.max(
+    tableColMax,
+    findFormARegisterHeaderColTo(worksheet, headerRow, FORM_A_RJ_TABLE_START_COL)
+  );
 
   // Preserve footer notes (* HS/S/SS/US and #Note…) — clear only the data band.
   const clearEndExclusive =
     footerStartRow > dataStartRow
       ? footerStartRow
       : Math.max(dataStartRow + Math.max(rows.length, 1), dataStartRow + 1);
+
+  // Tall merged blanks after PAN (Form A MH) hide per-row boxes — split before clear/write.
+  unmergeFormARegisterDataBand(
+    worksheet,
+    dataStartRow,
+    Math.max(clearEndExclusive - 1, dataStartRow + Math.max(rows.length, 1) - 1),
+    tableColMin,
+    fullTableColTo
+  );
+
   for (let r = dataStartRow; r < clearEndExclusive; r += 1) {
-    for (let c = tableColMin; c <= tableColMax; c += 1) {
+    for (let c = tableColMin; c <= fullTableColTo; c += 1) {
       worksheet.getCell(r, c).value = '';
     }
   }
@@ -842,7 +1074,7 @@ export async function buildFormARajasthanWorkbookWithTemplateStyles({
   rows.forEach((row, idx) => {
     const targetRowNum = dataStartRow + idx;
     const targetRow = worksheet.getRow(targetRowNum);
-    if (targetRow) targetRow.height = 18;
+    if (targetRow) targetRow.height = FORM_A_RJ_DATA_ROW_HEIGHT;
     templateCols.forEach(({ col, bucket, label }) => {
       let val = getFormAGJGujaratRowValueForHeader(row, label, idx);
       if ((val == null || val === '') && bucket) {
@@ -867,12 +1099,29 @@ export async function buildFormARajasthanWorkbookWithTemplateStyles({
     });
   });
 
+  const dataRowCount = Math.max(rows.length, 1);
+  const borderRowTo = dataStartRow + dataRowCount - 1;
+  // Unmerge again in case spliceRows/write reintroduced tall merges after PAN.
+  unmergeFormARegisterDataBand(
+    worksheet,
+    dataStartRow,
+    borderRowTo,
+    tableColMin,
+    fullTableColTo
+  );
+  // Header + data: full box through last MH column (ESIC IP, LWF, AADHAAR, …).
+  applyExcelJSFullBoxBordersToRange(worksheet, {
+    rowFrom: headerRow,
+    rowTo: borderRowTo,
+    colFrom: tableColMin,
+    colTo: fullTableColTo,
+  });
   if (rows.length > 0) {
     ensureExcelJSDataRowsWithBorders(worksheet, {
       dataStartRow,
       dataRowCount: rows.length,
       colFrom: tableColMin,
-      colTo: tableColMax,
+      colTo: fullTableColTo,
       templateRow: dataStartRow,
       templateBodyRows: 1,
     });

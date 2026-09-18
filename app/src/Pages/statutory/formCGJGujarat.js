@@ -194,11 +194,28 @@ export function readFormCGJEmployeeFullName(emp) {
   const fn = String(
     emp?.FirstName || emp?.['FirstName'] || emp?.firstName || emp?.['First Name'] || ''
   ).trim();
+  const mn = String(
+    emp?.MiddleName ||
+      emp?.['MiddleName'] ||
+      emp?.middleName ||
+      emp?.['Middle Name'] ||
+      emp?.middle_name ||
+      emp?.Middle_Name ||
+      ''
+  ).trim();
   const ln = String(
     emp?.LastName || emp?.['LastName'] || emp?.lastName || emp?.['Last Name'] || ''
   ).trim();
-  if (fn && ln) return `${fn} ${ln}`;
-  return fn || ln || '';
+  const full = [fn, mn, ln].filter(Boolean).join(' ').trim();
+  if (full) return full;
+  return String(
+    emp?.EmployeeName ||
+      emp?.['Employee Name'] ||
+      emp?.employee_name ||
+      emp?.Name ||
+      emp?.DisplayName ||
+      ''
+  ).trim();
 }
 
 export function isFormCGJNameHeader(h) {

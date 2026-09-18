@@ -603,10 +603,13 @@ app.get('/sitemanagement', async (req, res) => {
     console.log('Total records:', total);
     
     console.log('Executing data query...');
+    // Prefer full contractor columns. Fallbacks must not drop Contractor* when only Company/RC fail.
     const siteSelectWithCompany =
       'ROWID, SiteName, Company, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, SandERCNumber, FactoryRCNumber, CLRARCNumber, Location, CREATEDTIME, MODIFIEDTIME';
     const siteSelectFull =
       'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, SandERCNumber, FactoryRCNumber, CLRARCNumber, Location, CREATEDTIME, MODIFIEDTIME';
+    const siteSelectContractorNoRc =
+      'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, ContractorName, ContractorAddress, ContractorEmail, ContractorPhone, ContractorCity, ContractorState, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, Location, CREATEDTIME, MODIFIEDTIME';
     const siteSelectBase =
       'ROWID, SiteName, SiteAddress, SiteCity, SiteState, SitePostalCode, UNITNO, InchargeName, InchargePhone, InchargeEmail, InchargeDesignation, Industry, Location, CREATEDTIME, MODIFIEDTIME';
     const siteSelectWithRc =
@@ -631,22 +634,36 @@ app.get('/sitemanagement', async (req, res) => {
         } catch (queryErr) {
           const errMsg = String(queryErr?.message || queryErr || '');
           if (/invalid|unknown|no such|column/i.test(errMsg)) {
-            console.warn('Site list: contractor columns missing, trying without contractor columns:', errMsg);
-            hasContractorColumns = false;
+            // RC columns may be missing while contractor columns still exist.
+            console.warn('Site list: full SELECT failed, trying contractor without RC columns:', errMsg);
             try {
               rows = await zcql.executeZCQLQuery(
-                `SELECT ${siteSelectWithRc} FROM Site ORDER BY ROWID DESC ${limitClause}`
+                `SELECT ${siteSelectContractorNoRc} FROM Site ORDER BY ROWID DESC ${limitClause}`
               );
-            } catch (rcErr) {
-              const rcErrMsg = String(rcErr?.message || rcErr || '');
-              if (/invalid|unknown|no such|column/i.test(rcErrMsg)) {
-                console.warn('Site list: RC number columns missing, using base SELECT:', rcErrMsg);
-                hasRcNumberColumns = false;
-                rows = await zcql.executeZCQLQuery(
-                  `SELECT ${siteSelectBase} FROM Site ORDER BY ROWID DESC ${limitClause}`
-                );
+              hasRcNumberColumns = false;
+            } catch (contractorErr) {
+              const contractorErrMsg = String(contractorErr?.message || contractorErr || '');
+              if (/invalid|unknown|no such|column/i.test(contractorErrMsg)) {
+                console.warn('Site list: contractor columns missing, trying RC-only SELECT:', contractorErrMsg);
+                hasContractorColumns = false;
+                try {
+                  rows = await zcql.executeZCQLQuery(
+                    `SELECT ${siteSelectWithRc} FROM Site ORDER BY ROWID DESC ${limitClause}`
+                  );
+                } catch (rcErr) {
+                  const rcErrMsg = String(rcErr?.message || rcErr || '');
+                  if (/invalid|unknown|no such|column/i.test(rcErrMsg)) {
+                    console.warn('Site list: RC number columns missing, using base SELECT:', rcErrMsg);
+                    hasRcNumberColumns = false;
+                    rows = await zcql.executeZCQLQuery(
+                      `SELECT ${siteSelectBase} FROM Site ORDER BY ROWID DESC ${limitClause}`
+                    );
+                  } else {
+                    throw rcErr;
+                  }
+                }
               } else {
-                throw rcErr;
+                throw contractorErr;
               }
             }
           } else {
@@ -662,11 +679,19 @@ app.get('/sitemanagement', async (req, res) => {
       console.log('Site row keys:', Object.keys(rows[0].Site));
       console.log('Site.Company sample:', rows[0].Site.Company, rows[0].Site.company);
     }
+
+    const pickSiteText = (...vals) => {
+      for (let i = 0; i < vals.length; i += 1) {
+        const s = String(vals[i] ?? '').trim();
+        if (s) return s;
+      }
+      return '';
+    };
     
     const siteDetails = rows.map(r => {
       const site = r.Site || {};
       const companyValue = hasCompanyColumns
-        ? String(site.Company ?? site.company ?? site.CompanyName ?? site.companyName ?? '').trim()
+        ? pickSiteText(site.Company, site.company, site.CompanyName, site.companyName)
         : '';
       return {
       id: site.ROWID,
@@ -679,12 +704,13 @@ app.get('/sitemanagement', async (req, res) => {
       siteState: site.SiteState,
       sitePostalCode: site.SitePostalCode,
       unitNo: site.UNITNO,
-      contractorName: hasContractorColumns ? site.ContractorName : '',
-      contractorAddress: hasContractorColumns ? site.ContractorAddress : '',
-      contractorEmail: hasContractorColumns ? site.ContractorEmail : '',
-      contractorPhone: hasContractorColumns ? site.ContractorPhone : '',
-      contractorCity: hasContractorColumns ? site.ContractorCity : '',
-      contractorState: hasContractorColumns ? site.ContractorState : '',
+      // Always map contractor fields when present on the row (never force blank solely due to fallback flags).
+      contractorName: pickSiteText(site.ContractorName, site.contractorName),
+      contractorAddress: pickSiteText(site.ContractorAddress, site.contractorAddress),
+      contractorEmail: pickSiteText(site.ContractorEmail, site.contractorEmail),
+      contractorPhone: pickSiteText(site.ContractorPhone, site.contractorPhone),
+      contractorCity: pickSiteText(site.ContractorCity, site.contractorCity),
+      contractorState: pickSiteText(site.ContractorState, site.contractorState),
       inchargeName: site.InchargeName,
       inchargePhone: site.InchargePhone,
       inchargeEmail: site.InchargeEmail,
@@ -697,7 +723,7 @@ app.get('/sitemanagement', async (req, res) => {
       audit: false, // Temporarily set to false since Audit column is commented out
       createdTime: site.CREATEDTIME,
       modifiedTime: site.MODIFIEDTIME
-    };
+      };
     });
     
     console.log('Processed site details:', JSON.stringify(siteDetails, null, 2));

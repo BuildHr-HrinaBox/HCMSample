@@ -106,15 +106,25 @@ export function isFormDRajasthanContext(
 
   if (/gujarat|\b_gj\b|form[\s._-]*d[\s._-]*gj|form_d_gj/.test(parts)) return false;
 
+  // Form_D_MH / Form_D_RJ — underscore after D breaks \bform…d\b.
+  if (/form[\s._-]*d[\s._-]*(rj|mh)\b|form_d_(rj|mh)\b/.test(parts)) return true;
+
   const hasRajasthan =
     /rajasthan|\b_rj\b|form[\s._-]*d[\s._-]*rj|form_d_rj/.test(parts);
-  const hasFormD = /\bform[\s._-]*d\b/.test(parts);
+  const hasMaharashtra =
+    /maharashtra|\b_mh\b|form[\s._-]*d[\s._-]*mh|form_d_mh/.test(parts);
+  const hasFormD =
+    /form[\s._-]*d(?=[\s._-]|$)/.test(parts) || /\bform[\s._-]*d\b/.test(parts);
 
-  if (hasRajasthan && hasFormD) return true;
-  if (hasRajasthan && /attendance\s+register|format\s+of\s+attendance/.test(parts)) return true;
-  if (hasRajasthan && headersIndicateFormDRajasthanAttendanceTable(tableHeaders)) return true;
+  if ((hasRajasthan || hasMaharashtra) && hasFormD) return true;
+  if ((hasRajasthan || hasMaharashtra) && /attendance\s+register|format\s+of\s+attendance/.test(parts)) {
+    return true;
+  }
+  if ((hasRajasthan || hasMaharashtra) && headersIndicateFormDRajasthanAttendanceTable(tableHeaders)) {
+    return true;
+  }
   if (
-    hasRajasthan &&
+    (hasRajasthan || hasMaharashtra) &&
     hasFormD &&
     headersIndicateFormDRajasthanPeriodRowMisparse(tableHeaders)
   ) {
@@ -132,6 +142,191 @@ export function isFormDRajasthanUsingWrongTable(tableHeaders) {
 
 export function isFormDRajasthanAttendanceTableLayoutFormHeader(formHeader) {
   return !!formHeader?.formDRJAttendanceTableLayout;
+}
+
+/** Legal notes painted outside the Form D RJ attendance box (Excel + PDF). */
+export const FORM_D_RJ_RELAY_MINES_NOTE =
+  '#Relay and *Place of Work in case of Mines only (Underground/Opencast/Surface)';
+export const FORM_D_RJ_ABSENCE_CODES_NOTE =
+  'In case an employee is not present the following to be entered: (R for Rest/L for Paid Leave/A for absent/O for Weekly Off/C for Establishment Closed)';
+export const FORM_D_RJ_E_FORM_NOTE =
+  '** Not necessary in case of E Form maintenance.';
+export const FORM_D_RJ_OUTER_FOOTNOTES = [
+  FORM_D_RJ_RELAY_MINES_NOTE,
+  FORM_D_RJ_ABSENCE_CODES_NOTE,
+  FORM_D_RJ_E_FORM_NOTE,
+];
+
+function normalizeFormDRJFootnoteCompare(text) {
+  return String(text || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+export function isFormDRJRelayMinesFootnoteText(text) {
+  const norm = normalizeFormDRJFootnoteCompare(text);
+  if (!norm) return false;
+  return (
+    (/relay/.test(norm) && /place\s+of\s+work/.test(norm) && /mines?/.test(norm)) ||
+    (/underground/.test(norm) && /opencast|open\s*cast|surface/.test(norm) && /mines?/.test(norm))
+  );
+}
+
+export function isFormDRJAbsenceCodesFootnoteText(text) {
+  const norm = normalizeFormDRJFootnoteCompare(text);
+  if (!norm) return false;
+  return (
+    (/not\s+present/.test(norm) &&
+      (/weekly\s+off|establishment\s+closed|paid\s+leave/.test(norm) ||
+        /\br\s+for\s+rest\b/.test(norm))) ||
+    (/r\s+for\s+rest/.test(norm) && /l\s+for\s+paid\s+leave/.test(norm) && /a\s+for\s+absent/.test(norm))
+  );
+}
+
+export function isFormDRJEFormMaintenanceFootnoteText(text) {
+  const norm = normalizeFormDRJFootnoteCompare(text);
+  if (!norm) return false;
+  return (
+    /not\s+necessary/.test(norm) &&
+    (/e\s*form/.test(norm) || /form\s*e\b/.test(norm)) &&
+    /maintenance/.test(norm)
+  );
+}
+
+export function isFormDRJOuterFootnoteText(text) {
+  return (
+    isFormDRJRelayMinesFootnoteText(text) ||
+    isFormDRJAbsenceCodesFootnoteText(text) ||
+    isFormDRJEFormMaintenanceFootnoteText(text)
+  );
+}
+
+export function isFormDRJOuterFootnoteRow(row) {
+  if (!Array.isArray(row)) return false;
+  const filled = row.map((c) => String(c || '').trim()).filter(Boolean);
+  if (!filled.length) return false;
+  const joined = filled.join(' ');
+  if (isFormDRJOuterFootnoteText(joined)) return true;
+  const unique = [...new Set(filled)];
+  return unique.every((t) => isFormDRJOuterFootnoteText(t));
+}
+
+export function normalizeFormDRJOuterFootnoteText(text) {
+  const raw = String(text || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!raw) return '';
+  if (isFormDRJRelayMinesFootnoteText(raw)) return FORM_D_RJ_RELAY_MINES_NOTE;
+  if (isFormDRJAbsenceCodesFootnoteText(raw)) return FORM_D_RJ_ABSENCE_CODES_NOTE;
+  if (isFormDRJEFormMaintenanceFootnoteText(raw)) return FORM_D_RJ_E_FORM_NOTE;
+  return raw;
+}
+
+export function extractFormDRJOuterFootnoteText(row) {
+  if (!Array.isArray(row)) {
+    return normalizeFormDRJOuterFootnoteText(row);
+  }
+  const parts = [];
+  for (let i = 0; i < row.length; i += 1) {
+    const t = String(row[i] || '')
+      .replace(/\r?\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!t) continue;
+    if (!parts.includes(t)) parts.push(t);
+  }
+  const joined = parts.join(' ').replace(/\s+/g, ' ').trim();
+  return normalizeFormDRJOuterFootnoteText(joined) || (isFormDRJOuterFootnoteText(joined) ? joined : '');
+}
+
+function clearFormDRJCellBorder(cell) {
+  if (!cell) return;
+  try {
+    cell.border = {};
+    const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+    cell.style = { ...prev, border: {} };
+  } catch (_) {
+    try {
+      cell.border = {};
+    } catch (__) {
+      /* ignore */
+    }
+  }
+}
+
+function clearFormDRJRowOutsideBox(worksheet, row, colFrom, colTo) {
+  if (!worksheet || !Number.isFinite(row) || row < 1) return;
+  const c0 = Math.max(1, Number(colFrom) || 1);
+  const c1 = Math.max(c0, Number(colTo) || c0);
+  for (let c = c0; c <= c1; c += 1) {
+    const cell = worksheet.getCell(row, c);
+    cell.value = '';
+    clearFormDRJCellBorder(cell);
+  }
+}
+
+/**
+ * Write Form D RJ legal footnotes below the attendance box (no borders).
+ * Matches the PDF "outside the box" layout.
+ */
+export function writeFormDRJOuterFootnotes(worksheet, options = {}) {
+  if (!worksheet) return null;
+  const {
+    afterRow,
+    startCol = 1,
+    endCol = 36,
+    footnotes = FORM_D_RJ_OUTER_FOOTNOTES,
+  } = options;
+  const baseRow =
+    Number.isFinite(Number(afterRow)) && Number(afterRow) > 0 ? Number(afterRow) : null;
+  if (!baseRow) return null;
+
+  const colFrom = Math.max(1, Number(startCol) || 1);
+  const colTo = Math.max(colFrom, Number(endCol) || colFrom);
+  const lines = (Array.isArray(footnotes) ? footnotes : FORM_D_RJ_OUTER_FOOTNOTES)
+    .map((t) => String(t || '').trim())
+    .filter(Boolean);
+  if (!lines.length) return null;
+
+  const scanEnd = Math.max(worksheet.rowCount || 0, baseRow + 20);
+  for (let r = Math.max(1, baseRow - 2); r <= scanEnd; r += 1) {
+    for (let c = 1; c <= Math.max(colTo + 4, 12); c += 1) {
+      const existing = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!isFormDRJOuterFootnoteText(existing)) continue;
+      clearFormDRJRowOutsideBox(worksheet, r, colFrom, colTo);
+      break;
+    }
+  }
+
+  let firstWrittenRow = null;
+  lines.forEach((text, idx) => {
+    const row = baseRow + 1 + idx;
+    if (firstWrittenRow == null) firstWrittenRow = row;
+    clearFormDRJRowOutsideBox(worksheet, row, colFrom, colTo);
+    try {
+      worksheet.mergeCells(row, colFrom, row, colTo);
+    } catch (_) {
+      /* overlap — keep A-cell text */
+    }
+    const cell = worksheet.getCell(row, colFrom);
+    cell.value = text;
+    cell.font = { name: 'Arial', size: 8, italic: false, bold: false };
+    cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+    clearFormDRJCellBorder(cell);
+    for (let c = colFrom; c <= colTo; c += 1) clearFormDRJCellBorder(worksheet.getCell(row, c));
+    const excelRow = worksheet.getRow(row);
+    if (excelRow) {
+      excelRow.height = Math.max(
+        Number(excelRow.height) || 0,
+        idx === 1 ? 28 : 16
+      );
+    }
+  });
+
+  return firstWrittenRow;
 }
 
 export function listFormDRajasthanDayColumnHeaders(tableHeaders) {
@@ -418,10 +613,25 @@ function pickEmployeeValue(emp, keys) {
 }
 
 export function readFormDRJEmployeeFullName(emp) {
-  const fn = pickEmployeeValue(emp, ['FirstName', 'First Name', 'firstName']);
-  const ln = pickEmployeeValue(emp, ['LastName', 'Last Name', 'lastName']);
-  if (fn && ln) return `${fn} ${ln}`;
-  return fn || ln || '';
+  const fn = pickEmployeeValue(emp, ['FirstName', 'First Name', 'firstName', 'first_name']);
+  const mn = pickEmployeeValue(emp, [
+    'MiddleName',
+    'Middle Name',
+    'middleName',
+    'middle_name',
+    'Middle_Name',
+  ]);
+  const ln = pickEmployeeValue(emp, ['LastName', 'Last Name', 'lastName', 'last_name']);
+  const full = [fn, mn, ln].filter(Boolean).join(' ').trim();
+  if (full) return full;
+  return pickEmployeeValue(emp, [
+    'EmployeeName',
+    'Employee Name',
+    'employee_name',
+    'DisplayName',
+    'Display Name',
+    'Name',
+  ]);
 }
 
 export function readFormDRJDesignation(emp) {
@@ -534,11 +744,15 @@ export function formatFormDRJAttendanceTime(raw) {
   return `${h}.${String(m).padStart(2, '0')}`;
 }
 
+/**
+ * Actual check-in punch only — never ShiftStartTime (that is the roster default 09:00).
+ * Absent / no punch → blank.
+ */
 function readAttendanceFirstIn(rec) {
   if (!rec || typeof rec !== 'object') return '';
   const keys = [
-    'FirstIn', 'firstIn', 'ShiftStartTime', 'shiftStartTime', 'InTime', 'inTime', 'CheckIn',
-    'CheckInTime', 'checkInTime', 'FirstCheckIn', 'firstCheckIn', 'In', 'in',
+    'FirstIn', 'firstIn', 'InTime', 'inTime', 'CheckIn',
+    'CheckInTime', 'checkInTime', 'FirstCheckIn', 'firstCheckIn',
     'LoginTime', 'loginTime', 'PunchIn', 'punchIn',
   ];
   for (const k of keys) {
@@ -548,11 +762,15 @@ function readAttendanceFirstIn(rec) {
   return '';
 }
 
+/**
+ * Actual check-out punch only — never ShiftEndTime (that is the roster default 17:00).
+ * Absent / no punch → blank.
+ */
 function readAttendanceLastOut(rec) {
   if (!rec || typeof rec !== 'object') return '';
   const keys = [
-    'LastOut', 'lastOut', 'ShiftEndTime', 'shiftEndTime', 'OutTime', 'outTime', 'CheckOut',
-    'CheckOutTime', 'checkOutTime', 'LastCheckOut', 'lastCheckOut', 'Out', 'out',
+    'LastOut', 'lastOut', 'OutTime', 'outTime', 'CheckOut',
+    'CheckOutTime', 'checkOutTime', 'LastCheckOut', 'lastCheckOut',
     'LogoutTime', 'logoutTime', 'PunchOut', 'punchOut',
   ];
   for (const k of keys) {
@@ -560,6 +778,29 @@ function readAttendanceLastOut(rec) {
     if (v && v !== '-') return v;
   }
   return '';
+}
+
+/** True when Zoho day status means the person did not attend (leave blank IN/OUT). */
+function isFormDRJAbsentAttendanceStatus(rec) {
+  if (!rec || typeof rec !== 'object') return true;
+  const raw = String(
+    rec.Status ??
+      rec.status ??
+      rec.StatusCode ??
+      rec.statusCode ??
+      rec.AttendanceStatus ??
+      rec.attendanceStatus ??
+      rec.dayStatus ??
+      ''
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/[\s/_-]+/g, '');
+  if (!raw || raw === '-') return false;
+  if (/^(p|pr|present|od|onDuty|onduty)$/i.test(raw)) return false;
+  return /^(a|ab|abs|absent|wo|weekoff|weeklyoff|off|l|leave|cl|el|sl|pl|ml|h|ho|nh|fh|holiday|wop)$/i.test(
+    raw
+  );
 }
 
 function attendanceRecordDateKey(rec) {
@@ -772,10 +1013,18 @@ function pickAttendanceRecordName(rec) {
   const first = String(
     rec.firstName || rec.FirstName || rec.First_Name || rec['First Name'] || ''
   ).trim();
+  const middle = String(
+    rec.middleName ||
+      rec.MiddleName ||
+      rec.Middle_Name ||
+      rec['Middle Name'] ||
+      rec.middle_name ||
+      ''
+  ).trim();
   const last = String(
     rec.lastName || rec.LastName || rec.Last_Name || rec['Last Name'] || ''
   ).trim();
-  const full = `${first} ${last}`.trim();
+  const full = [first, middle, last].filter(Boolean).join(' ').trim();
   return normalizeAttendanceNameKey(
     full ||
       rec.EmployeeName ||
@@ -816,8 +1065,13 @@ function pickEmployeeAttendanceNames(emp, row) {
   const src = unwrapEmployeeRecord(emp);
   if (src && typeof src === 'object') {
     const first = String(src.FirstName || src.firstName || src['First Name'] || '').trim();
+    const middle = String(
+      src.MiddleName || src.middleName || src['Middle Name'] || src.middle_name || ''
+    ).trim();
     const last = String(src.LastName || src.lastName || src['Last Name'] || '').trim();
     if (first) names.push(first);
+    if (first && last) names.push([first, last].filter(Boolean).join(' '));
+    if (first && middle && last) names.push([first, middle, last].filter(Boolean).join(' '));
     if (last) names.push(last);
     if (src.Name) names.push(src.Name);
     if (src['Employee Name']) names.push(src['Employee Name']);
@@ -924,7 +1178,12 @@ export function enrichFormDRajasthanRowsFromAttendance(
       const d = String(dayDate.getDate()).padStart(2, '0');
       const iso = `${y}-${m}-${d}`;
       const rec = byDate.get(iso);
-      if (!rec) return;
+
+      // No day record / absent / leave / week-off → blank (never roster 9.00 / 17.00).
+      if (!rec || isFormDRJAbsentAttendanceStatus(rec)) {
+        if (overwrite) row[header] = '';
+        return;
+      }
 
       const inVal = formatFormDRJAttendanceTime(readAttendanceFirstIn(rec));
       const outVal = formatFormDRJAttendanceTime(readAttendanceLastOut(rec));
@@ -932,6 +1191,9 @@ export function enrichFormDRajasthanRowsFromAttendance(
       if (val) {
         row[header] = val;
         filled += 1;
+      } else if (overwrite) {
+        // Present status but no actual FirstIn/LastOut punch → blank (do not use shift defaults).
+        row[header] = '';
       }
     });
   });
@@ -951,25 +1213,109 @@ export function readFormDRJPaidDays(payrollRow) {
   return String(val).trim();
 }
 
+/** Remarks No. of hours ← Summary No. of Days × 8. */
+export function computeFormDRJRemarksHours(summaryDays) {
+  const raw = String(summaryDays ?? '').replace(/,/g, '').trim();
+  if (!raw) return '';
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return '';
+  return String(Math.round(n * 8 * 100) / 100);
+}
+
 export function applyFormDRajasthanPayrollToRow(row, payrollRow, headers, helpers = {}) {
   if (!row || !payrollRow || payrollRow.fetch_error) return false;
   const rowType = getFormDRJRowType(row);
   if (rowType === FORM_D_RJ_ROW_TYPE_OUT) return false;
 
   const hdrs = Array.isArray(headers) ? headers : [];
-  const paidDays = readFormDRJPaidDays(payrollRow);
+  let paidDays = readFormDRJPaidDays(payrollRow);
+  if (paidDays === '') {
+    // Still allow Remarks hours from an existing Summary No. of Days value.
+    for (let i = 0; i < hdrs.length; i += 1) {
+      if (!isFormDRJSummaryDaysHeader(hdrs[i])) continue;
+      const existing = String(row[hdrs[i]] ?? '').trim();
+      if (existing && !/^enter\b/i.test(existing)) {
+        paidDays = existing;
+        break;
+      }
+    }
+  }
   if (paidDays === '') return false;
 
   const { overwrite = true, sanitizeValue = (v) => String(v ?? '').trim() } = helpers;
+  const remarksHours = computeFormDRJRemarksHours(paidDays);
   let changed = false;
   hdrs.forEach((header) => {
-    if (!isFormDRJSummaryDaysHeader(header)) return;
-    const existing = String(row[header] ?? '').trim();
-    if (!overwrite && existing && !/^enter\b/i.test(existing)) return;
-    row[header] = sanitizeValue(paidDays);
-    changed = true;
+    if (isFormDRJSummaryDaysHeader(header)) {
+      const existing = String(row[header] ?? '').trim();
+      if (!overwrite && existing && !/^enter\b/i.test(existing)) return;
+      row[header] = sanitizeValue(paidDays);
+      changed = true;
+      return;
+    }
+    if (isFormDRJRemarksHoursHeader(header) && remarksHours !== '') {
+      const existing = String(row[header] ?? '').trim();
+      if (!overwrite && existing && !/^enter\b/i.test(existing)) return;
+      row[header] = sanitizeValue(remarksHours);
+      changed = true;
+    }
   });
   return changed;
+}
+
+/**
+ * Fill Remarks No. of hours from Summary No. of Days × 8 on every employee row.
+ * Safe to call after payroll enrich even when paid_days was already written.
+ */
+export function applyFormDRJRemarksHoursFromSummary(mappedData, headers, helpers = {}) {
+  if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  const hdrs = Array.isArray(headers) ? headers : [];
+  const daysHeaders = hdrs.filter((h) => isFormDRJSummaryDaysHeader(h));
+  const hoursHeaders = hdrs.filter((h) => isFormDRJRemarksHoursHeader(h));
+  if (hoursHeaders.length === 0) return 0;
+
+  const { overwrite = true, sanitizeValue = (v) => String(v ?? '').trim() } = helpers;
+  let filled = 0;
+  mappedData.forEach((row) => {
+    if (!row || typeof row !== 'object') return;
+    const rowType = getFormDRJRowType(row);
+    if (rowType === FORM_D_RJ_ROW_TYPE_OUT) return;
+
+    let summaryDays = '';
+    for (let i = 0; i < daysHeaders.length; i += 1) {
+      const v = String(row[daysHeaders[i]] ?? '').trim();
+      if (v && !/^enter\b/i.test(v)) {
+        summaryDays = v;
+        break;
+      }
+    }
+    if (summaryDays === '') {
+      Object.keys(row).forEach((key) => {
+        if (summaryDays || !isFormDRJSummaryDaysHeader(key)) return;
+        const v = String(row[key] ?? '').trim();
+        if (v && !/^enter\b/i.test(v)) summaryDays = v;
+      });
+    }
+    const hours = computeFormDRJRemarksHours(summaryDays);
+    if (hours === '') return;
+
+    let changed = false;
+    hoursHeaders.forEach((header) => {
+      const existing = String(row[header] ?? '').trim();
+      if (!overwrite && existing && !/^enter\b/i.test(existing)) return;
+      row[header] = sanitizeValue(hours);
+      changed = true;
+    });
+    Object.keys(row).forEach((key) => {
+      if (!isFormDRJRemarksHoursHeader(key) || hoursHeaders.includes(key)) return;
+      const existing = String(row[key] ?? '').trim();
+      if (!overwrite && existing && !/^enter\b/i.test(existing)) return;
+      row[key] = sanitizeValue(hours);
+      changed = true;
+    });
+    if (changed) filled += 1;
+  });
+  return filled;
 }
 
 export function enrichFormDRajasthanPayrollRows(mappedData, employees, headers, helpers = {}) {
@@ -994,7 +1340,29 @@ export function enrichFormDRajasthanPayrollRows(mappedData, employees, headers, 
     let payrollRow =
       typeof resolvePayrollRow === 'function' ? resolvePayrollRow(emp || {}, row, rowIndex) : null;
     if ((!payrollRow || payrollRow.fetch_error) && Array.isArray(payrollRows) && payrollRows.length > 0) {
-      payrollRow = payrollRows[empIndex] || null;
+      // Prefer FirstName + MiddleName + LastName match before positional index fallback.
+      const nameHit = payrollRows.find((candidate) => {
+        if (!candidate || candidate.fetch_error) return false;
+        const peopleName = normalizeAttendanceNameKey(readFormDRJEmployeeFullName(emp || {}));
+        if (!peopleName) return false;
+        const payName = normalizeAttendanceNameKey(
+          [
+            candidate.first_name || candidate.FirstName || candidate.firstName || '',
+            candidate.middle_name || candidate.MiddleName || candidate.middleName || '',
+            candidate.last_name || candidate.LastName || candidate.lastName || '',
+          ]
+            .map((v) => String(v || '').trim())
+            .filter(Boolean)
+            .join(' ') ||
+            candidate.employee_name ||
+            candidate.EmployeeName ||
+            candidate.full_name ||
+            ''
+        );
+        if (!payName) return false;
+        return peopleName === payName || namesLooselyMatchAttendance(peopleName, payName);
+      });
+      payrollRow = nameHit || payrollRows[empIndex] || null;
     }
     if (
       payrollRow &&
@@ -1441,6 +1809,14 @@ export async function buildFormDRajasthanWorkbookWithTemplateStyles({
       templateBodyRows: 1,
     });
   }
+
+  // Legal footnotes sit outside the attendance box (PDF + Excel model).
+  const lastDataRow = rows.length > 0 ? dataStartRow + rows.length - 1 : dataStartRow - 1;
+  writeFormDRJOuterFootnotes(worksheet, {
+    afterRow: Math.max(lastDataRow, dataStartRow - 1),
+    startCol: tableColMin,
+    endCol: tableColMax,
+  });
 
   const out = await workbook.xlsx.writeBuffer();
   const fileName =

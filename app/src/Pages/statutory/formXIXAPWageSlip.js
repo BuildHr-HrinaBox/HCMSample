@@ -54,8 +54,9 @@ export function isFormXIXRajasthanOvertimeRegisterContext(
     .join(' ')
     .toLowerCase();
 
-  // Form_XIX_RJ.xlsx identity wins even if company/site text mentions another state.
+  // Form_XIX_RJ / Form_XIX_MH identity wins even if company/site text mentions another state.
   if (/form[\s._-]*xix[\s._-]*rj/i.test(parts) || /\bxix_rj\b/i.test(parts)) return true;
+  if (/form[\s._-]*xix[\s._-]*mh/i.test(parts) || /\bxix_mh\b/i.test(parts)) return true;
 
   if (/wage\s+slip/i.test(parts)) return false;
   // Other states' Form XIX wage-slip files must not match via siteState=Rajasthan alone.
@@ -67,10 +68,10 @@ export function isFormXIXRajasthanOvertimeRegisterContext(
   }
 
   if (/register\s+of\s+over[\s-]*time|over[\s-]*time\s+register/i.test(parts) && matchesFormXIXHint(parts)) {
-    return /rajasthan/i.test(parts) || /form[\s._-]*xix(?![a-z])/i.test(parts);
+    return /rajasthan|maharashtra/i.test(parts) || /form[\s._-]*xix(?![a-z])/i.test(parts);
   }
 
-  return /rajasthan/i.test(parts) && matchesFormXIXHint(parts);
+  return /(rajasthan|maharashtra)/i.test(parts) && matchesFormXIXHint(parts);
 }
 
 export function isFormXIXAPWageSlipContext(formHeader, rowItem, fileName, sheetText = '') {
@@ -600,9 +601,18 @@ export function resolveFormXIXWorkbookSheetName(workbook, hints = {}) {
 
 export const formatWorkmanNameAndGuardian = (emp = {}) => {
   const fn = String(emp.FirstName || emp['FirstName'] || emp.firstName || emp['First Name'] || '').trim();
+  const mn = String(
+    emp.MiddleName ||
+      emp['MiddleName'] ||
+      emp.middleName ||
+      emp['Middle Name'] ||
+      emp.middle_name ||
+      emp.Middle_Name ||
+      ''
+  ).trim();
   const ln = String(emp.LastName || emp['LastName'] || emp.lastName || emp['Last Name'] || '').trim();
   const name =
-    (fn && ln ? `${fn} ${ln}` : fn || ln || '') ||
+    [fn, mn, ln].filter(Boolean).join(' ').trim() ||
     String(emp.Name || emp['Name'] || emp.EmployeeName || emp['Employee Name'] || '').trim();
   const guardian = String(
     emp.Father_s_Name ||

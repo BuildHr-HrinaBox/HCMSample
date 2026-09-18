@@ -9,6 +9,24 @@
   },
   "projects": [
     {
+      "idx": 2,
+      "id": "31459000000036009",
+      "name": "CMSVayona",
+      "domain": {
+        "id": "50039564684",
+        "name": "cmsvayona-60066164950.development"
+      },
+      "timezone": "Asia/Kolkata",
+      "env": [
+        {
+          "idx": 1,
+          "id": "60066164950",
+          "name": "Development",
+          "type": 3
+        }
+      ]
+    },
+    {
       "idx": 1,
       "id": "31459000000468003",
       "name": "HCM",
@@ -22,7 +40,15 @@
           "idx": 1,
           "id": "60066164950",
           "name": "Development",
-          "type": 3
+          "type": 3,
+          "env_status": "Active",
+          "project_details": {
+            "project_name": "HCM",
+            "id": "31459000000468003",
+            "project_type": "Live"
+          },
+          "is_default": false,
+          "action_required": false
         }
       ]
     }

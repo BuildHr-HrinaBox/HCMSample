@@ -103,4 +103,56 @@ describe('Form P Karnataka PDF Excel model', () => {
     expect(estAt).toBeGreaterThanOrEqual(0);
     expect(detailsAt).toBeGreaterThan(estAt);
   });
+
+  test('detects Form_P_-_Maharashtra.xlsx notice and keeps leave days/dates (not shift times)', () => {
+    expect(
+      looksLikeFormPKarnatakaPdfContext([], [['NOTICE']], 'FORM P', 'Form_P_-_Maharashtra.xlsx')
+    ).toBe(true);
+    expect(
+      looksLikeFormPKarnatakaPdfContext([], [], 'FORM P', 'Form_P_Maharashtra_Asha_Patil.xlsx')
+    ).toBe(true);
+
+    const mhRows = [
+      ["Form – 'P'"],
+      ['(See rule 20)'],
+      ['NOTICE OF MAXIMUM LEAVE ACCUMULATED'],
+      ['Name and address of the establishment : LOHARA Site'],
+      ['Name of the Authorised person / Manager'],
+      ['To,'],
+      ['Shri/Smt. Asha Patil'],
+      ['Address: LOHARA Site'],
+      [
+        'It is hereby informed that as per section 18 (5) of the Maharashtra Shops and Establishments Act, 2017 the maximum leave that can be accumulated is for 45 days.',
+      ],
+      ['Details of the leave accumulated'],
+      ['Sr. No.', 'Number of accumulated leave', 'Period for which leave is accumulated', ''],
+      ['', '', 'From', 'Till'],
+      // Real leave row
+      ['1', '2', '31 Aug 2026', '01 Sept 2026'],
+      // Template residue that previously leaked into PDF From/Till
+      ['', '', '09:00 AM', '05:00 PM'],
+    ];
+    const normalized = normalizeFormPKarnatakaPdfMatrix(mhRows, 4, 0, []);
+    expect(normalized.formPKAModel.leaveRows[0][1]).toBe('2');
+    expect(normalized.formPKAModel.leaveRows[0][2]).toMatch(/31 Aug 2026/);
+    expect(normalized.formPKAModel.leaveRows[0][3]).toMatch(/01 Sept 2026/);
+    const joinedLeave = normalized.formPKAModel.leaveRows.flat().join(' ');
+    expect(joinedLeave).not.toMatch(/09:00\s*AM/i);
+    expect(joinedLeave).not.toMatch(/05:00\s*PM/i);
+  });
+
+  test('skips leave rows that only contain shift clock times', () => {
+    const rows = [
+      ['Details of the leave accumulated'],
+      ['Sr. No.', 'Number of accumulated leave', 'Period for which leave is accumulated', ''],
+      ['', '', 'From', 'Till'],
+      ['1', '', '09:00 AM', '05:00 PM'],
+      ['2', '3', '10-Jun-2026', '12-Jun-2026'],
+    ];
+    const normalized = normalizeFormPKarnatakaPdfMatrix(rows, 4, 0, []);
+    expect(normalized.formPKAModel.leaveRows[0][0]).toBe('2');
+    expect(normalized.formPKAModel.leaveRows[0][1]).toBe('3');
+    expect(normalized.formPKAModel.leaveRows[0][2]).toMatch(/10-Jun-2026/);
+    expect(normalized.formPKAModel.leaveRows[0][3]).toMatch(/12-Jun-2026/);
+  });
 });

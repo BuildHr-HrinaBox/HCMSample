@@ -495,6 +495,21 @@ export function isFormLGJWorkerNameHeader(header) {
   return /name\s+of\s+the\s+worker/.test(normHeaderLabel(header));
 }
 
+/** Title-case worker names for Form L Excel (lookup helpers store lowercase). */
+export function toFormLGJPersonNameDisplay(value) {
+  const s = String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!s) return '';
+  return s
+    .split(' ')
+    .map((word) => {
+      if (!word) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
 export function isFormLGJDesignationHeader(header) {
   return /^designation$/.test(normHeaderLabel(header));
 }
@@ -1106,6 +1121,9 @@ export async function buildFormLGJGujaratWorkbookWithTemplateStyles({
       if (bucket === 'sno') {
         const n = Number(String(val).replace(/[,]/g, '').trim());
         cell.value = Number.isFinite(n) ? n : String(val);
+      } else if (bucket === 'workerName') {
+        // Autofill lookup names are lowercased; write Title Case in Excel.
+        cell.value = toFormLGJPersonNameDisplay(val);
       } else {
         cell.value = String(val);
       }

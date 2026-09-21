@@ -73,9 +73,20 @@ function isFormLGJIdentityHeaderText(text) {
   );
 }
 
+function readFormLGJHeaderLeafAtCol(rows, fromRow, toRow, col) {
+  for (let r = fromRow; r <= toRow; r += 1) {
+    const t = String(rows[r]?.[col] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!t || isFormLGJDateOfMonthGroupLabel(t)) continue;
+    return t;
+  }
+  return '';
+}
+
 /**
  * One wide "Date of the Month" heading across 1st/2nd/3rd Shift columns
- * (Excel repeats the label per shift column).
+ * (Excel repeats the label per shift column). Never swallow Weekly holiday.
  */
 export function detectFormLGJGujaratPdfGroupBands(rows, tableStart, headerBandEnd, colCount) {
   if (!Array.isArray(rows) || colCount < 2) return [];
@@ -109,18 +120,27 @@ export function detectFormLGJGujaratPdfGroupBands(rows, tableStart, headerBandEn
         .replace(/\s+/g, ' ')
         .trim();
       if (group && !isFormLGJDateOfMonthGroupLabel(group)) break;
-      let leaf = '';
-      for (let r = dateRow; r <= end; r += 1) {
-        const t = String(rows[r]?.[c] || '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        if (!t || isFormLGJDateOfMonthGroupLabel(t)) continue;
-        leaf = t;
-        break;
-      }
+      const leaf = readFormLGJHeaderLeafAtCol(rows, dateRow, end, c);
+      if (isFormLGJWeeklyHolidayHeaderText(group) || isFormLGJWeeklyHolidayHeaderText(leaf)) break;
       if (leaf && isFormLGJIdentityHeaderText(leaf) && !isFormLGJShiftGroupLabel(leaf)) break;
       bandEnd = c;
     }
+  }
+  // Trim trailing Weekly holiday / identity columns if Date-of-Month text leaked into them.
+  while (bandEnd > bandStart) {
+    const group = String(rows[dateRow]?.[bandEnd] || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const leaf = readFormLGJHeaderLeafAtCol(rows, dateRow, end, bandEnd);
+    if (
+      isFormLGJWeeklyHolidayHeaderText(group) ||
+      isFormLGJWeeklyHolidayHeaderText(leaf) ||
+      (leaf && isFormLGJIdentityHeaderText(leaf) && !isFormLGJShiftGroupLabel(leaf) && !isFormLGJDateOfMonthGroupLabel(leaf))
+    ) {
+      bandEnd -= 1;
+      continue;
+    }
+    break;
   }
   if (!(bandEnd > bandStart)) return [];
   return [
@@ -131,6 +151,72 @@ export function detectFormLGJGujaratPdfGroupBands(rows, tableStart, headerBandEn
       label: 'Date of the Month',
     },
   ];
+}
+
+/**
+ * Excel often repeats "Weekly holiday day" down its merged column, so the PDF
+ * paints it again on the 1st/2nd/3rd Shift row (looks like it sits under 3rd Shift).
+ * Keep the label only on the top header row of that column; never inside shift cols.
+ */
+export function sanitizeFormLGJGujaratPdfHeaderRows(rows, colCount, tableStartRow = 0) {
+  if (!Array.isArray(rows) || rows.length === 0 || colCount <= 0) return rows;
+  const start = Math.max(0, Number(tableStartRow) || 0);
+  const headerEnd = Math.min(rows.length - 1, start + 5);
+  let weeklyHolidayCol = -1;
+  const shiftCols = new Set();
+  const shiftLabelRows = new Set();
+  const fromToRows = new Set();
+
+  for (let r = start; r <= headerEnd; r += 1) {
+    const row = rows[r] || [];
+    for (let c = 0; c < colCount; c += 1) {
+      const t = String(row[c] || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!t) continue;
+      if (isFormLGJWeeklyHolidayHeaderText(t) && weeklyHolidayCol < 0) weeklyHolidayCol = c;
+      if (isFormLGJShiftGroupLabel(t)) {
+        shiftCols.add(c);
+        shiftLabelRows.add(r);
+      }
+      if (/from\s*[-–—]\s*to/i.test(t) || /^(from|to)(\s*[-–—]\s*(from|to)?)?$/i.test(t)) {
+        fromToRows.add(r);
+        shiftCols.add(c);
+      }
+    }
+  }
+  if (weeklyHolidayCol < 0 && shiftCols.size === 0) return rows;
+
+  let weeklyHolidayTopRow = -1;
+  if (weeklyHolidayCol >= 0) {
+    for (let r = start; r <= headerEnd; r += 1) {
+      if (isFormLGJWeeklyHolidayHeaderText(rows[r]?.[weeklyHolidayCol])) {
+        weeklyHolidayTopRow = r;
+        break;
+      }
+    }
+  }
+
+  return rows.map((row, rowIndex) => {
+    if (rowIndex < start || rowIndex > headerEnd || !Array.isArray(row)) return row;
+    const next = [...row];
+    let changed = false;
+    for (let c = 0; c < colCount; c += 1) {
+      if (!isFormLGJWeeklyHolidayHeaderText(next[c])) continue;
+      const inShiftCol = shiftCols.has(c);
+      const isHolidayCol = c === weeklyHolidayCol;
+      const onShiftOrFromToRow = shiftLabelRows.has(rowIndex) || fromToRows.has(rowIndex);
+      const duplicateHoliday =
+        isHolidayCol &&
+        weeklyHolidayTopRow >= 0 &&
+        rowIndex > weeklyHolidayTopRow;
+      if (inShiftCol || (isHolidayCol && (onShiftOrFromToRow || duplicateHoliday))) {
+        next[c] = '';
+        changed = true;
+      }
+    }
+    return changed ? next : row;
+  });
 }
 
 /** Keep Name / shift / weekly-holiday heading boxes wide enough to read. */

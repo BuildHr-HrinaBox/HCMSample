@@ -1,12 +1,14 @@
 import {
   applyFormDGJGujaratEmployeeToRow,
   applyFormDGJGujaratPaidDaysToRows,
+  clearFormDGJGujaratHeaderMetaBoxes,
   computeFormDGJGujaratRemarksHours,
   FORM_DGJ_GJ_CANONICAL_TABLE_HEADERS,
   FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_1,
   FORM_DGJ_GJ_ELECTRONIC_FORMAT_NOTE_2,
   FORM_DGJ_GJ_GOVERNOR_ORDER_NOTE,
   isFormDGJGujaratOuterFootnoteText,
+  isFormDGJGujaratPlainHeaderMetaLabel,
   isFormDGJRemarksNoOfHoursHeader,
   isFormDGJSummaryNoOfDaysHeader,
   readFormDGJGujaratPaidDays,
@@ -74,7 +76,7 @@ describe('Form D Gujarat Summary No. of Days ← Paid_days', () => {
     expect(rows[1]['Remarks No. of Hours']).toBe('208');
   });
 
-  test('matches Summery spelling and falls back to payroll name when emp lookup misses', () => {
+  test('matches Summery spelling by FirstName + LastName from Name column', () => {
     const headers = [
       'Sr. No. in Employee / Workman / Worker Register',
       'Name',
@@ -85,12 +87,28 @@ describe('Form D Gujarat Summary No. of Days ← Paid_days', () => {
     expect(isFormDGJSummaryNoOfDaysHeader('Summery No. of Days')).toBe(true);
     const rows = [{ Name: 'Vasan Jagad', 'Summery No. of Days': '', 'Remarks No. of Hours': '' }];
     const hits = applyFormDGJGujaratPaidDaysToRows(rows, [null], headers, {
-      payrollRows: [{ employee_name: 'Vasan Jagad', Paid_days: 28 }],
+      payrollRows: [{ first_name: 'Vasan', last_name: 'Jagad', Paid_days: 28 }],
       resolvePayrollRow: () => null,
     });
     expect(hits).toBe(1);
     expect(rows[0]['Summery No. of Days']).toBe('28');
     expect(rows[0]['Remarks No. of Hours']).toBe('224');
+  });
+
+  test('does not match payroll on first name only', () => {
+    const headers = [...FORM_DGJ_GJ_CANONICAL_TABLE_HEADERS];
+    const rows = [{ Name: 'Vasan Jagad', 'Summary No. of Days': '', 'Remarks No. of Hours': '' }];
+    const hits = applyFormDGJGujaratPaidDaysToRows(
+      rows,
+      [{ FirstName: 'Vasan', LastName: 'Jagad' }],
+      headers,
+      {
+        payrollRows: [{ first_name: 'Vasan', last_name: 'Kumar', Paid_days: 28 }],
+        resolvePayrollRow: () => null,
+      }
+    );
+    expect(hits).toBe(0);
+    expect(rows[0]['Summary No. of Days']).toBe('');
   });
 });
 
@@ -150,5 +168,68 @@ describe('Form D Gujarat outer footnotes', () => {
     expect(excelJSCellHasBorder(ws.getCell(25, 1))).toBe(true);
     // Old far System Generated copy removed.
     expect(String(ws.getCell(30, 1).value ?? '')).toBe('');
+  });
+});
+
+describe('Form D Gujarat header meta boxes (plain text)', () => {
+  const boxBorder = {
+    top: { style: 'thin' },
+    left: { style: 'thin' },
+    bottom: { style: 'thin' },
+    right: { style: 'thin' },
+  };
+
+  test('detects first 5 meta labels and skips period', () => {
+    expect(isFormDGJGujaratPlainHeaderMetaLabel('Name of Establishment : Alfanar')).toBe(true);
+    expect(isFormDGJGujaratPlainHeaderMetaLabel('Name of Owner :')).toBe(true);
+    expect(isFormDGJGujaratPlainHeaderMetaLabel('Labour Identification No :')).toBe(true);
+    expect(
+      isFormDGJGujaratPlainHeaderMetaLabel(
+        'Name and address of Principal Employer : Amreli Renewable'
+      )
+    ).toBe(true);
+    expect(
+      isFormDGJGujaratPlainHeaderMetaLabel('*Labour Identification No of Principal Employer:')
+    ).toBe(true);
+    expect(isFormDGJGujaratPlainHeaderMetaLabel('For the period From 01-07-2026 to 31-07-2026')).toBe(
+      false
+    );
+  });
+
+  test('clears borders on first 5 header fields but keeps period and table', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM D');
+    const meta = [
+      [7, 'Name of Establishment : Alfanar Site'],
+      [10, 'Name of Owner :'],
+      [12, 'Labour Identification No :'],
+      [14, 'Name and address of Principal Employer : Amreli'],
+      [16, '*Labour Identification No of Principal Employer:'],
+    ];
+    meta.forEach(([row, text]) => {
+      ws.getCell(row, 1).value = text;
+      for (let c = 1; c <= 4; c += 1) {
+        ws.getCell(row, c).border = { ...boxBorder };
+        ws.getCell(row + 1, c).border = { ...boxBorder };
+      }
+    });
+    ws.getCell(19, 1).value = 'For the period From 01-07-2026 to 31-07-2026';
+    for (let c = 1; c <= 4; c += 1) ws.getCell(19, c).border = { ...boxBorder };
+    for (let c = 1; c <= 6; c += 1) {
+      ws.getCell(22, c).border = { ...boxBorder };
+      ws.getCell(22, c).value = c === 1 ? 'Sr. No.' : '';
+    }
+
+    clearFormDGJGujaratHeaderMetaBoxes(ws, { headerRowEnd: 21, colTo: 6 });
+
+    expect(excelJSCellHasBorder(ws.getCell(7, 1))).toBe(false);
+    expect(excelJSCellHasBorder(ws.getCell(10, 1))).toBe(false);
+    expect(excelJSCellHasBorder(ws.getCell(12, 1))).toBe(false);
+    expect(excelJSCellHasBorder(ws.getCell(14, 1))).toBe(false);
+    expect(excelJSCellHasBorder(ws.getCell(16, 1))).toBe(false);
+    expect(String(ws.getCell(7, 1).value ?? '')).toContain('Name of Establishment');
+    // Period box and muster table borders remain.
+    expect(excelJSCellHasBorder(ws.getCell(19, 1))).toBe(true);
+    expect(excelJSCellHasBorder(ws.getCell(22, 1))).toBe(true);
   });
 });

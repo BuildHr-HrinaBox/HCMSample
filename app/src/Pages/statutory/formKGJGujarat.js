@@ -6,6 +6,10 @@ import {
   isFormKGJHolidayCaptionText,
   isFormKGJTruncatedWeeklyIntroText,
 } from '../../utils/statutoryDraftPdf.formKGJ.GJ';
+import {
+  readFormPGJShiftEndFromEmployee,
+  readFormPGJShiftStartFromEmployee,
+} from './formPGJGujarat';
 
 /** Gujarat Form K — worker register (name, designation, weekly holiday, hours of work). */
 
@@ -103,9 +107,16 @@ export function isFormKGJHoursOfWorkHeader(header) {
   return /hours?\s+of\s+work/.test(s) || (/\bhours?\b/.test(s) && /\bwork\b/.test(s));
 }
 
-/** Manual entry only — never map from People / payroll. */
+/** Block generic People header fuzzy-match on Hours of Work (filled via shift times). */
 export function isFormKGJSkipPeopleAutofillHeader(header) {
   return isFormKGJHoursOfWorkHeader(header);
+}
+
+export function formatFormKGJHoursOfWorkFromEmployee(emp) {
+  const start = String(readFormPGJShiftStartFromEmployee(emp) || '').trim();
+  const end = String(readFormPGJShiftEndFromEmployee(emp) || '').trim();
+  if (start && end) return `${start} to ${end}`;
+  return start || end || '';
 }
 
 export function headersIndicateFormKGJGujaratTable(tableHeaders) {
@@ -198,10 +209,6 @@ export function applyFormKGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
   if (fullName) out.__employeeLookupName = fullName;
 
   hdrs.forEach((header) => {
-    if (isFormKGJSkipPeopleAutofillHeader(header)) {
-      setCell(header, '');
-      return;
-    }
     if (isFormKGJSerialHeader(header)) {
       setCell(header, String(rowIndex + 1));
       return;
@@ -216,6 +223,10 @@ export function applyFormKGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
     }
     if (isFormKGJWeeklyHolidayHeader(header)) {
       setCell(header, FORM_KGJ_WEEKLY_HOLIDAY_DEFAULT);
+      return;
+    }
+    if (isFormKGJHoursOfWorkHeader(header)) {
+      setCell(header, formatFormKGJHoursOfWorkFromEmployee(emp));
     }
   });
 
@@ -226,27 +237,20 @@ export function enrichFormKGJGujaratStaticFieldRows(mappedData, headers, { overw
   if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
   const hdrs = resolveFormKGJGujaratTableHeaders(headers);
   const holidayHdrs = hdrs.filter(isFormKGJWeeklyHolidayHeader);
-  const hoursHdrs = hdrs.filter(isFormKGJHoursOfWorkHeader);
-  if (holidayHdrs.length === 0 && hoursHdrs.length === 0) return 0;
+  if (holidayHdrs.length === 0) return 0;
   let hits = 0;
   mappedData.forEach((row) => {
     if (!row || typeof row !== 'object') return;
     const holidayKeys = new Set(holidayHdrs);
-    const hoursKeys = new Set(hoursHdrs);
     Object.keys(row).forEach((key) => {
       if (String(key).startsWith('__')) return;
       if (isFormKGJWeeklyHolidayHeader(key)) holidayKeys.add(key);
-      if (isFormKGJHoursOfWorkHeader(key)) hoursKeys.add(key);
     });
     holidayKeys.forEach((header) => {
       if (!overwrite && !cellIsEmpty(row[header])) return;
       row[header] = FORM_KGJ_WEEKLY_HOLIDAY_DEFAULT;
     });
-    hoursKeys.forEach((header) => {
-      if (!overwrite && !cellIsEmpty(row[header])) return;
-      row[header] = '';
-    });
-    if (holidayKeys.size > 0 || hoursKeys.size > 0) hits += 1;
+    if (holidayKeys.size > 0) hits += 1;
   });
   return hits;
 }
@@ -410,17 +414,47 @@ function detectFormKGJGujaratTableLayout(worksheet, hints = {}) {
   }
   if (headerRow < 1) return null;
 
+  const readHeaderBandLabel = (c) => {
+    for (let r = headerRow; r <= headerRow + 3; r += 1) {
+      const t = getMergedAwareCellText(r, c);
+      if (t) return t;
+    }
+    return '';
+  };
+
   const templateCols = [];
+  const seenCols = new Set();
+  const pushTemplateCol = (c, label) => {
+    if (!label || seenCols.has(c)) return;
+    const bucket = formKGJHeaderAliasBucket(normHeaderLabel(label));
+    seenCols.add(c);
+    templateCols.push({ col: c, label, bucket });
+  };
+
   for (let c = startCol; c <= startCol + 12; c += 1) {
-    const label = getMergedAwareCellText(headerRow, c);
+    const label = readHeaderBandLabel(c);
     if (!label) {
       if (templateCols.length >= 5) break;
       continue;
     }
-    const bucket = formKGJHeaderAliasBucket(normHeaderLabel(label));
-    templateCols.push({ col: c, label, bucket });
+    pushTemplateCol(c, label);
     if (templateCols.length >= 8) break;
   }
+
+  if (!templateCols.some(({ bucket }) => bucket === 'hoursOfWork')) {
+    for (let c = startCol; c <= startCol + 12; c += 1) {
+      for (let r = headerRow; r <= headerRow + 3; r += 1) {
+        const label = getMergedAwareCellText(r, c);
+        if (label && isFormKGJHoursOfWorkHeader(label)) {
+          pushTemplateCol(c, label);
+          break;
+        }
+      }
+      if (templateCols.some(({ bucket }) => bucket === 'hoursOfWork')) break;
+    }
+  }
+
+  templateCols.sort((a, b) => a.col - b.col);
   if (templateCols.length < 4) return null;
 
   const dataStartRow =

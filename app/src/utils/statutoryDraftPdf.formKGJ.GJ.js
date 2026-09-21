@@ -105,6 +105,57 @@ function isFormKGJSerialHeaderText(text) {
  * Gujarat Form K templates keep an empty column A left of Sr. No.
  * Drop leading spacer columns so the PDF table starts at Sr. No.
  */
+const FORM_KGJ_GJ_WEEKLY_HOLIDAY_DEFAULT = 'Saturday & Sunday';
+
+function isFormKGJHoursOfWorkHeaderText(text) {
+  const s = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return /hours?\s+of\s+work/.test(s) || (/\bhours?\b/.test(s) && /\bwork\b/.test(s));
+}
+
+/**
+ * Template sample rows sometimes copy weekly holiday into the Hours column.
+ * Clear that placeholder so PDF shows fetched shift hours (or blank).
+ */
+export function sanitizeFormKGJGujaratPdfDataRows(
+  rows,
+  colCount,
+  tableStartRow = 0,
+  weeklyHolidayDefault = FORM_KGJ_GJ_WEEKLY_HOLIDAY_DEFAULT
+) {
+  if (!Array.isArray(rows) || rows.length === 0 || colCount <= 0) return rows;
+  const startRow = Math.max(0, Number(tableStartRow) || 0);
+  let hoursCol = -1;
+  for (let r = startRow; r < Math.min(rows.length, startRow + 6); r += 1) {
+    const row = rows[r] || [];
+    for (let c = 0; c < colCount; c += 1) {
+      if (isFormKGJHoursOfWorkHeaderText(row[c])) {
+        hoursCol = c;
+        break;
+      }
+    }
+    if (hoursCol >= 0) break;
+  }
+  if (hoursCol < 0) return rows;
+  const holidayNorm = String(weeklyHolidayDefault || '').trim().toLowerCase();
+  return rows.map((row, rowIndex) => {
+    if (rowIndex <= startRow || !Array.isArray(row)) return row;
+    const cell = String(row[hoursCol] ?? '').trim();
+    if (!cell) return row;
+    if (cell.toLowerCase() === holidayNorm) {
+      const next = [...row];
+      next[hoursCol] = '';
+      return next;
+    }
+    return row;
+  });
+}
+
 export function trimFormKGJGujaratLeadingBlankPdfColumns(rows, colCount, tableStartRow = 0) {
   if (!Array.isArray(rows) || rows.length === 0 || colCount <= 1) {
     return { rows, colCount };

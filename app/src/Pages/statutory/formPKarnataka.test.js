@@ -148,6 +148,40 @@ describe('Form P Karnataka per-employee notice ZIP', () => {
     expect(text).not.toMatch(/House 2, Mysuru/i);
   });
 
+  test('writeFormPKarnatakaLeaveTableRow clears shift-time residue and stamps leave dates', async () => {
+    const { writeFormPKarnatakaLeaveTableRow } = await import('./formPKarnataka');
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('FORM P');
+    ws.getCell(14, 3).value = 'Sr. No.';
+    ws.getCell(14, 4).value = 'Number of accumulated leave';
+    ws.mergeCells(14, 5, 14, 6);
+    ws.getCell(14, 5).value = 'Period for which leave is accumulated';
+    ws.getCell(15, 5).value = 'From';
+    ws.getCell(15, 6).value = 'Till';
+    ws.getCell(16, 3).value = '1';
+    ws.getCell(16, 4).value = '';
+    ws.getCell(16, 5).value = '09:00 AM';
+    ws.getCell(16, 6).value = '05:00 PM';
+    ws.getCell(17, 5).value = '09:00 AM';
+    ws.getCell(17, 6).value = '05:00 PM';
+
+    const written = writeFormPKarnatakaLeaveTableRow(
+      ws,
+      {
+        'Number of accumulated leave': '2',
+        'Period for which leave is accumulated_From': '31 Aug 2026',
+        'Period for which leave is accumulated_Till': '01 Sept 2026',
+      },
+      {}
+    );
+    expect(written).toBe(1);
+    expect(String(ws.getCell(16, 4).value)).toBe('2');
+    expect(String(ws.getCell(16, 5).value)).toMatch(/31 Aug 2026/);
+    expect(String(ws.getCell(16, 6).value)).toMatch(/01 Sept 2026/);
+    expect(String(ws.getCell(17, 5).value || '')).toBe('');
+    expect(String(ws.getCell(17, 6).value || '')).toBe('');
+  });
+
   test('single employee download stays a single xlsx (not a ZIP)', async () => {
     const buf = await makeFormPKarnatakaNoticeTemplateBuffer();
     const { blob, fileName } = await buildFormPKarnatakaPerEmployeeDownload({

@@ -13,6 +13,33 @@ import {
 
 export const FORM_OGJ_PERIOD_PARENT = 'Period for which leave is accumulated';
 
+/** Form O / Form P accumulated-leave notices map to Zoho Contingency Leave. */
+export const FORM_OGJ_CONTINGENCY_LEAVE_TYPE_ALIASES = [
+  'contingency leave',
+  'contingency',
+  'cl',
+];
+
+function leaveTypeMatchesFormOGJContingency(label) {
+  const normalized = String(label || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return false;
+  return FORM_OGJ_CONTINGENCY_LEAVE_TYPE_ALIASES.some((alias) => {
+    const a = String(alias || '')
+      .toLowerCase()
+      .trim();
+    if (!a) return false;
+    if (normalized === a) return true;
+    if (a.length >= 3 && (normalized.startsWith(`${a} `) || normalized.endsWith(` ${a}`) || normalized.includes(` ${a} `))) {
+      return true;
+    }
+    return a.length >= 4 && normalized.includes(a);
+  });
+}
+
 export const FORM_OGJ_GJ_CANONICAL_TABLE_HEADERS = [
   'Sr. No.',
   'Name of Workers',
@@ -73,6 +100,13 @@ function formOGJContextBlob(formHeader, rowItem, fileName, sheetText = '', table
     .toLowerCase();
 }
 
+function formPAccumulatedLeaveTableHints(parts) {
+  return (
+    /accumulated\s+leave/.test(parts) &&
+    (/sr\.?\s*no/.test(parts) || /period|perod/.test(parts) || /\bfrom\b/.test(parts))
+  );
+}
+
 /** Karnataka Form P is the accumulated-leave notice (same table as Gujarat Form O). */
 export function isFormPKarnatakaAccumulatedLeaveContext(
   formHeader,
@@ -86,16 +120,38 @@ export function isFormPKarnatakaAccumulatedLeaveContext(
   if (/\bform[\s._-]*p[\s._-]*gj\b/.test(parts) || (/gujarat/.test(parts) && !/karnataka/.test(parts))) {
     return false;
   }
+  if (/maharashtra/.test(parts) && !/karnataka/.test(parts)) return false;
   if (/muster[\s-]*roll/.test(parts) || /date\s+of\s+(the\s+)?month/.test(parts)) return false;
   const isFormP = /\bform[\s._-]*p\b/.test(parts) || /form_p_/.test(parts);
   const isKA =
     /karnataka/.test(parts) ||
     /form[\s._-]*p[\s._-]*ka\b/.test(parts) ||
     /form_p_-_karnataka/.test(parts);
-  const hasLeaveTable =
-    /accumulated\s+leave/.test(parts) &&
-    (/sr\.?\s*no/.test(parts) || /period|perod/.test(parts) || /\bfrom\b/.test(parts));
-  return isFormP && isKA && hasLeaveTable;
+  return isFormP && isKA && formPAccumulatedLeaveTableHints(parts);
+}
+
+/** Maharashtra Form P — notice of accumulated leave (same table as Gujarat Form O / Karnataka Form P). */
+export function isFormPMaharashtraAccumulatedLeaveContext(
+  formHeader,
+  rowItem,
+  fileName,
+  sheetText = '',
+  tableHeaders = []
+) {
+  const parts = formOGJContextBlob(formHeader, rowItem, fileName, sheetText, tableHeaders);
+  if (!parts) return false;
+  if (/\bform[\s._-]*p[\s._-]*gj\b/.test(parts) || (/gujarat/.test(parts) && !/maharashtra/.test(parts))) {
+    return false;
+  }
+  if (/karnataka/.test(parts) && !/maharashtra/.test(parts)) return false;
+  if (/muster[\s-]*roll/.test(parts) || /date\s+of\s+(the\s+)?month/.test(parts)) return false;
+  const isFormP = /\bform[\s._-]*p\b/.test(parts) || /form_p_/.test(parts);
+  const isMH =
+    /maharashtra/.test(parts) ||
+    /form[\s._-]*p[\s._-]*mh\b/.test(parts) ||
+    /form_p_-_maharashtra/.test(parts);
+  // Filename Form_P_-_Maharashtra.xlsx is enough; table headers confirm when present.
+  return isFormP && isMH && (formPAccumulatedLeaveTableHints(parts) || /form_p_-_maharashtra/.test(parts));
 }
 
 export function isFormOGJGujaratContext(
@@ -109,6 +165,9 @@ export function isFormOGJGujaratContext(
 
   if (/\bform\s*q\b|\bform_q\b|form[\s._-]*q[\s._-]*gj/.test(parts)) return false;
   if (isFormPKarnatakaAccumulatedLeaveContext(formHeader, rowItem, fileName, sheetText, tableHeaders)) {
+    return true;
+  }
+  if (isFormPMaharashtraAccumulatedLeaveContext(formHeader, rowItem, fileName, sheetText, tableHeaders)) {
     return true;
   }
   if (/\bform\s*p\b|\bform_p\b|form[\s._-]*p[\s._-]*gj/.test(parts)) return false;
@@ -488,6 +547,23 @@ export function filterApprovedLeaveRecordsForFormOGJMonth(records, monthFrom, mo
   );
 }
 
+/** Accumulated-leave notices (esp. Form P MH) use Contingency Leave only — not Earned Leave. */
+export function isApprovedLeaveContingencyForFormOGJ(record) {
+  const leaveType = readApprovedLeaveLeaveType(record);
+  if (!leaveType) return false;
+  return leaveTypeMatchesFormOGJContingency(leaveType);
+}
+
+export function filterApprovedLeaveRecordsForFormOGJContingency(records, monthFrom, monthTo) {
+  const monthFiltered =
+    monthFrom && monthTo
+      ? filterApprovedLeaveRecordsForFormOGJMonth(records, monthFrom, monthTo)
+      : Array.isArray(records)
+        ? records
+        : [];
+  return monthFiltered.filter(isApprovedLeaveContingencyForFormOGJ);
+}
+
 function unwrapEmployeeRecord(emp) {
   return emp?.Employee || emp?.employee || emp;
 }
@@ -855,8 +931,13 @@ export function applyFormOGJGujaratApprovedLeaveAutofill(
     monthFrom,
     monthTo
   );
-  const recordsToUse =
+  let recordsToUse =
     monthFrom && monthTo ? monthFiltered : approvedLeaveRecords;
+  if (options.contingencyLeaveOnly) {
+    recordsToUse = (Array.isArray(recordsToUse) ? recordsToUse : []).filter(
+      isApprovedLeaveContingencyForFormOGJ
+    );
+  }
   const usedRecordKeys = new Set();
   let hits = 0;
 
@@ -924,12 +1005,48 @@ export function enrichFormOGJGujaratDisplayHeader(formHeader, fileName, rowItem,
     '',
     tableHeaders
   );
+  const isPMH = isFormPMaharashtraAccumulatedLeaveContext(
+    formHeader,
+    rowItem,
+    fileName,
+    '',
+    tableHeaders
+  );
+  if (isPMH) {
+    return {
+      ...(formHeader || {}),
+      // Always override — templates / prior Form O parse can leave "FORM - O" + rule 18.
+      title: "Form – 'P'",
+      subtitle: '(See rule 20)',
+      reference: 'NOTICE OF MAXIMUM LEAVE ACCUMULATED',
+      formOGJGujaratTableLayout: true,
+      formPMaharashtraLeaveLayout: true,
+      formPKarnatakaLeaveLayout: false,
+    };
+  }
+  if (isPKA) {
+    return {
+      ...(formHeader || {}),
+      title:
+        formHeader?.title && /form\s*[-–]?\s*['']?p['']?/i.test(String(formHeader.title))
+          ? formHeader.title
+          : 'FORM P',
+      subtitle:
+        formHeader?.subtitle && /rule\s*20/i.test(String(formHeader.subtitle))
+          ? formHeader.subtitle
+          : '(See rule 20)',
+      formOGJGujaratTableLayout: true,
+      formPKarnatakaLeaveLayout: true,
+      formPMaharashtraLeaveLayout: false,
+    };
+  }
   return {
     ...(formHeader || {}),
-    title: formHeader?.title || (isPKA ? 'FORM P' : 'FORM - O'),
-    subtitle: formHeader?.subtitle || (isPKA ? '' : '(See rule 18)'),
+    title: formHeader?.title || 'FORM - O',
+    subtitle: formHeader?.subtitle || '(See rule 18)',
     formOGJGujaratTableLayout: true,
-    formPKarnatakaLeaveLayout: isPKA || !!formHeader?.formPKarnatakaLeaveLayout,
+    formPKarnatakaLeaveLayout: !!formHeader?.formPKarnatakaLeaveLayout,
+    formPMaharashtraLeaveLayout: !!formHeader?.formPMaharashtraLeaveLayout,
   };
 }
 
@@ -1347,7 +1464,12 @@ export async function buildFormOGJGujaratWorkbookWithTemplateStyles({
         return;
       }
       if (bucket === 'periodFrom' || bucket === 'periodTill') {
-        cell.value = formatDate(val);
+        // Force text so Excel time formats cannot turn leave dates into 09:00 AM / 05:00 PM.
+        cell.numFmt = '@';
+        cell.value = String(formatDate(val) || '').trim();
+      } else if (bucket === 'leaveCount') {
+        cell.numFmt = '@';
+        cell.value = String(val).trim();
       } else if (bucket === 'sno') {
         const n = Number(String(val).replace(/[,]/g, '').trim());
         cell.value = Number.isFinite(n) ? n : String(val);

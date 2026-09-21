@@ -46,15 +46,25 @@ export function looksLikeFormPKarnatakaPdfContext(
   if (!blob && !sheetName && !fileName) return false;
   const nameBlob = `${sheetName || ''} ${fileName || ''}`.toLowerCase();
   if (/muster[\s-]*roll/.test(blob) || /date\s+of\s+(the\s+)?month/.test(blob)) return false;
-  if (/gujarat/.test(blob) && !/karnataka/.test(blob) && !/karnataka/.test(nameBlob)) return false;
+  if (/gujarat/.test(blob) && !/karnataka/.test(blob) && !/maharashtra/.test(blob) && !/karnataka|maharashtra/.test(nameBlob)) {
+    return false;
+  }
   if (/\bform[\s._-]*p[\s._-]*gj\b/.test(blob) || /form_p_gj/.test(blob) || /form_p_gj/.test(nameBlob)) {
     return false;
   }
 
-  const nameIsFormPKA =
+  // Form P KA / MH notice — filename alone is enough (ZIP members: Form_P_Maharashtra_Name.xlsx).
+  const nameIsFormPNotice =
     /form[\s._-]*p/.test(nameBlob) &&
-    (/karnataka/.test(nameBlob) || /form[\s._-]*p[\s._-]*ka\b/.test(nameBlob) || /form_p_-_karnataka/.test(nameBlob));
-  if (nameIsFormPKA) return true;
+    (/karnataka/.test(nameBlob) ||
+      /maharashtra/.test(nameBlob) ||
+      /form[\s._-]*p[\s._-]*ka\b/.test(nameBlob) ||
+      /form[\s._-]*p[\s._-]*mh\b/.test(nameBlob) ||
+      /form_p_-_karnataka/.test(nameBlob) ||
+      /form_p_-_maharashtra/.test(nameBlob) ||
+      /form_p_karnataka/.test(nameBlob) ||
+      /form_p_maharashtra/.test(nameBlob));
+  if (nameIsFormPNotice) return true;
 
   const isFormP =
     /form[\s._\-–—'"]*p\b/.test(blob) || /form_p_/.test(blob) || /\bform\s*p\b/.test(blob);
@@ -62,10 +72,14 @@ export function looksLikeFormPKarnatakaPdfContext(
     /karnataka/.test(blob) ||
     /form[\s._-]*p[\s._-]*ka\b/.test(blob) ||
     /form_p_-_karnataka/.test(blob);
+  const isMH =
+    /maharashtra/.test(blob) ||
+    /form[\s._-]*p[\s._-]*mh\b/.test(blob) ||
+    /form_p_-_maharashtra/.test(blob);
   const hasNotice = /notice of maximum leave accumulated/.test(blob);
   const hasRule20 = /see\s+rule\s*20/.test(blob);
   const hasShriSmt = /shri\s*\/?\s*smt/.test(blob);
-  if (isFormP && (isKA || hasRule20) && (hasNotice || hasShriSmt || hasRule20)) return true;
+  if (isFormP && (isKA || isMH || hasRule20) && (hasNotice || hasShriSmt || hasRule20)) return true;
   return Boolean(hasNotice && hasRule20 && hasShriSmt);
 }
 
@@ -145,8 +159,42 @@ function isFromTillRow(row) {
   return /\bfrom\b/.test(blob) && /\b(till|to)\b/.test(blob) && !/shri/.test(blob);
 }
 
-function packLeaveDataRow(row, startCol) {
+function isClockTimeOnly(text) {
+  const t = lower(text);
+  if (!t) return false;
+  // Shift leftovers (09:00 AM / 5 PM) must never land in leave From/Till.
+  if (/^\d{1,2}:\d{2}(\s*[ap]\.?m\.?)?$/i.test(t)) return true;
+  if (/^\d{1,2}\s*[ap]\.?m\.?$/i.test(t)) return true;
+  if (/^\d{1,2}:\d{2}:\d{2}/.test(t) && !/\d{4}/.test(t)) return true;
+  return false;
+}
+
+function looksLikeLeaveDate(text) {
+  const t = norm(text);
+  if (!t || isClockTimeOnly(t)) return false;
+  if (/\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{2,4}/.test(t)) return true;
+  if (/\d{1,2}[-/]\d{1,2}[-/]\d{2,4}/.test(t)) return true;
+  if (/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/i.test(t) && /\d{4}/.test(t)) {
+    return true;
+  }
+  return false;
+}
+
+function looksLikeLeaveCount(text) {
+  const t = norm(text);
+  if (!t || isClockTimeOnly(t)) return false;
+  return /^\d+(\.\d+)?$/.test(t);
+}
+
+function packLeaveDataRow(row, startCol, colMap = null) {
   const src = Array.isArray(row) ? row : [];
+  if (colMap && (colMap.sno >= 0 || colMap.leave >= 0 || colMap.from >= 0 || colMap.till >= 0)) {
+    const sno = colMap.sno >= 0 ? norm(src[colMap.sno]) : '';
+    const leave = colMap.leave >= 0 ? norm(src[colMap.leave]) : '';
+    const from = colMap.from >= 0 ? norm(src[colMap.from]) : '';
+    const till = colMap.till >= 0 ? norm(src[colMap.till]) : '';
+    return [sno, leave, from, till];
+  }
   const slice = src.slice(startCol, startCol + 4).map((c) => norm(c));
   if (slice.some(Boolean)) return slice;
   const packed = src.map((c) => norm(c)).filter(Boolean);
@@ -158,7 +206,7 @@ function packLeaveDataRow(row, startCol) {
   return out;
 }
 
-function isLeaveDataRow(row, startCol) {
+function isLeaveDataRow(row, startCol, colMap = null) {
   const blob = rowBlob(row);
   if (!blob) return false;
   if (isTitleLine(blob) || isLegalLine(blob) || isLeaveHeaderRow(row) || isFromTillRow(row)) return false;
@@ -167,8 +215,49 @@ function isLeaveDataRow(row, startCol) {
     return false;
   }
   if (isSystemGeneratedNote(blob)) return false;
-  const packed = packLeaveDataRow(row, startCol);
-  return packed.some((t) => t && !isDotsOnly(t));
+  const packed = packLeaveDataRow(row, startCol, colMap);
+  if (!packed.some((t) => t && !isDotsOnly(t))) return false;
+  // Reject template residue that only has shift times in From/Till.
+  const leaveOk = looksLikeLeaveCount(packed[1]);
+  const fromOk = looksLikeLeaveDate(packed[2]);
+  const tillOk = looksLikeLeaveDate(packed[3]);
+  const fromIsTime = isClockTimeOnly(packed[2]);
+  const tillIsTime = isClockTimeOnly(packed[3]);
+  if ((fromIsTime || tillIsTime) && !leaveOk && !fromOk && !tillOk) return false;
+  if (!leaveOk && !fromOk && !tillOk && !looksLikeLeaveCount(packed[0])) {
+    // Sr-only / empty body — keep only if something date-like exists elsewhere in the row.
+    return packed.some((t) => looksLikeLeaveDate(t) || looksLikeLeaveCount(t));
+  }
+  return true;
+}
+
+function resolveLeaveColumnMap(rows, headerRow, startCol) {
+  const map = { sno: startCol, leave: startCol + 1, from: startCol + 2, till: startCol + 3 };
+  const header = Array.isArray(rows?.[headerRow]) ? rows[headerRow] : [];
+  header.forEach((cell, c) => {
+    const t = lower(cell);
+    if (!t) return;
+    if (/^sr\.?\s*no/.test(t) || t === 'sr no') map.sno = c;
+    if (/number\s+of\s+accumulated\s+leave/.test(t) || (/accumulated\s+leave/.test(t) && !/period|perod/.test(t))) {
+      map.leave = c;
+    }
+  });
+  const scanTo = Math.min((rows || []).length - 1, headerRow + 4);
+  for (let r = headerRow; r <= scanTo; r += 1) {
+    const row = rows[r] || [];
+    row.forEach((cell, c) => {
+      const t = lower(cell);
+      if (t === 'from') map.from = c;
+      if (t === 'till' || t === 'to') map.till = c;
+    });
+  }
+  // Merged "Period …" parent often sits on From col; Till is the next non-empty leaf.
+  if (map.from >= 0 && map.till === map.from) map.till = map.from + 1;
+  if (map.from < 0 && map.leave >= 0) {
+    map.from = map.leave + 1;
+    map.till = map.leave + 2;
+  }
+  return map;
 }
 
 function extractLeaveRows(rows) {
@@ -184,6 +273,8 @@ function extractLeaveRows(rows) {
   }
   if (headerRow < 0) return [];
 
+  const colMap = resolveLeaveColumnMap(rows, headerRow, startCol);
+
   let dataStart = headerRow + 1;
   for (let r = headerRow; r <= Math.min(headerRow + 4, (rows || []).length - 1); r += 1) {
     if (isFromTillRow(rows[r])) {
@@ -194,11 +285,17 @@ function extractLeaveRows(rows) {
 
   const out = [];
   for (let r = dataStart; r < (rows || []).length; r += 1) {
-    if (!isLeaveDataRow(rows[r], startCol)) {
+    if (!isLeaveDataRow(rows[r], startCol, colMap)) {
       if (out.length) break;
       continue;
     }
-    const packed = packLeaveDataRow(rows[r], startCol);
+    const packed = packLeaveDataRow(rows[r], startCol, colMap);
+    // Drop pure time residue even if isLeaveDataRow was lenient.
+    if (isClockTimeOnly(packed[2]) && isClockTimeOnly(packed[3]) && !looksLikeLeaveCount(packed[1])) {
+      continue;
+    }
+    if (isClockTimeOnly(packed[2])) packed[2] = '';
+    if (isClockTimeOnly(packed[3])) packed[3] = '';
     if (packed.some(Boolean)) out.push(packed);
   }
   return out;

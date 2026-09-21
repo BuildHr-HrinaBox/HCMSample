@@ -1673,6 +1673,8 @@ export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpe
     parsedFormHeader = null,
     sheetText = '',
     payrollRows = null,
+    // Gujarat / Karnataka: FirstName + LastName only — never ID / loose personNamesMatch.
+    strictFirstLastMatch = false,
   } = helpers;
   const wageRateHints = buildFormXIVKarnatakaWageRateHints({
     item,
@@ -1681,8 +1683,10 @@ export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpe
     sheetText,
   });
   if (!Array.isArray(mappedData) || mappedData.length === 0) return 0;
+  const useStrictFirstLast =
+    Boolean(strictFirstLastMatch) || variant === 'gj' || variant === 'ka';
   const fallbackResolver =
-    Array.isArray(payrollRows) && payrollRows.length > 0
+    !useStrictFirstLast && Array.isArray(payrollRows) && payrollRows.length > 0
       ? buildFormXIVMPPayrollRowResolver(payrollRows)
       : null;
   let hits = 0;
@@ -1696,7 +1700,12 @@ export function enrichFormXIVMPPayrollRows(mappedData, employees, headers, helpe
     if ((!payrollRow || payrollRow.fetch_error) && fallbackResolver) {
       payrollRow = fallbackResolver(emp, row);
     }
-    if ((!payrollRow || payrollRow.fetch_error) && Array.isArray(payrollRows) && payrollRows.length > 0) {
+    if (
+      !useStrictFirstLast &&
+      (!payrollRow || payrollRow.fetch_error) &&
+      Array.isArray(payrollRows) &&
+      payrollRows.length > 0
+    ) {
       payrollRow = resolveFormXIVMPPayrollRowForWageRate(emp, payrollRows, row);
     }
     const rate = resolveFormXIVMPWageRate(emp, payrollRow && !payrollRow.fetch_error ? payrollRow : null, {

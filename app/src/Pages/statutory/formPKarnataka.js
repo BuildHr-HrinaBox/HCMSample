@@ -290,18 +290,139 @@ function identitiesMatch(rowId, rowName, empId, empName) {
   return false;
 }
 
+/**
+ * Stamp the leave table body from mapped autofill (days / From / Till).
+ * Survives fragile column detection and clears template shift-time residue.
+ */
+export function writeFormPKarnatakaLeaveTableRow(worksheet, row = null, options = {}) {
+  if (!worksheet || !row || typeof row !== 'object') return 0;
+  const formatDate =
+    typeof options.formatStatutoryDateDisplay === 'function'
+      ? options.formatStatutoryDateDisplay
+      : (v) => String(v || '').trim();
+
+  const leaveCount = String(
+    getFormOGJRowValueForHeader(row, 'Number of accumulated leave') ||
+      row['Number of accumulated leave'] ||
+      ''
+  ).trim();
+  const periodFrom = String(
+    getFormOGJRowValueForHeader(row, 'Period for which leave is accumulated_From') ||
+      row['Period for which leave is accumulated_From'] ||
+      row['Period for which leave is accumulated From_From'] ||
+      ''
+  ).trim();
+  const periodTill = String(
+    getFormOGJRowValueForHeader(row, 'Period for which leave is accumulated_Till') ||
+      row['Period for which leave is accumulated_Till'] ||
+      row['Period for which leave is accumulated Till_Till'] ||
+      ''
+  ).trim();
+  if (!leaveCount && !periodFrom && !periodTill) return 0;
+
+  const maxRows = Math.min(60, Number(worksheet.rowCount) || 60);
+  let headerRow = -1;
+  let snoCol = -1;
+  let leaveCol = -1;
+  let fromCol = -1;
+  let tillCol = -1;
+
+  for (let r = 1; r <= maxRows; r += 1) {
+    const parts = [];
+    for (let c = 1; c <= 12; c += 1) {
+      const t = excelCellText(worksheet.getCell(r, c).value);
+      if (t) parts.push(t.toLowerCase());
+    }
+    const joined = parts.join(' ');
+    if (!/sr\.?\s*no/.test(joined) || !/accumulated\s+leave/.test(joined)) continue;
+    if (/details of the leave/.test(joined) && !/number\s+of\s+accumulated/.test(joined)) continue;
+    headerRow = r;
+    for (let c = 1; c <= 12; c += 1) {
+      const t = excelCellText(worksheet.getCell(r, c).value).toLowerCase();
+      if (/^sr\.?\s*no/.test(t)) snoCol = c;
+      if (/number\s+of\s+accumulated\s+leave/.test(t) || (/accumulated\s+leave/.test(t) && !/period|perod/.test(t))) {
+        leaveCol = c;
+      }
+      if (/period|perod/.test(t) && /accumulated/.test(t)) {
+        if (fromCol < 0) fromCol = c;
+        tillCol = Math.max(tillCol, c + 1);
+      }
+    }
+    break;
+  }
+  if (headerRow < 0 || snoCol < 0) return 0;
+
+  for (let r = headerRow; r <= Math.min(headerRow + 4, maxRows); r += 1) {
+    for (let c = 1; c <= 12; c += 1) {
+      const t = excelCellText(worksheet.getCell(r, c).value).toLowerCase().trim();
+      if (t === 'from') fromCol = c;
+      if (t === 'till' || t === 'to') tillCol = c;
+    }
+  }
+  if (leaveCol < 0) leaveCol = snoCol + 1;
+  if (fromCol < 0) fromCol = leaveCol + 1;
+  if (tillCol < 0 || tillCol === fromCol) tillCol = fromCol + 1;
+
+  let dataRow = headerRow + 2;
+  for (let r = headerRow; r <= Math.min(headerRow + 5, maxRows); r += 1) {
+    let hasFrom = false;
+    let hasTill = false;
+    for (let c = 1; c <= 12; c += 1) {
+      const t = excelCellText(worksheet.getCell(r, c).value).toLowerCase().trim();
+      if (t === 'from') hasFrom = true;
+      if (t === 'till' || t === 'to') hasTill = true;
+    }
+    if (hasFrom || hasTill) dataRow = r + 1;
+  }
+
+  const stamp = (col, value) => {
+    if (col < 1) return;
+    const cell = worksheet.getCell(dataRow, col);
+    cell.numFmt = '@';
+    cell.value = value == null || value === '' ? '' : String(value);
+    cell.alignment = {
+      ...(cell.alignment || {}),
+      vertical: 'middle',
+      horizontal: 'center',
+      wrapText: true,
+    };
+  };
+
+  stamp(snoCol, '1');
+  stamp(leaveCol, leaveCount);
+  stamp(fromCol, formatDate(periodFrom));
+  stamp(tillCol, formatDate(periodTill));
+
+  // Clear trailing body rows so leftover template times (09:00 AM) cannot leak into PDF.
+  for (let r = dataRow + 1; r <= dataRow + 4; r += 1) {
+    [snoCol, leaveCol, fromCol, tillCol].forEach((col) => {
+      if (col < 1) return;
+      worksheet.getCell(r, col).value = '';
+    });
+  }
+  return 1;
+}
+
 export async function buildFormPKarnatakaWorkbookWithTemplateStyles(opts = {}) {
-  const { employee = null, mappedData = [], headerFormData = null, ...rest } = opts;
+  const {
+    employee = null,
+    mappedData = [],
+    headerFormData = null,
+    formatStatutoryDateDisplay = null,
+    ...rest
+  } = opts;
   const rows = Array.isArray(mappedData) ? mappedData : [];
   const row = rows[0] || {};
   const establishmentText = resolveFormPKarnatakaEstablishmentText(headerFormData);
   return buildFormOGJGujaratWorkbookWithTemplateStyles({
     ...rest,
+    formatStatutoryDateDisplay,
     // Generic header writer merges/wraps Address / Name into the To block (1st screenshot).
     headerFormData: null,
     mappedData: rows,
     afterWorksheetReady: (worksheet) => {
       writeFormPKarnatakaNoticeIdentity(worksheet, employee, row, { establishmentText, headerFormData });
+      writeFormPKarnatakaLeaveTableRow(worksheet, row, { formatStatutoryDateDisplay });
     },
   });
 }
@@ -323,15 +444,17 @@ function resolveFormPKarnatakaEmployeeDownloadBaseName(row, empItem, fallbackInd
   return slug || `Employee_${fallbackIndex + 1}`;
 }
 
-function allocateUniqueFormPKarnatakaDownloadFileName(baseName, usedNames) {
+function allocateUniqueFormPKarnatakaDownloadFileName(baseName, usedNames, fileNamePrefix = 'Form_P_Karnataka') {
   const count = usedNames.get(baseName) || 0;
   usedNames.set(baseName, count + 1);
   const suffix = count > 0 ? `_${count + 1}` : '';
-  return `Form_P_Karnataka_${baseName}${suffix}.xlsx`;
+  const prefix = String(fileNamePrefix || 'Form_P_Karnataka').replace(/\.xlsx?$/i, '');
+  return `${prefix}_${baseName}${suffix}.xlsx`;
 }
 
 /**
  * One Form P notice per employee. Single employee → one .xlsx; multiple → ZIP.
+ * @param {string} [fileNamePrefix='Form_P_Karnataka'] — also used for MH (`Form_P_Maharashtra`).
  */
 export async function buildFormPKarnatakaPerEmployeeDownload({
   templateArrayBuffer,
@@ -344,10 +467,11 @@ export async function buildFormPKarnatakaPerEmployeeDownload({
   parsedTableStartCol,
   employeesOverride = [],
   formatStatutoryDateDisplay = null,
+  fileNamePrefix = 'Form_P_Karnataka',
 }) {
   if (!templateArrayBuffer) {
     throw new Error(
-      'Original Form P Karnataka template could not be loaded. Open Autofill again, then Download.'
+      'Original Form P template could not be loaded. Open Autofill again, then Download.'
     );
   }
 
@@ -380,7 +504,8 @@ export async function buildFormPKarnatakaPerEmployeeDownload({
     });
   }
 
-  const zipBase = String(formFileName || parsedFormHeader?.title || 'Form_P_Karnataka')
+  const prefix = String(fileNamePrefix || 'Form_P_Karnataka').replace(/\.xlsx?$/i, '');
+  const zipBase = String(formFileName || parsedFormHeader?.title || prefix)
     .replace(/\.xlsx?$/i, '')
     .replace(/[^a-zA-Z0-9._-]+/g, '_');
   const templateBytes =
@@ -410,7 +535,7 @@ export async function buildFormPKarnatakaPerEmployeeDownload({
         templateBytes instanceof ArrayBuffer ? templateBytes.slice(0) : templateBytes,
       mappedData: rows,
       employee: entry?.emp || null,
-      formFileName: allocateUniqueFormPKarnatakaDownloadFileName(baseName, new Map()),
+      formFileName: allocateUniqueFormPKarnatakaDownloadFileName(baseName, new Map(), prefix),
     });
   }
 
@@ -419,7 +544,7 @@ export async function buildFormPKarnatakaPerEmployeeDownload({
   for (let i = 0; i < exportEntries.length; i += 1) {
     const entry = exportEntries[i];
     const baseName = resolveFormPKarnatakaEmployeeDownloadBaseName(entry.row, entry.emp, entry.index);
-    const entryName = allocateUniqueFormPKarnatakaDownloadFileName(baseName, usedNames);
+    const entryName = allocateUniqueFormPKarnatakaDownloadFileName(baseName, usedNames, prefix);
     const { blob } = await buildFormPKarnatakaWorkbookWithTemplateStyles({
       ...workbookArgs,
       templateArrayBuffer:

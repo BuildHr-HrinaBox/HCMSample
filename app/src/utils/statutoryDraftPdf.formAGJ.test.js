@@ -79,6 +79,7 @@ describe('Form A GJ PDF layout', () => {
       0,
       'Form_A_GJ'
     );
+    expect(model.titles).toHaveLength(0);
     expect(model.titles.some((t) => /14\s*to\s*18/i.test(t))).toBe(false);
     expect(model.titles.some((t) => /highly\s*skilled/i.test(t))).toBe(false);
     expect(model.fields.some((t) => /14\s*to\s*18/i.test(t))).toBe(false);

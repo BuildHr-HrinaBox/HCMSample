@@ -23,7 +23,7 @@ export function formMGJGujaratHeaderNorm(txt) {
 
 const stripLeadingNumber = (s) =>
   String(s || '')
-    .replace(/^\(?[a-e\d]+\)?\s*[\.\)]?\s*/i, '')
+    .replace(/^(?:\([a-e\d]+\)|[a-e][.)]|\d+[.)]?)\s*/i, '')
     .trim();
 
 function normHeaderLabel(h) {
@@ -1056,7 +1056,7 @@ export function readFormMGJGujaratEmployeeDateOfJoining(emp) {
   );
 }
 
-/** Force Contact No. from Mobile after overlay/remap — never keep names like "father". */
+/** Preserve Contact No. from the imported/grid row; employee Mobile must not be injected. */
 export function enrichFormMGJGujaratContactRows(mappedData, employees, headers, options = {}) {
   if (!Array.isArray(mappedData) || mappedData.length === 0) return mappedData;
   const hdrs = resolveFormMGJGujaratTableHeaders(headers);
@@ -1073,12 +1073,14 @@ export function enrichFormMGJGujaratContactRows(mappedData, employees, headers, 
       const name = readEmployeeFullName(empItem);
       if (name) row.__employeeLookupName = name;
     }
-    row[contactHeader] = empItem ? readFormMGJGujaratEmployeeMobile(empItem) : '';
+    row[contactHeader] = sanitizeFormMGJGujaratMobileValue(
+      getFormMGJGujaratRowValueForHeader(row, contactHeader)
+    );
   });
   return mappedData;
 }
 
-/** Remap grid rows for display/save and optionally fill Contact No. from People Mobile. */
+/** Remap grid rows for display/save without filling Contact No. from People Mobile. */
 export function resolveFormMGJGujaratDisplayRows(rows, sourceHeaders, targetHeaders, employees = null, options = {}) {
   const remapped = remapFormMGJGujaratRowsToHeaders(rows, sourceHeaders, targetHeaders);
   if (!Array.isArray(employees) || employees.length === 0) return remapped;
@@ -1135,8 +1137,8 @@ export function applyFormMGJGujaratAutofillFromEmployee(headerData, empItem, sit
   // Always sync dates from People — blank when missing (never keep shared header data).
   out.form_m_gj_date_of_birth = dobRaw ? formatStatutoryDateDisplay(dobRaw) : '';
   out.form_m_gj_date_of_joining = dojRaw ? formatStatutoryDateDisplay(dojRaw) : '';
-  // Always sync Contact No. from People Mobile — blank when missing (never keep shared header data).
-  out.form_m_gj_contact_no = readFormMGJGujaratEmployeeMobile(empItem);
+  // Contact No. belongs to the imported/grid data; do not inject People Mobile.
+  out.form_m_gj_contact_no = '';
   return out;
 }
 
@@ -1188,7 +1190,8 @@ export function applyFormMGJGujaratEmployeeToRow(row, emp, headers, helpers = {}
       return;
     }
     if (isFormMGJContactHeader(header)) {
-      setCell(header, readFormMGJGujaratEmployeeMobile(emp));
+      // Preserve an imported contact when present; never synthesize it from People Mobile.
+      return;
     }
   });
 
@@ -1225,10 +1228,10 @@ export function buildFormMGJGujaratHeaderFormDataForRow(baseHeaderData, row, hea
     const key = WORKER_FIELD_KEY_BY_BUCKET[bucket];
     if (!key) return;
     if (bucket === 'contactNo') {
-      // Per-employee Contact No. must mirror People Mobile only; never keep shared headerFormData.
-      out[key] = empItem
-        ? readFormMGJGujaratEmployeeMobile(empItem)
-        : sanitizeFormMGJGujaratMobileValue(getFormMGJGujaratRowValueForHeader(row, header));
+      // Export only the contact explicitly present in the imported/grid row.
+      out[key] = sanitizeFormMGJGujaratMobileValue(
+        getFormMGJGujaratRowValueForHeader(row, header)
+      );
       return;
     }
     if (bucket === 'dateOfBirth' || bucket === 'dateOfJoining') {

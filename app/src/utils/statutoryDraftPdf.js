@@ -6,6 +6,7 @@ import {
   FORM_14_RJ_DAY_ENTRIES_NOTE,
   FORM_14_RJ_FOOTER_NOTE
 } from '../Pages/statutory/form14Rajasthan';
+import { isFormAGJGujaratExportTitleBandText } from '../Pages/statutory/formAGJGujarat';
 import {
   FORM_D_RJ_ABSENCE_CODES_NOTE,
   FORM_D_RJ_E_FORM_NOTE,
@@ -60,12 +61,16 @@ import {
 import {
   looksLikeFormKGJGujaratPdfContext,
   rewriteFormKGJGujaratPdfHeader,
+  sanitizeFormKGJGujaratPdfDataRows,
   trimFormKGJGujaratLeadingBlankPdfColumns,
 } from './statutoryDraftPdf.formKGJ.GJ';
 import {
   detectFormLGJGujaratPdfGroupBands,
   formLGJGujaratColumnWeight,
+  isFormLGJDateOfMonthGroupLabel,
+  isFormLGJWeeklyHolidayHeaderText,
   looksLikeFormLGJGujaratPdfContext,
+  sanitizeFormLGJGujaratPdfHeaderRows,
   trimFormLGJGujaratLeadingBlankPdfColumns,
 } from './statutoryDraftPdf.formLGJ.GJ';
 import {
@@ -80,6 +85,18 @@ import {
   rewriteFormPGJGujaratPdfHeader,
   trimFormPGJGujaratLeadingBlankPdfColumns,
 } from './statutoryDraftPdf.formPGJ.GJ';
+import {
+  FORM_Q_MH_PDF_TABLE_FONT_SIZE,
+  detectFormQMaharashtraPdfGroupBands,
+  formQMaharashtraColumnWeight,
+  isFormQMaharashtraDateOfMonthGroupLabel,
+  isFormQMaharashtraParentGroupLabel,
+  isFormQMaharashtraVerticalHeaderText,
+  looksLikeFormQMaharashtraPdfContext,
+  normalizeFormQMaharashtraPdfMatrix,
+  rewriteFormQMaharashtraPdfHeader,
+  splitFormQMaharashtraVerticalHeaderLines,
+} from './statutoryDraftPdf.formQ.MH';
 import {
   looksLikeFormOGJGujaratPdfContext,
   rewriteFormOGJGujaratPdfHeader,
@@ -138,6 +155,19 @@ import {
   looksLikeFormXXIIIAPSEPdfContext,
   trimFormXXIIIAPSEEmptyPdfColumns
 } from './statutoryDraftPdf.formXXIII.AP.S&D.js';
+import {
+  formXXIIIGJOtPdfColumnWeight,
+  getFormXXIIIGJOtHeaderTitles,
+  isFormXXIIIGJOtAdminRow,
+  isFormXXIIIGJOtCenterValueHeader,
+  isFormXXIIIGJOtPreambleRow,
+  isFormXXIIIGJOtSpuriousPdfDataRow,
+  isFormXXIIIGJOtTableHeaderRow,
+  isFormXXIIIGJOtTitleRow,
+  looksLikeFormXXIIIGJOtPdfContext,
+  normalizeFormXXIIIGJOtPdfMatrix,
+  sanitizeFormXXIIIGJOtMatrixCell,
+} from './statutoryDraftPdf.formXXIII.GJ.js';
 import {
   applyFormTSEKarnatakaPdfNormalization,
   detectFormTSEKarnatakaAttendanceBand,
@@ -2947,6 +2977,11 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet', fileName = '') => {
     else maxCol = Math.min(maxCol, 12);
   }
 
+  // Form XXIII GJ OT register is always 12 columns (A–L).
+  if (looksLikeFormXXIIIGJOtPdfContext([], rows, sheetName, fileName)) {
+    maxCol = Math.min(maxCol, 12);
+  }
+
   const padded = [];
   for (let r = 0; r <= endRow; r += 1) {
     const line = [];
@@ -3065,6 +3100,12 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet', fileName = '') => {
       padded.slice(0, Math.min(padded.length, 24)),
       sheetName
     );
+    const earlyFormXXIIIGJ = looksLikeFormXXIIIGJOtPdfContext(
+      metaLines,
+      padded.slice(0, Math.min(padded.length, 28)),
+      sheetName,
+      fileName
+    );
     const earlyFormBGJ =
       looksLikeFormBGJGujaratPdfContext(
         metaLines,
@@ -3077,6 +3118,25 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet', fileName = '') => {
         /gujarat|_gj|wage\s+register|minimum\s+wages/i.test(
           [sheetName || '', ...padded.slice(0, 12).flat()].join(' ')
         ));
+    if (
+      earlyFormXXIIIGJ &&
+      (isFormXXIIIGJOtTitleRow(padded[r]) ||
+        isFormXXIIIGJOtAdminRow(padded[r]) ||
+        isFormXXIIIGJOtPreambleRow(padded[r]))
+    ) {
+      if (!isFormXXIIIGJOtPreambleRow(padded[r])) {
+        const unique = [];
+        padded[r].forEach((cell) => {
+          const text = String(cell || '').trim();
+          if (text && !unique.includes(text)) unique.push(text);
+        });
+        unique.forEach((text) => {
+          expandStatutoryMetaSegments(text).forEach((segment) => metaLines.push(segment));
+        });
+      }
+      tableStartRow = r + 1;
+      continue;
+    }
     if (isFormXXIIIAPSE && (isFormXXIIIAPSETitleRow(padded[r]) || isFormXXIIIAPSEAdminRow(padded[r]))) {
       const unique = [];
       padded[r].forEach((cell) => {
@@ -3141,13 +3201,16 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet', fileName = '') => {
     }
 
     const isColHeader =
+      (earlyFormXXIIIGJ && isFormXXIIIGJOtTableHeaderRow(padded[r]) && filled.length >= 3) ||
       (isFormXXIIIAPSE && isFormXXIIIAPSETableHeaderRow(padded[r]) && filled.length >= 3) ||
       (isFormXXAPTableHeaderRow(padded[r]) && filled.length >= 5) ||
       (isFormXVIAPTableHeaderRow(padded[r]) && filled.length >= 3) ||
       (isFormXVIAP && isFormXVIIDateNumberRow(padded[r])) ||
-      (earlyFormBGJ
-        ? isFormBGJWageRegisterColHeaderBlob(blob) && filled.length >= 3
-        : isWageRegisterColHeaderBlob(blob) && filled.length >= 3) ||
+      (earlyFormXXIIIGJ
+        ? false
+        : earlyFormBGJ
+          ? isFormBGJWageRegisterColHeaderBlob(blob) && filled.length >= 3
+          : isWageRegisterColHeaderBlob(blob) && filled.length >= 3) ||
       (isFormCLwfColHeaderBlob(blob) && filled.length >= 2) ||
       (isForm25TamilNaduColHeaderBlob(blob) && filled.length >= 3) ||
       (isForm14RajasthanColHeaderBlob(blob) && filled.length >= 2) ||
@@ -3291,6 +3354,18 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet', fileName = '') => {
     finalRows = trimmedLead.rows;
     finalColCount = trimmedLead.colCount;
   }
+  if (looksLikeFormXXIIIGJOtPdfContext(metaLines, finalRows, sheetName, fileName)) {
+    const normalizedGj = normalizeFormXXIIIGJOtPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = normalizedGj.rows;
+    finalColCount = normalizedGj.colCount;
+    tableStartRow = normalizedGj.tableStartRow;
+    if (Array.isArray(normalizedGj.metaLines)) metaLines = normalizedGj.metaLines;
+  }
   if (looksLikeFormXIRajasthanServiceCertificatePdfContext(metaLines, finalRows, sheetName)) {
     const trimmedLead = trimFormXIRajasthanLeadingBlankPdfColumns(
       finalRows,
@@ -3323,7 +3398,11 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet', fileName = '') => {
       finalColCount,
       tableStartRow
     );
-    finalRows = trimmedLead.rows;
+    finalRows = sanitizeFormKGJGujaratPdfDataRows(
+      trimmedLead.rows,
+      trimmedLead.colCount,
+      tableStartRow
+    );
     finalColCount = trimmedLead.colCount;
   }
   if (looksLikeFormLGJGujaratPdfContext(metaLines, finalRows, sheetName)) {
@@ -3332,11 +3411,25 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet', fileName = '') => {
       finalColCount,
       tableStartRow
     );
-    finalRows = trimmedLead.rows;
+    finalRows = sanitizeFormLGJGujaratPdfHeaderRows(
+      trimmedLead.rows,
+      trimmedLead.colCount,
+      tableStartRow
+    );
     finalColCount = trimmedLead.colCount;
   }
   if (looksLikeFormPGJGujaratPdfContext(metaLines, finalRows, sheetName)) {
     const trimmedLead = normalizeFormPGJGujaratPdfMatrix(
+      finalRows,
+      finalColCount,
+      tableStartRow,
+      metaLines
+    );
+    finalRows = trimmedLead.rows;
+    finalColCount = trimmedLead.colCount;
+  }
+  if (looksLikeFormQMaharashtraPdfContext(metaLines, finalRows, sheetName, fileName)) {
+    const trimmedLead = normalizeFormQMaharashtraPdfMatrix(
       finalRows,
       finalColCount,
       tableStartRow,
@@ -3694,6 +3787,27 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
         matrix.colCount = trimmedLead.colCount;
       }
 
+      // Form XXIII GJ: rebuild August model (meta titles/admin + 12-col OT band).
+      if (
+        looksLikeFormXXIIIGJOtPdfContext(
+          matrix.metaLines,
+          matrix.rows,
+          matrix.name,
+          matrix.fileName || ''
+        )
+      ) {
+        const normalizedGj = normalizeFormXXIIIGJOtPdfMatrix(
+          matrix.rows,
+          matrix.colCount,
+          matrix.tableStartRow || 0,
+          matrix.metaLines
+        );
+        matrix.rows = normalizedGj.rows;
+        matrix.colCount = normalizedGj.colCount;
+        matrix.tableStartRow = normalizedGj.tableStartRow;
+        if (Array.isArray(normalizedGj.metaLines)) matrix.metaLines = normalizedGj.metaLines;
+      }
+
       // Form XI RJ Service Certificate: drop the empty template column before Serial No.
       if (
         looksLikeFormXIRajasthanServiceCertificatePdfContext(
@@ -3744,7 +3858,11 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
           matrix.colCount,
           matrix.tableStartRow || 0
         );
-        matrix.rows = trimmedLead.rows;
+        matrix.rows = sanitizeFormKGJGujaratPdfDataRows(
+          trimmedLead.rows,
+          trimmedLead.colCount,
+          matrix.tableStartRow || 0
+        );
         matrix.colCount = trimmedLead.colCount;
       }
 
@@ -3762,7 +3880,11 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
           matrix.colCount,
           matrix.tableStartRow || 0
         );
-        matrix.rows = trimmedLead.rows;
+        matrix.rows = sanitizeFormLGJGujaratPdfHeaderRows(
+          trimmedLead.rows,
+          trimmedLead.colCount,
+          matrix.tableStartRow || 0
+        );
         matrix.colCount = trimmedLead.colCount;
       }
 
@@ -3776,6 +3898,25 @@ const enrichMatrixWithExcelJs = async (arrayBuffer, matrices) => {
         )
       ) {
         const trimmedLead = normalizeFormPGJGujaratPdfMatrix(
+          matrix.rows,
+          matrix.colCount,
+          matrix.tableStartRow || 0,
+          matrix.metaLines
+        );
+        matrix.rows = trimmedLead.rows;
+        matrix.colCount = trimmedLead.colCount;
+      }
+
+      // Form Q MH: drop empty leading columns before Sr. No.
+      if (
+        looksLikeFormQMaharashtraPdfContext(
+          matrix.metaLines,
+          matrix.rows,
+          matrix.name,
+          matrix.fileName
+        )
+      ) {
+        const trimmedLead = normalizeFormQMaharashtraPdfMatrix(
           matrix.rows,
           matrix.colCount,
           matrix.tableStartRow || 0,
@@ -4995,6 +5136,10 @@ const resolveLeafHeaderTexts = (rows, tableStart, headerBandEnd, colCount) => {
         continue;
       }
       if (isFormPGJDateOfMonthGroupLabel(t)) continue;
+      if (isFormQMaharashtraParentGroupLabel(t)) {
+        if (!best) best = t;
+        continue;
+      }
       // Prefer the deepest (leaf) non-group label; skip ultra-wide group banners alone.
       if (
         /^deductions$/i.test(t) ||
@@ -5759,6 +5904,47 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     };
   }
 
+  const isFormXXIIIGJOt = looksLikeFormXXIIIGJOtPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName,
+    fileName
+  );
+  if (isFormXXIIIGJOt) {
+    const titles = getFormXXIIIGJOtHeaderTitles(effectiveMetaLines, rows, tableStart);
+    const fields = [];
+    const seenGj = new Set(titles.map((t) => normalizeMetaKey(t)));
+    (effectiveMetaLines || []).forEach((raw) => {
+      expandStatutoryMetaSegments(raw).forEach((line) => {
+        const text = String(line || '').replace(/\s+/g, ' ').trim();
+        if (!text || isSystemGeneratedDocumentNote(text)) return;
+        if (isStatutoryTitleMetaLine(text)) return;
+        const key = normalizeMetaKey(text);
+        if (seenGj.has(key)) return;
+        if (
+          /name and address|nature and location|principal employer|contractor|establishment/i.test(
+            text
+          )
+        ) {
+          seenGj.add(key);
+          fields.push(text);
+        }
+      });
+    });
+    return {
+      titles,
+      fields,
+      rightFields: [],
+      formXXIIIGJOt: true,
+      hasSystemNote: (effectiveMetaLines || []).some((l) => isSystemGeneratedDocumentNote(l)),
+      isFormXXVI: false,
+      isFormW: false,
+      isFormXXVIIRegister: false,
+      titleBoxFullBorder: true,
+      hideRightBandSplit: true
+    };
+  }
+
   const isFormXXIAP = looksLikeFormXXIAPPdfContext(effectiveMetaLines, rows, sheetName);
   if (isFormXXIAP) {
     return {
@@ -5929,6 +6115,12 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     sheetName,
     fileName
   );
+  const isFormQMaharashtra = looksLikeFormQMaharashtraPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName,
+    fileName
+  );
   const isFormXVIIITamilNadu = looksLikeFormXVIIITamilNaduPdfContext(
     effectiveMetaLines,
     rows,
@@ -5990,10 +6182,16 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
           .trim()
       )
     : effectiveMetaLines;
+  const formAGJGujaratPdfContextHint = looksLikeFormAGJGujaratPdfContext(
+    effectiveMetaLines,
+    rows,
+    sheetName
+  );
 
   headerMetaSource.forEach((raw) => {
     expandStatutoryMetaSegments(raw).forEach((line) => {
       if (!line) return;
+      if (formAGJGujaratPdfContextHint && isFormAGJGujaratExportTitleBandText(line)) return;
       if (preferForm15Part1 && isStandaloneFormXTitle(line)) return;
       if (isSystemGeneratedDocumentNote(line)) {
         hasSystemNote = true;
@@ -6180,6 +6378,12 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     finalTitles = rewritten.titles;
     finalFields = rewritten.fields;
   }
+  // Form Q MH: FORM Q / See Rule 26(1) / MUSTER-ROLL + Establishment / Employer / Month.
+  if (isFormQMaharashtra) {
+    const rewritten = rewriteFormQMaharashtraPdfHeader(finalTitles, finalFields);
+    finalTitles = rewritten.titles;
+    finalFields = rewritten.fields;
+  }
   // Form O GJ: Address → Authorized person → Notice → legal text → Details of Workers.
   if (
     looksLikeFormOGJGujaratPdfContext(
@@ -6200,6 +6404,7 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
     looksLikeFormBRajasthanPdfContext(effectiveMetaLines, rows, sheetName);
   if (looksLikeFormAGJGujaratPdfContext(effectiveMetaLines, rows, sheetName)) {
     finalFields = reorderFormAGJPdfHeaderFields(finalFields);
+    finalTitles = finalTitles.filter((t) => !isFormAGJGujaratExportTitleBandText(t));
   }
   if (isFormBGJ) {
     // Keep establishment / owner / LIN / principal / wage period; drop wage-rate box scraps.
@@ -6298,6 +6503,7 @@ const buildStatutoryPdfHeaderModel = (metaLines, rows, tableStart, sheetName = '
       fileName
     ),
     formPGJGujarat: isFormPGJ,
+    formQMaharashtra: isFormQMaharashtra,
     formBGJMinWagesBox,
     genderBox,
     hasSystemNote,
@@ -6865,13 +7071,13 @@ const paintBorderedStatutoryHeader = (doc, headerModel, layout, yStart) => {
             ? 10
           : headerModel?.formXVIAP
             ? 9
-            : headerModel?.formAGJGujarat || headerModel?.formLGJGujarat
+            : headerModel?.formAGJGujarat || headerModel?.formLGJGujarat || headerModel?.formXXIIIGJOt
               ? 10
               : 8,
         align: headerModel?.formLGJGujarat ? 'center' : 'left',
         minH: headerModel?.formTKA
           ? 22
-          : headerModel?.formAGJGujarat || headerModel?.formLGJGujarat
+          : headerModel?.formAGJGujarat || headerModel?.formLGJGujarat || headerModel?.formXXIIIGJOt
             ? 20
             : 16,
       });
@@ -6974,6 +7180,7 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   const isFormXVIAP = headerModel.formXVIAP === true;
   const isFormXIIIAP = headerModel.formXIIIAP === true;
   const isFormXXIIIAPSE = headerModel.formXXIIIAPSE === true;
+  const isFormXXIIIGJOt = headerModel.formXXIIIGJOt === true;
   const isFormXIXAP = matrix.formXIXAPLayout === true;
 
   let headerBandEnd = tableStart;
@@ -7131,6 +7338,23 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       }
     }
   }
+  // Form Q MH — same Excel header stack (parent groups + day numbers + col index).
+  if (headerModel.formQMaharashtra === true) {
+    for (let r = tableStart; r < Math.min(rows.length, tableStart + 6); r += 1) {
+      const blob = (rows[r] || []).join(' ').toLowerCase();
+      if (
+        /sr\.?\s*no|date\s+of\s+(the\s+)?month|full\s+name\s+of\s+the\s+worker|interval\s+for\s+rest|working\s+hours|deductions?/.test(
+          blob
+        )
+      ) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+      const filled = (rows[r] || []).filter((c) => String(c || '').trim());
+      if (filled.filter((c) => /^\(?\s*\d{1,2}\s*\)?$/.test(String(c).trim())).length >= 8) {
+        headerBandEnd = Math.max(headerBandEnd, r);
+      }
+    }
+  }
   // Form Q KA: every label|value row is body text (Excel model) — never a header band.
   if (isFormQKALayout) {
     headerBandEnd = tableStart - 1;
@@ -7176,17 +7400,41 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   )
     ? detectFormPGJGujaratPdfGroupBands(rows, tableStart, headerBandEnd, colCount)
     : [];
+  const formQMhGroupBands = looksLikeFormQMaharashtraPdfContext(
+    metaLines,
+    rows,
+    matrix.name || '',
+    pdfOpts.fileName || matrix.fileName || ''
+  )
+    ? detectFormQMaharashtraPdfGroupBands(rows, tableStart, headerBandEnd, colCount)
+    : [];
+  const formQMhDateBand = formQMhGroupBands.find(
+    (b) => b && isFormQMaharashtraDateOfMonthGroupLabel(b.label) && b.end > b.start
+  );
   const dayBand =
     formXVIDateBand ||
     formTKAAttendanceBand ||
     (formPGJGroupBands[0] && formPGJGroupBands[0].end > formPGJGroupBands[0].start
       ? formPGJGroupBands[0]
       : null) ||
+    formQMhDateBand ||
     detectDailyHoursBand(rows, tableStart, headerBandEnd, colCount);
+  // Form Q MH: use Form-Q group bands only for Working hours / Interval / Date / Deductions
+  // so generic "Deductions" detection cannot paint two split banners.
+  const statutoryGroupBands = detectStatutoryGroupHeaderBands(
+    rows,
+    tableStart,
+    headerBandEnd,
+    colCount
+  ).filter((band) => {
+    if (!(formQMhGroupBands.length > 0)) return true;
+    return !isFormQMaharashtraParentGroupLabel(band?.label);
+  });
   const groupBands = [
-    ...detectStatutoryGroupHeaderBands(rows, tableStart, headerBandEnd, colCount),
+    ...statutoryGroupBands,
     ...formLGJGroupBands,
     ...formPGJGroupBands,
+    ...formQMhGroupBands,
   ];
   if (headerModel.formBTamilNadu) {
     detectFormBTamilNaduPdfGroupBands(rows, tableStart, headerBandEnd, colCount).forEach((band) => {
@@ -7329,12 +7577,23 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       weights.push(formXXIIIAPSEColumnWeight(leafHeaders[c]));
       continue;
     }
+    if (looksLikeFormXXIIIGJOtPdfContext(metaLines, rows, matrix.name || '', matrix.fileName || '')) {
+      const gjW = formXXIIIGJOtPdfColumnWeight(leafHeaders[c], maxDataLen || maxLen);
+      if (gjW > 0) {
+        weights.push(gjW);
+        continue;
+      }
+    }
     if (headerModel.formLGJGujarat === true) {
       weights.push(formLGJGujaratColumnWeight(leafHeaders[c], maxDataLen || maxLen));
       continue;
     }
     if (headerModel.formPGJGujarat === true) {
       weights.push(formPGJGujaratColumnWeight(leafHeaders[c], maxDataLen || maxLen));
+      continue;
+    }
+    if (headerModel.formQMaharashtra === true) {
+      weights.push(formQMaharashtraColumnWeight(leafHeaders[c], maxDataLen || maxLen));
       continue;
     }
     if (headerModel.isFormXXVIIRegister) {
@@ -7391,9 +7650,10 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       isFormXIXRajasthanOvertimeSheet ||
       isFormASheet ||
       isFormBRajasthanSheet ||
-      isFormXXIIIAPSE,
+      isFormXXIIIAPSE ||
+      isFormXXIIIGJOt,
     tightSerial: isFormXVIAP,
-    compactSex: isFormXVIAP
+    compactSex: isFormXVIAP || isFormXXIIIGJOt
   });
   const colXs = [marginX];
   for (let i = 0; i < colWidths.length; i += 1) colXs.push(colXs[i] + colWidths[i]);
@@ -7440,6 +7700,8 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         ? 9
       : headerModel.formPGJGujarat === true
         ? 8
+      : headerModel.formQMaharashtra === true
+        ? FORM_Q_MH_PDF_TABLE_FONT_SIZE
       : headerModel.formXVIIITamilNadu === true
         ? FORM_XVIII_TN_PDF_TABLE_FONT_SIZE
       : colCount > 40
@@ -7704,6 +7966,7 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     const rowHeight = Math.max(fontSize + 5, maxLines * (fontSize + 1.5) + 4);
     if (headerModel?.formLGJGujarat && isHeaderRow) return Math.max(22, rowHeight);
     if (headerModel?.formPGJGujarat && isHeaderRow) return Math.max(24, rowHeight);
+    if (headerModel?.formQMaharashtra && isHeaderRow) return Math.max(56, rowHeight);
     if (headerModel?.formBTamilNadu && isHeaderRow) return Math.max(28, rowHeight);
     // Form X_RJ: tall header boxes so wrapped labels like
     // "Sl. No. of the register of workman employed" are not clipped.
@@ -7806,7 +8069,12 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       }
 
       doc.rect(colXs[c], y, colWidths[c], rowH, 'S');
-      const raw = String(row[c] ?? '');
+      let raw = String(row[c] ?? '');
+      if (isFormXXIIIGJOt && !isHeaderRow) {
+        raw = String(
+          sanitizeFormXXIIIGJOtMatrixCell(raw, leafHeaders[c] || '', c) ?? ''
+        );
+      }
       if (!raw.trim()) continue;
       // Hide duplicate day-band label leftovers in non-label header rows
       if (
@@ -7816,9 +8084,23 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         c <= dayBand.end &&
         (/daily\s+hours/i.test(raw) ||
           (isFormTKASheet && /attendance/i.test(raw) && !/^\d{1,2}$/.test(raw.trim())) ||
-          (headerModel.formPGJGujarat === true && isFormPGJDateOfMonthGroupLabel(raw)))
+          (headerModel.formPGJGujarat === true && isFormPGJDateOfMonthGroupLabel(raw)) ||
+          (headerModel.formQMaharashtra === true && isFormQMaharashtraParentGroupLabel(raw)))
       ) {
         continue;
+      }
+      // Form L GJ: never paint "Weekly holiday day" inside the Date of the Month band.
+      if (
+        headerModel.formLGJGujarat === true &&
+        rowIndex <= headerBandEnd &&
+        isFormLGJWeeklyHolidayHeaderText(raw)
+      ) {
+        const dateBand = formLGJGroupBands.find(
+          (b) => b && isFormLGJDateOfMonthGroupLabel(b.label) && b.end > b.start
+        );
+        if (dateBand && c >= dateBand.start && c <= dateBand.end) {
+          continue;
+        }
       }
       // Hide leftover group labels that leaked into leaf header cells
       if (
@@ -7827,6 +8109,76 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         isStatutoryGroupHeaderLabel(raw) &&
         !groupBandAt(rowIndex, c)
       ) {
+        continue;
+      }
+      // Form Q MH: parent banners only paint via groupBand merge — never as leaf text.
+      if (
+        headerModel.formQMaharashtra === true &&
+        rowIndex <= headerBandEnd &&
+        isFormQMaharashtraParentGroupLabel(raw) &&
+        !groupBandAt(rowIndex, c)
+      ) {
+        continue;
+      }
+      // Form Q MH: never paint stray Advances/Other under Total Deduction / Net Payable.
+      if (headerModel.formQMaharashtra === true && rowIndex <= headerBandEnd) {
+        const stackParts = [];
+        for (let hr = Math.max(0, tableStart - 2); hr <= headerBandEnd; hr += 1) {
+          const ht = String(rows[hr]?.[c] ?? '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (ht) stackParts.push(ht);
+        }
+        const colStack = stackParts.join(' ').toLowerCase();
+        if (
+          /total\s+deductions?|net\s+payable/.test(colStack) &&
+          (/^advances?\b/i.test(raw.trim()) || /other\s+deductions?/i.test(raw)) &&
+          !/total\s+deductions?|net\s+payable/i.test(raw)
+        ) {
+          continue;
+        }
+      }
+
+      // Form Q MH: heading-box labels (Name of the worker, etc.) — bottom→top (angle 90).
+      // Long labels wrap to 2 lines so they fit the header box height.
+      if (
+        headerModel.formQMaharashtra === true &&
+        isHeaderRow &&
+        isFormQMaharashtraVerticalHeaderText(raw)
+      ) {
+        const label = String(raw || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        // Span empty header rows below so long labels fit (identity merges).
+        let spanH = rowH;
+        for (let hr = rowIndex + 1; hr <= headerBandEnd; hr += 1) {
+          const below = String(rows[hr]?.[c] ?? '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (below) break;
+          spanH += measureRowHeight(rows[hr], hr);
+        }
+        const colW = Math.max(colWidths[c] - 2, 6);
+        let lines = splitFormQMaharashtraVerticalHeaderLines(label, 2);
+        let size = Math.min(fontSize, 7);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(size);
+        const maxLen = Math.max(spanH - 6, 10);
+        const longest = () => Math.max(...lines.map((ln) => doc.getTextWidth(ln)), 0);
+        const linesNeedWidth = () =>
+          lines.length <= 1 ? 0 : (lines.length - 1) * (size + 1.2) + size;
+        while (size > 3.6 && (longest() > maxLen || linesNeedWidth() > colW)) {
+          size -= 0.25;
+          doc.setFontSize(size);
+        }
+        const tw = longest();
+        const blockW = lines.length > 1 ? (lines.length - 1) * (size + 1.2) : 0;
+        const cx = colXs[c] + colWidths[c] / 2;
+        const cy = y + spanH / 2;
+        // jsPDF angle 90 = counterclockwise → reads bottom→top; multi-line spreads across column.
+        doc.text(lines, cx + size * 0.35 - blockW / 2, cy + tw / 2, { angle: 90 });
+        doc.setFontSize(fontSize);
+        doc.setFont('helvetica', isHeaderRow ? 'bold' : 'normal');
         continue;
       }
 
@@ -7926,6 +8278,16 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         if (isFormXXIIIAPSEMoneyHeader(xxiiiHeader) && String(xxiiiDisplay || '').trim()) {
           doc.text(xxiiiDisplay, colXs[c] + colWidths[c] - 1.5, y + (rowH + fontSize) / 2 - 1, {
             align: 'right'
+          });
+          continue;
+        }
+      }
+
+      if (isFormXXIIIGJOt && !isHeaderRow) {
+        const gjHeader = leafHeaders[c] || '';
+        if (isFormXXIIIGJOtCenterValueHeader(gjHeader) && String(raw || '').trim()) {
+          doc.text(raw, colXs[c] + colWidths[c] / 2, y + (rowH + fontSize) / 2 - 1, {
+            align: 'center'
           });
           continue;
         }
@@ -8312,6 +8674,17 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     if (!rowHasContent(row)) continue;
     if (isFormXIIIAP && isFormXIIIPdfTitleRow(row)) continue;
     if (isFormXXIIIAPSE && (isFormXXIIIAPSETitleRow(row) || isFormXXIIIAPSEAdminRow(row))) continue;
+    if (
+      isFormXXIIIGJOt &&
+      (isFormXXIIIGJOtTitleRow(row) ||
+        isFormXXIIIGJOtAdminRow(row) ||
+        isFormXXIIIGJOtPreambleRow(row))
+    ) {
+      continue;
+    }
+    if (isFormXXIIIGJOt && r > tableStart + 1 && isFormXXIIIGJOtSpuriousPdfDataRow(row)) {
+      continue;
+    }
     if (isApForm && isApPdfHeadingRow(row)) continue;
     if ((isFormXXAP || isFormXVIIAP || isFormXVIAP) && r <= headerBandEnd) continue;
 
@@ -8797,7 +9170,11 @@ export async function buildStatutoryDraftPdfBlob({
             m.colCount,
             m.tableStartRow || 0
           );
-          m.rows = trimmedLead.rows;
+          m.rows = sanitizeFormLGJGujaratPdfHeaderRows(
+            trimmedLead.rows,
+            trimmedLead.colCount,
+            m.tableStartRow || 0
+          );
           m.colCount = trimmedLead.colCount;
         }
         // Form O GJ: drop the empty template column before Sr. No. (file name may be
@@ -9064,6 +9441,9 @@ export async function buildStatutoryDraftPdfBlob({
   const anyFormPGJ = matricesForPdf.some((m) =>
     looksLikeFormPGJGujaratPdfContext(m.metaLines, m.rows, m.name, m.fileName)
   );
+  const anyFormQMaharashtra = matricesForPdf.some((m) =>
+    looksLikeFormQMaharashtraPdfContext(m.metaLines, m.rows, m.name, m.fileName)
+  );
   // Form 14 RJ has few columns but very long header labels — landscape keeps them aligned.
   // Form XIX Wage Slip / Form XIV Employment Card / Form M GJ / Form Q KA stay portrait A4.
   const forcePortraitCard =
@@ -9081,22 +9461,30 @@ export async function buildStatutoryDraftPdfBlob({
     anyForm14Rj ||
     anyFormNGJLeaveBook ||
     anyFormFKALeaveRegister ||
-    anyFormPGJ;
+    anyFormPGJ ||
+    anyFormQMaharashtra;
   // Form W (~30 wage/deduction cols) and Form T KA (~40 identity/attendance/wage cols)
   // need A2 landscape so amounts stay on one line.
-  // Form P GJ (~60 worker/day/wage cols) matches the Excel muster-roll on A2 landscape.
+  // Form P GJ / Form Q MH (~60 worker/day/wage cols) match the Excel muster-roll on A2 landscape.
   // Form 11 Accident Book (~18 cols with long headers) and other wide registers need A3.
   const veryWide =
     anyFormW ||
     anyFormTKA ||
     anyFormPGJ ||
+    anyFormQMaharashtra ||
     anyAccidentBook ||
     anyForm25 ||
     anyFormNGJLeaveBook ||
     (!forcePortraitCard && maxCols > 14);
   const doc = new jsPDF({
     unit: 'pt',
-    format: forcePortraitCard ? 'a4' : anyFormW || anyFormTKA || anyFormPGJ ? 'a2' : veryWide ? 'a3' : 'a4',
+    format: forcePortraitCard
+      ? 'a4'
+      : anyFormW || anyFormTKA || anyFormPGJ || anyFormQMaharashtra
+        ? 'a2'
+        : veryWide
+          ? 'a3'
+          : 'a4',
     orientation: forcePortraitCard ? 'portrait' : wide ? 'landscape' : 'portrait'
   });
 
@@ -9287,6 +9675,9 @@ export const statutoryDraftPdfTestUtils = {
   trimFormKGJGujaratLeadingBlankPdfColumns,
   looksLikeFormLGJGujaratPdfContext,
   trimFormLGJGujaratLeadingBlankPdfColumns,
+  sanitizeFormLGJGujaratPdfHeaderRows,
+  detectFormLGJGujaratPdfGroupBands,
+  formLGJGujaratColumnWeight,
   looksLikeFormPGJGujaratPdfContext,
   rewriteFormPGJGujaratPdfHeader,
   trimFormPGJGujaratLeadingBlankPdfColumns,

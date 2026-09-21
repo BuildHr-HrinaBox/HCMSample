@@ -3,6 +3,7 @@ import {
   detectFormLGJGujaratPdfGroupBands,
   formLGJGujaratColumnWeight,
   looksLikeFormLGJGujaratPdfContext,
+  sanitizeFormLGJGujaratPdfHeaderRows,
   trimFormLGJGujaratLeadingBlankPdfColumns,
 } from './statutoryDraftPdf.formLGJ.GJ';
 
@@ -93,6 +94,54 @@ describe('Form L GJ PDF heading width', () => {
     ]);
   });
 
+  it('does not extend Date of the Month over Weekly holiday day', () => {
+    const rows = [
+      [
+        'Sr. No.',
+        'Name of the Worker',
+        'Designation',
+        'Date of the Month',
+        '',
+        '',
+        'Weekly holiday day',
+      ],
+      ['', '', '', '1st Shift', '2nd Shift', '3rd Shift', 'Weekly holiday day'],
+      ['', '', '', 'From - To -', 'From - To -', 'From - To -', 'Weekly holiday day'],
+    ];
+    const bands = detectFormLGJGujaratPdfGroupBands(rows, 0, 2, 7);
+    expect(bands).toEqual([
+      {
+        labelRow: 0,
+        start: 3,
+        end: 5,
+        label: 'Date of the Month',
+      },
+    ]);
+  });
+
+  it('removes Weekly holiday day repeats under the 3rd Shift header row', () => {
+    const rows = [
+      [
+        'Sr. No.',
+        'Name of the Worker',
+        'Designation',
+        'Date of the Month',
+        'Date of the Month',
+        'Date of the Month',
+        'Weekly holiday day',
+      ],
+      ['', '', '', '1st Shift', '2nd Shift', '3rd Shift', 'Weekly holiday day'],
+      ['', '', '', 'From - To -', 'From - To -', 'From - To -', 'Weekly holiday day'],
+      ['1', 'Vikash Gupta', 'Engineer', '9 AM\n6 PM', '', '', 'Saturday & Sunday'],
+    ];
+    const out = sanitizeFormLGJGujaratPdfHeaderRows(rows, 7, 0);
+    expect(out[0][6]).toBe('Weekly holiday day');
+    expect(out[1][6]).toBe('');
+    expect(out[2][6]).toBe('');
+    expect(out[1][5]).toBe('3rd Shift');
+    expect(out[3][6]).toBe('Saturday & Sunday');
+  });
+
   it('gives shift and weekly-holiday heading columns more weight than Sr. No.', () => {
     expect(formLGJGujaratColumnWeight('Sr. No.')).toBeLessThan(
       formLGJGujaratColumnWeight('1st Shift')
@@ -126,4 +175,3 @@ describe('Form L GJ PDF heading width', () => {
     expect(model.formLGJGujarat).toBe(true);
   });
 });
-

@@ -77,6 +77,103 @@ function clearFormDGJCellBorder(cell) {
   }
 }
 
+/**
+ * First 5 Form D GJ header meta labels — export as plain text (no box borders).
+ * Keeps "For the period From …" and the muster-roll table box untouched.
+ */
+export function isFormDGJGujaratPlainHeaderMetaLabel(text) {
+  const raw = String(text || '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!raw) return false;
+  const labelOnly = raw.split(':')[0].trim().toLowerCase().replace(/^\*+\s*/, '');
+  if (/for\s+the\s+period\s+from/.test(labelOnly)) return false;
+  if (/^name\s+of\s+establishment\b/.test(labelOnly) && !/principal|employer|contractor/.test(labelOnly)) {
+    return true;
+  }
+  if (/^name\s+of\s+owner\b/.test(labelOnly)) return true;
+  if (
+    /labour\s+identification\s+no/.test(labelOnly) &&
+    /principal\s+employer/.test(labelOnly)
+  ) {
+    return true;
+  }
+  if (
+    /labour\s+identification\s+no/.test(labelOnly) &&
+    !/principal\s+employer/.test(labelOnly)
+  ) {
+    return true;
+  }
+  if (/name\s+and\s+address\s+of\s+principal\s+employer/.test(labelOnly)) return true;
+  return false;
+}
+
+function formDGJFindMergeBounds(worksheet, row, col) {
+  const merges = worksheet?.model?.merges;
+  if (Array.isArray(merges)) {
+    for (let i = 0; i < merges.length; i += 1) {
+      const parts = String(merges[i] || '').split(':');
+      if (parts.length !== 2) continue;
+      try {
+        const tl = worksheet.getCell(parts[0]);
+        const br = worksheet.getCell(parts[1]);
+        if (!tl || !br) continue;
+        if (row >= tl.row && row <= br.row && col >= tl.col && col <= br.col) {
+          return { r0: tl.row, r1: br.row, c0: tl.col, c1: br.col };
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+  return { r0: row, r1: row, c0: col, c1: col };
+}
+
+/**
+ * Strip template box borders from the first 5 header meta fields so Excel shows
+ * plain text only (Name of Establishment / Owner / LIN / Principal Employer / PE LIN).
+ */
+export function clearFormDGJGujaratHeaderMetaBoxes(
+  worksheet,
+  { headerRowEnd = 25, colTo = 12 } = {}
+) {
+  if (!worksheet) return;
+  const rowEnd = Math.max(1, Number(headerRowEnd) || 25);
+  const colEnd = Math.max(4, Number(colTo) || 12);
+  const cleared = new Set();
+
+  for (let r = 1; r <= rowEnd; r += 1) {
+    for (let c = 1; c <= colEnd; c += 1) {
+      const text = formDGJExcelCellText(worksheet, r, c);
+      if (!isFormDGJGujaratPlainHeaderMetaLabel(text)) continue;
+      const bounds = formDGJFindMergeBounds(worksheet, r, c);
+      // Template often boxes an empty row under a single-row label (e.g. A10:A11).
+      let r1 = bounds.r1;
+      if (bounds.r0 === bounds.r1 && bounds.r0 + 1 <= rowEnd) {
+        const nextText = formDGJExcelCellText(worksheet, bounds.r0 + 1, bounds.c0);
+        if (
+          !nextText &&
+          !/for\s+the\s+period\s+from/i.test(
+            formDGJExcelCellText(worksheet, bounds.r0 + 1, 1)
+          )
+        ) {
+          r1 = bounds.r0 + 1;
+        }
+      }
+      const c1 = Math.max(bounds.c1, Math.min(colEnd, bounds.c0 + 3));
+      for (let rr = bounds.r0; rr <= Math.min(r1, rowEnd); rr += 1) {
+        for (let cc = bounds.c0; cc <= Math.min(c1, colEnd + 4); cc += 1) {
+          const key = `${rr}:${cc}`;
+          if (cleared.has(key)) continue;
+          cleared.add(key);
+          clearFormDGJCellBorder(worksheet.getCell(rr, cc));
+        }
+      }
+    }
+  }
+}
+
 export function isFormDGJGujaratSystemGeneratedText(text) {
   return /this\s+is\s+a\s+system\s+generated\s+document|system\s+generated\s+document/i.test(
     String(text || '').trim()
@@ -780,50 +877,6 @@ export function readFormDGJGujaratPaidDays(payrollRow) {
   return '';
 }
 
-function formDGJPayrollNameCandidates(payrollRow) {
-  if (!payrollRow || typeof payrollRow !== 'object') return [];
-  const flat = flattenPayrollEarningColumns(payrollRow);
-  return [
-    flat.employee_name,
-    flat.EmployeeName,
-    flat['Employee Name'],
-    flat.full_name,
-    flat.name,
-    flat.Name,
-    `${flat.first_name || ''} ${flat.last_name || ''}`,
-    `${flat.FirstName || ''} ${flat.LastName || ''}`,
-    payrollRow.employee_name,
-    payrollRow.EmployeeName,
-    `${payrollRow.first_name || ''} ${payrollRow.last_name || ''}`,
-  ]
-    .map((v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' '))
-    .filter((v) => v.length >= 2);
-}
-
-function formDGJRowNameCandidates(row, headers) {
-  if (!row || typeof row !== 'object') return [];
-  const hdrs = Array.isArray(headers) ? headers : [];
-  const names = [];
-  hdrs.forEach((h) => {
-    if (!isFormDGJNameHeader(h)) return;
-    const v = String(row[h] ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
-    if (v) names.push(v);
-  });
-  const lookup = String(row.__employeeLookupName || '').trim().toLowerCase().replace(/\s+/g, ' ');
-  if (lookup) names.push(lookup);
-  return [...new Set(names)];
-}
-
-function formDGJNamesLooselyMatch(a, b) {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  // Require multi-token names (first + last). Never match first-name-only.
-  const aParts = String(a).split(/\s+/).filter(Boolean);
-  const bParts = String(b).split(/\s+/).filter(Boolean);
-  if (aParts.length < 2 || bParts.length < 2) return false;
-  return aParts[0] === bParts[0] && aParts[aParts.length - 1] === bParts[bParts.length - 1];
-}
-
 /**
  * Fill Summary No. of Days from Sample Payroll Paid_days,
  * and Remarks No. of Hours = Summary No. of Days × 8.
@@ -864,17 +917,7 @@ export function applyFormDGJGujaratPaidDaysToRows(
     }
     const byName = findForm10PayrollRowByFirstAndLastName(emp || row, payrollList, extraParts);
     if (byName && readFormDGJGujaratPaidDays(byName) !== '') return byName;
-
-    // Last resort: full-name first+last token match against payroll name candidates.
-    const rowNames = formDGJRowNameCandidates(row, headers).filter((n) => n.split(/\s+/).length >= 2);
-    for (let i = 0; i < payrollList.length; i += 1) {
-      const pr = payrollList[i];
-      if (!pr || pr.fetch_error || readFormDGJGujaratPaidDays(pr) === '') continue;
-      const payNames = formDGJPayrollNameCandidates(pr).filter((n) => n.split(/\s+/).length >= 2);
-      if (rowNames.some((rn) => payNames.some((pn) => formDGJNamesLooselyMatch(rn, pn)))) {
-        return pr;
-      }
-    }
+    // No ID / first-name-only / loose fallbacks — FirstName AND LastName only.
     return null;
   };
 
@@ -1080,6 +1123,11 @@ export function writeFormDGJGujaratHeaderFieldsToWorksheet(
     headerFormData.form_d_gj_period || headerFormData.statutory_period_from,
     headerRowEnd
   );
+  // First 5 meta fields: plain text only (strip template box borders).
+  clearFormDGJGujaratHeaderMetaBoxes(worksheet, {
+    headerRowEnd,
+    colTo: Math.max(6, Number(helpers.colTo) || 12),
+  });
 }
 
 function buildMergeTopLeftResolver(worksheet) {

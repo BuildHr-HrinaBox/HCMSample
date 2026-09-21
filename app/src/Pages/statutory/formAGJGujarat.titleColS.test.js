@@ -4,18 +4,33 @@ import {
   writeFormAGJGujaratTitleBandsInColumnS,
 } from './formAGJGujarat';
 
+function assertFormAGJTitleBandsCleared(ws) {
+  for (let r = 1; r <= 15; r += 1) {
+    for (let c = 1; c <= 26; c += 1) {
+      const v = String(ws.getCell(r, c).value || '').trim();
+      if (!v) continue;
+      expect(v).not.toMatch(/^SCHEDULE$/i);
+      expect(v).not.toMatch(/^FORM A$/i);
+      expect(v).not.toMatch(/FORMAT OF EMPLOYEE/i);
+    }
+  }
+  expect(String(ws.getCell(1, 6).value || '')).not.toMatch(/See rule 2/i);
+}
+
 async function buildTemplateWithTitlesInEF() {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('FORM A');
-  // Wide merge past S (E2:Z2) — write to S must not land on master E.
-  ws.mergeCells(2, 5, 2, 26); // E2:Z2
+  ws.getCell(1, 1).value = 'SCHEDULE';
+  ws.getCell(1, 6).value = '[See rule 2(1)]';
+  ws.mergeCells(2, 5, 2, 26);
   ws.getCell(2, 5).value = 'FORM A';
   ws.getCell(2, 5).alignment = { horizontal: 'center' };
-  ws.mergeCells(4, 5, 4, 26); // E4:Z4
+  ws.mergeCells(4, 5, 4, 26);
   ws.getCell(4, 5).value = 'FORMAT OF EMPLOYEE/ WORKMAN/ WORKER';
   ws.getCell(4, 5).alignment = { horizontal: 'center' };
 
   const headers = [
+    
     'Sl. No.',
     'Employee Code',
     'Name',
@@ -47,38 +62,17 @@ async function buildTemplateWithTitlesInEF() {
   return wb.xlsx.writeBuffer();
 }
 
-function assertTitlesOnlyInColumnS(ws) {
-  for (let r = 1; r <= 8; r += 1) {
-    for (let c = 1; c <= 18; c += 1) {
-      const v = String(ws.getCell(r, c).value || '');
-      expect(v).not.toMatch(/FORM A|FORMAT OF EMPLOYEE/i);
-    }
-  }
-  const sTexts = [];
-  for (let r = 1; r <= 8; r += 1) {
-    const v = String(ws.getCell(r, 19).value || '').trim();
-    if (v) sTexts.push(v);
-  }
-  expect(sTexts.some((t) => /^FORM A$/i.test(t))).toBe(true);
-  expect(sTexts.some((t) => /FORMAT OF EMPLOYEE/i.test(t))).toBe(true);
-
-  const merges = Array.isArray(ws.model?.merges) ? ws.model.merges : [];
-  merges.forEach((range) => {
-    const parts = String(range || '').split(':');
-    if (parts.length !== 2) return;
-    const start = parts[0].match(/^([A-Z]+)(\d+)$/i);
-    const end = parts[1].match(/^([A-Z]+)(\d+)$/i);
-    if (!start || !end) return;
-    const r1 = parseInt(start[2], 10);
-    const r2 = parseInt(end[2], 10);
-    if (r2 < 1 || r1 > 8) return;
-    // No leftover title merges that span into E–P.
-    expect(String(range)).not.toMatch(/^[E-R]\d+:[E-R]\d+$/i);
-  });
+function assertFormAGJTitleBandOrder(ws) {
+  expect(String(ws.getCell(1, 5).value || '').trim()).toMatch(/^SCHEDULE$/i);
+  expect(String(ws.getCell(2, 5).value || '').trim()).toMatch(/^FORM A$/i);
+  expect(String(ws.getCell(3, 5).value || '').trim()).toMatch(/FORMAT OF EMPLOYEE/i);
+  expect(String(ws.getCell(4, 5).value || '').trim()).not.toMatch(/FORMAT OF EMPLOYEE/i);
+  expect(String(ws.getCell(1, 1).value || '').trim()).not.toMatch(/^SCHEDULE$/i);
+  expect(String(ws.getCell(1, 6).value || '')).toMatch(/See rule 2/i);
 }
 
-describe('Form A GJ titles in column S', () => {
-  test('writeFormAGJGujaratTitleBandsInColumnS clears E–F and writes S', async () => {
+describe('Form A GJ title band rows 1–3', () => {
+  test('writeFormAGJGujaratTitleBandsInColumnS orders SCHEDULE / FORM A / FORMAT', async () => {
     const buf = await buildTemplateWithTitlesInEF();
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buf);
@@ -89,14 +83,10 @@ describe('Form A GJ titles in column S', () => {
       subtitle: 'FORMAT OF EMPLOYEE/ WORKMAN/ WORKER',
     });
 
-    assertTitlesOnlyInColumnS(ws);
-    expect(String(ws.getCell(2, 19).value || '')).toMatch(/FORM A/i);
-    expect(String(ws.getCell(4, 19).value || '')).toMatch(/FORMAT OF EMPLOYEE/i);
-    expect(String(ws.getCell(2, 5).value || '')).toBe('');
-    expect(String(ws.getCell(4, 5).value || '')).toBe('');
+    assertFormAGJTitleBandOrder(ws);
   });
 
-  test('download places titles in column S not E–F', async () => {
+  test('download clears SCHEDULE / FORM A / FORMAT title band', async () => {
     const templateArrayBuffer = await buildTemplateWithTitlesInEF();
     const { buffer } = await buildFormAGJGujaratWorkbookWithTemplateStyles({
       templateArrayBuffer,
@@ -142,6 +132,6 @@ describe('Form A GJ titles in column S', () => {
 
     const outWb = new ExcelJS.Workbook();
     await outWb.xlsx.load(buffer);
-    assertTitlesOnlyInColumnS(outWb.worksheets[0]);
+    assertFormAGJTitleBandsCleared(outWb.worksheets[0]);
   });
 });

@@ -9,6 +9,7 @@ import {
   looksLikeDemoCompanyHeaderValue,
   applySiteCompanyHeaderAutofill,
   applyFormCRJContractorFromSite,
+  applyFormXXIIIGJHeaderFieldsFromSite,
   buildCompanyNameAndAddress,
   buildCompanyNameWithSiteAddress,
   buildSiteContractorNameAndAddress,
@@ -505,5 +506,49 @@ describe('resolveCompanyRecordForStatutory', () => {
       }
     );
     expect(next.form_xi_rj_contractor).toBe('Vayona Contractor, Jaipur');
+  });
+});
+
+describe('Form XXIII GJ header fetch', () => {
+  it('fills contractor, establishment, and principal employer from site + company', () => {
+    const site = {
+      siteName: 'Alfanar Site',
+      siteAddress: '66/33Kv Substation, Nanikundal',
+      siteCity: 'Babra',
+      siteState: 'Gujarat',
+      location: 'GJ-Alfanar',
+      contractorName: 'VAYONA ENERGY PRIVATE LIMITED',
+      contractorAddress: 'vvd/14',
+    };
+    const company = {
+      companyName: 'Amreli Renewable Energy Pvt Ltd',
+      companyAddress: '66/33Kv Substation Amreli',
+      city: 'Babra',
+      state: 'Gujarat',
+    };
+    const next = applyFormXXIIIGJHeaderFieldsFromSite(
+      { form_xxiii_contractor: 'OLD' },
+      site,
+      company,
+      {
+        formHeaderFields: [
+          { key: 'form_xxiii_contractor', label: 'Name and address of the Contractor' },
+          {
+            key: 'form_xxiii_establishment_contract_carried',
+            label: 'Name and address of Establishment in/under which contract is carried on',
+          },
+          {
+            key: 'form_xxiii_principal_employer',
+            label: 'Name and address of Principal Employer',
+          },
+        ],
+      }
+    );
+    expect(next.form_xxiii_contractor).toMatch(/VAYONA ENERGY PRIVATE LIMITED/);
+    expect(next.form_xxiii_contractor).toMatch(/vvd\/14/);
+    expect(next.form_xxiii_establishment_contract_carried).toMatch(/Alfanar Site/);
+    expect(next.form_xxiii_principal_employer).toMatch(/Amreli Renewable Energy/);
+    expect(next.statutory_principal_employer).toMatch(/Amreli Renewable Energy/);
+    expect(next.form_xxiii_nature_location_work).toMatch(/GJ-Alfanar|Alfanar/);
   });
 });

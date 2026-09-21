@@ -11,10 +11,7 @@ import {
   collectForm10RowNameParts,
   findForm10PayrollRowByFirstAndLastName,
 } from './form10TamilNadu';
-import {
-  resolveFormXIXMPPayrollRowForEmployee,
-  resolveFormXIXMPPayrollRowsForAutofill,
-} from './formXIXMPWageSlip';
+import { resolveFormXIXMPPayrollRowsForAutofill } from './formXIXMPWageSlip';
 
 /** Gujarat Form B — Register of Wages (Shops & Establishments). */
 
@@ -1129,6 +1126,145 @@ function detectFormBGJGujaratTableLayout(worksheet, hints = {}) {
   return { headerRow, dataStartRow, templateCols, startCol };
 }
 
+const MONTH_NAMES_BGJ = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+/** Form B GJ header: "Wage period From 01-07-2019 To 31-07-2019" */
+export function buildFormBGJGujaratWagePeriodLine(monthName, year) {
+  let idx = MONTH_NAMES_BGJ.findIndex(
+    (m) => m.toLowerCase() === String(monthName || '').toLowerCase().trim()
+  );
+  if (idx < 0) {
+    const token = String(monthName || '').toLowerCase().trim().slice(0, 3);
+    idx = MONTH_NAMES_BGJ.findIndex((m) => m.toLowerCase().startsWith(token));
+  }
+  if (idx < 0) return '';
+  const y = Number(year);
+  if (!Number.isFinite(y) || y < 1900) return '';
+  const m = idx + 1;
+  const lastDay = new Date(y, idx + 1, 0).getDate();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `Wage period From ${pad(1)}-${pad(m)}-${y} To ${pad(lastDay)}-${pad(m)}-${y}`;
+}
+
+/** Put wage-period line into headerFormData keys used by Excel export / PDF. */
+export function applyFormBGJGujaratWagePeriodToHeaderData(headerData, periodLine) {
+  const line = String(periodLine || '').trim();
+  if (!line) return headerData && typeof headerData === 'object' ? { ...headerData } : {};
+  const out = headerData && typeof headerData === 'object' ? { ...headerData } : {};
+  out.form_b_gj_wage_period = line;
+  out.statutory_period_from = line;
+  out.wage_period_text = line;
+  return out;
+}
+
+export function prepareFormBGJGujaratDownloadHeaderData(
+  headerFormData,
+  parsedFormHeader = null,
+  siteContext = {}
+) {
+  const out = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
+  const {
+    establishmentText = '',
+    principalEmployerText = '',
+    periodText = '',
+  } = siteContext;
+
+  if (establishmentText) {
+    out.statutory_establishment_name = establishmentText;
+    out.form_b_gj_establishment = establishmentText;
+  }
+  if (principalEmployerText) {
+    out.statutory_principal_employer = principalEmployerText;
+    out.form_b_gj_principal_employer = principalEmployerText;
+  }
+  if (periodText) {
+    Object.assign(out, applyFormBGJGujaratWagePeriodToHeaderData(out, periodText));
+  }
+
+  const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
+  fields.forEach((field) => {
+    const key = field?.key;
+    if (!key || String(out[key] ?? '').trim()) return;
+    const label = String(field.label || '');
+    if (/establishment/i.test(label) && !/principal|employer|contractor|owner/i.test(label)) {
+      if (establishmentText) out[key] = establishmentText;
+    } else if (/principal\s+employer/i.test(label)) {
+      if (principalEmployerText) out[key] = principalEmployerText;
+    } else if (/wage\s*period\s*from/i.test(label)) {
+      if (periodText) out[key] = periodText;
+    }
+  });
+
+  return out;
+}
+
+/** Always write wage-period sentence into column A of the matching header row. */
+export function writeFormBGJGujaratWagePeriodCell(worksheet, periodText, headerRowEnd = 40) {
+  const line = String(periodText || '').trim();
+  if (!line || !worksheet) return false;
+  const maxR = Math.max(1, Number(headerRowEnd) || 40);
+  let targetRow = 0;
+
+  // Find the wage-period row anywhere in the header band (template may park it in B+).
+  for (let r = 1; r <= maxR; r += 1) {
+    for (let c = 1; c <= 24; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (/wage\s*period\s*from/i.test(raw)) {
+        targetRow = r;
+        break;
+      }
+    }
+    if (targetRow) break;
+  }
+  if (!targetRow) return false;
+
+  // Unmerge any header merge covering this row so column A is a real write target.
+  const merges = Array.isArray(worksheet.model?.merges) ? [...worksheet.model.merges] : [];
+  merges.forEach((range) => {
+    try {
+      const [a, b] = String(range || '').split(':');
+      if (!a || !b) return;
+      const tl = worksheet.getCell(a);
+      const br = worksheet.getCell(b);
+      if (!tl || !br) return;
+      if (targetRow >= tl.row && targetRow <= br.row) {
+        worksheet.unMergeCells(range);
+      }
+    } catch (_) {
+      /* template merge may already be gone */
+    }
+  });
+
+  // Always put the full wage-period sentence in column A; clear spill in B+.
+  worksheet.getCell(targetRow, 1).value = line;
+  worksheet.getCell(targetRow, 1).alignment = {
+    ...(worksheet.getCell(targetRow, 1).alignment || {}),
+    wrapText: false,
+    vertical: 'middle',
+    horizontal: 'left',
+  };
+  for (let c = 2; c <= 24; c += 1) {
+    const raw = excelCellValueToString(worksheet.getCell(targetRow, c)?.value).trim();
+    if (/wage\s*period/i.test(raw)) {
+      worksheet.getCell(targetRow, c).value = '';
+    }
+  }
+  return true;
+}
+
 export async function buildFormBGJGujaratWorkbookWithTemplateStyles({
   templateArrayBuffer,
   mappedData,
@@ -1154,14 +1290,37 @@ export async function buildFormBGJGujaratWorkbookWithTemplateStyles({
   if (!layout) throw new Error('Could not locate Gujarat Form B table header row.');
 
   const { dataStartRow, templateCols } = layout;
+  const headerRowEnd = Math.max(1, layout.headerRow - 1);
+
+  const wagePeriodLine = String(
+    headerFormData?.form_b_gj_wage_period ||
+      headerFormData?.wage_period_text ||
+      headerFormData?.statutory_period_from ||
+      ''
+  ).trim();
 
   if (headerFormData && typeof headerFormData === 'object') {
+    // Do not let the generic Label:value writer touch wage-period (it spills into column B).
+    const headerDataWithoutWagePeriod = { ...headerFormData };
+    delete headerDataWithoutWagePeriod.form_b_gj_wage_period;
+    delete headerDataWithoutWagePeriod.wage_period_text;
+    delete headerDataWithoutWagePeriod.statutory_period_from;
+    const fieldsWithoutWagePeriod = Array.isArray(parsedFormHeader?.fields)
+      ? parsedFormHeader.fields.filter(
+          (f) =>
+            !/wage\s*period\s*from/i.test(String(f?.label || '')) &&
+            f?.key !== 'form_b_gj_wage_period'
+        )
+      : [];
     writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
-      headerFormData,
-      parsedFormHeader,
-      headerRowEnd: Math.max(1, layout.headerRow - 1),
+      headerFormData: headerDataWithoutWagePeriod,
+      parsedFormHeader: parsedFormHeader
+        ? { ...parsedFormHeader, fields: fieldsWithoutWagePeriod }
+        : parsedFormHeader,
+      headerRowEnd,
       maxScanCols: 80,
     });
+    writeFormBGJGujaratWagePeriodCell(worksheet, wagePeriodLine, Math.max(headerRowEnd, 40));
   }
 
   const templateHeaderLabels = templateCols.map((entry) => entry.label);
@@ -1252,4 +1411,13 @@ export async function buildFormBGJGujaratWorkbookWithTemplateStyles({
   };
 }
 
-export { resolveFormXIXMPPayrollRowForEmployee as resolveFormBGJGujaratPayrollRowForEmployee };
+/**
+ * Form B Gujarat — match Sample Payroll by FirstName AND LastName only
+ * (never employee ID / first-name-only / loose personNamesMatch).
+ */
+export function resolveFormBGJGujaratPayrollRowForEmployee(emp, payrollRows, formRow = null, headers = []) {
+  const rows = Array.isArray(payrollRows) ? payrollRows : [];
+  if (rows.length === 0) return null;
+  const extraParts = collectForm10RowNameParts(formRow, Array.isArray(headers) ? headers : []);
+  return findForm10PayrollRowByFirstAndLastName(emp || formRow, rows, extraParts);
+}

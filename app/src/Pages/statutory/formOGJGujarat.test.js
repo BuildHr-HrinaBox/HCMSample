@@ -1,10 +1,12 @@
 import {
   FORM_OGJ_PERIOD_PARENT,
   applyFormOGJGujaratApprovedLeaveAutofill,
+  enrichFormOGJGujaratDisplayHeader,
   formOGJPersonNamesMatchStrict,
   formOGJRecordMatchesWorker,
   isFormOGJGujaratContext,
   isFormPKarnatakaAccumulatedLeaveContext,
+  isFormPMaharashtraAccumulatedLeaveContext,
   resolveFormOGJGujaratTableHeaders,
   toFormOGJPersonNameDisplay,
 } from './formOGJGujarat';
@@ -380,5 +382,123 @@ describe('Form P Karnataka accumulated leave', () => {
     expect(mappedData[0][leaveCountHeader]).toBe('2');
     expect(mappedData[0][fromHeader]).toBe('02-May-2026');
     expect(mappedData[0][tillHeader]).toBe('03-May-2026');
+  });
+});
+
+describe('Form P Maharashtra accumulated leave', () => {
+  const mhHeaders = [
+    'Sr. No.',
+    'Number of accumulated leave',
+    'Period for which leave is accumulated From_From',
+    'Period for which leave is accumulated Till_Till',
+  ];
+
+  it('detects Form_P_-_Maharashtra.xlsx as an accumulated-leave notice', () => {
+    expect(
+      isFormPMaharashtraAccumulatedLeaveContext(
+        { title: 'FORM P' },
+        { formFileName: 'Form_P_-_Maharashtra.xlsx' },
+        'Form_P_-_Maharashtra.xlsx',
+        '',
+        mhHeaders
+      )
+    ).toBe(true);
+    expect(
+      isFormOGJGujaratContext(
+        { title: 'FORM P' },
+        { formFileName: 'Form_P_-_Maharashtra.xlsx' },
+        'Form_P_-_Maharashtra.xlsx',
+        '',
+        mhHeaders
+      )
+    ).toBe(true);
+    expect(
+      isFormPKarnatakaAccumulatedLeaveContext(
+        { title: 'FORM P' },
+        { formFileName: 'Form_P_-_Maharashtra.xlsx' },
+        'Form_P_-_Maharashtra.xlsx',
+        '',
+        mhHeaders
+      )
+    ).toBe(false);
+    expect(
+      isFormOGJGujaratContext(
+        { title: 'FORM P' },
+        { formFileName: 'Form_P_GJ.xlsx' },
+        'Form_P_GJ.xlsx',
+        'MUSTER-ROLL Date of the Month',
+        ['Sr. No.', 'Full Name of the Worker', 'Date of Month_1']
+      )
+    ).toBe(false);
+  });
+
+  it('forces Form – P / See rule 20 / NOTICE heading (overrides FORM - O)', () => {
+    const enriched = enrichFormOGJGujaratDisplayHeader(
+      { title: 'FORM - O', subtitle: '(See rule 18)\n(See rule 20)' },
+      'Form_P_-_Maharashtra.xlsx',
+      { formFileName: 'Form_P_-_Maharashtra.xlsx' },
+      mhHeaders
+    );
+    expect(enriched.title).toBe("Form – 'P'");
+    expect(enriched.subtitle).toBe('(See rule 20)');
+    expect(enriched.reference).toBe('NOTICE OF MAXIMUM LEAVE ACCUMULATED');
+    expect(enriched.formPMaharashtraLeaveLayout).toBe(true);
+  });
+
+  it('autofills days / From / Till from Contingency Leave only (skips Earned Leave)', () => {
+    const mappedData = [
+      {
+        'Sr. No.': '1',
+        'Number of accumulated leave': '',
+        'Period for which leave is accumulated From_From': '',
+        'Period for which leave is accumulated Till_Till': '',
+      },
+    ];
+    const employees = [{ FirstName: 'Asha', LastName: 'Patil', EmployeeID: 'VE0901' }];
+    const approved = [
+      {
+        'Leave Type': 'Earned Leave',
+        From: '05-Jun-2026',
+        To: '06-Jun-2026',
+        Days: {
+          '05-Jun-2026': { LeaveCount: 1 },
+          '06-Jun-2026': { LeaveCount: 1 },
+        },
+        ApprovalStatus: 'APPROVED',
+        'Employee Name': 'Asha Patil',
+        EmployeeID: 'VE0901',
+        ZohoID: 'leave-mh-el',
+      },
+      {
+        'Leave Type': 'Contingency Leave',
+        From: '10-Jun-2026',
+        To: '12-Jun-2026',
+        Days: {
+          '10-Jun-2026': { LeaveCount: 1 },
+          '11-Jun-2026': { LeaveCount: 1 },
+          '12-Jun-2026': { LeaveCount: 1 },
+        },
+        ApprovalStatus: 'APPROVED',
+        'Employee Name': 'Asha Patil',
+        EmployeeID: 'VE0901',
+        ZohoID: 'leave-mh-cl',
+      },
+    ];
+
+    const hits = applyFormOGJGujaratApprovedLeaveAutofill(
+      mappedData,
+      employees,
+      mhHeaders,
+      approved,
+      {
+        monthFrom: '01-Jun-2026',
+        monthTo: '30-Jun-2026',
+        contingencyLeaveOnly: true,
+      }
+    );
+    expect(hits).toBe(1);
+    expect(mappedData[0][leaveCountHeader]).toBe('3');
+    expect(mappedData[0][fromHeader]).toBe('10-Jun-2026');
+    expect(mappedData[0][tillHeader]).toBe('12-Jun-2026');
   });
 });

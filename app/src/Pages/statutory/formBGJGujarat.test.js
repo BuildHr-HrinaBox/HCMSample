@@ -1,5 +1,7 @@
 import {
   applyFormBGJGujaratEmployeeToRow,
+  applyFormBGJGujaratWagePeriodToHeaderData,
+  buildFormBGJGujaratWagePeriodLine,
   formBGJPayrollRowHasSampleDeductionFields,
   isFormBGJIncomeTaxHeader,
   isFormBGJInsuranceHeader,
@@ -7,10 +9,14 @@ import {
   isFormBGJPfHeader,
   isFormBGJRecoveriesHeader,
   isFormBGJVoluntaryPfHeader,
+  prepareFormBGJGujaratDownloadHeaderData,
   resolveFormBGJGujaratPayrollFields,
+  resolveFormBGJGujaratPayrollRowForEmployee,
   resolveFormBGJGujaratPayrollRowsForAutofill,
   resolveFormBGJGujaratTableHeaders,
+  writeFormBGJGujaratWagePeriodCell,
 } from './formBGJGujarat';
+import ExcelJS from 'exceljs';
 
 describe('Form B Gujarat Sample Payroll deductions', () => {
   test('distinguishes PF, Voluntary Provident Fund, and Income Tax headers', () => {
@@ -319,5 +325,63 @@ describe('Form B Gujarat Sample Payroll deductions', () => {
       }
     );
     expect(row['Date of Payment']).toBe('30-04-2026');
+  });
+
+  test('resolveFormBGJGujaratPayrollRowForEmployee matches FirstName AND LastName only', () => {
+    const payrollRows = [
+      { first_name: 'Selva', last_name: 'Kumar', pf: 100, employee_id: 'VE1' },
+      { first_name: 'Selva', last_name: 'P', pf: 200, employee_id: 'VE2' },
+    ];
+    const hit = resolveFormBGJGujaratPayrollRowForEmployee(
+      { FirstName: 'Selva', LastName: 'P', EmployeeID: 'VE1' },
+      payrollRows
+    );
+    expect(hit).toBeTruthy();
+    expect(hit.pf).toBe(200);
+    expect(
+      resolveFormBGJGujaratPayrollRowForEmployee({ FirstName: 'Selva', LastName: '' }, payrollRows)
+    ).toBeNull();
+  });
+
+  test('buildFormBGJGujaratWagePeriodLine uses DD-MM-YYYY From/To with year', () => {
+    expect(buildFormBGJGujaratWagePeriodLine('July', 2019)).toBe(
+      'Wage period From 01-07-2019 To 31-07-2019'
+    );
+    expect(buildFormBGJGujaratWagePeriodLine('April', 2026)).toBe(
+      'Wage period From 01-04-2026 To 30-04-2026'
+    );
+    expect(buildFormBGJGujaratWagePeriodLine('Feb', 2024)).toBe(
+      'Wage period From 01-02-2024 To 29-02-2024'
+    );
+  });
+
+  test('applyFormBGJGujaratWagePeriodToHeaderData stamps export keys', () => {
+    const data = applyFormBGJGujaratWagePeriodToHeaderData(
+      {},
+      'Wage period From 01-07-2019 To 31-07-2019'
+    );
+    expect(data.form_b_gj_wage_period).toBe('Wage period From 01-07-2019 To 31-07-2019');
+    expect(data.statutory_period_from).toBe('Wage period From 01-07-2019 To 31-07-2019');
+    expect(data.wage_period_text).toBe('Wage period From 01-07-2019 To 31-07-2019');
+  });
+
+  test('prepareFormBGJGujaratDownloadHeaderData keeps period for Excel write', () => {
+    const prepared = prepareFormBGJGujaratDownloadHeaderData(
+      { statutory_establishment_name: 'Site A' },
+      { fields: [{ label: 'Wage period From', key: 'header_wage', value: '' }] },
+      { periodText: 'Wage period From 01-07-2019 To 31-07-2019' }
+    );
+    expect(prepared.form_b_gj_wage_period).toBe('Wage period From 01-07-2019 To 31-07-2019');
+    expect(prepared.header_wage).toBe('Wage period From 01-07-2019 To 31-07-2019');
+  });
+
+  test('writeFormBGJGujaratWagePeriodCell always places line in column A', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Form B');
+    ws.getCell(16, 2).value = 'Wage period From 01-07-2019 To 31-07-2019';
+    const line = 'Wage period From 01-07-2019 To 31-07-2019';
+    expect(writeFormBGJGujaratWagePeriodCell(ws, line, 20)).toBe(true);
+    expect(String(ws.getCell(16, 1).value)).toBe(line);
+    expect(String(ws.getCell(16, 2).value || '')).toBe('');
   });
 });

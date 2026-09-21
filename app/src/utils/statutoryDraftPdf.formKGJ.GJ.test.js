@@ -5,6 +5,7 @@ import {
   isFormKGJTruncatedWeeklyIntroText,
   looksLikeFormKGJGujaratPdfContext,
   rewriteFormKGJGujaratPdfHeader,
+  sanitizeFormKGJGujaratPdfDataRows,
   trimFormKGJGujaratLeadingBlankPdfColumns,
 } from './statutoryDraftPdf.formKGJ.GJ';
 
@@ -115,5 +116,16 @@ describe('Form K GJ PDF weekly-holiday caption', () => {
       'Saturday & Sunday',
       '',
     ]);
+  });
+
+  it('clears weekly-holiday placeholder text from the Hours of Work PDF column', () => {
+    const rows = [
+      ['Sr. No. (1)', 'Name of Worker (2)', 'Designation (3)', 'Day of Weekly Holiday (4)', 'Hours of Work (5)'],
+      ['1', 'Vikash Gupta', 'Engineer', 'Saturday & Sunday', 'Saturday & Sunday'],
+      ['1', 'Vikash Gupta', 'Engineer', 'Saturday & Sunday', '09:00 to 18:00'],
+    ];
+    const out = sanitizeFormKGJGujaratPdfDataRows(rows, 5, 0);
+    expect(out[1][4]).toBe('');
+    expect(out[2][4]).toBe('09:00 to 18:00');
   });
 });

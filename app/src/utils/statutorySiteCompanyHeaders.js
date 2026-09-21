@@ -49,6 +49,9 @@ export function statutoryHeaderLabelMatchKey(label) {
   if (/for\s+the\s+period\s+from/.test(compact)) {
     return 'statutory_period_from';
   }
+  if (/wage\s*period\s*from/.test(compact)) {
+    return 'form_b_gj_wage_period';
+  }
   return compact;
 }
 
@@ -290,6 +293,75 @@ export function applyFormXXIIIMPHeaderFieldsFromSite(
     ) {
       setValue(key, contractorText, true);
     } else if (/nature\s+and\s+location\s+of\s+work/.test(labelNorm) || /name\s+and\s+location\s+of\s+work/.test(labelNorm)) {
+      setValue(key, locationText, true);
+    }
+  }
+
+  return changed ? out : headerData;
+}
+
+/**
+ * Form XXIII GJ Register of Overtime — force-fetch header band from Site + Company:
+ * - Name and address of the Contractor ← Site contractor name + address
+ * - Name and address of Establishment in/under which contract is carried on ← Site establishment
+ * - Name and address of Principal Employer ← Company name + address
+ * - Nature and location of work ← Site location (also kept in sync)
+ */
+export function applyFormXXIIIGJHeaderFieldsFromSite(
+  headerData,
+  site,
+  company,
+  { formHeaderFields = [], isPlaceholder = () => false } = {}
+) {
+  if (!headerData || typeof headerData !== 'object') return headerData;
+  const contractorText = site ? buildSiteContractorNameAndAddress(site) : '';
+  const establishmentText = site ? buildSiteEstablishmentNameAndAddress(site) : '';
+  const principalEmployerText = buildCompanyNameAndAddress(company);
+  const locationText = site ? buildSiteLocationText(site) : '';
+  if (!contractorText && !establishmentText && !principalEmployerText && !locationText) {
+    return headerData;
+  }
+
+  const out = { ...headerData };
+  let changed = false;
+
+  const setValue = (key, value, force = true) => {
+    if (!key || !value) return;
+    const cur = Object.prototype.hasOwnProperty.call(out, key) ? String(out[key] ?? '').trim() : '';
+    if (!force && cur && !isPlaceholder(cur)) return;
+    if (cur === value) return;
+    out[key] = value;
+    changed = true;
+  };
+
+  setValue('form_xxiii_contractor', contractorText, true);
+  setValue('statutory_contractor', contractorText, true);
+  setValue('form_xxiii_establishment_contract_carried', establishmentText, true);
+  setValue('form_xxiii_principal_employer', principalEmployerText, true);
+  setValue('statutory_principal_employer', principalEmployerText, true);
+  setValue('form_xxiii_nature_location_work', locationText, true);
+
+  const fields = Array.isArray(formHeaderFields) ? formHeaderFields : [];
+  for (const field of fields) {
+    const key = field?.key;
+    if (!key) continue;
+    const labelNorm = normalizeStatutoryHeaderLabel(field.label);
+    if (
+      /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/.test(labelNorm) &&
+      !/principal/.test(labelNorm)
+    ) {
+      setValue(key, contractorText, true);
+    } else if (
+      /establishment/.test(labelNorm) &&
+      (/contract\s+is\s+cari?ed\s+on/.test(labelNorm) || /under\s+which\s+contract/.test(labelNorm))
+    ) {
+      setValue(key, establishmentText, true);
+    } else if (/principal\s+employer/.test(labelNorm)) {
+      setValue(key, principalEmployerText, true);
+    } else if (
+      /nature\s+and\s+location\s+of\s+work/.test(labelNorm) ||
+      /name\s+and\s+location\s+of\s+work/.test(labelNorm)
+    ) {
       setValue(key, locationText, true);
     }
   }
@@ -975,6 +1047,11 @@ export const STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS = [
     key: 'form_d_gj_period'
   },
   {
+    match: /wage\s*period\s*from/i,
+    label: 'Wage period From',
+    key: 'form_b_gj_wage_period'
+  },
+  {
     match: /name\s+and\s+address\s+of\s+the\s+factory/i,
     label: 'Name and Address of the Factory:',
     key: 'statutory_factory_name_address'
@@ -1298,6 +1375,9 @@ export function resolveHeaderFieldExportValue(headerFormData, field) {
   }
   if (/for\s+the\s+period\s+from/i.test(normalizeStatutoryHeaderLabel(label))) {
     return tryKeys(['form_d_gj_period', 'statutory_period_from']);
+  }
+  if (/wage\s*period\s*from/i.test(normalizeStatutoryHeaderLabel(label))) {
+    return tryKeys(['form_b_gj_wage_period', 'wage_period_text', 'statutory_period_from']);
   }
   if (isRegistrationNoHeaderLabel(label)) {
     return tryKeys(['statutory_registration_no', 'form12_header_registration']);

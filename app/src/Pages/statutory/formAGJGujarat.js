@@ -834,20 +834,20 @@ function buildMergeTopLeftResolver(worksheet) {
     const key = `${r}:${c}`;
     if (cache.has(key)) return cache.get(key);
     let topLeft = { r, c };
-    const merges = worksheet.model?.merges;
-    if (Array.isArray(merges)) {
-      for (let mi = 0; mi < merges.length; mi += 1) {
-        const parts = String(merges[mi] || '').split(':');
-        if (parts.length !== 2) continue;
-        const tl = worksheet.getCell(parts[0]);
-        const br = worksheet.getCell(parts[1]);
-        if (!tl || !br) continue;
-        if (r >= tl.row && r <= br.row && c >= tl.col && c <= br.col) {
-          topLeft = { r: tl.row, c: tl.col };
-          break;
-        }
+    listFormAGJWorksheetMerges(worksheet).forEach((range) => {
+      const parts = String(range || '').split(':');
+      if (parts.length !== 2) return;
+      const start = parseFormAGJMergeRef(parts[0]);
+      const end = parseFormAGJMergeRef(parts[1]);
+      if (!start || !end) return;
+      const r1 = Math.min(start.row, end.row);
+      const r2 = Math.max(start.row, end.row);
+      const c1 = Math.min(start.col, end.col);
+      const c2 = Math.max(start.col, end.col);
+      if (r >= r1 && r <= r2 && c >= c1 && c <= c2) {
+        topLeft = { r: r1, c: c1 };
       }
-    }
+    });
     cache.set(key, topLeft);
     return topLeft;
   };
@@ -916,10 +916,16 @@ function detectFormAGJGujaratTableLayout(worksheet, hints = {}) {
   return { headerRow, dataStartRow, templateCols };
 }
 
-/** Title band: column S only (not E–F / wide E–P merges). */
-const FORM_AGJ_TITLE_COL = 19; // S
+/** Title band: centered merge E–Z, rows 1–3 (matches Gujarat Form A template). */
+const FORM_AGJ_TITLE_MERGE_COL_FROM = 5; // E
+const FORM_AGJ_TITLE_MERGE_COL_TO = 26; // Z
+const FORM_AGJ_SCHEDULE_ROW = 1;
+const FORM_AGJ_TITLE_MAIN_ROW = 2;
+const FORM_AGJ_TITLE_SUB_ROW = 3;
+const FORM_AGJ_DEFAULT_SCHEDULE = 'SCHEDULE';
 const FORM_AGJ_DEFAULT_MAIN_TITLE = 'FORM A';
 const FORM_AGJ_DEFAULT_SUBTITLE = 'FORMAT OF EMPLOYEE/ WORKMAN/ WORKER';
+const FORM_AGJ_DEFAULT_SEE_RULE = '[See rule 2(1)]';
 
 function normalizeFormAGJSubtitleSingleLine(text) {
   const cleaned = String(text || FORM_AGJ_DEFAULT_SUBTITLE)
@@ -953,6 +959,18 @@ function sheetTextLooksLikeFormAGJSchedule(text) {
   if (isPlaceholderBandText(text)) return false;
   const n = formAGJGujaratHeaderNorm(text).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   return n === 'schedule' || /^schedule(\s+[ivxlc\d]+)?$/.test(n) || n === 'sched';
+}
+
+function sheetTextLooksLikeFormAGJSeeRule(text) {
+  if (isPlaceholderBandText(text)) return false;
+  const n = formAGJGujaratHeaderNorm(text);
+  return /see\s*rule\s*2/.test(n);
+}
+
+function sheetTextLooksLikeFormAGJPartA(text) {
+  if (isPlaceholderBandText(text)) return false;
+  const n = formAGJGujaratHeaderNorm(text);
+  return /part\s*[-\s]?a\b/.test(n) && /establish/.test(n);
 }
 
 function formAGJColLettersToNumber(letters) {
@@ -1045,10 +1063,79 @@ function sheetTextLooksLikeFormAGJTitleBand(text) {
   );
 }
 
+/** Title-band lines omitted from downloaded Excel/PDF (establishment fields stay). */
+export function isFormAGJGujaratExportTitleBandText(text) {
+  if (isPlaceholderBandText(text)) return false;
+  if (sheetTextLooksLikeFormAGJSeeRule(text)) return true;
+  if (sheetTextLooksLikeFormAGJTitleBand(text)) return true;
+  const n = formAGJGujaratHeaderNorm(text);
+  if (/see\s*rule\s*2/.test(n) && /schedule/.test(n)) return true;
+  return false;
+}
+
+function buildFormAGJTitleBandClearPredicate() {
+  const cellLooksLikeTitleToClear = (raw) => {
+    if (!raw) return false;
+    if (sheetTextLooksLikeFormAGJSeeRule(raw) || sheetTextLooksLikeFormAGJPartA(raw)) return false;
+    if (sheetTextLooksLikeFormAGJTitleBand(raw) || isPlaceholderBandText(raw)) return true;
+    const n = formAGJGujaratHeaderNorm(raw);
+    if (/^schedule(\s+[ivxlc\d]+)?$/.test(n.replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim())) {
+      return true;
+    }
+    if (/^form\s*a\b/.test(n) && n.length < 20) return true;
+    if (/format\s+of\s+employee/.test(n)) return true;
+    return false;
+  };
+  return cellLooksLikeTitleToClear;
+}
+
+/** Remove SCHEDULE / FORM A / FORMAT title rows from the export worksheet. */
+export function clearFormAGJGujaratExportTitleBands(worksheet) {
+  if (!worksheet) return;
+  const getMergeTopLeft = buildMergeTopLeftResolver(worksheet);
+  const getMergedAwareCellText = (r, c) => {
+    const tl = getMergeTopLeft(r, c);
+    return excelCellValueToString(worksheet.getCell(tl.r, tl.c)?.value).trim();
+  };
+  const scanRowFrom = 1;
+  const scanRowTo = 15;
+  const unmergeColTo = Math.max(FORM_AGJ_TITLE_MERGE_COL_TO + 14, 40);
+  const cellLooksLikeTitleToClear = buildFormAGJTitleBandClearPredicate();
+  const clearedMasters = new Set();
+
+  unmergeFormAGJTitleBandMerges(worksheet, scanRowFrom, scanRowTo, 1, unmergeColTo);
+
+  const shouldClearCellText = (raw) =>
+    cellLooksLikeTitleToClear(raw) || sheetTextLooksLikeFormAGJSeeRule(raw);
+
+  const clearTitleAt = (row, col) => {
+    const raw = getMergedAwareCellText(row, col);
+    if (!shouldClearCellText(raw)) return;
+    const tl = getMergeTopLeft(row, col);
+    const key = `${tl.r}:${tl.c}`;
+    if (clearedMasters.has(key)) return;
+    clearedMasters.add(key);
+    unmergeFormAGJTitleBandMerges(worksheet, tl.r, tl.r, 1, unmergeColTo);
+    worksheet.getCell(tl.r, tl.c).value = null;
+  };
+
+  for (let r = scanRowFrom; r <= scanRowTo; r += 1) {
+    for (let c = 1; c <= unmergeColTo; c += 1) {
+      clearTitleAt(r, c);
+    }
+  }
+}
+
+/** Last pass on any download workbook that looks like Gujarat Form A. */
+export function finalizeFormAGJGujaratExportTitleBandsOnWorksheet(worksheet) {
+  if (!worksheet) return;
+  if (!detectFormAGJGujaratTableLayout(worksheet, {})) return;
+  clearFormAGJGujaratExportTitleBands(worksheet);
+}
+
 /**
- * Place the 2 Form A title lines (FORM A + FORMAT OF EMPLOYEE…) in column S only.
- * Unmerges wide left-band merges (including merges that extend past S) and clears
- * the same titles from A–R so they do not stay centered over E–F.
+ * Form A GJ title band (rows 1–3, centered E–Z):
+ * SCHEDULE → FORM A → FORMAT OF EMPLOYEE/ WORKMAN/ WORKER.
  */
 export function writeFormAGJGujaratTitleBandsInColumnS(worksheet, parsedFormHeader = {}) {
   if (!worksheet) return;
@@ -1060,6 +1147,7 @@ export function writeFormAGJGujaratTitleBandsInColumnS(worksheet, parsedFormHead
 
   const parsedTitle = String(parsedFormHeader?.title || '').trim();
   const parsedSubtitle = String(parsedFormHeader?.subtitle || '').trim();
+  const scheduleText = FORM_AGJ_DEFAULT_SCHEDULE;
   const mainText =
     parsedTitle && !isPlaceholderBandText(parsedTitle) && sheetTextLooksLikeFormAGJMainTitle(parsedTitle)
       ? parsedTitle
@@ -1070,65 +1158,58 @@ export function writeFormAGJGujaratTitleBandsInColumnS(worksheet, parsedFormHead
       : FORM_AGJ_DEFAULT_SUBTITLE
   );
 
-  // Detect existing title rows (template often puts them on 2/3 and 4/5 over E–P).
-  let mainRow = -1;
-  let scheduleRow = -1;
-  let subRow = -1;
-  for (let r = 1; r <= 12; r += 1) {
+  let seeRuleText = FORM_AGJ_DEFAULT_SEE_RULE;
+  for (let r = 1; r <= 8; r += 1) {
     for (let c = 1; c <= 40; c += 1) {
       const raw = getMergedAwareCellText(r, c);
-      if (!raw || isPlaceholderBandText(raw)) continue;
-      if (mainRow < 0 && sheetTextLooksLikeFormAGJMainTitle(raw)) mainRow = r;
-      if (scheduleRow < 0 && sheetTextLooksLikeFormAGJSchedule(raw)) scheduleRow = r;
-      if (subRow < 0 && sheetTextLooksLikeFormAGJSubtitle(raw)) subRow = r;
+      if (raw && sheetTextLooksLikeFormAGJSeeRule(raw)) {
+        seeRuleText = raw;
+        break;
+      }
     }
   }
-  if (mainRow < 0) mainRow = 3;
-  if (subRow < 0) subRow = mainRow === 3 ? 5 : Math.max(mainRow + 2, 5);
 
+  const scheduleRow = FORM_AGJ_SCHEDULE_ROW;
+  const mainRow = FORM_AGJ_TITLE_MAIN_ROW;
+  const subRow = FORM_AGJ_TITLE_SUB_ROW;
   const scanRowFrom = 1;
-  const scanRowTo = Math.max(10, mainRow, subRow, scheduleRow > 0 ? scheduleRow : 0);
-  // Unmerge past column S so E2:Z2-style bands cannot keep hosting the title on E.
-  const unmergeColTo = Math.max(FORM_AGJ_TITLE_COL + 20, 40);
+  const scanRowTo = 8;
+  const unmergeColTo = Math.max(FORM_AGJ_TITLE_MERGE_COL_TO + 14, 40);
 
   unmergeFormAGJTitleBandMerges(worksheet, scanRowFrom, scanRowTo, 1, unmergeColTo);
 
-  const cellLooksLikeTitleToClear = (raw) => {
-    if (!raw) return false;
-    if (sheetTextLooksLikeFormAGJTitleBand(raw) || isPlaceholderBandText(raw)) return true;
-    const n = formAGJGujaratHeaderNorm(raw);
-    if (/^form\s*a\b/.test(n) && n.length < 20) return true;
-    if (/format\s+of\s+employee/.test(n)) return true;
-    return false;
-  };
+  const cellLooksLikeTitleToClear = buildFormAGJTitleBandClearPredicate();
 
-  const clearTitleTextInRow = (row, colFrom, colTo) => {
-    for (let c = colFrom; c <= colTo; c += 1) {
-      const cell = worksheet.getCell(row, c);
-      const raw = excelCellValueToString(cell?.value).trim();
+  const clearTitleDuplicatesInRow = (row) => {
+    for (let c = 1; c <= unmergeColTo; c += 1) {
+      const tl = getMergeTopLeft(row, c);
+      if (tl.r !== row || tl.c !== c) continue;
+      const raw = excelCellValueToString(worksheet.getCell(row, c)?.value).trim();
       if (!cellLooksLikeTitleToClear(raw)) continue;
-      cell.value = null;
+      worksheet.getCell(row, c).value = null;
     }
   };
 
   for (let r = scanRowFrom; r <= scanRowTo; r += 1) {
-    clearTitleTextInRow(r, 1, FORM_AGJ_TITLE_COL - 1);
-    // Also clear anything already in S before rewrite.
-    const sCell = worksheet.getCell(r, FORM_AGJ_TITLE_COL);
-    const sRaw = excelCellValueToString(sCell?.value).trim();
-    if (cellLooksLikeTitleToClear(sRaw) || !sRaw) sCell.value = null;
+    clearTitleDuplicatesInRow(r);
   }
 
-  const writeBand = (row, text, kind) => {
+  const writeCenteredBand = (row, text, kind) => {
     if (!row || row < 1 || !text) return;
-    // Guarantee this row has no merge covering S or the left band.
     unmergeFormAGJTitleBandMerges(worksheet, row, row, 1, unmergeColTo);
-    clearTitleTextInRow(row, 1, FORM_AGJ_TITLE_COL - 1);
-    const cell = worksheet.getCell(row, FORM_AGJ_TITLE_COL);
+    clearTitleDuplicatesInRow(row);
+    const colFrom = FORM_AGJ_TITLE_MERGE_COL_FROM;
+    const colTo = FORM_AGJ_TITLE_MERGE_COL_TO;
+    try {
+      worksheet.mergeCells(row, colFrom, row, colTo);
+    } catch (_) {
+      /* ignore */
+    }
+    const cell = worksheet.getCell(row, colFrom);
     cell.value = text;
     const isSubtitle = kind === 'subtitle';
     cell.alignment = {
-      horizontal: 'left',
+      horizontal: 'center',
       vertical: 'middle',
       wrapText: isSubtitle,
       shrinkToFit: false,
@@ -1136,23 +1217,44 @@ export function writeFormAGJGujaratTitleBandsInColumnS(worksheet, parsedFormHead
     cell.font = {
       ...(cell.font || {}),
       bold: true,
-      size: isSubtitle ? 8 : 11,
+      size: isSubtitle ? 9 : 11,
     };
     const wsRow = worksheet.getRow(row);
-    if (wsRow) wsRow.height = isSubtitle ? 22 : 18;
-    const col = worksheet.getColumn(FORM_AGJ_TITLE_COL);
-    if (col && (!col.width || col.width < (isSubtitle ? 36 : 18))) {
-      col.width = isSubtitle ? 36 : 18;
-    }
+    if (wsRow) wsRow.height = isSubtitle ? 24 : 18;
   };
 
-  writeBand(mainRow, mainText, 'main');
-  writeBand(subRow, subText, 'subtitle');
-  if (scheduleRow > 0) clearTitleTextInRow(scheduleRow, 1, FORM_AGJ_TITLE_COL - 1);
+  writeCenteredBand(scheduleRow, scheduleText, 'schedule');
+  writeCenteredBand(mainRow, mainText, 'main');
+  writeCenteredBand(subRow, subText, 'subtitle');
 
-  // Final sweep: nothing title-like may remain left of S.
-  for (let r = scanRowFrom; r <= scanRowTo; r += 1) {
-    clearTitleTextInRow(r, 1, FORM_AGJ_TITLE_COL - 1);
+  if (seeRuleText) {
+    try {
+      worksheet.unMergeCells(scheduleRow, 6, scheduleRow, 10);
+    } catch (_) {
+      /* ignore */
+    }
+    const ruleCell = worksheet.getCell(scheduleRow, 6);
+    ruleCell.value = seeRuleText;
+    ruleCell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
+    ruleCell.font = { ...(ruleCell.font || {}), bold: false, size: 9 };
+  }
+
+  // Remove stale copies that lived on rows 4–5 in older templates.
+  for (let r = subRow + 1; r <= subRow + 3; r += 1) {
+    let onlyTitle = true;
+    for (let c = 1; c <= unmergeColTo; c += 1) {
+      const raw = getMergedAwareCellText(r, c);
+      if (!raw) continue;
+      if (sheetTextLooksLikeFormAGJPartA(raw)) {
+        onlyTitle = false;
+        break;
+      }
+      if (!cellLooksLikeTitleToClear(raw)) {
+        onlyTitle = false;
+        break;
+      }
+    }
+    if (onlyTitle) clearTitleDuplicatesInRow(r);
   }
 }
 
@@ -1311,8 +1413,8 @@ export async function buildFormAGJGujaratWorkbookWithTemplateStyles({
     });
   }
 
-  // Titles last so nothing else can leave FORM A / FORMAT… centered over E–F.
-  writeFormAGJGujaratTitleBandsInColumnS(worksheet, parsedFormHeader);
+  // Download: drop SCHEDULE / FORM A / FORMAT heading band; keep establishment + table.
+  clearFormAGJGujaratExportTitleBands(worksheet);
 
   const out = await workbook.xlsx.writeBuffer();
   const fileName =

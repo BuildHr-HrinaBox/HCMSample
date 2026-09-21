@@ -1368,9 +1368,14 @@ export async function fetchFirstOkResponse(urls) {
           return;
         }
         const errorData = await resp.json().catch(() => ({}));
-        lastErr = new Error(
-          String(errorData.message || errorData.error || '').trim() || `Failed to load form file (HTTP ${resp.status})`
-        );
+        const msg = String(errorData.message || errorData.error || '').trim();
+        if (/statutory record not found/i.test(msg) && !lastErr) {
+          lastErr = new Error(msg || `Failed to load form file (HTTP ${resp.status})`);
+        } else if (msg && !/statutory record not found/i.test(msg)) {
+          lastErr = new Error(msg);
+        } else if (!lastErr) {
+          lastErr = new Error(msg || `Failed to load form file (HTTP ${resp.status})`);
+        }
       } catch (fetchErr) {
         if (!settled) {
           lastErr = fetchErr instanceof Error ? fetchErr : new Error('Failed to load form file');

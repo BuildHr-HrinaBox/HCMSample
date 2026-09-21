@@ -81,5 +81,39 @@ describe('Form XXVI Tamil Nadu SmartBrowz PDF', () => {
     expect(html).toContain('Acme Industries');
     expect(html).toContain('Ravi');
     expect(html).toContain('class="xxvi-grid"');
+    expect(html).toContain('table-layout: fixed');
+    expect(html).toContain('<colgroup>');
+  });
+
+  test('reads Month when the next cell is Date and the value is below', () => {
+    const rows = [
+      ['FORM XXVI'],
+      ['See Rule 75 of the Tamil Nadu Contract Labour (Regulation and Abolition) Rules, 1975'],
+      ['Register of Employment of Contractual Labour'],
+      ['Name and address of Principal Employer', 'Acme', '', '', 'Month', 'Date'],
+      ['Name and Address of Contractor.', 'Vayona', '', '', 'September', '2026'],
+      ['Nature and location of work.', 'Theni'],
+      ['Serial Number', 'Name of the Workman']
+    ];
+    const header = extractFormXXVITamilNaduPdfHeader(rows, 6);
+    expect(header.month).toBe('September');
+    expect(header.date).toBe('2026');
+  });
+
+  test('falls back to selected month when Excel Month cell is empty', () => {
+    const rows = [
+      ['FORM XXVI'],
+      ['See Rule 75 of the Tamil Nadu Contract Labour (Regulation and Abolition) Rules, 1975'],
+      ['Register of Employment of Contractual Labour'],
+      ['Month', 'Date'],
+      ['Serial Number', 'Name of the Workman']
+    ];
+    const header = extractFormXXVITamilNaduPdfHeader(rows, 4, { month: '2026-08' });
+    expect(header.month).toBe('August');
+    const html = buildFormXXVITamilNaduPdfHtml({
+      rows,
+      monthLabel: '2026-08'
+    });
+    expect(html).toContain('August');
   });
 });

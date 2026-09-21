@@ -3,7 +3,7 @@ import JSZip from 'jszip';
 import { jsPDF } from 'jspdf';
 import * as XLSX from 'xlsx';
 import { convertExcelFilesToSmartbrowzPdf } from './smartbrowzPdf';
-import { convertFormXXVITamilNaduExcelToSmartbrowzPdf } from './statutoryDraftPdf.formXXVI.TN';
+import { convertFormXXVITamilNaduExcelToSmartbrowzPdf, formXXVITamilNaduPdfColumnWeight } from './statutoryDraftPdf.formXXVI.TN';
 import {
   FORM_14_RJ_DAY_ENTRIES_NOTE,
   FORM_14_RJ_FOOTER_NOTE
@@ -7543,6 +7543,10 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   const weights = [];
   for (let c = 0; c < colCount; c += 1) {
     const inDayBand = dayBand && c >= dayBand.start && c <= dayBand.end;
+    if (headerModel.isFormXXVI) {
+      weights.push(formXXVITamilNaduPdfColumnWeight(leafHeaders[c], c, dayBand));
+      continue;
+    }
     if (inDayBand) {
       weights.push(
         isApMultiLevelForm ? 1.6 : isFormTKASheet ? 1.8 : headerModel.isFormXXVI ? 2.8 : 2.2
@@ -9119,7 +9123,6 @@ export async function buildStatutoryDraftPdfBlob({
   title = 'Statutory Draft',
   monthLabel = ''
 } = {}) {
-  void monthLabel;
   const excelFiles = await collectExcelBuffersFromDraft(arrayBuffer, fileName);
   if (!excelFiles.length) {
     throw new Error('No Excel data found in the draft file to convert to PDF.');
@@ -9129,7 +9132,8 @@ export async function buildStatutoryDraftPdfBlob({
     const xxviBlob = await convertFormXXVITamilNaduExcelToSmartbrowzPdf({
       excelFiles,
       title,
-      fileName
+      fileName,
+      monthLabel
     });
     if (xxviBlob && xxviBlob.size > 80) {
       return xxviBlob;

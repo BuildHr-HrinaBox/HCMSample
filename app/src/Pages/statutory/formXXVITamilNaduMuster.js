@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { writeStatutoryHeaderFieldsToExcelJsWorksheet } from '../../utils/statutorySiteCompanyHeaders';
 import { ensureExcelJSDataRowsWithBorders } from '../../utils/excelTableBorders';
 import { flattenPayrollEarningColumns, readPayrollScalar } from '../../utils/payrollEarnings';
+import { resolveToFullMonthName } from '../../utils/statutoryMonthResolve';
 
 /** Form XXVI (Tamil Nadu CLRA) — Muster with daily hours 1–31 under column band (10). */
 
@@ -52,7 +53,7 @@ export const FORM_XXVI_TN_HEADER_SPECS = [
     label: 'Name and Location of Worksite',
     fieldType: 'textarea',
     match:
-      /name\s+and\s+location\s+of\s+(?:the\s+)?work\s*site|name\s+and\s+location\s+of\s+worksite/i
+      /name\s+and\s+location\s+of\s+(?:the\s+)?work\s*site|name\s+and\s+location\s+of\s+worksite|(?:name|nature)\s+and\s+location\s+of\s+work/i
   },
   {
     key: 'form_x_month',
@@ -62,7 +63,7 @@ export const FORM_XXVI_TN_HEADER_SPECS = [
   {
     key: 'form_x_year',
     label: 'Year:',
-    match: /^year\s*:?\s*$/i
+    match: /^(?:year|date)\s*:?\s*$/i
   }
 ];
 
@@ -82,6 +83,7 @@ export function isFormXXVITamilNaduNonTableHeaderField(header) {
   if (!n) return false;
   if (/name\s+and\s+location\s+of\s+(?:the\s+)?work\s*site/.test(n)) return true;
   if (/name\s+and\s+location\s+of\s+worksite/.test(n)) return true;
+  if (/(?:name|nature)\s+and\s+location\s+of\s+work/.test(n) && !/workman/.test(n)) return true;
   if (/name\s+and\s+address\s+of\s+(?:the\s+)?principal\s+employer/.test(n)) return true;
   if (/name\s+and\s+address\s+of\s+(?:the\s+)?contractor/.test(n) && !/workman/.test(n)) return true;
   if (/^month$/.test(n) || /^year$/.test(n) || /^month\s*\/\s*year$/.test(n)) return true;
@@ -525,6 +527,126 @@ export function applyFormXXVITamilNaduAutofillFromSite(headerData, context = {})
   fill('form_x_month', context.monthName || '');
   fill('form_x_year', context.year || '');
   return out;
+}
+
+/** Month / year from Autofill header or the selected payroll month (ISO / name). */
+export function resolveFormXXVITamilNaduPeriodParts(selectedMonthIso = '', headerFormData = {}) {
+  const headerMonth = String(headerFormData?.form_x_month ?? '').trim();
+  const headerYear = String(headerFormData?.form_x_year ?? '').trim();
+  const monthName =
+    resolveToFullMonthName(headerMonth) ||
+    resolveToFullMonthName(selectedMonthIso) ||
+    '';
+  let year = (headerYear.match(/(?:19|20)\d{2}/) || [])[0] || '';
+  if (!year) {
+    const isoYear = String(selectedMonthIso || headerMonth || '').match(/(?:19|20)\d{2}/);
+    if (isoYear) year = isoYear[0];
+  }
+  return { monthName, year };
+}
+
+export function applyFormXXVITamilNaduPeriodToHeaderData(headerFormData, selectedMonthIso = '') {
+  const out = headerFormData && typeof headerFormData === 'object' ? { ...headerFormData } : {};
+  const parts = resolveFormXXVITamilNaduPeriodParts(selectedMonthIso, out);
+  if (parts.monthName) out.form_x_month = parts.monthName;
+  if (parts.year && !String(out.form_x_year || '').trim()) out.form_x_year = parts.year;
+  return out;
+}
+
+const FORM_XXVI_TN_EXCEL_HEADER_WRITE_SPECS = [
+  {
+    key: 'form_xxvi_principal_employer',
+    test: /name\s+and\s+address\s+of\s+(?:the\s+)?principal\s+employer/i
+  },
+  {
+    key: 'form_xxvi_contractor',
+    test: /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i,
+    reject: /workman|principal/i
+  },
+  {
+    key: 'form_xxvi_worksite',
+    test: /(?:name|nature)\s+and\s+location\s+of\s+work/i
+  },
+  {
+    key: 'form_x_month',
+    test: /^month\s*:?\s*$/i
+  },
+  {
+    key: 'form_x_year',
+    test: /^(?:date|year)\s*:?\s*$/i
+  }
+];
+
+function isFormXXVITamilNaduPeriodLabel(text) {
+  return /^(?:month|date|year)\s*:?\s*$/i.test(String(text || '').trim());
+}
+
+function writeFormXXVITamilNaduAdjacentValue(worksheet, row, col, value) {
+  const val = String(value ?? '').trim();
+  if (!val || !worksheet) return false;
+  const nextText = excelCellValueToString(worksheet.getCell(row, col + 1)?.value).trim();
+  if (nextText && nextText.toLowerCase() === val.toLowerCase()) return true;
+  if (!nextText || /^enter\b/i.test(nextText)) {
+    worksheet.getCell(row, col + 1).value = val;
+    return true;
+  }
+  if (isFormXXVITamilNaduPeriodLabel(nextText)) {
+    const below = excelCellValueToString(worksheet.getCell(row + 1, col)?.value).trim();
+    if (!below || /^enter\b/i.test(below)) {
+      worksheet.getCell(row + 1, col).value = val;
+      return true;
+    }
+    const belowNext = excelCellValueToString(worksheet.getCell(row + 1, col + 1)?.value).trim();
+    if (!belowNext || /^enter\b/i.test(belowNext)) {
+      worksheet.getCell(row + 1, col + 1).value = val;
+      return true;
+    }
+  }
+  const raw = excelCellValueToString(worksheet.getCell(row, col)?.value).trim();
+  if (isFormXXVITamilNaduPeriodLabel(raw) || /:$/.test(raw)) {
+    const label = raw.replace(/:+\s*$/, '').trim() || 'Month';
+    worksheet.getCell(row, col).value = `${label} : ${val}`;
+    return true;
+  }
+  return false;
+}
+
+/** Write only Autofill header values that exist — never invent extra template fields. */
+export function writeFormXXVITamilNaduHeaderFieldsToExcelJsWorksheet(
+  worksheet,
+  { headerFormData, headerRowEnd, selectedMonthIso } = {}
+) {
+  if (!worksheet) return false;
+  const headerValues = applyFormXXVITamilNaduPeriodToHeaderData(headerFormData, selectedMonthIso);
+  const maxRows = Math.max(12, Math.min(Number(headerRowEnd) || 20, 40));
+  const maxCols = Math.max(80, Number(worksheet.columnCount) || 80);
+  const written = new Set();
+  let any = false;
+
+  for (let r = 1; r <= maxRows; r += 1) {
+    for (let c = 1; c <= maxCols; c += 1) {
+      const raw = excelCellValueToString(worksheet.getCell(r, c)?.value).trim();
+      if (!raw) continue;
+      const labelOnly = raw.split(':')[0].trim();
+      for (let i = 0; i < FORM_XXVI_TN_EXCEL_HEADER_WRITE_SPECS.length; i += 1) {
+        const spec = FORM_XXVI_TN_EXCEL_HEADER_WRITE_SPECS[i];
+        if (written.has(spec.key)) continue;
+        if (spec.reject && spec.reject.test(raw)) continue;
+        if (!spec.test.test(labelOnly) && !spec.test.test(raw)) continue;
+        const value = String(headerValues[spec.key] ?? '').trim();
+        if (!value) {
+          written.add(spec.key);
+          break;
+        }
+        if (writeFormXXVITamilNaduAdjacentValue(worksheet, r, c, value)) {
+          written.add(spec.key);
+          any = true;
+        }
+        break;
+      }
+    }
+  }
+  return any;
 }
 
 function pickFormXXVITamilNaduPaidDaysValue(payrollRow) {
@@ -1220,7 +1342,8 @@ export async function buildFormXXVITamilNaduWorkbookWithTemplateStyles({
   parsedFormHeader,
   headerFormData,
   formFileName,
-  sheetNameHint
+  sheetNameHint,
+  selectedMonthIso
 }) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateArrayBuffer);
@@ -1379,25 +1502,40 @@ export async function buildFormXXVITamilNaduWorkbookWithTemplateStyles({
   const toOrderedValues = (row, rowIndex) => {
     if (Array.isArray(row)) {
       const out = [...row];
-      if (out[0] == null || String(out[0]).trim() === '') out[0] = rowIndex + 1;
       const colCount = Math.max(orderedCols.length, hdrs.length, out.length);
-      return Array.from({ length: colCount }, (_, idx) => out[idx] ?? '');
+      const values = Array.from({ length: colCount }, (_, idx) => out[idx] ?? '');
+      const hasOther = values.slice(1).some((v) => String(v ?? '').trim() !== '');
+      if (hasOther && (values[0] == null || String(values[0]).trim() === '')) {
+        values[0] = rowIndex + 1;
+      }
+      return values;
     }
     const colCount = Math.max(orderedCols.length, hdrs.length);
     const out = Array.from({ length: colCount }, (_, idx) => {
       const header = hdrs[idx] || '';
       return header ? getRowValueForHeader(row, header, idx) : '';
     });
-    if (out[0] == null || String(out[0]).trim() === '') out[0] = rowIndex + 1;
+    const hasOther = out.slice(1).some((v) => String(v ?? '').trim() !== '');
+    if (hasOther && (out[0] == null || String(out[0]).trim() === '')) out[0] = rowIndex + 1;
     return out;
   };
 
-  const headerValues = headerFormData && typeof headerFormData === 'object' ? headerFormData : {};
+  const headerValues = applyFormXXVITamilNaduPeriodToHeaderData(
+    headerFormData && typeof headerFormData === 'object' ? headerFormData : {},
+    selectedMonthIso
+  );
   writeStatutoryHeaderFieldsToExcelJsWorksheet(worksheet, {
     headerFormData: headerValues,
     parsedFormHeader,
     headerRowEnd: headerRow,
-    maxScanCols: 80
+    maxScanCols: 90,
+    writeMode: 'adjacent',
+    skipGenericSpecs: true
+  });
+  writeFormXXVITamilNaduHeaderFieldsToExcelJsWorksheet(worksheet, {
+    headerFormData: headerValues,
+    headerRowEnd: headerRow,
+    selectedMonthIso
   });
 
   const sourcePrimary =

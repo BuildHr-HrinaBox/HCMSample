@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import { inferSmartbrowzPdfOptions, requestSmartbrowzPdf } from './smartbrowzPdf';
+import { resolveToFullMonthName } from './statutoryMonthResolve';
 
 export const FORM_XXVI_TN_PDF_TITLE = 'FORM XXVI';
 export const FORM_XXVI_TN_PDF_REFERENCE =
@@ -50,7 +51,31 @@ export function looksLikeFormXXVITamilNaduPdfContext({
   );
 }
 
-export function extractFormXXVITamilNaduPdfHeader(rows = [], tableStart = 0) {
+const isFormXXVIPeriodLabel = (text) => /^(?:month|date|year)\s*:?\s*$/i.test(String(text || '').trim());
+
+const isFormXXVITableHeaderLike = (text) =>
+  /serial|s\.?\s*no|name of the workman|name of the worker|daily hours|rate of wages|number of days|signature|thumb|termination|designation|permanent|local address/i.test(
+    String(text || '')
+  );
+
+function pickValueNearLabel(rows, r, c, skipRe, tableStart) {
+  const belowOk = tableStart == null || r + 1 < tableStart;
+  const candidates = [
+    cellText(rows[r]?.[c + 1]),
+    belowOk ? cellText(rows[r + 1]?.[c]) : '',
+    belowOk ? cellText(rows[r + 1]?.[c + 1]) : '',
+    cellText(rows[r]?.[c + 2])
+  ];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const cand = candidates[i];
+    if (!cand || isFormXXVIPeriodLabel(cand) || isFormXXVITableHeaderLike(cand)) continue;
+    if (skipRe && skipRe.test(cand)) continue;
+    return cand;
+  }
+  return '';
+}
+
+export function extractFormXXVITamilNaduPdfHeader(rows = [], tableStart = 0, fallbacks = {}) {
   const principalRe = /name\s+and\s+address\s+of\s+(?:the\s+)?principal\s+employer/i;
   const contractorRe = /name\s+and\s+address\s+of\s+(?:the\s+)?contractor/i;
   const worksiteRe =
@@ -65,7 +90,8 @@ export function extractFormXXVITamilNaduPdfHeader(rows = [], tableStart = 0) {
   const scanLimit = Math.max(tableStart || 0, Math.min(rows.length, 24));
   for (let r = 0; r < scanLimit; r += 1) {
     const row = rows[r] || [];
-    for (let c = 0; c < row.length; c += 1) {
+    const colLimit = Math.max(row.length, 80);
+    for (let c = 0; c < colLimit; c += 1) {
       const cell = cellText(row[c]);
       if (!cell) continue;
       const lower = cell.toLowerCase();
@@ -79,21 +105,29 @@ export function extractFormXXVITamilNaduPdfHeader(rows = [], tableStart = 0) {
       if (!worksite && worksiteRe.test(cell)) {
         worksite = stripFieldLabelPrefix(cell, worksiteRe) || next;
       }
-      if (!month && /^month\s*:?\s*$/i.test(cell) && next && !/date|year|name and/i.test(next)) {
-        month = next;
+      if (!month && /^month\s*:?\s*$/i.test(cell)) {
+        month = pickValueNearLabel(rows, r, c, /date|year|name and/i, tableStart);
       }
       if (!month) {
         const monthMatch = cell.match(/^month\s*:?\s*(.+)$/i);
         if (monthMatch?.[1] && !/name and|date/i.test(monthMatch[1])) month = monthMatch[1].trim();
       }
-      if (!date && /^(?:date|year)\s*:?\s*$/i.test(cell) && next && !/name and|nature/i.test(next)) {
-        date = next;
+      if (!date && /^(?:date|year)\s*:?\s*$/i.test(cell)) {
+        date = pickValueNearLabel(rows, r, c, /month|name and|nature/i, tableStart);
       }
       if (!date) {
         const dateMatch = cell.match(/^(?:date|year)\s*:?\s*(.+)$/i);
         if (dateMatch?.[1] && !/name and|nature/i.test(dateMatch[1])) date = dateMatch[1].trim();
       }
     }
+  }
+
+  if (!month) {
+    month = resolveToFullMonthName(fallbacks.month) || cellText(fallbacks.month);
+  }
+  if (!date) {
+    const fbDate = cellText(fallbacks.date);
+    date = (fbDate.match(/(?:19|20)\d{2}/) || [])[0] || fbDate;
   }
 
   return {
@@ -106,6 +140,28 @@ export function extractFormXXVITamilNaduPdfHeader(rows = [], tableStart = 0) {
     month,
     date
   };
+}
+
+/** Column widths follow heading box labels — never body-cell length. */
+export function formXXVITamilNaduPdfColumnWeight(headerText, colIndex = 0, dayBand = null) {
+  if (dayBand && colIndex >= dayBand.start && colIndex <= dayBand.end) return 1.15;
+  const h = String(headerText || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const lower = h.toLowerCase();
+  if (/serial|s\.?\s*no/.test(lower)) return 2.2;
+  if (/age\s*(and|&)?\s*sex|^sex$|^age$/.test(lower)) return 2.4;
+  if (/rate\s+of\s+wages?/.test(lower)) return 3;
+  if (/date of (entry|termination)|entry into service/.test(lower)) return 3.2;
+  if (/permanent|home address/.test(lower)) return 5.2;
+  if (/local address/.test(lower)) return 5;
+  if (/name of the workm|name of the worker/.test(lower)) return 5;
+  if (/father|husband/.test(lower)) return 4.4;
+  if (/designation|nature of work/.test(lower)) return 4.2;
+  if (/number of days/.test(lower)) return 2.8;
+  if (/signature|thumb|contractor|representative/.test(lower)) return 3.4;
+  const len = h.length;
+  return Math.min(6, Math.max(2.4, len * 0.16 || 2.6));
 }
 
 export function findFormXXVITamilNaduPdfTableStart(rows = []) {
@@ -282,6 +338,18 @@ function buildOfficialHeaderHtml(header) {
   </table>`;
 }
 
+function leafHeaderText(theadRows, col) {
+  for (let i = theadRows.length - 1; i >= 0; i -= 1) {
+    const t = cellText(theadRows[i]?.[col]);
+    if (t && !/^\d{1,2}$/.test(t)) return t;
+  }
+  for (let i = 0; i < theadRows.length; i += 1) {
+    const t = cellText(theadRows[i]?.[col]);
+    if (t) return t;
+  }
+  return '';
+}
+
 function buildGridHtml(rows, tableStart, colCount) {
   const dayBand = detectDayBand(rows, tableStart, colCount);
   const headerEnd = findHeaderBandEnd(rows, tableStart, dayBand);
@@ -292,6 +360,15 @@ function buildGridHtml(rows, tableStart, colCount) {
   const bodyRows = rows.slice(headerEnd + 1).filter((row) =>
     (row || []).some((c) => String(c || '').trim())
   );
+
+  const weights = [];
+  for (let c = 0; c < colCount; c += 1) {
+    weights.push(formXXVITamilNaduPdfColumnWeight(leafHeaderText(theadRows, c), c, dayBand));
+  }
+  const weightSum = weights.reduce((a, b) => a + b, 0) || 1;
+  const colgroup = `<colgroup>${weights
+    .map((w) => `<col style="width:${((w / weightSum) * 100).toFixed(3)}%" />`)
+    .join('')}</colgroup>`;
 
   const renderRow = (row, tag) => {
     const cells = [];
@@ -307,12 +384,22 @@ function buildGridHtml(rows, tableStart, colCount) {
 
   const thead = theadRows.map((row) => renderRow(row, 'th')).join('');
   const tbody = (bodyRows.length ? bodyRows : [[]]).map((row) => renderRow(row, 'td')).join('');
-  return `<table class="xxvi-grid"><thead>${thead}</thead><tbody>${tbody}</tbody></table>`;
+  return `<table class="xxvi-grid">${colgroup}<thead>${thead}</thead><tbody>${tbody}</tbody></table>`;
 }
 
-export function buildFormXXVITamilNaduPdfHtml({ rows = [], fileName = '', title = '', sheetName = '' } = {}) {
+export function buildFormXXVITamilNaduPdfHtml({
+  rows = [],
+  fileName = '',
+  title = '',
+  sheetName = '',
+  monthLabel = '',
+  dateLabel = ''
+} = {}) {
   const tableStart = findFormXXVITamilNaduPdfTableStart(rows);
-  const header = extractFormXXVITamilNaduPdfHeader(rows, tableStart);
+  const header = extractFormXXVITamilNaduPdfHeader(rows, tableStart, {
+    month: monthLabel,
+    date: dateLabel
+  });
   const colCount = rows.reduce((max, row) => Math.max(max, (row || []).length), 0);
   return `<!DOCTYPE html>
 <html>
@@ -336,6 +423,7 @@ export function buildFormXXVITamilNaduPdfHtml({ rows = [], fileName = '', title 
       border-collapse: collapse;
       margin-bottom: 8px;
       font-size: 10px;
+      table-layout: fixed;
     }
     table.xxvi-meta td {
       border: 1px solid #000;
@@ -350,11 +438,13 @@ export function buildFormXXVITamilNaduPdfHtml({ rows = [], fileName = '', title 
       border-collapse: collapse;
       width: 100%;
       font-size: 7px;
+      table-layout: fixed;
     }
     table.xxvi-grid th, table.xxvi-grid td {
       border: 1px solid #000;
       padding: 2px 3px;
       vertical-align: top;
+      overflow-wrap: anywhere;
       word-break: break-word;
     }
     table.xxvi-grid th {
@@ -363,7 +453,6 @@ export function buildFormXXVITamilNaduPdfHtml({ rows = [], fileName = '', title 
       background: #f7f7f7;
     }
     table.xxvi-grid .day {
-      width: 14px;
       text-align: center;
       white-space: nowrap;
     }
@@ -379,7 +468,8 @@ export function buildFormXXVITamilNaduPdfHtml({ rows = [], fileName = '', title 
 export async function convertFormXXVITamilNaduExcelToSmartbrowzPdf({
   excelFiles = [],
   title = '',
-  fileName = 'FORM-XXVI.pdf'
+  fileName = 'FORM-XXVI.pdf',
+  monthLabel = ''
 } = {}) {
   if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV === 'test') {
     return null;
@@ -402,7 +492,8 @@ export async function convertFormXXVITamilNaduExcelToSmartbrowzPdf({
       rows,
       fileName: label,
       title,
-      sheetName
+      sheetName,
+      monthLabel
     });
     const inferred = inferSmartbrowzPdfOptions({
       fileName: label || fileName,

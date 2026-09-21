@@ -1472,12 +1472,13 @@ export function writeStatutoryHeaderFieldsToExcelJsWorksheet(
     maxScanRows,
     maxScanCols,
     colRightBound,
-    writeMode = 'combined'
+    writeMode = 'combined',
+    skipGenericSpecs = false
   } = {}
 ) {
   if (!worksheet || !headerFormData || typeof headerFormData !== 'object') return;
   const fields = Array.isArray(parsedFormHeader?.fields) ? parsedFormHeader.fields : [];
-  const specs = STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS;
+  const specs = skipGenericSpecs ? [] : STATUTORY_SITE_COMPANY_SHEET_HEADER_SPECS;
   if (fields.length === 0 && specs.length === 0) return;
 
   const normalize = normalizeStatutoryHeaderLabel;

@@ -4,6 +4,7 @@ import {
   FORM_XXVI_TN_TITLE,
   applyFormXXVITamilNaduAutofillFromSite,
   applyFormXXVITamilNaduPaidDaysToMappedRows,
+  applyFormXXVITamilNaduPeriodToHeaderData,
   buildFormXXVITamilNaduWorksiteText,
   enrichFormXXVITamilNaduDisplayHeader,
   getFormXXVITamilNaduEmployeeName,
@@ -16,6 +17,7 @@ import {
   detectFormXXVITamilNaduDayColumnMap,
   ensureFormXXVITamilNaduDayColumnHeaders,
   readFormXXVITamilNaduCellValue,
+  resolveFormXXVITamilNaduPeriodParts,
   resolveFormXXVITamilNaduRateOfWages,
   stripFormXXVITamilNaduNonTableHeaders,
 } from './formXXVITamilNaduMuster';
@@ -167,6 +169,17 @@ describe('formXXVITamilNaduMuster worksite + employee name', () => {
     expect(out.form_xxvi_principal_employer).toBe('Principal Co');
     expect(out.form_x_month).toBe('July');
     expect(out.form_x_year).toBe('2026');
+  });
+
+  test('resolveFormXXVITamilNaduPeriodParts fetches Month from selected ISO when header is empty', () => {
+    expect(resolveFormXXVITamilNaduPeriodParts('2026-09', {})).toEqual({
+      monthName: 'September',
+      year: '2026'
+    });
+    const filled = applyFormXXVITamilNaduPeriodToHeaderData({ form_xxvi_worksite: 'Theni' }, '2026-09');
+    expect(filled.form_x_month).toBe('September');
+    expect(filled.form_x_year).toBe('2026');
+    expect(filled.form_xxvi_worksite).toBe('Theni');
   });
 
   test('stripFormXXVITamilNaduNonTableHeaders removes worksite column', () => {

@@ -51716,6 +51716,17 @@ const Statutory = ({ userEmail, userRole }) => {
         console.warn('Site factory header autofill for download skipped:', siteFactoryHeaderErr);
       }
 
+      if (isFormXXVITamilNaduDownload) {
+        downloadHeaderFormData = applyStatutorySeparateMonthYearToHeaderData(
+          downloadHeaderFormData,
+          selectedMonth,
+          item,
+          parsed?.formHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
+      }
+
       if (isFormPGJGujaratDownload) {
         downloadHeaderFormData = applyStatutorySeparateMonthYearToHeaderData(
           downloadHeaderFormData,
@@ -62538,6 +62549,12 @@ const Statutory = ({ userEmail, userRole }) => {
         }));
       } else if (formXXVITamilNaduSave && templateWb) {
         const templateArrayBuffer = XLSX.write(templateWb, { type: 'array', bookType: 'xlsx' });
+        const xxviHeaderForSave = applyStatutorySeparateMonthYearToHeaderData(
+          headerDataForSave,
+          selectedMonth,
+          currentItem,
+          parsedFormHeaderForSave?.wagePeriodText || formHeader?.wagePeriodText || ''
+        );
         ({ blob, fileName } = await buildFormXXVITamilNaduWorkbookWithTemplateStyles({
           templateArrayBuffer,
           mappedData: tableDataForSave,
@@ -62547,7 +62564,7 @@ const Statutory = ({ userEmail, userRole }) => {
           parsedDataStartIndex: dataStartIndex,
           parsedTableStartCol: formFileModalData?.tableStartCol ?? 0,
           parsedFormHeader: parsedFormHeaderForSave || formHeader,
-          headerFormData: headerDataForSave,
+          headerFormData: xxviHeaderForSave,
           formFileName: draftFileNameForSave,
           sheetNameHint: resolvedSaveSheetNameForBuild || formFileModalData?.sheetName || '',
           selectedMonthIso:

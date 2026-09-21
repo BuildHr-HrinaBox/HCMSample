@@ -142,6 +142,46 @@ describe('Form L GJ PDF heading width', () => {
     expect(out[3][6]).toBe('Saturday & Sunday');
   });
 
+  it('removes a leaked shift label from the weekly holiday column', () => {
+    const rows = [
+      [
+        'Sr. No.',
+        'Name of the Worker',
+        'Designation',
+        'Date of the Month',
+        'Date of the Month',
+        'Date of the Month',
+        'Weekly holiday day',
+      ],
+      ['', '', '', '1st Shift', '2nd Shift', '3rd Shift', '3rd Shift'],
+      ['', '', '', 'From - To -', 'From - To -', 'From - To -', ''],
+    ];
+    const out = sanitizeFormLGJGujaratPdfHeaderRows(rows, 7, 0);
+    expect(out[0][6]).toBe('Weekly holiday day');
+    expect(out[1][5]).toBe('3rd Shift');
+    expect(out[1][6]).toBe('');
+  });
+
+  it('removes From-To text from the weekly holiday column', () => {
+    const rows = [
+      [
+        'Sr. No.',
+        'Name of the Worker',
+        'Designation',
+        'Date of the Month',
+        'Date of the Month',
+        'Date of the Month',
+        'Weekly holiday day',
+      ],
+      ['', '', '', '1st Shift', '2nd Shift', '3rd Shift', ''],
+      ['', '', '', 'From - To -', 'From - To -', 'From - To -', 'From - To -'],
+      ['1', 'Vikash Gupta', 'Senior Engineer', '9 AM\n6 PM', '', '', 'Saturday & Sunday'],
+    ];
+    const out = sanitizeFormLGJGujaratPdfHeaderRows(rows, 7, 0);
+    expect(out[2][6]).toBe('');
+    expect(out[3][6]).toBe('Saturday & Sunday');
+  });
+
   it('gives shift and weekly-holiday heading columns more weight than Sr. No.', () => {
     expect(formLGJGujaratColumnWeight('Sr. No.')).toBeLessThan(
       formLGJGujaratColumnWeight('1st Shift')

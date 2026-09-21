@@ -411,6 +411,10 @@ export function remapFormOGJGujaratRowsToHeaders(rows, sourceHeaders, targetHead
   return rows.map((row, rowIndex) => {
     if (!row || typeof row !== 'object') return {};
     const out = {};
+    // Preserve lookup keys for Form P To/Shri/Smt identity (canonical headers omit them).
+    Object.keys(row).forEach((k) => {
+      if (String(k).startsWith('__')) out[k] = row[k];
+    });
     tgt.forEach((targetHeader, colIdx) => {
       let val = '';
       if (Object.prototype.hasOwnProperty.call(row, targetHeader)) {
@@ -420,6 +424,7 @@ export function remapFormOGJGujaratRowsToHeaders(rows, sourceHeaders, targetHead
       } else {
         const bucket = bucketFor(targetHeader);
         for (const [k, v] of Object.entries(row)) {
+          if (String(k).startsWith('__')) continue;
           if (bucketFor(k) === bucket) {
             val = v;
             break;

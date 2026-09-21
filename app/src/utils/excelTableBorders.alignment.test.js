@@ -63,92 +63,42 @@ describe('statutory download content alignment helpers', () => {
     expect(isStatutoryFormTitleBandText('Overtime earnings')).toBe(false);
   });
 
-  test('centers title band even when template had left, and never forces text left', () => {
-    const cells = new Map();
-    const makeCell = (addr, value, alignment = {}) => {
-      const cell = { value, alignment: { ...alignment } };
-      cells.set(addr, cell);
-      return cell;
-    };
-    const worksheet = {
-      eachRow: (_opts, cb) => {
-        cb(
-          {
-            eachCell: (_o, cellCb) => {
-              // Was wrongly left — must become center
-              cellCb(makeCell('A1', 'FORM XXIII', { horizontal: 'left' }), 1);
-              cellCb(makeCell('A2', '*[See Rule 78(1)(a)(iii)]', { horizontal: 'left' }), 1);
-              cellCb(makeCell('A3', 'Register of Overtime', { horizontal: 'left' }), 1);
-            },
-          },
-          1
-        );
-        cb(
-          {
-            eachCell: (_o, cellCb) => {
-              cellCb(
-                makeCell('A4', 'Name and Address of Contractor. : VAYONA', {
-                  horizontal: 'left',
-                }),
-                1
-              );
-              cellCb(makeCell('H4', '67348'), 8);
-            },
-          },
-          4
-        );
-        cb(
-          {
-            eachCell: (_o, cellCb) => {
-              cellCb(makeCell('A10', 'Rajeshkumar', { horizontal: 'left' }), 1);
-              cellCb(makeCell('H10', 67348), 8);
-            },
-          },
-          10
-        );
-      },
-    };
+  test('does not override original template alignment or wrap', () => {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Align');
+    ws.getCell(1, 1).value = 'FORM XXIII';
+    ws.getCell(1, 1).alignment = { horizontal: 'left', wrapText: true };
+    ws.getCell(10, 1).value = 'Rajeshkumar';
+    ws.getCell(10, 1).alignment = { horizontal: 'center' };
+    ws.getCell(10, 8).value = 67348;
+    ws.getCell(10, 8).alignment = { horizontal: 'center' };
 
-    applyStatutoryDownloadContentAlignment(worksheet);
+    applyStatutoryDownloadContentAlignment(ws);
 
-    expect(cells.get('A1').alignment.horizontal).toBe('center');
-    expect(cells.get('A1').alignment.wrapText).toBe(false);
-    expect(cells.get('A2').alignment.horizontal).toBe('center');
-    expect(cells.get('A2').alignment.wrapText).toBe(false);
-    expect(cells.get('A3').alignment.horizontal).toBe('center');
-    // Field / body text: left-align override removed — existing alignment kept
-    expect(cells.get('A4').alignment.horizontal).toBe('left');
-    expect(cells.get('A10').alignment.horizontal).toBe('left');
-    expect(cells.get('H4').alignment.horizontal).toBe('right');
-    expect(cells.get('H10').alignment.horizontal).toBe('right');
+    expect(ws.getCell(1, 1).alignment.horizontal).toBe('left');
+    expect(ws.getCell(1, 1).alignment.wrapText).toBe(true);
+    expect(ws.getCell(10, 1).alignment.horizontal).toBe('center');
+    expect(ws.getCell(10, 8).alignment.horizontal).toBe('center');
   });
 
-  test('Form XXI AP boxed cells stay left, including S.No and NIL', () => {
+  test('Form XXI AP boxed cells keep the alignment already on the template', () => {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('XXI-Fines');
     ws.getCell(2, 1).value = 'FORM - XXI REGISTER OF FINES';
-    ws.getCell(3, 1).value =
-      '[Vide Rule 78 (1) (a) (ii) of Contract Labour (Reg. & Abolition) Central & A.P.Rules]';
+    ws.getCell(2, 1).alignment = { horizontal: 'center' };
     ws.getCell(13, 1).value = 'S.No';
-    ws.getCell(13, 1).alignment = { horizontal: 'center' };
-    ws.getCell(13, 2).value = 'Name of Workmen';
-    ws.getCell(14, 1).value = 1;
-    ws.getCell(14, 1).alignment = { horizontal: 'center' };
-    ws.getCell(14, 2).value = 'Ravi';
+    ws.getCell(13, 1).alignment = { horizontal: 'left' };
     ws.getCell(14, 5).value = 'NIL';
-    ws.getCell(14, 5).alignment = { horizontal: 'center' };
+    ws.getCell(14, 5).alignment = { horizontal: 'left' };
 
     applyStatutoryDownloadContentAlignment(ws);
 
     expect(ws.getCell(2, 1).alignment.horizontal).toBe('center');
-    expect(ws.getCell(3, 1).alignment.horizontal).toBe('center');
     expect(ws.getCell(13, 1).alignment.horizontal).toBe('left');
-    expect(ws.getCell(14, 1).alignment.horizontal).toBe('left');
-    expect(ws.getCell(14, 2).alignment.horizontal).toBe('left');
     expect(ws.getCell(14, 5).alignment.horizontal).toBe('left');
   });
 
-  test('Form XVIII TN table body text is left-aligned', () => {
+  test('Form XVIII TN keeps template body alignment (no generic left override)', () => {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('FORMXVIII');
     ws.getCell(1, 1).value = 'FORM XVIII';
@@ -164,9 +114,8 @@ describe('statutory download content alignment helpers', () => {
     ws.getCell(13, 4).alignment = { horizontal: 'center' };
     expect(worksheetLooksLikeFormXVIIITamilNadu(ws)).toBe(true);
     applyStatutoryDownloadContentAlignment(ws);
-    expect(ws.getCell(1, 1).alignment.horizontal).toBe('center');
-    expect(ws.getCell(13, 2).alignment.horizontal).toBe('left');
-    expect(ws.getCell(13, 4).alignment.horizontal).toBe('left');
+    expect(ws.getCell(13, 2).alignment.horizontal).toBe('center');
+    expect(ws.getCell(13, 4).alignment.horizontal).toBe('center');
   });
 });
 

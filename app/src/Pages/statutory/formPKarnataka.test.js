@@ -260,4 +260,32 @@ describe('Form P Karnataka per-employee notice ZIP', () => {
     expect(String(ws.getCell(7, 3).value)).toBe('Name of the Authorised person / Manager');
     expect(String(ws.getCell(8, 3).value)).toBe('To,');
   });
+
+  test('writeFormPKarnatakaNoticeIdentity fills Shri/Smt dots placeholder with worker name', () => {
+    const ws = {
+      rowCount: 12,
+      getCell(r, c) {
+        const key = `${r}:${c}`;
+        if (!this._cells) this._cells = {};
+        if (!this._cells[key]) this._cells[key] = { value: '', alignment: {} };
+        return this._cells[key];
+      },
+      getRow() {
+        return { height: 18 };
+      },
+    };
+    ws.getCell(6, 3).value = 'Name and address of the establishment';
+    ws.getCell(8, 3).value = 'To,';
+    ws.getCell(9, 3).value = 'Shri/Smt. …………………………………';
+    ws.getCell(10, 3).value = 'Address......................';
+    const written = writeFormPKarnatakaNoticeIdentity(
+      ws,
+      { FirstName: 'Asha', LastName: 'Patil', Employee_ID: 'VE0901' },
+      { __employeeLookupName: 'asha patil' },
+      { establishmentText: ESTABLISHMENT_TEXT }
+    );
+    expect(written).toBeGreaterThan(0);
+    expect(String(ws.getCell(9, 3).value)).toMatch(/Shri\/Smt\.\s+Asha Patil/i);
+    expect(String(ws.getCell(9, 3).value)).not.toMatch(/\u2026/);
+  });
 });

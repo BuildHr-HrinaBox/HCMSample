@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import { jsPDF } from 'jspdf';
 import * as XLSX from 'xlsx';
+import { convertExcelFilesToSmartbrowzPdf } from './smartbrowzPdf';
 import {
   FORM_14_RJ_DAY_ENTRIES_NOTE,
   FORM_14_RJ_FOOTER_NOTE
@@ -3038,7 +3039,7 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet', fileName = '') => {
 
   // Karnataka Form P notice of maximum leave — letter + small table, not a generic grid.
   if (looksLikeFormPKarnatakaPdfContext([], padded, sheetName, fileName)) {
-    const normalized = normalizeFormPKarnatakaPdfMatrix(padded, maxCol, 0, []);
+    const normalized = normalizeFormPKarnatakaPdfMatrix(padded, maxCol, 0, [], fileName);
     return {
       name: sheetName,
       rows: normalized.rows,
@@ -3625,7 +3626,8 @@ const sheetToDenseMatrix = (worksheet, sheetName = 'Sheet', fileName = '') => {
       finalRows,
       finalColCount,
       tableStartRow,
-      metaLines
+      metaLines,
+      fileName
     );
     finalRows = normalized.rows;
     finalColCount = normalized.colCount;
@@ -9122,6 +9124,19 @@ export async function buildStatutoryDraftPdfBlob({
     throw new Error('No Excel data found in the draft file to convert to PDF.');
   }
 
+  try {
+    const smartBlob = await convertExcelFilesToSmartbrowzPdf({
+      excelFiles,
+      title,
+      fileName
+    });
+    if (smartBlob && smartBlob.size > 80) {
+      return smartBlob;
+    }
+  } catch (smartErr) {
+    console.warn('SmartBrowz PDF conversion failed, using local jsPDF:', smartErr);
+  }
+
   const allMatrices = [];
   for (const file of excelFiles) {
     try {
@@ -9353,7 +9368,8 @@ export async function buildStatutoryDraftPdfBlob({
               m.rows,
               m.colCount,
               m.tableStartRow || 0,
-              m.metaLines
+              m.metaLines,
+              m.fileName || m.name || ''
             )
           );
         }

@@ -3,6 +3,11 @@
  * onto every populated data row in statutory form exports.
  */
 
+import { installExcelJsOriginalTemplatePreserve } from './excelTemplateLayoutPreserve';
+
+installExcelJsOriginalTemplatePreserve();
+
+
 export function excelJSCellHasBorder(cell) {
   const b = cell?.border;
   if (!b) return false;
@@ -240,6 +245,117 @@ export function applyExcelJSDataRowBorders(
   }
 }
 
+function statutoryWorksheetWorkbook(worksheet) {
+  return worksheet?.workbook || null;
+}
+
+export function registerStatutoryFilledRowRange(worksheet, range) {
+  if (!worksheet || !range) return;
+  const startRow = Math.max(1, Number(range.dataStartRow) || 1);
+  const dataRowCount = Math.max(0, Number(range.dataRowCount) || 0);
+  const colFrom = Math.max(1, Number(range.colFrom) || 1);
+  const colTo = Math.max(colFrom, Number(range.colTo) || colFrom);
+  const payload = {
+    sheetName: worksheet.name,
+    dataStartRow: startRow,
+    dataRowCount,
+    colFrom,
+    colTo,
+    templateRow: range.templateRow != null ? range.templateRow : startRow
+  };
+  worksheet.__statutoryFitRange = payload;
+  const wb = statutoryWorksheetWorkbook(worksheet);
+  if (!wb) return;
+  if (!Array.isArray(wb.__statutoryFilledRowRanges)) wb.__statutoryFilledRowRanges = [];
+  const next = wb.__statutoryFilledRowRanges.filter(
+    (item) => item?.sheetName !== payload.sheetName
+  );
+  next.push(payload);
+  wb.__statutoryFilledRowRanges = next;
+  wb.__applyStatutoryFilledRowRanges = applyRegisteredStatutoryFilledRowRanges;
+}
+
+/**
+ * Keep exactly `dataRowCount` boxed body rows (5 employees → 5 boxes).
+ * Extra template sample rows are cleared; employee rows get the template box style.
+ */
+export function trimExcelJsTableToRecordCount(
+  worksheet,
+  { dataStartRow, dataRowCount, colFrom, colTo, templateRow = null } = {}
+) {
+  if (!worksheet) return;
+  const startRow = Math.max(1, Number(dataStartRow) || 1);
+  const n = Math.max(0, Number(dataRowCount) || 0);
+  const c0 = Math.max(1, Number(colFrom) || 1);
+  const c1 = Math.max(c0, Number(colTo) || c0);
+  if (n < 1) return;
+
+  const styleRow = templateRow != null && templateRow >= 1 ? templateRow : startRow;
+  let boxHeight = worksheet.getRow(styleRow)?.height;
+  if (boxHeight == null || !Number(boxHeight)) {
+    boxHeight = worksheet.getRow(startRow)?.height;
+  }
+
+  applyExcelJSDataRowBorders(worksheet, {
+    dataStartRow: startRow,
+    dataRowCount: n,
+    colFrom: c0,
+    colTo: c1,
+    templateRow: styleRow,
+    forceFullBox: true
+  });
+
+  for (let i = 0; i < n; i += 1) {
+    const row = worksheet.getRow(startRow + i);
+    if (boxHeight != null && Number(boxHeight) > 0) row.height = Number(boxHeight);
+  }
+
+  const lastFilled = startRow + n - 1;
+  const scanTo = Math.max(
+    lastFilled + 8,
+    Number(worksheet.rowCount) || 0,
+    Number(worksheet.actualRowCount) || 0
+  );
+  for (let r = lastFilled + 1; r <= scanTo; r += 1) {
+    let noteRow = false;
+    for (let c = c0; c <= c1; c += 1) {
+      const raw = cellText(worksheet.getCell(r, c)?.value);
+      if (/^this\s+is\s+a\s+system\s+generated\s+document\.?$/i.test(raw)) {
+        noteRow = true;
+        break;
+      }
+    }
+    if (noteRow) continue;
+    for (let c = c0; c <= c1; c += 1) {
+      const cell = worksheet.getCell(r, c);
+      const raw = cellText(cell?.value);
+      if (/^this\s+is\s+a\s+system\s+generated\s+document\.?$/i.test(raw)) continue;
+      cell.value = null;
+      cell.border = {};
+      try {
+        const prev = cell.style && typeof cell.style === 'object' ? { ...cell.style } : {};
+        cell.style = { ...prev, border: {} };
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+export function applyRegisteredStatutoryFilledRowRanges(workbook) {
+  const ranges = Array.isArray(workbook?.__statutoryFilledRowRanges)
+    ? workbook.__statutoryFilledRowRanges
+    : [];
+  ranges.forEach((range) => {
+    if (!range) return;
+    const ws =
+      (range.sheetName && workbook.getWorksheet(range.sheetName)) ||
+      workbook.worksheets?.[0];
+    if (!ws) return;
+    trimExcelJsTableToRecordCount(ws, range);
+  });
+}
+
 /**
  * Apply all-borders styling to every populated data row.
  * Does not insert/duplicate worksheet rows — callers write values directly to
@@ -255,13 +371,20 @@ export function ensureExcelJSDataRowsWithBorders(
   const startRow = Math.max(1, dataStartRow);
   void templateBodyRows;
 
-  applyExcelJSDataRowBorders(worksheet, {
+  registerStatutoryFilledRowRange(worksheet, {
     dataStartRow: startRow,
     dataRowCount,
     colFrom,
     colTo,
-    templateRow: templateRow != null ? templateRow : startRow,
-    forceFullBox: true
+    templateRow: templateRow != null ? templateRow : startRow
+  });
+
+  trimExcelJsTableToRecordCount(worksheet, {
+    dataStartRow: startRow,
+    dataRowCount,
+    colFrom,
+    colTo,
+    templateRow: templateRow != null ? templateRow : startRow
   });
 }
 
@@ -629,112 +752,10 @@ export function worksheetLooksLikeForm14Rajasthan(worksheet) {
 }
 
 /**
- * Download alignment:
- * - Form Number / Rule / Form Name → center
- * - Numeric values → right (except Form XV service-certificate table → center)
- * - Rajasthan Form 14 table / month-year → left (matches official template model)
- * - Form XXI AP Register of Fines boxed cells → left
- * - Form XVIII TN table body (below column-number row) → left
- * - No left-align override for other text (keeps template centering)
+ * Do not apply a generic alignment/wrap system.
+ * Each original form/state template already defines alignment, wrap, fonts,
+ * and number formats. Download finalize must not reflow text into neighbours.
  */
 export function applyStatutoryDownloadContentAlignment(worksheet) {
-  if (!worksheet) return;
-  const formXvServiceCertificate = worksheetLooksLikeFormXVServiceCertificate(worksheet);
-  const form14Rajasthan = worksheetLooksLikeForm14Rajasthan(worksheet);
-  const formXXIAPFines = worksheetLooksLikeFormXXIAPRegisterOfFines(worksheet);
-  const formXVIIITamilNadu = worksheetLooksLikeFormXVIIITamilNadu(worksheet);
-  const formXVIIIDataStart = formXVIIITamilNadu
-    ? findFormXVIIITamilNaduDataStartRow(worksheet)
-    : 0;
-  const sheetNameLower = String(worksheet?.name || '').toLowerCase();
-  let formIFinesProbe = ` ${sheetNameLower} `;
-  for (let r = 1; r <= 4; r += 1) {
-    for (let c = 1; c <= 10; c += 1) {
-      const t = statutoryCellValueToPlainText(worksheet.getCell(r, c)?.value);
-      if (t) formIFinesProbe += ` ${t}`;
-    }
-  }
-  const formITamilNaduFines =
-    /pw\s*form\s*i/.test(sheetNameLower) ||
-    (/register\s+of\s+fines/i.test(formIFinesProbe) &&
-      !/register\s+of\s+workmen|conferment/i.test(formIFinesProbe));
-  worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-    row.eachCell({ includeEmpty: false }, (cell) => {
-      const text = statutoryCellValueToPlainText(cell?.value);
-      if (!text) return;
-      if (/^this\s+is\s+a\s+system\s+generated\s+document\.?$/i.test(text)) return;
-
-      const next = {
-        ...(cell.alignment || {}),
-        vertical: cell.alignment?.vertical || 'middle'
-      };
-      // Preserve template wrapText — do not force wrap on every cell (shreds Form XXIII headers).
-
-      // Always center Form Number / Rule / Form Name (do not leave/force left).
-      // Keep wrapText false on title band so a narrow column cannot stack the title vertically.
-      // Long Gujarat "Vide rule 77 … Gujarat Rules" line may need wrap inside its merge.
-      if (rowNumber <= 20 && isStatutoryFormTitleBandText(text)) {
-        // Form 14 RJ model: center the title band across the sheet.
-        next.horizontal = 'center';
-        next.wrapText = /vide\s+rule/i.test(text) && text.length > 60 ? true : false;
-        next.textRotation = 0;
-        cell.alignment = next;
-        return;
-      }
-
-      // Form I TN Register of Fines — table body (names + NIL) stays left.
-      if (formITamilNaduFines && rowNumber >= 5) {
-        next.horizontal = 'left';
-        next.wrapText = true;
-        cell.alignment = next;
-        return;
-      }
-
-      // Form XXI AP — every boxed cell (headers, S.No, NIL, names) stays left.
-      if (formXXIAPFines) {
-        next.horizontal = 'left';
-        cell.alignment = next;
-        return;
-      }
-
-      // Form XVIII TN — table body text/numbers sit left in each box.
-      if (formXVIIITamilNadu && formXVIIIDataStart > 0 && rowNumber >= formXVIIIDataStart) {
-        next.horizontal = 'left';
-        next.vertical = cell.alignment?.vertical || 'middle';
-        cell.alignment = next;
-        return;
-      }
-
-      // Form 14 RJ — table values (names, Young, hours, Nil) stay left like the template model.
-      // Do not left-align title lines (already handled above).
-      if (form14Rajasthan) {
-        const lower = text.toLowerCase();
-        if (
-          /rajasthan\s+shops/.test(lower) ||
-          /^form\s*14\b/.test(lower) ||
-          /rule\s*22/.test(lower) ||
-          /hours\s+of\s+work/.test(lower) ||
-          /notice\s+in\s+form\s*13/.test(lower)
-        ) {
-          next.horizontal = 'center';
-          cell.alignment = next;
-          return;
-        }
-        next.horizontal = 'left';
-        // Long header labels / footnotes may wrap; short data cells stay single-line.
-        if (text.length < 40 && !/name of persons|young person|total hours|extent of overtime|days on which overtime/i.test(text)) {
-          next.wrapText = false;
-        }
-        cell.alignment = next;
-        return;
-      }
-
-      // Numbers only — never force normal text to left.
-      if (isStatutoryNumericCellValue(cell?.value)) {
-        // Form XV employment table (Sl No / rate / period) matches the certificate template.
-        next.horizontal = formXvServiceCertificate && rowNumber >= 30 ? 'center' : 'right';
-        cell.alignment = next;
-      }
-    });
-  });
+  void worksheet;
 }

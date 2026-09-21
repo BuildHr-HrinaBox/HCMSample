@@ -60,7 +60,8 @@
       "pendingforms_job_function",
       "chro_job_function",
       "pending_function",
-      "remaindarfunctiom"
+      "remaindarfunctiom",
+      "sdkpdf_function"
     ],
     "ignore": [],
     "source": "functions"

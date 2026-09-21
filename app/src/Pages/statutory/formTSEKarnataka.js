@@ -5153,7 +5153,7 @@ export async function buildFormTSEWorkbookWithTemplateStyles({
   const tableColMin = fieldCols.length > 0 ? Math.min(...fieldCols) : 1;
   const tableColMax = fieldCols.length > 0 ? Math.max(...fieldCols) : writeHeaders.length;
   const templateBodyRows = countExcelJSTemplateBodyRows(worksheet, startRow, tableColMin, tableColMax);
-  const bodyRowsToPaint = Math.max(sourcePrimary.length, templateBodyRows);
+  const bodyRowsToPaint = Math.max(sourcePrimary.length, 1);
   // Wipe A…wage band on body rows first. Dirty Draft templates keep a prior J-shifted
   // write; without this, names stay under ATTENDANCE even after a correct A–I rewrite.
   const clearThroughCol = Math.max(tableColMax + 40, FORM_T_KA_ATTENDANCE_START_COL0 + 50, 80);

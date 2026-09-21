@@ -307,7 +307,13 @@ function padLeaveRows(rows) {
   return out;
 }
 
-export function normalizeFormPKarnatakaPdfMatrix(rows = [], colCount = 4, _tableStartRow = 0, metaLines = []) {
+export function normalizeFormPKarnatakaPdfMatrix(
+  rows = [],
+  colCount = 4,
+  _tableStartRow = 0,
+  metaLines = [],
+  fileName = ''
+) {
   const src = [];
   (Array.isArray(metaLines) ? metaLines : []).forEach((line) => {
     const t = norm(line);
@@ -324,12 +330,24 @@ export function normalizeFormPKarnatakaPdfMatrix(rows = [], colCount = 4, _table
     src,
     (n) => /authorised person|authorized person/.test(n) && /manager|authorised|authorized/.test(n)
   );
-  const shriSmt = firstMatchingLine(src, (n) => /shri\s*\/?\s*smt/.test(n));
+  let shriSmt = firstMatchingLine(src, (n) => /shri\s*\/?\s*smt/.test(n));
   const address = firstMatchingLine(src, (n, raw) => isWorkerAddressLine(raw));
   const legal =
     src
       .map((row) => collectNonEmptyCells(row).join(' '))
       .find((line) => isLegalLine(line)) || FORM_P_KA_PDF_LEGAL;
+
+  // If Excel still has "Shri/Smt. ………", recover the worker name from the ZIP member file name.
+  if (isFormPShriSmtPlaceholderText(shriSmt)) {
+    const fromFile = extractWorkerNameFromFormPFileName(fileName);
+    if (fromFile) shriSmt = `Shri/Smt. ${fromFile}`;
+  } else if (shriSmt) {
+    // Collapse leftover dots after a filled name: "Shri/Smt. Asha ….." → "Shri/Smt. Asha"
+    shriSmt = shriSmt
+      .replace(/(\bshri\s*\/?\s*smt\.?\s+)(.+?)([.\u2026\s]+)$/i, (_, a, name) => `${a}${String(name).trim()}`)
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
 
   const establishmentText = establishment
     ? /:/.test(establishment)
@@ -384,6 +402,46 @@ export function normalizeFormPKarnatakaPdfMatrix(rows = [], colCount = 4, _table
     formPKALayout: true,
     formPKAModel: model,
   };
+}
+
+function isFormPShriSmtPlaceholderText(text) {
+  const t = String(text || '')
+    .replace(/\u2026/g, '.')
+    .replace(/[.\u00b7\u2022_\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!t) return true;
+  if (!/shri/.test(t) || !/smt/.test(t)) return false;
+  const withoutLabel = t
+    .replace(/shri\s*\/?\s*smt\.?/g, '')
+    .replace(/name\s+of\s+(the\s+)?worker/g, '')
+    .replace(/[()]/g, '')
+    .trim();
+  return withoutLabel === '';
+}
+
+/** Form_P_Maharashtra_Asha_Patil.xlsx → "Asha Patil" */
+function extractWorkerNameFromFormPFileName(fileName) {
+  const base = String(fileName || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()
+    .replace(/\.xlsx?$/i, '')
+    .trim();
+  if (!base) return '';
+  const stripped = base
+    .replace(/^form_p[_-]*/i, '')
+    .replace(/^(karnataka|maharashtra)[_-]*/i, '')
+    .replace(/_+/g, ' ')
+    .replace(/-+/g, ' ')
+    .trim();
+  if (!stripped || /^(karnataka|maharashtra|employees?)$/i.test(stripped)) return '';
+  return stripped
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
 }
 
 export const applyFormPKarnatakaPdfNormalization = (target, normalized) => {

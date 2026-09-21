@@ -1,0 +1,10 @@
+{
+	"name": "sdkpdf_function",
+	"version": "1.0.0",
+	"main": "index.js",
+	"author": "zohoadmin@vayonaenergy.com",
+	"dependencies": {
+		"express": "^4.22.3",
+		"zcatalyst-sdk-node": "latest"
+	}
+}

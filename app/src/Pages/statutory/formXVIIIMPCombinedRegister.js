@@ -3152,7 +3152,7 @@ export async function buildFormXVIIIWorkbookWithTemplateStyles({
   const tableColMin = fieldCols.length > 0 ? Math.min(...fieldCols) : 1;
   const tableColMax = fieldCols.length > 0 ? Math.max(...fieldCols) : effectiveHeaders.length;
   const templateBodyRows = countExcelJSTemplateBodyRows(worksheet, startRow, tableColMin, tableColMax);
-  const bodyRowsToPaint = Math.max(sourcePrimary.length, templateBodyRows);
+  const bodyRowsToPaint = Math.max(sourcePrimary.length, 1);
 
   clearExcelJSTrailingTableCells(worksheet, {
     dataStartRow: startRow,

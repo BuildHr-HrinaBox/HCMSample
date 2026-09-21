@@ -202,17 +202,28 @@ export function sanitizeFormLGJGujaratPdfHeaderRows(rows, colCount, tableStartRo
     const next = [...row];
     let changed = false;
     for (let c = 0; c < colCount; c += 1) {
-      if (!isFormLGJWeeklyHolidayHeaderText(next[c])) continue;
-      const inShiftCol = shiftCols.has(c);
       const isHolidayCol = c === weeklyHolidayCol;
+      const inShiftCol = shiftCols.has(c) && !isHolidayCol;
       const onShiftOrFromToRow = shiftLabelRows.has(rowIndex) || fromToRows.has(rowIndex);
       const duplicateHoliday =
         isHolidayCol &&
         weeklyHolidayTopRow >= 0 &&
         rowIndex > weeklyHolidayTopRow;
-      if (inShiftCol || (isHolidayCol && (onShiftOrFromToRow || duplicateHoliday))) {
+      const leakedShiftLabel = isHolidayCol && isFormLGJShiftGroupLabel(next[c]);
+      const leakedFromTo =
+        isHolidayCol &&
+        (/from\s*[-–—]\s*to/i.test(String(next[c] || '')) ||
+          /^(from|to)(\s*[-–—]\s*(from|to)?)?$/i.test(String(next[c] || '').trim()));
+      if (!isFormLGJWeeklyHolidayHeaderText(next[c]) && !leakedShiftLabel && !leakedFromTo) continue;
+      if (
+        inShiftCol ||
+        leakedShiftLabel ||
+        leakedFromTo ||
+        (isHolidayCol && (onShiftOrFromToRow || duplicateHoliday))
+      ) {
         next[c] = '';
         changed = true;
+
       }
     }
     return changed ? next : row;

@@ -98,9 +98,30 @@ export function fillFormPKarnatakaShriSmtToLine(raw, name) {
   const text = String(name || '').trim();
   if (!text) return raw;
   const source = String(raw || '');
-  const prefixMatch = source.match(/shri\s*\/\s*smt\.?/i);
-  const prefix = prefixMatch ? prefixMatch[0].replace(/\s+/g, '') : 'Shri/Smt.';
+  const prefixMatch = source.match(/shri\s*\/?\s*smt\.?/i);
+  let prefix = prefixMatch ? prefixMatch[0].replace(/\s+/g, ' ').trim() : 'Shri/Smt.';
+  // Normalize "Shri / Smt." → "Shri/Smt."
+  prefix = prefix.replace(/\s*\/\s*/g, '/').replace(/\s+/g, '');
+  if (!/\.$/.test(prefix)) prefix = `${prefix}.`;
   return `${prefix} ${text}`.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+/** True when the Shri/Smt cell is still a blank template (dots / Name of worker). */
+export function isFormPKarnatakaShriSmtPlaceholder(text) {
+  const t = String(text || '')
+    .replace(/\u2026/g, '.')
+    .replace(/[.\u00b7\u2022_\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!t) return true;
+  if (!/shri/.test(t) || !/smt/.test(t)) return false;
+  const withoutLabel = t
+    .replace(/shri\s*\/?\s*smt\.?/g, '')
+    .replace(/name\s+of\s+(the\s+)?worker/g, '')
+    .replace(/[()]/g, '')
+    .trim();
+  return withoutLabel === '';
 }
 
 export function resolveFormPKarnatakaEstablishmentText(headerFormData = {}) {
@@ -225,7 +246,12 @@ export function writeFormPKarnatakaNoticeIdentity(worksheet, empItem, row = null
         wroteEstablishment = true;
         continue;
       }
-      if (!wroteShriSmt && name && /shri\s*\/?\s*smt/i.test(n)) {
+      if (
+        !wroteShriSmt &&
+        name &&
+        /shri\s*\/?\s*smt/i.test(n) &&
+        (isFormPKarnatakaShriSmtPlaceholder(raw) || !new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(raw))
+      ) {
         const next = fillFormPKarnatakaShriSmtToLine(raw, name);
         if (next !== raw) {
           cell.value = next;
@@ -496,11 +522,20 @@ export async function buildFormPKarnatakaPerEmployeeDownload({
             }) ||
             employees[index] ||
             null;
+      const name = resolveFormPKarnatakaEmployeeName(emp, row);
+      if (name && !String(row.__employeeLookupName || '').trim()) {
+        row.__employeeLookupName = name;
+      }
       exportEntries.push({ row, emp, index });
     });
   } else if (employees.length > 0) {
     employees.forEach((emp, index) => {
-      exportEntries.push({ row: {}, emp, index });
+      const name = resolveFormPKarnatakaEmployeeName(emp, null);
+      exportEntries.push({
+        row: name ? { __employeeLookupName: name } : {},
+        emp,
+        index,
+      });
     });
   }
 

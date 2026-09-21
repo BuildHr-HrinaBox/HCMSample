@@ -141,18 +141,27 @@ describe('Form P Karnataka PDF Excel model', () => {
     expect(joinedLeave).not.toMatch(/05:00\s*PM/i);
   });
 
-  test('skips leave rows that only contain shift clock times', () => {
+  test('fills Shri/Smt from ZIP file name when Excel still has dots placeholder', () => {
     const rows = [
+      ["Form – 'P'"],
+      ['(See rule 20)'],
+      ['NOTICE OF MAXIMUM LEAVE ACCUMULATED'],
+      ['Name and address of the establishment : LOHARA Site'],
+      ['To,'],
+      ['Shri/Smt. …………………………………'],
+      ['Address: LOHARA Site'],
       ['Details of the leave accumulated'],
-      ['Sr. No.', 'Number of accumulated leave', 'Period for which leave is accumulated', ''],
-      ['', '', 'From', 'Till'],
-      ['1', '', '09:00 AM', '05:00 PM'],
-      ['2', '3', '10-Jun-2026', '12-Jun-2026'],
+      ['Sr. No.', 'Number of accumulated leave', 'From', 'Till'],
+      ['1', '2', '31 Aug 2026', '01 Sept 2026'],
     ];
-    const normalized = normalizeFormPKarnatakaPdfMatrix(rows, 4, 0, []);
-    expect(normalized.formPKAModel.leaveRows[0][0]).toBe('2');
-    expect(normalized.formPKAModel.leaveRows[0][1]).toBe('3');
-    expect(normalized.formPKAModel.leaveRows[0][2]).toMatch(/10-Jun-2026/);
-    expect(normalized.formPKAModel.leaveRows[0][3]).toMatch(/12-Jun-2026/);
+    const normalized = normalizeFormPKarnatakaPdfMatrix(
+      rows,
+      4,
+      0,
+      [],
+      'Form_P_Maharashtra_Asha_Patil.xlsx'
+    );
+    expect(normalized.formPKAModel.shriSmt).toMatch(/Shri\/Smt\.\s+Asha Patil/i);
+    expect(normalized.formPKAModel.shriSmt).not.toMatch(/\u2026|\.{3,}/);
   });
 });

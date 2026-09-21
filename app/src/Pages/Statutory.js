@@ -40,6 +40,11 @@ import {
   resetExcelJsWorkbookActiveSheet,
 } from '../utils/excelTableBorders';
 import {
+  snapshotSheetJsWorkbookLayout,
+  preserveSheetJsOriginalTemplateLayout,
+  trimSheetJsTableToRecordCount,
+} from '../utils/excelTemplateLayoutPreserve';
+import {
   buildStatutoryDraftPdfBlob,
   buildFormXVAPServiceCertificatePdfBlob,
   draftFileNameToPdfName,
@@ -24008,32 +24013,9 @@ const writeFormXVDataRowsToWorksheet = (worksheet, layout, sourceRows, { preferG
   return rows.length;
 };
 
-const autofitExcelJSColumns = (worksheet, colFrom, colTo, rowFrom, rowTo, minWidth = 12) => {
-  if (!worksheet) return;
-  const start = Math.max(1, colFrom);
-  const end = Math.max(start, colTo);
-  const r0 = Math.max(1, rowFrom);
-  const r1 = Math.max(r0, rowTo);
-  const minW = Math.max(8, Number(minWidth) || 12);
-  for (let c = start; c <= end; c += 1) {
-    let maxLen = minW;
-    for (let r = r0; r <= r1; r += 1) {
-      const cell = worksheet.getCell(r, c);
-      const raw = cell?.value;
-      let text = '';
-      if (raw == null) text = '';
-      else if (typeof raw === 'object' && raw.richText) {
-        text = raw.richText.map((part) => part?.text || '').join('');
-      } else if (typeof raw === 'object' && raw.text != null) {
-        text = String(raw.text);
-      } else {
-        text = String(raw);
-      }
-      maxLen = Math.max(maxLen, text.length + 2);
-    }
-    const col = worksheet.getColumn(c);
-    col.width = Math.min(Math.max(maxLen, minW), 72);
-  }
+const autofitExcelJSColumns = (_worksheet, _colFrom, _colTo, _rowFrom, _rowTo, _minWidth = 12) => {
+  // Original templates own column widths. Autofit shifts headers and data
+  // into neighbouring columns across forms/states — never resize here.
 };
 
 /**
@@ -24161,9 +24143,6 @@ const unhideExcelJSWorksheetRows = (worksheet, rowTo = null) => {
   for (let r = 1; r <= last; r += 1) {
     const row = worksheet.getRow(r);
     if (row.hidden) row.hidden = false;
-    if (row.height != null && Number(row.height) > 0 && Number(row.height) < 12) {
-      row.height = 18;
-    }
   }
 };
 
@@ -24184,12 +24163,6 @@ const unhideSheetJsWorksheetRows = (ws, rowTo = null) => {
   for (let r = 0; r <= maxR; r += 1) {
     if (!rowsMeta[r]) continue;
     if (rowsMeta[r].hidden) rowsMeta[r].hidden = false;
-    if (rowsMeta[r].h != null && Number(rowsMeta[r].h) > 0 && Number(rowsMeta[r].h) < 12) {
-      rowsMeta[r].h = 18;
-    }
-    if (rowsMeta[r].hpt != null && Number(rowsMeta[r].hpt) > 0 && Number(rowsMeta[r].hpt) < 12) {
-      rowsMeta[r].hpt = 18;
-    }
   }
 };
 
@@ -32558,6 +32531,7 @@ const Statutory = ({ userEmail, userRole }) => {
       originalHeaderRowIndex: originalHeaderRowIndexOpt,
       singleSheetExport = false
     } = opts;
+    const originalSheetJsLayout = snapshotSheetJsWorkbookLayout(templateWb);
     const formHeader = parsedFormHeader || null;
     const tableHeaders = headersToUse || [];
     const normalizeHeaderLookup = (txt) =>
@@ -32599,6 +32573,7 @@ const Statutory = ({ userEmail, userRole }) => {
     const useFormFileTemplate = templateWb && headerRowIndex >= 0 && dataStartIndex >= 0 && headersToUse.length > 0;
     let effectiveDataStartIndex = dataStartIndex;
     let wb;
+    let sheetJsFitRange = null;
     if (useFormFileTemplate) {
       wb = templateWb;
       const sheetParseHints = {
@@ -34100,6 +34075,17 @@ const Statutory = ({ userEmail, userRole }) => {
           range.e.c = Math.max(range.e.c, maxWrittenCol);
         }
         ws['!ref'] = XLSX.utils.encode_range(range);
+        const minWrittenCol = writtenCols.length > 0 ? Math.min(...writtenCols) : 0;
+        const sheetJsFit = {
+          sheetName: targetSheetName || wb.SheetNames?.[0],
+          dataStartRow0: effectiveDataStartIndex,
+          dataRowCount: tableRowsForWrite.length,
+          colFrom0: Math.max(0, minWrittenCol),
+          colTo0: Math.max(0, maxWrittenCol)
+        };
+        sheetJsFitRange = sheetJsFit;
+        wb.__statutorySheetJsFitRange = sheetJsFit;
+        trimSheetJsTableToRecordCount(ws, sheetJsFit);
       }
       if (isApFormXXIIIOvertimeRegister) {
         unhideSheetJsWorksheetRows(
@@ -34115,6 +34101,16 @@ const Statutory = ({ userEmail, userRole }) => {
         wb = cloneWorkbookSingleSheet(wb, targetSheetName);
       } else if (templateWb?.SheetNames?.length > 1 && sheetNameOpt && targetSheetName) {
         wb = cloneWorkbookSingleSheet(wb, targetSheetName);
+      }
+      if (sheetJsFitRange && wb) {
+        const fitSheetName =
+          (sheetJsFitRange.sheetName && wb.Sheets?.[sheetJsFitRange.sheetName] && sheetJsFitRange.sheetName) ||
+          wb.SheetNames?.[0];
+        sheetJsFitRange = { ...sheetJsFitRange, sheetName: fitSheetName };
+        wb.__statutorySheetJsFitRange = sheetJsFitRange;
+        if (fitSheetName && wb.Sheets?.[fitSheetName]) {
+          trimSheetJsTableToRecordCount(wb.Sheets[fitSheetName], sheetJsFitRange);
+        }
       }
       // Form Q MH: repair on the FINAL sheet (after clone) so shifts are not discarded.
       if (useSequentialFormQCols || useMappedFormQCols || formQSheetHasWorkerGrid) {
@@ -34181,6 +34177,15 @@ const Statutory = ({ userEmail, userRole }) => {
     const fileName = formFileName ||
       formHeader?.title?.replace(/[^a-zA-Z0-9]/g, '_') ||
       `Form_${Date.now()}.xlsx`;
+    if (originalSheetJsLayout && wb && wb.Sheets) {
+      const layoutReport = preserveSheetJsOriginalTemplateLayout(wb, originalSheetJsLayout);
+      if (!layoutReport.ok && typeof console !== 'undefined' && console.warn) {
+        console.warn(
+          'Statutory Excel: SheetJS layout restored to original template',
+          layoutReport.mismatches.slice(0, 12)
+        );
+      }
+    }
     const excelBuffer = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
     const blob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     return { blob, fileName };
@@ -35740,7 +35745,7 @@ const Statutory = ({ userEmail, userRole }) => {
       tableColMin,
       tableColMax
     );
-    const bodyRowsToPaint = Math.max(sourceRows.length, templateBodyRows);
+    const bodyRowsToPaint = Math.max(sourceRows.length, 1);
 
     clearExcelJSTrailingTableCells(worksheet, {
       dataStartRow: startRow,
@@ -38477,7 +38482,7 @@ const Statutory = ({ userEmail, userRole }) => {
     // Full thin box borders on header + data + empty template body (the blank box under the row).
     // GJ: paint data rows only — keep multi-tier From/To header merges as in the template.
     if (sourceRows.length > 0 && usedExportCols.length > 0) {
-      const bodyRowsToPaint = Math.max(sourceRows.length, templateBodyRows, 1);
+      const bodyRowsToPaint = Math.max(sourceRows.length, 1);
       ensureExcelJSDataRowsWithBorders(worksheet, {
         dataStartRow,
         dataRowCount: bodyRowsToPaint,

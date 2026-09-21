@@ -26,6 +26,11 @@ import {
   statutoryRowVisibleForLogin,
 } from '../utils/setupFormAccess';
 import { fetchPayrollTableRowsForMonths, loadPayrollTableRowsForStatutoryAutofill, getPayrollTableRowsForStatutoryAutofillSync, prefetchPayrollTableRowsForMonths } from '../utils/payrollTable';
+import {
+  daysInStatutoryMonth,
+  resolveToFullMonthName as resolveStatutoryCalendarMonthName,
+  statutoryMonthIndex,
+} from '../utils/statutoryMonthResolve';
 import { fetchSamplePayrollEmployeeRow, fetchSamplePayrollRowsForMonth, fetchSamplePayrollRowsForMonthCandidates, samplePayrollRowMatchesEmployeeId } from '../utils/samplePayrollApi';
 import {
   ensureExcelJSDataRowsWithBorders,
@@ -7718,9 +7723,7 @@ const countMeaningfulFormTableRows = (rows) => {
 function zohoBookedBalanceRangeForUiMonth(selectedMonthStr) {
   const now = new Date();
   let monthIdx = now.getMonth();
-  const idx = MONTH_NAMES.findIndex((m) =>
-    m.toLowerCase().startsWith(String(selectedMonthStr || '').toLowerCase().trim())
-  );
+  const idx = statutoryMonthIndex(selectedMonthStr);
   if (idx >= 0) monthIdx = idx;
   const year = now.getFullYear();
   const first = new Date(year, monthIdx, 1);
@@ -7734,9 +7737,7 @@ function zohoBookedBalanceRangeForUiMonth(selectedMonthStr) {
 function resolveFormQMonthEndDateForAutofill(selectedMonthStr, formatDate = null) {
   const now = new Date();
   let monthIdx = now.getMonth();
-  const idx = MONTH_NAMES.findIndex((m) =>
-    m.toLowerCase().startsWith(String(selectedMonthStr || '').toLowerCase().trim())
-  );
+  const idx = statutoryMonthIndex(selectedMonthStr);
   if (idx >= 0) monthIdx = idx;
   const year = now.getFullYear();
   const last = new Date(year, monthIdx + 1, 0);
@@ -10557,9 +10558,7 @@ function resolveStatutoryAttendanceMonthYear(selectedMonthStr, item, wagePeriodL
   }
   const now = new Date();
   let monthIndex = now.getMonth();
-  const selectedMonthIndex = MONTH_NAMES.findIndex((m) =>
-    m.toLowerCase().startsWith(String(selectedMonthStr || '').toLowerCase().trim())
-  );
+  const selectedMonthIndex = statutoryMonthIndex(selectedMonthStr);
   if (selectedMonthIndex >= 0) monthIndex = selectedMonthIndex;
   return { year: now.getFullYear(), monthIndex };
 }
@@ -11308,9 +11307,8 @@ const getMonthFromDueDate = (dueDateStr) => {
   if (s.includes('monthly basis')) return null; // Don't change filter for "Monthly Basis"
   // Pure day-of-month strings (e.g. "7", "15") must not be treated as month numbers.
   if (/^\d{1,2}$/.test(s)) return null;
-  for (let i = 0; i < MONTH_NAMES.length; i++) {
-    if (s.includes(MONTH_NAMES[i].toLowerCase()) || s.includes(MONTH_ABBR[i].toLowerCase())) return MONTH_NAMES[i];
-  }
+  const fromName = resolveStatutoryCalendarMonthName(dueDateStr);
+  if (fromName) return fromName;
   const mmMatch = s.match(/\b(0?[1-9]|1[0-2])\b/);
   if (mmMatch) {
     const monthNum = parseInt(mmMatch[1], 10);
@@ -11326,19 +11324,7 @@ const monthForBackend = (value) => {
 };
 
 /** Map month filter / partial names to full calendar month name */
-const resolveToFullMonthName = (raw) => {
-  if (!raw || typeof raw !== 'string') return null;
-  const s = raw.trim().toLowerCase();
-  if (!s) return null;
-  for (let i = 0; i < MONTH_NAMES.length; i++) {
-    const full = MONTH_NAMES[i].toLowerCase();
-    const ab = MONTH_ABBR[i].toLowerCase();
-    if (full === s || ab === s) return MONTH_NAMES[i];
-    if (full.startsWith(s) || s.startsWith(full.slice(0, 3))) return MONTH_NAMES[i];
-    if (s.startsWith(ab.slice(0, 3))) return MONTH_NAMES[i];
-  }
-  return null;
-};
+const resolveToFullMonthName = (raw) => resolveStatutoryCalendarMonthName(raw);
 
 /** Align checklist bulk rows (often missing MonthFilter) with saved statutory rows after Autofill→Save. */
 function statutoryDedupeMonthNorm(item, uiMonthFallback) {
@@ -14019,10 +14005,8 @@ const isForm25TamilNaduCompensatoryHolidaysContext = (
 /** Infer calendar month from an existing wage-period sentence in the template (e.g. "…April 202…"). */
 const inferMonthFromWagePeriodLine = (line) => {
   if (!line || typeof line !== 'string') return null;
-  const lower = line.toLowerCase().replace(/\s+/g, ' ');
-  for (let i = 0; i < MONTH_NAMES.length; i++) {
-    if (lower.includes(MONTH_NAMES[i].toLowerCase())) return MONTH_NAMES[i];
-  }
+  const named = resolveStatutoryCalendarMonthName(line);
+  if (named) return named;
   const dateMatch = String(line).match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b/);
   if (dateMatch) {
     const monthNum = parseInt(dateMatch[2], 10);
@@ -29670,9 +29654,7 @@ const Statutory = ({ userEmail, userRole }) => {
       const idx = MONTH_NAMES.indexOf(fullMonth);
       if (idx >= 0) monthAbbr = MONTH_ABBR[idx];
     } else if (monthSource) {
-      const monthIndex = MONTH_NAMES.findIndex((m) =>
-        m.toLowerCase().startsWith(monthSource.toLowerCase())
-      );
+      const monthIndex = statutoryMonthIndex(monthSource);
       if (monthIndex !== -1) monthAbbr = MONTH_ABBR[monthIndex];
       else monthAbbr = monthSource.substring(0, 3);
     }
@@ -42628,7 +42610,7 @@ const Statutory = ({ userEmail, userRole }) => {
         dayRow = r;
       }
     }
-    // Template often ends at day 30 — insert day 31 (etc.) so May export stays aligned.
+    // Template often ends at day 30 — insert day 31 (etc.) so every 31-day month stays aligned.
     const formVMonthDays = Math.min(Math.max(Number(daysInMonth) || 31, 28), 31);
     if (dayColsByNumber.size > 0) {
       const ensured = ensureFormVTamilNaduExcelDayColumns(worksheet, {
@@ -64404,13 +64386,10 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
       }
-      const formQMonthIdx = MONTH_NAMES.findIndex((m) =>
-        m.toLowerCase().startsWith(String(selectedMonth || '').toLowerCase().trim())
+      const formQDayCount = daysInStatutoryMonth(
+        selectedMonth,
+        new Date().getFullYear()
       );
-      const formQDayCount =
-        formQMonthIdx >= 0
-          ? new Date(new Date().getFullYear(), formQMonthIdx + 1, 0).getDate()
-          : 31;
       const formQAutofillFileHint = String(
         modalData?.fileName || modalData?.formFileName || modalData?.item?.formName || modalData?.item?.FormName || ''
       );
@@ -64435,7 +64414,7 @@ const Statutory = ({ userEmail, userRole }) => {
           setTableHeaders(currentHeaders);
         }
       }
-      // Form V TN: attendance day columns must match selected month (May → 31, not fixed 30).
+      // Form V TN: attendance day columns must match the selected month (31 vs 30 vs Feb), not a fixed 30.
       {
         const formVFileHint = String(
           modalData?.fileName ||
@@ -87820,11 +87799,7 @@ const Statutory = ({ userEmail, userRole }) => {
             }
             if (noOfDaysLaidOffHeader) {
               if (matchedAttendanceAgg) {
-                const daysInMonth = new Date(new Date().getFullYear(), (MONTH_NAMES.findIndex(
-                  (month) => month.toLowerCase().startsWith(String(selectedMonth || '').toLowerCase().trim())
-                ) >= 0 ? MONTH_NAMES.findIndex(
-                  (month) => month.toLowerCase().startsWith(String(selectedMonth || '').toLowerCase().trim())
-                ) : new Date().getMonth()) + 1, 0).getDate();
+                const daysInMonth = daysInStatutoryMonth(selectedMonth, new Date().getFullYear());
                 row[noOfDaysLaidOffHeader] = String(Math.max(0, daysInMonth - Number(matchedAttendanceAgg.days || 0)));
               } else if (fallbackForm25Record) {
                 row[noOfDaysLaidOffHeader] = pickForm25DayValue(fallbackForm25Record, [
@@ -97707,13 +97682,7 @@ const Statutory = ({ userEmail, userRole }) => {
           }
         }
 
-        const formQMonthIdx = MONTH_NAMES.findIndex((m) =>
-          m.toLowerCase().startsWith(String(selectedMonth || '').toLowerCase().trim())
-        );
-        const formQDayCount =
-          formQMonthIdx >= 0
-            ? new Date(new Date().getFullYear(), formQMonthIdx + 1, 0).getDate()
-            : 31;
+        const formQDayCount = daysInStatutoryMonth(selectedMonth, new Date().getFullYear());
         const formQKarnatakaFileOpen = isFormQKarnatakaContext(
           parsed.formHeader,
           item,
@@ -103231,13 +103200,10 @@ const Statutory = ({ userEmail, userRole }) => {
       baseHeaders = resolveFormVTamilNaduTableHeaders(baseHeaders, formVDayCount);
     }
     if (isFormQContext(displayFormHeader, item, fn, baseHeaders)) {
-      const formQMonthIdx = MONTH_NAMES.findIndex((m) =>
-        m.toLowerCase().startsWith(String(effectiveSelectedMonth || '').toLowerCase().trim())
+      const formQDayCount = daysInStatutoryMonth(
+        effectiveSelectedMonth,
+        new Date().getFullYear()
       );
-      const formQDayCount =
-        formQMonthIdx >= 0
-          ? new Date(new Date().getFullYear(), formQMonthIdx + 1, 0).getDate()
-          : 31;
       baseHeaders = resolveFormQDisplayHeaders(
         stripAndNormalizeFormQTableHeaders(buildFormQCanonicalHeaders(formQDayCount)),
         formQDayCount
@@ -103253,13 +103219,10 @@ const Statutory = ({ userEmail, userRole }) => {
         baseHeaders
       )
     ) {
-      const formPGJMonthIdx = MONTH_NAMES.findIndex((m) =>
-        m.toLowerCase().startsWith(String(effectiveSelectedMonth || '').toLowerCase().trim())
+      const formPGJDayCount = daysInStatutoryMonth(
+        effectiveSelectedMonth,
+        new Date().getFullYear()
       );
-      const formPGJDayCount =
-        formPGJMonthIdx >= 0
-          ? new Date(new Date().getFullYear(), formPGJMonthIdx + 1, 0).getDate()
-          : 31;
       baseHeaders = stripAndNormalizeFormPGJTableHeaders(
         buildFormPGJGujaratCanonicalHeaders(formPGJDayCount)
       );
@@ -103302,14 +103265,15 @@ const Statutory = ({ userEmail, userRole }) => {
     ) {
       return resolveFormLGJGujaratTableHeaders(baseHeaders);
     }
-    const selectedMonthIndex = MONTH_NAMES.findIndex(
-      (month) => month.toLowerCase().startsWith(String(effectiveSelectedMonth || '').toLowerCase().trim())
-    );
+    const selectedMonthIndex = statutoryMonthIndex(effectiveSelectedMonth);
     if (selectedMonthIndex < 0) {
       return baseHeaders;
     }
 
-    const monthDayCount = new Date(new Date().getFullYear(), selectedMonthIndex + 1, 0).getDate();
+    const monthDayCount = daysInStatutoryMonth(
+      effectiveSelectedMonth,
+      new Date().getFullYear()
+    );
     if (
       isFormTSEContext(
         displayFormHeader,
@@ -103356,12 +103320,7 @@ const Statutory = ({ userEmail, userRole }) => {
 
   const formTSEMonthDayCount = useMemo(() => {
     const effectiveSelectedMonth = resolveToFullMonthName(selectedMonth) || '';
-    const monthIdx = MONTH_NAMES.findIndex((month) =>
-      month.toLowerCase().startsWith(String(effectiveSelectedMonth || '').toLowerCase().trim())
-    );
-    return monthIdx >= 0
-      ? new Date(new Date().getFullYear(), monthIdx + 1, 0).getDate()
-      : 31;
+    return daysInStatutoryMonth(effectiveSelectedMonth, new Date().getFullYear());
   }, [selectedMonth]);
 
   const formTSEModalOpen = useMemo(() => {

@@ -30,6 +30,7 @@ import { personNamesMatch } from './formFKarnataka';
 import { formatPayrollFirstAndLastName } from './form10TamilNadu';
 import { isAprilPayrollMonthCandidates } from './formQKarnataka';
 import { resolveFormXXIIIMPAprilDefaultNormalRate } from './formXXIIIMP';
+import { resolveToFullMonthName } from '../../utils/statutoryMonthResolve';
 import {
   blobIndicatesEmploymentCard,
   isFormXIVEmploymentCardContext,
@@ -1326,20 +1327,9 @@ const FORM_XIV_MP_MONTH_NAMES = [
   'November',
   'December',
 ];
-const FORM_XIV_MP_MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 function resolveFormXIVMPFullMonthName(raw) {
-  if (!raw || typeof raw !== 'string') return null;
-  const s = raw.trim().toLowerCase();
-  if (!s) return null;
-  for (let i = 0; i < FORM_XIV_MP_MONTH_NAMES.length; i++) {
-    const full = FORM_XIV_MP_MONTH_NAMES[i].toLowerCase();
-    const ab = FORM_XIV_MP_MONTH_ABBR[i].toLowerCase();
-    if (full === s || ab === s) return FORM_XIV_MP_MONTH_NAMES[i];
-    if (full.startsWith(s) || s.startsWith(full.slice(0, 3))) return FORM_XIV_MP_MONTH_NAMES[i];
-    if (s.startsWith(ab.slice(0, 3))) return FORM_XIV_MP_MONTH_NAMES[i];
-  }
-  return null;
+  return resolveToFullMonthName(raw);
 }
 
 function getFormXIVMPMonthFromDueDate(dueDateStr) {
@@ -1347,15 +1337,7 @@ function getFormXIVMPMonthFromDueDate(dueDateStr) {
   if (typeof dueDateStr === 'number') return null;
   const s = String(dueDateStr).trim().toLowerCase();
   if (!s || s.includes('monthly basis') || /^\d{1,2}$/.test(s)) return null;
-  for (let i = 0; i < FORM_XIV_MP_MONTH_NAMES.length; i++) {
-    if (
-      s.includes(FORM_XIV_MP_MONTH_NAMES[i].toLowerCase()) ||
-      s.includes(FORM_XIV_MP_MONTH_ABBR[i].toLowerCase())
-    ) {
-      return FORM_XIV_MP_MONTH_NAMES[i];
-    }
-  }
-  return null;
+  return resolveToFullMonthName(dueDateStr);
 }
 
 function extractFormXIVMPYearFromDueDate(dueDateStr) {

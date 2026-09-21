@@ -15,11 +15,21 @@ describe('Form V Tamil Nadu month-wise day columns', () => {
     expect(resolveFormVTamilNaduDayNumberFromHeader('Name of Worker')).toBe(0);
   });
 
-  test('May has 31 days and April has 30', () => {
-    expect(getFormVTamilNaduMonthDayCount('May', 2026)).toBe(31);
+  test('every month uses the calendar length (July is 31, not June’s 30)', () => {
+    expect(getFormVTamilNaduMonthDayCount('January', 2026)).toBe(31);
+    expect(getFormVTamilNaduMonthDayCount('February', 2026)).toBe(28);
+    expect(getFormVTamilNaduMonthDayCount('March', 2026)).toBe(31);
     expect(getFormVTamilNaduMonthDayCount('April', 2026)).toBe(30);
+    expect(getFormVTamilNaduMonthDayCount('May', 2026)).toBe(31);
+    expect(getFormVTamilNaduMonthDayCount('June', 2026)).toBe(30);
+    expect(getFormVTamilNaduMonthDayCount('July', 2026)).toBe(31);
+    expect(getFormVTamilNaduMonthDayCount('Jul', 2026)).toBe(31);
+    expect(getFormVTamilNaduMonthDayCount('August', 2026)).toBe(31);
+    expect(getFormVTamilNaduMonthDayCount('September', 2026)).toBe(30);
+    expect(getFormVTamilNaduMonthDayCount('October', 2026)).toBe(31);
+    expect(getFormVTamilNaduMonthDayCount('November', 2026)).toBe(30);
+    expect(getFormVTamilNaduMonthDayCount('December', 2026)).toBe(31);
     expect(getFormVTamilNaduMonthDayCount('February', 2024)).toBe(29);
-    expect(getFormVTamilNaduMonthDayCount('February', 2025)).toBe(28);
   });
 
   test('expands default 30-day band to 31 for May', () => {

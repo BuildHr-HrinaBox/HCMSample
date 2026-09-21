@@ -1,10 +1,11 @@
 /**
  * Tamil Nadu Form V — Register of Employment (daily attendance columns).
- * Day columns must match the selected month (May → 31, April → 30), not a fixed 30.
+ * Day columns must match the selected month (31 / 30 / Feb), not a fixed 30.
  * Total Days Worked ← payroll Paid_days.
  */
 
 import { flattenPayrollEarningColumns, readPayrollScalar } from '../../utils/payrollEarnings';
+import { daysInStatutoryMonth } from '../../utils/statutoryMonthResolve';
 
 /**
  * Filename Form_V_-_TamilNadu.xlsx: word-boundary after "v" fails because "_" is a word char.
@@ -67,27 +68,7 @@ export function isFormVTamilNaduDayHeader(header) {
 
 /** Calendar day count for a month name (uses year for Feb leap years). */
 export function getFormVTamilNaduMonthDayCount(monthName, year = new Date().getFullYear()) {
-  const MONTHS = [
-    'january',
-    'february',
-    'march',
-    'april',
-    'may',
-    'june',
-    'july',
-    'august',
-    'september',
-    'october',
-    'november',
-    'december',
-  ];
-  const raw = String(monthName || '').trim().toLowerCase();
-  if (!raw) return 31;
-  const idx = MONTHS.findIndex((m) => m.startsWith(raw) || raw.startsWith(m.slice(0, 3)));
-  if (idx < 0) return 31;
-  const y = Number(year);
-  const yUse = Number.isFinite(y) && y >= 1900 ? y : new Date().getFullYear();
-  return new Date(yUse, idx + 1, 0).getDate();
+  return daysInStatutoryMonth(monthName, year);
 }
 
 function makeFormVTamilNaduDayHeader(sampleHeader, day) {
@@ -370,7 +351,7 @@ export function applyFormVTamilNaduPaidDaysToRows(
 
 /**
  * Ensure the Excel template physically has day columns 1..daysInMonth.
- * Form_V template often stops at day 30 — for May we must insert day 31 before writing
+ * Form_V template often stops at day 30 — for any 31-day month insert day 31 before writing
  * so Total Days Worked / Hours / LOP stay aligned.
  *
  * Always prefer a manual right-shift: ExcelJS spliceColumns is unreliable on this template,

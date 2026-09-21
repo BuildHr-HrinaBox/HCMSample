@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { jsPDF } from 'jspdf';
 import * as XLSX from 'xlsx';
 import { convertExcelFilesToSmartbrowzPdf } from './smartbrowzPdf';
+import { convertFormXXVITamilNaduExcelToSmartbrowzPdf } from './statutoryDraftPdf.formXXVI.TN';
 import {
   FORM_14_RJ_DAY_ENTRIES_NOTE,
   FORM_14_RJ_FOOTER_NOTE
@@ -9122,6 +9123,19 @@ export async function buildStatutoryDraftPdfBlob({
   const excelFiles = await collectExcelBuffersFromDraft(arrayBuffer, fileName);
   if (!excelFiles.length) {
     throw new Error('No Excel data found in the draft file to convert to PDF.');
+  }
+
+  try {
+    const xxviBlob = await convertFormXXVITamilNaduExcelToSmartbrowzPdf({
+      excelFiles,
+      title,
+      fileName
+    });
+    if (xxviBlob && xxviBlob.size > 80) {
+      return xxviBlob;
+    }
+  } catch (xxviSmartErr) {
+    console.warn('Form XXVI SmartBrowz PDF conversion failed:', xxviSmartErr);
   }
 
   try {

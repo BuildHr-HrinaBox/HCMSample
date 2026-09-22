@@ -931,6 +931,61 @@ export function isFormXXVIITamilNaduOtherDeductionsHeader(header) {
   return /other\s+deductions?/.test(s);
 }
 
+/**
+ * Excel merges sometimes bleed "OTHER DEDUCTIONS" into cols 21–22 (PT / Uniform).
+ * Keep that label only on the official col 24 leaf before PDF paint.
+ */
+export function normalizeFormXXVIITamilNaduRegisterPdfHeaderRows(
+  rows,
+  colCount = 28,
+  headerBandEnd = -1,
+  tableStart = 0
+) {
+  if (!Array.isArray(rows) || !rows.length) return rows;
+  const out = rows.map((r) => (Array.isArray(r) ? [...r] : []));
+  const start = Math.max(0, Number(tableStart) || 0);
+  const end =
+    Number.isFinite(headerBandEnd) && headerBandEnd >= start
+      ? headerBandEnd
+      : Math.min(out.length - 1, start + 10);
+
+  let otherDedCol = -1;
+  for (let r = end; r >= start; r -= 1) {
+    if (isFormXXVIITamilNaduColumnIndexRow(out[r], colCount)) continue;
+    const row = out[r] || [];
+    for (let c = 0; c < Math.min(colCount, row.length); c += 1) {
+      const t = String(row[c] ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (isFormXXVIITamilNaduOtherDeductionsHeader(t)) {
+        otherDedCol = c;
+        break;
+      }
+    }
+    if (otherDedCol >= 0) break;
+  }
+  if (otherDedCol < 0) otherDedCol = Math.min(23, colCount - 1);
+
+  for (let r = start; r <= end && r < out.length; r += 1) {
+    if (isFormXXVIITamilNaduColumnIndexRow(out[r], colCount)) continue;
+    const row = out[r];
+    for (let c = 0; c < Math.min(colCount, row.length); c += 1) {
+      const t = String(row[c] ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!t) continue;
+      if (!isFormXXVIITamilNaduOtherDeductionsHeader(t)) continue;
+      if (c === otherDedCol) continue;
+      if (c >= 20 && c <= 21) {
+        row[c] = c === 20 && !/^other$/i.test(t) ? 'OTHER' : '';
+      } else {
+        row[c] = '';
+      }
+    }
+  }
+  return out;
+}
+
 /** TOTAL DEDUCTIONS ← gross_pay − net_pay */
 export function isFormXXVIITamilNaduTotalDeductionsHeader(header) {
   const s = formXXVIITamilNaduHeaderNorm(header);

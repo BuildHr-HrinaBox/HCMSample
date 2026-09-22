@@ -653,7 +653,6 @@ export function resolveFormXIXMPPayrollRowForEmployee(emp, payrollRows) {
   if (nameCandidates.length > 0) {
     const compositeHit = resolvePayrollRowByNameAndGid(nameCandidates, gidCandidates, payrollRows);
     if (compositeHit) return compositeHit;
-    if (gidCandidates.length > 0) return null;
   }
 
   const peopleCodes = employeePeopleCodes(emp);
@@ -1960,7 +1959,9 @@ const buildFormXIXMPFastZipDownload = async ({
   for (let i = 0; i < rowsForZip.length; i += 1) {
     const empItem = resolveFormXIXMPDownloadEmployeeForRow(rowsForZip[i], employees, i);
     const payrollRow =
-      typeof resolvePayrollRow === 'function' && empItem ? resolvePayrollRow(empItem) : null;
+      typeof resolvePayrollRow === 'function' && empItem
+        ? resolvePayrollRow(empItem, rowsForZip[i])
+        : null;
     const mergedHeaderData = sanitizeFormXIXMPHeaderFormData(
       buildEmployeeHeaderFormData(baseHeaderData, rowsForZip[i], parsedFormHeader, payrollRow, empItem)
     );
@@ -2132,16 +2133,33 @@ function buildEmployeeHeaderFormData(headerFormData, employeeRow, parsedFormHead
   }
 
   if (payrollRow && !payrollRow.fetch_error) {
-    const payrollOptions = resolveFormXIXMPPayrollHelpers({
-      formHeader: parsedFormHeader,
-    });
-    const fromPayroll = applyFormXIXMPPayrollToHeaderData({}, payrollRow, payrollOptions);
-    FORM_XIX_MP_WAGE_SPECS.forEach((spec) => {
-      const payrollVal = String(fromPayroll[spec.key] ?? '').trim();
-      if (payrollVal && String(base[spec.key] ?? '').trim() === '') {
-        base[spec.key] = payrollVal;
+    if (tamilNaduLayout) {
+      const emp = unwrapFormXIXMPEmployeeItem(empItem);
+      if (emp && typeof emp === 'object') {
+        const { applyFormXIXTamilNaduEmployeeToRow } = require('./formXIXTamilNadu');
+        const tnHdrs = FORM_XIX_TN_ROW_TO_HEADER_KEY.map(([tableHeader]) => tableHeader);
+        const tnRow = applyFormXIXTamilNaduEmployeeToRow(employeeRow || {}, emp, tnHdrs, {
+          payrollRow,
+        });
+        FORM_XIX_TN_ROW_TO_HEADER_KEY.forEach(([tableHeader, key]) => {
+          const value = getFormXIXMPRowValueForHeader(tnRow, tableHeader);
+          if (String(value ?? '').trim() !== '' && String(base[key] ?? '').trim() === '') {
+            base[key] = value;
+          }
+        });
       }
-    });
+    } else {
+      const payrollOptions = resolveFormXIXMPPayrollHelpers({
+        formHeader: parsedFormHeader,
+      });
+      const fromPayroll = applyFormXIXMPPayrollToHeaderData({}, payrollRow, payrollOptions);
+      FORM_XIX_MP_WAGE_SPECS.forEach((spec) => {
+        const payrollVal = String(fromPayroll[spec.key] ?? '').trim();
+        if (payrollVal && String(base[spec.key] ?? '').trim() === '') {
+          base[spec.key] = payrollVal;
+        }
+      });
+    }
   }
 
   return base;
@@ -2180,8 +2198,9 @@ const enrichFormXIXMPExportRowForDownload = (row, empItem, hdrs, helpers = {}) =
     formatStatutoryDateDisplay = null,
     monthCandidates = null,
   } = helpers;
-  const payrollRow = typeof resolvePayrollRow === 'function' ? resolvePayrollRow(empItem) : null;
   const baseRow = row && typeof row === 'object' ? { ...row } : {};
+  const payrollRow =
+    typeof resolvePayrollRow === 'function' ? resolvePayrollRow(empItem, baseRow) : null;
   if (
     tamilNaduLayout ||
     formXIXMPHeadersHaveSeparateFatherNameColumn(hdrs)
@@ -2235,7 +2254,9 @@ export async function buildFormXIXMPWorkbookWithTemplateStyles({
   const employees = Array.isArray(employeesOverride) ? employeesOverride : [];
   const empItem = employees.length > 0 ? resolveFormXIXMPDownloadEmployeeForRow(employeeRow, employees, 0) : null;
   const payrollRow =
-    typeof resolvePayrollRow === 'function' && empItem ? resolvePayrollRow(empItem) : null;
+    typeof resolvePayrollRow === 'function' && empItem
+      ? resolvePayrollRow(empItem, employeeRow)
+      : null;
   const mergedHeaderData = sanitizeFormXIXMPHeaderFormData(
     buildEmployeeHeaderFormData(headerFormData, employeeRow, parsedFormHeader, payrollRow, empItem)
   );
@@ -2561,7 +2582,7 @@ export async function buildFormXIXMPPerEmployeeDownload({
     const empItem = resolveFormXIXMPDownloadEmployeeForRow(rowsForZip[i], employees, i);
     const payrollRow =
       typeof exportHelpers.resolvePayrollRow === 'function' && empItem
-        ? exportHelpers.resolvePayrollRow(empItem)
+        ? exportHelpers.resolvePayrollRow(empItem, rowsForZip[i])
         : null;
     const mergedHeaderData = sanitizeFormXIXMPHeaderFormData(
       buildEmployeeHeaderFormData(baseHeaderData, rowsForZip[i], parsedFormHeader, payrollRow, empItem)

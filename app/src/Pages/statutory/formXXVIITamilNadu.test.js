@@ -41,8 +41,25 @@ import {
   resolveFormXXVIITamilNaduTableHeaders,
   resolveFormXXVIITamilNaduTotalDeductions,
   sanitizeFormXXVIITamilNaduColumnGroupLabels,
+  normalizeFormXXVIITamilNaduRegisterPdfHeaderRows,
   splitFormXXVIITamilNaduVerticalHeaderLines,
 } from './formXXVIITamilNadu';
+
+describe('formXXVIITamilNadu PDF header normalize', () => {
+  test('clears mis-merged OTHER DEDUCTIONS from PT/Uniform columns', () => {
+    const rows = [
+      Array.from({ length: 28 }, () => ''),
+      Array.from({ length: 28 }, () => ''),
+    ];
+    rows[0][20] = 'OTHER DEDUCTIONS';
+    rows[0][21] = 'OTHER DEDUCTIONS';
+    rows[1][23] = 'OTHER DEDUCTIONS';
+    const out = normalizeFormXXVIITamilNaduRegisterPdfHeaderRows(rows, 28, 1, 0);
+    expect(out[0][20]).toBe('OTHER');
+    expect(out[0][21]).toBe('');
+    expect(out[1][23]).toBe('OTHER DEDUCTIONS');
+  });
+});
 
 describe('formXXVIITamilNadu column grouping', () => {
   const headers = [

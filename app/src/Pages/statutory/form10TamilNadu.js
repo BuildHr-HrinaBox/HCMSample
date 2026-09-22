@@ -216,8 +216,25 @@ export function findForm10PayrollRowByFirstAndLastName(employeeOrRow, payrollRow
   );
   if (rows.length === 0) return null;
   const hits = rows.filter((row) => form10FirstAndLastNamesMatch(employeeOrRow, row, extraParts));
-  if (hits.length === 0) return null;
-  return hits[0];
+  if (hits.length > 0) return hits[0];
+
+  const extra = extraParts && typeof extraParts === 'object' ? extraParts : {};
+  const fullName = String(extra.fullName || '').trim();
+  if (fullName) {
+    const displayHits = rows.filter((row) => {
+      const pay = readForm10PersonNameParts(row);
+      const payName =
+        pay.fullName ||
+        (pay.firstName && pay.lastName ? `${pay.firstName} ${pay.lastName}`.trim() : '');
+      if (!payName) return false;
+      return (
+        form10FullNamesMatchExact(fullName, payName) ||
+        normForm10Name(fullName) === normForm10Name(payName)
+      );
+    });
+    if (displayHits.length === 1) return displayHits[0];
+  }
+  return null;
 }
 
 /**

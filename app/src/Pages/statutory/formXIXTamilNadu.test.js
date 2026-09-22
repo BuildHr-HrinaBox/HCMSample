@@ -116,6 +116,23 @@ describe('formXIXTamilNadu', () => {
     ).toBe('Form_XIX_MP');
   });
 
+  it('preserves autofill grid wage cells when payroll row is missing (Excel export)', () => {
+    const seeded = {
+      Basic: '7258',
+      'No. of. Working Days': '26',
+      'Gross Wages': '50000',
+    };
+    const row = applyFormXIXTamilNaduEmployeeToRow(
+      seeded,
+      { FirstName: 'Dinesh', LastName: 'Kumar' },
+      FORM_XIX_TN_TABLE_HEADERS,
+      { sanitizeValue: (v) => String(v ?? '').trim(), payrollRow: null }
+    );
+    expect(row.Basic).toBe('7258');
+    expect(row['No. of. Working Days']).toBe('26');
+    expect(row['Gross Wages']).toBe('50000');
+  });
+
   it('fetches HRA into House Rent Allowance and derives Other Allowances when missing', () => {
     const row = applyFormXIXTamilNaduEmployeeToRow(
       {},

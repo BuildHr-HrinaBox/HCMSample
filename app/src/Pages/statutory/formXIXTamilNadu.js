@@ -683,6 +683,13 @@ export function applyFormXIXTamilNaduEmployeeToRow(row, emp, headers, helpers = 
     andhraPradeshPayrollRules: false,
   });
   const wages = resolveFormXIXTamilNaduWageComputationFields(hasPayroll ? payrollRow : null);
+  /** Keep Autofill grid / saved row values when payroll lookup fails (Excel download path). */
+  const wageValue = (value, current = '') => {
+    if (hasPayroll) {
+      return value !== '' && value != null ? sanitizeValue(value) : sanitizeValue(current);
+    }
+    return value !== '' && value != null ? sanitizeValue(value) : String(current ?? '').trim();
+  };
 
   hdrs.forEach((header) => {
     if (isFormXIXTamilNaduWorkmanCodeHeader(header)) {
@@ -712,12 +719,19 @@ export function applyFormXIXTamilNaduEmployeeToRow(row, emp, headers, helpers = 
       return;
     }
     if (isFormXIXTamilNaduWorkingDaysHeader(header)) {
-      out[header] = sanitizeValue(payroll.daysWorked || '');
+      out[header] = wageValue(payroll.daysWorked, out[header]);
       return;
     }
     if (isFormXIXTamilNaduOvertimeHeader(header)) {
       const ot = payroll.overtimeWages;
-      out[header] = sanitizeValue(ot !== '' && ot != null ? ot : 'NIL');
+      const current = String(out[header] ?? '').trim();
+      if (hasPayroll) {
+        out[header] = sanitizeValue(ot !== '' && ot != null ? ot : 'NIL');
+      } else if (current) {
+        out[header] = sanitizeValue(current);
+      } else {
+        out[header] = 'NIL';
+      }
       return;
     }
     if (isFormXIXTamilNaduRateHeader(header)) {
@@ -729,47 +743,47 @@ export function applyFormXIXTamilNaduEmployeeToRow(row, emp, headers, helpers = 
       return;
     }
     if (isFormXIXTamilNaduBasicHeader(header)) {
-      out[header] = sanitizeValue(wages.basic);
+      out[header] = wageValue(wages.basic, out[header]);
       return;
     }
     if (isFormXIXTamilNaduDearnessHeader(header)) {
-      out[header] = sanitizeValue(wages.dearnessAllowance);
+      out[header] = wageValue(wages.dearnessAllowance, out[header]);
       return;
     }
     if (isFormXIXTamilNaduHraHeader(header)) {
-      out[header] = sanitizeValue(wages.houseRentAllowance);
+      out[header] = wageValue(wages.houseRentAllowance, out[header]);
       return;
     }
     if (isFormXIXTamilNaduLeaveWagesHeader(header)) {
-      out[header] = sanitizeValue(wages.leaveWithWages);
+      out[header] = wageValue(wages.leaveWithWages, out[header] || 'NIL');
       return;
     }
     if (isFormXIXTamilNaduOtherAllowancesHeader(header)) {
-      out[header] = sanitizeValue(wages.otherAllowances);
+      out[header] = wageValue(wages.otherAllowances, out[header]);
       return;
     }
     if (isFormXIXTamilNaduGrossHeader(header)) {
-      out[header] = sanitizeValue(wages.grossWages);
+      out[header] = wageValue(wages.grossWages, out[header]);
       return;
     }
     if (isFormXIXTamilNaduEpfHeader(header)) {
-      out[header] = sanitizeValue(wages.epf);
+      out[header] = wageValue(wages.epf, out[header]);
       return;
     }
     if (isFormXIXTamilNaduEsicDeductionHeader(header)) {
-      out[header] = sanitizeValue(wages.esic);
+      out[header] = wageValue(wages.esic, out[header]);
       return;
     }
     if (isFormXIXTamilNaduAdvanceLoanHeader(header)) {
-      out[header] = sanitizeValue(wages.advanceLoan);
+      out[header] = wageValue(wages.advanceLoan, out[header] || 'NIL');
       return;
     }
     if (isFormXIXTamilNaduLwfHeader(header)) {
-      out[header] = sanitizeValue(wages.lwf);
+      out[header] = wageValue(wages.lwf, out[header]);
       return;
     }
     if (isFormXIXTamilNaduProfessionalTaxHeader(header)) {
-      out[header] = sanitizeValue(wages.professionalTax);
+      out[header] = wageValue(wages.professionalTax, out[header]);
       return;
     }
     if (isFormXIXTamilNaduTotalDeductionsHeader(header)) {
@@ -785,12 +799,12 @@ export function applyFormXIXTamilNaduEmployeeToRow(row, emp, headers, helpers = 
       if (Number.isFinite(g) && Number.isFinite(n)) {
         out[header] = sanitizeValue(String(Math.max(0, Math.round((g - n) * 100) / 100)));
       } else {
-        out[header] = sanitizeValue(wages.totalDeductions);
+        out[header] = wageValue(wages.totalDeductions, out[header]);
       }
       return;
     }
     if (isFormXIXTamilNaduNetHeader(header)) {
-      out[header] = sanitizeValue(wages.netWages);
+      out[header] = wageValue(wages.netWages, out[header]);
     }
   });
   return out;

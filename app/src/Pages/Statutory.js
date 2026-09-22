@@ -54164,9 +54164,21 @@ const Statutory = ({ userEmail, userRole }) => {
             fn || formFileModalData?.fileName || '',
             parsed?.sheetText || formFileModalData?.sheetText || ''
           );
+          const xixTnDownload =
+            isFormXIXTamilNaduTableLayoutFormHeader(parsed?.formHeader) ||
+            isFormXIXTamilNaduWageSlipContext(
+              parsed?.formHeader,
+              lineItem,
+              fn || formFileModalData?.fileName || '',
+              parsed?.sheetText || formFileModalData?.sheetText || ''
+            );
           resolveXixPayrollRowForDownload = xixGjDownload
             ? buildGujaratPayrollFirstLastResolver(formXIXMPDownloadPayrollRows, headersToUse)
-            : buildFormXIXMPPayrollRowResolver(formXIXMPDownloadPayrollRows);
+            : xixTnDownload
+              ? buildFormTamilNaduPayrollRowResolver(formXIXMPDownloadPayrollRows, {
+                  getExtraParts: (_emp, row) => collectForm10RowNameParts(row, headersToUse),
+                })
+              : buildFormXIXMPPayrollRowResolver(formXIXMPDownloadPayrollRows);
         }
       }
       if (isFormTSEDownload) {
@@ -77257,7 +77269,11 @@ const Statutory = ({ userEmail, userRole }) => {
             ? buildKarnatakaPayrollFirstLastResolver(payrollRowsForXixGrid, currentHeaders)
             : formXIXGJAutofillContext
               ? buildGujaratPayrollFirstLastResolver(payrollRowsForXixGrid, currentHeaders)
-              : buildFormXIXMPPayrollRowResolver(payrollRowsForXixGrid);
+              : formXIXTamilNaduAutofillContext
+                ? buildFormTamilNaduPayrollRowResolver(payrollRowsForXixGrid, {
+                    getExtraParts: (_emp, row) => collectForm10RowNameParts(row, currentHeaders),
+                  })
+                : buildFormXIXMPPayrollRowResolver(payrollRowsForXixGrid);
         }
       }
       if (formXIVMPAutofillContext) {
@@ -81716,7 +81732,7 @@ const Statutory = ({ userEmail, userRole }) => {
         if (formXIXTamilNaduAutofillContext && currentHeaders?.length) {
           const xixPayrollRow =
             typeof resolveXixPayrollRowForGrid === 'function'
-              ? resolveXixPayrollRowForGrid(emp)
+              ? resolveXixPayrollRowForGrid(emp, row)
               : null;
           Object.assign(
             row,

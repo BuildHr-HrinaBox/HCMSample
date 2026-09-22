@@ -115,7 +115,11 @@ import {
   isFormXXVIITamilNaduColumnIndexHeader,
   isFormXXVIITamilNaduColumnIndexRow,
   isFormXXVIITamilNaduIdentityHeaderText,
+  isFormXXVIITamilNaduOtherAllowancesGroupLabel,
+  isFormXXVIITamilNaduOtherDeductionsHeader,
+  isFormXXVIITamilNaduPtHeader,
   isFormXXVIITamilNaduVerticalHeaderText,
+  normalizeFormXXVIITamilNaduRegisterPdfHeaderRows,
   splitFormXXVIITamilNaduVerticalHeaderLines,
 } from '../Pages/statutory/formXXVIITamilNadu';
 import {
@@ -5745,7 +5749,13 @@ const sanitizeFormXXVIITamilNaduRegisterPdfRows = (
     Number.isFinite(headerBandEnd) && headerBandEnd >= 0
       ? headerBandEnd
       : resolveFormXXVIIPdfHeaderBandEndEstimate(rows, tableStartRow, colCount);
-  return rows.filter((row, i) => {
+  const normalized = normalizeFormXXVIITamilNaduRegisterPdfHeaderRows(
+    rows,
+    colCount,
+    bandEnd,
+    tableStartRow
+  );
+  return normalized.filter((row, i) => {
     if (isFormXXVIITamilNaduStrayBodyGridRow(row, colCount, bandEnd, i)) return false;
     if (isFormXXVIITamilNaduPostIndexNonEmployeeRow(row, rows, i, colCount)) return false;
     return true;
@@ -8087,7 +8097,7 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
   }
   if (headerModel.isFormXXVIIRegister && xxviiIndexRow >= 0) {
     headerBandEnd = Math.min(headerBandEnd, xxviiIndexRow);
-    rows = sanitizeFormXXVIITamilNaduRegisterPdfRows(rows, colCount, headerBandEnd);
+    rows = sanitizeFormXXVIITamilNaduRegisterPdfRows(rows, colCount, headerBandEnd, tableStart);
   }
   const formXVIDateBand = isFormXVIAP
     ? (() => {
@@ -8184,6 +8194,16 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         if (!exists) groupBands.push(band);
       }
     );
+  }
+  if (headerModel.isFormXXVIIRegister) {
+    groupBands.forEach((band) => {
+      const label = String(band?.label || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (/^other$/i.test(label) && band.end > band.start + 1) {
+        band.end = band.start + 1;
+      }
+    });
   }
   if (isFormXXIIIAPSE) {
     const xxiiiDeductions = findFormXXIIIAPSEDeductionsBand(rows, tableStart, colCount);
@@ -8632,6 +8652,22 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     );
   };
 
+  /** Mid-tier OTHER (PT / Uniform) row — FINES / OTHER DEDUCTIONS sit beside it, not under it. */
+  const isFormXXVIIOtherDeductionMidRowSibling = (hr, col) => {
+    if (!headerModel.isFormXXVIIRegister || !Number.isFinite(col)) return false;
+    const band = groupBands.find(
+      (b) =>
+        b.labelRow === hr &&
+        /^other$/i.test(
+          String(b.label || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+        )
+    );
+    if (!band || col <= band.end) return false;
+    return true;
+  };
+
   const measureRowHeight = (row, rowIndex) => {
     const mergeDayLabel = isDayBandLabelHeaderRow(row, rowIndex);
     const xxviColIndexRow =
@@ -8685,7 +8721,10 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
           : xxviColIndexRow && dayBand && c === dayBand.start
             ? readFormXXVIDayParentIndexLabel(row, dayBand)
           : groupBand && c === groupBand.start
-            ? groupBand.label
+            ? headerModel.isFormXXVIIRegister &&
+              isFormXXVIITamilNaduOtherAllowancesGroupLabel(groupBand.label)
+              ? 'OTHER ALLOWANCES/CASH PAYMENT NATURE TO BE SPECIFIED'
+              : groupBand.label
             : String(row[c] ?? '') || ' ';
       // Form XXVII official model: identity stays horizontal in a merged tall cell;
       // wage/deduction leaves rotate 90° — neither should inflate this row via wrap.
@@ -8910,6 +8949,38 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     const xxviiOnIndexRow =
       headerModel.isFormXXVIIRegister && isFormXXVIITamilNaduColumnIndexRow(row, colCount);
 
+    const formXXVIIOtherMidBandAt = (hr, col) =>
+      groupBands.find(
+        (b) =>
+          b.labelRow === hr &&
+          /^other$/i.test(
+            String(b.label || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+          ) &&
+          col >= b.start &&
+          col <= b.end
+      );
+
+    const formXXVIIVerticalLeafBelow = (col, fromRow) => {
+      for (let r = fromRow + 1; r <= headerBandEnd && r < rows.length; r += 1) {
+        if (isFormXXVIITamilNaduColumnIndexRow(rows[r] || [], colCount)) break;
+        const t = String(rows[r]?.[col] ?? '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!t) continue;
+        if (isFormXXVIITamilNaduColumnIndexHeader(t)) break;
+        if (
+          isFormXXVIITamilNaduVerticalHeaderText(t) ||
+          isFormXXVIITamilNaduOtherDeductionsHeader(t)
+        ) {
+          return true;
+        }
+        return false;
+      }
+      return false;
+    };
+
     const isFormXXVIISpannedContinuation = (col) => {
       if (!headerModel.isFormXXVIIRegister || !isHeaderRow) return false;
       if (isFormXXVIITamilNaduColumnIndexRow(row, colCount)) return false;
@@ -8917,6 +8988,10 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         .replace(/\s+/g, ' ')
         .trim();
       if (cur) return false;
+      // Empty slot beside OTHER (PT / Uniform). FINES / OTHER DEDUCTIONS / TOTAL
+      // paint from the leaf row and span this row — do not stroke a line through them.
+      if (isFormXXVIIOtherDeductionMidRowSibling(rowIndex, col)) return true;
+      if (formXXVIIVerticalLeafBelow(col, rowIndex)) return true;
       for (let hr = rowIndex - 1; hr >= tableStart; hr -= 1) {
         if (groupBandAt(hr, col)) return false;
         const above = String(rows[hr]?.[col] ?? '')
@@ -8924,33 +8999,170 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
           .trim();
         if (!above) continue;
         if (isFormXXVIITamilNaduColumnIndexHeader(above)) return false;
-        if (isStatutoryGroupHeaderLabel(above)) return false;
+        if (isStatutoryGroupHeaderLabel(above)) {
+          // Parent banner (e.g. DEDUCTIONS) — vertical leaf may be on a lower row.
+          continue;
+        }
         return (
           isFormXXVIITamilNaduIdentityHeaderText(above) ||
           isFormXXVIITamilNaduVerticalHeaderText(above)
         );
       }
+      for (let hr = rowIndex + 1; hr <= headerBandEnd && hr < rows.length; hr += 1) {
+        if (isFormXXVIITamilNaduColumnIndexRow(rows[hr] || [], colCount)) break;
+        if (groupBandAt(hr, col)) return false;
+        const below = String(rows[hr]?.[col] ?? '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!below) continue;
+        if (isStatutoryGroupHeaderLabel(below)) return false;
+        return (
+          isFormXXVIITamilNaduIdentityHeaderText(below) ||
+          isFormXXVIITamilNaduVerticalHeaderText(below)
+        );
+      }
+      if (isFormXXVIIOtherDeductionMidRowSibling(rowIndex, col)) return true;
       return false;
     };
 
+    const isFormXXVIIPtOrUniformLeafLabel = (text) =>
+      isFormXXVIITamilNaduPtHeader(text) || /uniform\s+deposits?/i.test(String(text || ''));
+
+    /** PT / Uniform: one tall cell (DEDUCTIONS → OTHER → leaf) with full vertical borders. */
+    const paintFormXXVIIPtUniformStackedHeader = (col, leafLabel) => {
+      const trimmed = String(leafLabel || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!trimmed) return;
+
+      let paintRowIndex = rowIndex;
+      let paintY = y;
+      let spanH = rowH;
+      let otherSegmentH = 0;
+      const otherBandRow = rowIndex - 1;
+      const otherBand = formXXVIIOtherMidBandAt(otherBandRow, col);
+      if (otherBand) {
+        otherSegmentH = measureRowHeight(rows[otherBandRow], otherBandRow);
+        paintY -= otherSegmentH;
+        spanH += otherSegmentH;
+        paintRowIndex = otherBandRow;
+      }
+
+      while (paintRowIndex > tableStart) {
+        const prevIdx = paintRowIndex - 1;
+        const prevCell = String(rows[prevIdx]?.[col] ?? '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (prevCell) break;
+        const dedBand = groupBandAt(prevIdx, col);
+        if (
+          dedBand &&
+          /^deductions?$/i.test(
+            String(dedBand.label || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+          ) &&
+          col > dedBand.start
+        ) {
+          const h = measureRowHeight(rows[prevIdx], prevIdx);
+          paintY -= h;
+          spanH += h;
+          paintRowIndex = prevIdx;
+          continue;
+        }
+        if (formXXVIIVerticalLeafBelow(col, prevIdx)) {
+          const h = measureRowHeight(rows[prevIdx], prevIdx);
+          paintY -= h;
+          spanH += h;
+          paintRowIndex = prevIdx;
+          continue;
+        }
+        break;
+      }
+
+      const spanStrokeOpts = {};
+      if (headerModel.isFormXXVIIRegister && formXXVIISpanAbutsIndexRow(paintRowIndex, col)) {
+        spanStrokeOpts.skipBottom = true;
+      }
+      strokeFormXXVIICell(
+        colXs[col],
+        paintY,
+        colWidths[col],
+        spanH,
+        col === colCount - 1,
+        spanStrokeOpts
+      );
+
+      doc.setFont('helvetica', 'bold');
+      if (otherSegmentH > 0 && otherBand && col === otherBand.start) {
+        let otherSize = Math.min(fontSize, 7);
+        doc.setFontSize(otherSize);
+        doc.text('OTHER', colXs[col] + colWidths[col] / 2, paintY + otherSegmentH / 2 + otherSize / 2 - 1, {
+          align: 'center'
+        });
+      }
+
+      let lines = splitFormXXVIITamilNaduVerticalHeaderLines(trimmed, 4);
+      let size = Math.min(fontSize, 7);
+      doc.setFontSize(size);
+      const maxLen = Math.max(rowH - 6, 10);
+      const colW = Math.max(colWidths[col] - 2.4, 4);
+      const lineFactorFor = (count) => (count === 2 ? 2 : count >= 3 ? 1.22 : 1.15);
+      const longest = () => Math.max(...lines.map((ln) => doc.getTextWidth(ln)), 0);
+      const linesNeedWidth = () => {
+        if (lines.length <= 1) return 0;
+        return (lines.length - 1) * size * lineFactorFor(lines.length) + size;
+      };
+      while (size > 3.2 && (longest() > maxLen || linesNeedWidth() > colW)) {
+        size -= 0.2;
+        doc.setFontSize(size);
+      }
+      const tw = longest();
+      const lineFactor = lineFactorFor(lines.length);
+      const blockW = lines.length > 1 ? (lines.length - 1) * size * lineFactor : 0;
+      const cx = colXs[col] + colWidths[col] / 2;
+      const cy = y + rowH / 2;
+      doc.text(lines, cx + size * 0.2 - blockW / 2, cy + tw / 2, {
+        angle: 90,
+        lineHeightFactor: lineFactor
+      });
+      doc.setFontSize(fontSize);
+      doc.setFont('helvetica', isHeaderRow ? 'bold' : 'normal');
+    };
+
     const paintFormXXVIISpannedHeader = (label, col, mode) => {
+      const trimmed = String(label || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      let paintRowIndex = rowIndex;
+      let paintY = y;
+      while (paintRowIndex > tableStart) {
+        const prevIdx = paintRowIndex - 1;
+        const prevCell = String(rows[prevIdx]?.[col] ?? '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (prevCell) break;
+        if (!isFormXXVIIOtherDeductionMidRowSibling(prevIdx, col)) break;
+        paintY -= measureRowHeight(rows[prevIdx], prevIdx);
+        paintRowIndex = prevIdx;
+      }
       let spanH = formXXVIIHeaderSpanHeight(rowIndex, col, rowH);
-      if (headerModel.isFormXXVIIRegister && xxviiIndexRow >= 0 && rowIndex < xxviiIndexRow) {
-        let maxH = rowH;
-        for (let hr = rowIndex + 1; hr < xxviiIndexRow; hr += 1) {
+      for (let hr = paintRowIndex; hr < rowIndex; hr += 1) {
+        spanH += measureRowHeight(rows[hr], hr);
+      }
+      if (headerModel.isFormXXVIIRegister && xxviiIndexRow >= 0 && paintRowIndex < xxviiIndexRow) {
+        let maxH = measureRowHeight(rows[paintRowIndex], paintRowIndex);
+        for (let hr = paintRowIndex + 1; hr < xxviiIndexRow; hr += 1) {
           maxH += measureRowHeight(rows[hr], hr);
         }
         spanH = Math.min(spanH, maxH);
       }
       const lastCol = col === colCount - 1;
-      const spanStrokeOpts =
-        headerModel.isFormXXVIIRegister && formXXVIISpanAbutsIndexRow(rowIndex, col)
-          ? { skipBottom: true }
-          : {};
-      strokeFormXXVIICell(colXs[col], y, colWidths[col], spanH, lastCol, spanStrokeOpts);
-      const trimmed = String(label || '')
-        .replace(/\s+/g, ' ')
-        .trim();
+      const spanStrokeOpts = {};
+      if (headerModel.isFormXXVIIRegister && formXXVIISpanAbutsIndexRow(paintRowIndex, col)) {
+        spanStrokeOpts.skipBottom = true;
+      }
+      strokeFormXXVIICell(colXs[col], paintY, colWidths[col], spanH, lastCol, spanStrokeOpts);
       if (!trimmed) return;
       if (mode === 'horizontal') {
         const cellW = Math.max(colWidths[col] - 3, 6);
@@ -8966,7 +9178,7 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         }
         const lead = lines.length >= 2 ? size * 2 : size + 1.2;
         const textH = (lines.length - 1) * lead + size;
-        doc.text(lines, colXs[col] + colWidths[col] / 2, y + (spanH - textH) / 2 + size, {
+        doc.text(lines, colXs[col] + colWidths[col] / 2, paintY + (spanH - textH) / 2 + size, {
           align: 'center',
           lineHeightFactor: lines.length >= 2 ? 2 : 1.15
         });
@@ -8993,7 +9205,7 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       const lineFactor = lineFactorFor(lines.length);
       const blockW = lines.length > 1 ? (lines.length - 1) * size * lineFactor : 0;
       const cx = colXs[col] + colWidths[col] / 2;
-      const cy = y + spanH / 2;
+      const cy = paintY + spanH / 2;
       doc.text(lines, cx + size * 0.2 - blockW / 2, cy + tw / 2, {
         angle: 90,
         lineHeightFactor: lineFactor
@@ -9060,10 +9272,55 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
 
       if (groupBand && c === groupBand.start) {
         const bandW = colXs[groupBand.end + 1] - colXs[groupBand.start];
+        const otherMidBand = /^other$/i.test(
+          String(groupBand.label || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+        );
+        if (headerModel.isFormXXVIIRegister && otherMidBand) {
+          let ptUniformBelow = false;
+          for (let hr = rowIndex + 1; hr <= headerBandEnd && hr < rows.length; hr += 1) {
+            if (isFormXXVIITamilNaduColumnIndexRow(rows[hr] || [], colCount)) break;
+            for (let bc = groupBand.start; bc <= groupBand.end; bc += 1) {
+              const below = String(rows[hr]?.[bc] ?? '')
+                .replace(/\s+/g, ' ')
+                .trim();
+              if (below && isFormXXVIIPtOrUniformLeafLabel(below)) {
+                ptUniformBelow = true;
+                break;
+              }
+            }
+            if (ptUniformBelow) break;
+          }
+          if (ptUniformBelow) continue;
+        }
         if (headerModel.isFormXXVIIRegister) {
           strokeFormXXVIICell(colXs[c], y, bandW, rowH, groupBand.end === colCount - 1);
         } else {
           doc.rect(colXs[c], y, bandW, rowH, 'S');
+        }
+        const otherAllowancesBanner =
+          headerModel.isFormXXVIIRegister &&
+          isFormXXVIITamilNaduOtherAllowancesGroupLabel(groupBand.label);
+        if (otherAllowancesBanner) {
+          const tightLines = ['OTHER ALLOWANCES/CASH PAYMENT', 'NATURE TO BE SPECIFIED'];
+          const tightFactor = 1.02;
+          let size = Math.min(fontSize, 7);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(size);
+          const maxW = Math.max(bandW - 3, 8);
+          while (size > 3.6 && tightLines.some((ln) => doc.getTextWidth(ln) > maxW)) {
+            size -= 0.2;
+            doc.setFontSize(size);
+          }
+          const lead = size * tightFactor;
+          const textH = (tightLines.length - 1) * lead + size;
+          doc.text(tightLines, colXs[c] + bandW / 2, y + (rowH - textH) / 2 + size, {
+            align: 'center',
+            lineHeightFactor: tightFactor
+          });
+          doc.setFontSize(fontSize);
+          continue;
         }
         const groupLineCap = isFormVIFestivalGroupLabel(groupBand.label)
           ? 10
@@ -9074,11 +9331,12 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
           .splitTextToSize(groupBand.label, Math.max(bandW - 4, 8))
           .slice(0, groupLineCap);
         const xxviiTwoLine = headerModel.isFormXXVIIRegister && lines.length >= 2;
+        const lineFactor = xxviiTwoLine ? 2 : 1.15;
         const lineLead = xxviiTwoLine ? fontSize * 2 : fontSize + 1;
         const textH = (lines.length - 1) * lineLead + fontSize;
         doc.text(lines, colXs[c] + bandW / 2, y + (rowH - textH) / 2 + fontSize, {
           align: 'center',
-          lineHeightFactor: xxviiTwoLine ? 2 : 1.15
+          lineHeightFactor: lineFactor
         });
         continue;
       }
@@ -9097,6 +9355,21 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
             doc.text(xxviiLabel, colXs[c] + colWidths[c] / 2, y + (rowH + fontSize) / 2 - 1, {
               align: 'center'
             });
+            continue;
+          }
+          if (
+            isFormXXVIITamilNaduOtherDeductionsHeader(xxviiLabel) &&
+            (isFormXXVIITamilNaduPtHeader(leafHeaders[c] || '') ||
+              /uniform\s+deposits?/i.test(String(leafHeaders[c] || '')))
+          ) {
+            continue;
+          }
+          if (
+            isFormXXVIIPtOrUniformLeafLabel(xxviiLabel) &&
+            rowIndex > tableStart &&
+            formXXVIIOtherMidBandAt(rowIndex - 1, c)
+          ) {
+            paintFormXXVIIPtUniformStackedHeader(c, xxviiLabel);
             continue;
           }
           if (isFormXXVIITamilNaduVerticalHeaderText(xxviiLabel)) {

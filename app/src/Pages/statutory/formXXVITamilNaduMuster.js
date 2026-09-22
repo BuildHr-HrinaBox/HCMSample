@@ -991,11 +991,33 @@ export function ensureFormXXVITamilNaduDayColumnHeaders(headers, daysInMonth = 3
   });
 
   if (dayByNum.size === 0) return base;
+
+  // Inject Rate of Wages before the day band when the parsed prefix omitted it
+  // (short Serial/Name/Age prefixes used to shift Age into the wages Excel column).
+  const ensuredPrefix = [...prefix];
+  if (!ensuredPrefix.some((h) => isFormXXVITamilNaduRateOfWagesHeaderKey(h))) {
+    ensuredPrefix.push(
+      FORM_XXVI_TN_LEFT_HEADERS.find((h) => isFormXXVITamilNaduRateOfWagesHeaderKey(h)) ||
+        'Rate of Wages'
+    );
+  } else {
+    const wagesIdx = ensuredPrefix.findIndex((h) => isFormXXVITamilNaduRateOfWagesHeaderKey(h));
+    if (wagesIdx >= 0 && wagesIdx !== ensuredPrefix.length - 1) {
+      const [wagesHdr] = ensuredPrefix.splice(wagesIdx, 1);
+      ensuredPrefix.push(wagesHdr);
+    }
+  }
+
+  let ensuredSuffix = [...suffix];
+  if (!ensuredSuffix.some((h) => isFormXXVITamilNaduNumberOfDaysWorkedHeader(h))) {
+    ensuredSuffix = [FORM_XXVI_TN_RIGHT_HEADERS[0], ...ensuredSuffix];
+  }
+
   if (dayByNum.size >= monthDays) {
     const days = [...dayByNum.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([, header]) => header);
-    return [...prefix, ...days, ...suffix];
+    return [...ensuredPrefix, ...days, ...ensuredSuffix];
   }
 
   // Partial band (e.g. only 1–14) — pad missing days using the same key style.
@@ -1009,7 +1031,7 @@ export function ensureFormXXVITamilNaduDayColumnHeaders(headers, daysInMonth = 3
   const days = [...dayByNum.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, header]) => header);
-  return [...prefix, ...days, ...suffix];
+  return [...ensuredPrefix, ...days, ...ensuredSuffix];
 }
 
 /** Rebuild group-label row after day-column expansion (Daily hours of work band). */
@@ -1297,71 +1319,92 @@ export async function buildFormXXVITamilNaduWorkbookWithTemplateStyles({
     dataStartRow = Math.max(dataStartRow, markerRow + 1);
   }
 
-  const sourceHeaders = Array.isArray(headersToUse) ? [...headersToUse] : [];
-  // Prefer 10_N / Daily hours_* keys so bare column numbers (1)–(9) never become dayStartIdx.
-  const dayStartIdx = (() => {
-    const preferred = sourceHeaders.findIndex(
-      (h) =>
-        /^10_(\d{1,2})$/i.test(String(h || '').trim()) ||
-        /^daily\s+hours\s+of\s+work_(\d{1,2})$/i.test(String(h || '').trim())
+  // Canonical export layout: 9 identity cols | days 1–31 | right cols (11–14).
+  // Never let a short parsed prefix (e.g. only Serial/Name/Age) shift Age into Rate of Wages
+  // or leave Daily hours / Number of Days Worked blank on download.
+  const sourceHeaders = ensureFormXXVITamilNaduDayColumnHeaders(
+    stripFormXXVITamilNaduNonTableHeaders(Array.isArray(headersToUse) ? headersToUse : [])
+  );
+  const identityCount = FORM_XXVI_TN_LEFT_HEADERS.length;
+  const dayHeaderEntries = listFormXXVITamilNaduDayHeaders(sourceHeaders).filter(
+    ({ header }) =>
+      !isFormXXVITamilNaduRateOfWagesHeaderKey(header) &&
+      !isFormXXVITamilNaduNumberOfDaysWorkedHeader(header)
+  );
+  const dayHeaders =
+    dayHeaderEntries.length >= 5
+      ? dayHeaderEntries
+          .sort((a, b) => a.day - b.day)
+          .map(({ header }) => header)
+      : Array.from({ length: Math.min(markerCols.length || 31, 31) }, (_, i) => `10_${i + 1}`);
+  const isLeftIdentityHeader = (h) => {
+    const bucket = headerAliasBucket(h);
+    if (bucket && FORM_XXVI_TN_LEFT_HEADERS.some((left) => headerAliasBucket(left) === bucket)) {
+      return true;
+    }
+    return FORM_XXVI_TN_LEFT_HEADERS.some(
+      (left) => formXXVITamilNaduHeaderNorm(left) === formXXVITamilNaduHeaderNorm(h)
     );
-    if (preferred >= 0) return preferred;
-    return sourceHeaders.findIndex((h) => {
-      if (isFormXXVITamilNaduRateOfWagesHeaderKey(h)) return false;
-      return isFormXXVITamilNaduDayHeaderKey(h);
+  };
+  const rightHeaders = sourceHeaders.filter(
+    (h) =>
+      !isFormXXVITamilNaduRateOfWagesHeaderKey(h) &&
+      !isFormXXVITamilNaduDayHeaderKey(h) &&
+      !isLeftIdentityHeader(h) &&
+      (isFormXXVITamilNaduNumberOfDaysWorkedHeader(h) ||
+        /signature|thumb|termination|contractor|representative/i.test(String(h || '')))
+  );
+  const exportRightHeaders =
+    rightHeaders.length > 0
+      ? rightHeaders
+      : FORM_XXVI_TN_RIGHT_HEADERS.slice(0, Math.min(4, FORM_XXVI_TN_RIGHT_HEADERS.length));
+  // Prefer canonical left labels so alias lookup fills Age / Rate of Wages / etc. from row keys.
+  const exportLeftHeaders = FORM_XXVI_TN_LEFT_HEADERS.map((canonical) => {
+    const hit = sourceHeaders.find((h) => {
+      const bucket = headerAliasBucket(canonical);
+      return bucket && headerAliasBucket(h) === bucket;
     });
-  })();
-  const prefixCount = dayStartIdx >= 0 ? dayStartIdx : sourceHeaders.length;
-  const firstDayCol = markerCols.length > 0 ? markerCols[0] : Math.max(1, startCol + prefixCount);
+    return hit || canonical;
+  });
+  const hdrs = [...exportLeftHeaders, ...dayHeaders, ...exportRightHeaders];
+
+  const firstDayCol = markerCols.length > 0 ? markerCols[0] : Math.max(1, startCol + identityCount);
   const lastDayCol =
     markerCols.length > 0
       ? markerCols[markerCols.length - 1]
-      : firstDayCol + Math.max(markerCols.length, 31) - 1;
+      : firstDayCol + Math.max(dayHeaders.length, 31) - 1;
 
   const buildOrderedCols = () => {
-    if (markerCols.length >= 5 && dayStartIdx >= 0) {
+    if (markerCols.length >= 5) {
       const cols = [];
-      // Anchor identity columns immediately left of day 1 (Rate of Wages = firstDayCol - 1).
-      // Fall back to contiguous startCol when day-1 was mis-detected at the table edge
-      // (otherwise firstDayCol - prefixCount can be negative, e.g. 1 - 9 = -8).
-      let prefixStart = firstDayCol - prefixCount;
-      if (prefixStart < 1 || firstDayCol <= prefixCount) {
+      // Rate of Wages always sits at firstDayCol - 1; only bail when that would go off-sheet.
+      let prefixStart = firstDayCol - identityCount;
+      if (prefixStart < 1) {
         prefixStart = Math.max(1, startCol);
       }
-      for (let j = 0; j < prefixCount; j += 1) {
+      for (let j = 0; j < identityCount; j += 1) {
         cols.push(prefixStart + j);
       }
-      // Contiguous day headers only (stop at Number of Days Worked / signatures).
-      let dayCount = 0;
-      for (let i = dayStartIdx; i < sourceHeaders.length; i += 1) {
-        const h = sourceHeaders[i];
-        if (isFormXXVITamilNaduRateOfWagesHeaderKey(h)) break;
-        if (!isFormXXVITamilNaduDayHeaderKey(h)) break;
-        dayCount += 1;
-      }
-      if (dayCount < 5) dayCount = Math.min(markerCols.length, 31);
-      dayCount = Math.min(dayCount, markerCols.length, 31);
+      const dayCount = Math.min(Math.max(dayHeaders.length, 5), markerCols.length, 31);
       for (let d = 0; d < dayCount; d += 1) {
-        const h = sourceHeaders[dayStartIdx + d];
-        const dayNum = h != null ? resolveFormXXVITamilNaduDayNumberFromHeader(h) : 0;
+        const h = dayHeaders[d];
+        const dayNum = h != null ? resolveFormXXVITamilNaduDayNumberFromHeader(h) : d + 1;
         const mapped =
           dayNum >= 1 && dayNum <= 31 && dayColumnMap.has(dayNum)
             ? dayColumnMap.get(dayNum)
             : markerCols[d];
-        cols.push(Math.max(1, Number(mapped) || prefixStart + prefixCount + d));
+        cols.push(Math.max(1, Number(mapped) || prefixStart + identityCount + d));
       }
-      const rightStartIdx = dayStartIdx + dayCount;
-      const rightCount = Math.max(0, sourceHeaders.length - rightStartIdx);
+      const rightCount = exportRightHeaders.length;
       if (rightCount > 0) {
         const rightStart = Math.max(1, lastDayCol + 1);
         for (let r = 0; r < rightCount; r += 1) cols.push(rightStart + r);
       }
       return cols.filter((c) => Number.isFinite(c) && c >= 1 && c <= 16384);
     }
-    return Array.from({ length: Math.max(12, sourceHeaders.length) }, (_, i) => Math.max(1, startCol + i));
+    return Array.from({ length: Math.max(12, hdrs.length) }, (_, i) => Math.max(1, startCol + i));
   };
   const orderedCols = buildOrderedCols();
-  const hdrs = sourceHeaders;
 
   const getRowValueForHeader = (rowObj, header, headerIndex) => {
     if (!rowObj || typeof rowObj !== 'object' || Array.isArray(rowObj)) return '';
@@ -1457,6 +1500,9 @@ export async function buildFormXXVITamilNaduWorkbookWithTemplateStyles({
       templateRow: dataStartRow,
       templateBodyRows: 1
     });
+    // Full table span for centered "System Generated" box below the grid.
+    worksheet._formXxviTableColMin = tableColMin;
+    worksheet._formXxviTableColMax = tableColMax;
   }
 
   const targetSheetName = worksheet.name;

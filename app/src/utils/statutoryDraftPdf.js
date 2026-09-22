@@ -5019,6 +5019,30 @@ const enforcePdfColumnMinWidths = (widths, headers, usableWidth, options = {}) =
     if (/^(sex|gender|age|photo)$/i.test(h)) {
       return compactSex ? Math.max(18, total * 0.025) : Math.max(28, total * 0.045);
     }
+    // Form XXVI: address / identity columns need a large floor; day leaves stay tiny.
+    if (options?.formXXVIWordSafe === true && h && !/^\(?\s*\d{1,2}\s*\)?$/.test(h)) {
+      const longest = formXXVITamilNaduLongestHeaderWord(h);
+      if (/permanent/.test(lower) && /address/.test(lower)) {
+        return Math.max(78, total * 0.1);
+      }
+      if (/local\s+address/.test(lower)) {
+        return Math.max(70, total * 0.09);
+      }
+      if (/name of(?:\s+the)?\s+work/.test(lower)) {
+        return Math.max(56, total * 0.07);
+      }
+      // Date of Termination / Signature of workman / Signature of contractor.
+      if (isFormXXVITamilNaduTrailingWideHeader(h)) {
+        return Math.max(72, total * 0.085);
+      }
+      if (longest.length >= 4) {
+        const wordMin = Math.min(total * 0.1, Math.max(48, longest.length * 4.8));
+        if (/designation|number of days|rate of wages|father|husband/i.test(lower)) {
+          return Math.max(wordMin, total * 0.065);
+        }
+        return Math.max(wordMin * 0.9, total * 0.045);
+      }
+    }
     if (h.length >= 55) return Math.max(56, total * 0.09);
     if (
       /amount/.test(lower) &&
@@ -5120,6 +5144,172 @@ const formXXVIITamilNaduColumnWeight = (headerText, maxDataLen) => {
     return Math.max(5.5, Math.min(Math.max(maxDataLen || 0, 5) + 1.2, 8.5));
   }
   return Math.max(5, Math.min(maxDataLen || 4, 7.5));
+};
+
+/** Longest word in a Form XXVI heading — used so PDF never mid-splits "Permanent" / "Wages". */
+const formXXVITamilNaduLongestHeaderWord = (headerText) => {
+  const words = String(headerText || '')
+    .replace(/[()/\\|,;:]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+  if (!words.length) return '';
+  return words.reduce((best, w) => (w.length > best.length ? w : best), '');
+};
+
+/** Form XXVI trailing cols that need extra PDF width (long header labels). */
+const isFormXXVITamilNaduTrailingWideHeader = (headerText) => {
+  const lower = String(headerText || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!lower) return false;
+  if (/termination/.test(lower)) return true;
+  if (/signature/.test(lower) && /contractor|representative/.test(lower)) return true;
+  if (
+    (/signature|thumb|impression/.test(lower) && /workman|worker/.test(lower)) ||
+    (/thumb\s+impression/.test(lower) && !/contractor/.test(lower))
+  ) {
+    return true;
+  }
+  return false;
+};
+
+/**
+ * Form XXVI TN Register of Employment — identity / address cols get most of the page;
+ * day leaves stay compact so addresses are readable.
+ */
+const formXXVITamilNaduColumnWeight = (headerText, maxDataLen = 0) => {
+  const h = String(headerText || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const lower = h.toLowerCase();
+  const longest = formXXVITamilNaduLongestHeaderWord(h);
+  const wordFloor = Math.max(6, Math.min(14, (longest.length || 4) * 0.85));
+  const dataBoost = Math.min(Math.max(Number(maxDataLen) || 0, 0), 48) * 0.28;
+
+  if (!h) return Math.max(5, Math.min(maxDataLen || 3, 8));
+  if (/^\(?\s*\d{1,2}\s*\)?$/.test(h)) return 0.55;
+  if (/^(?:s|sr|si|sl)\.?\s*no\b|^serial\s*(?:no|number)/.test(lower)) {
+    return Math.max(4.2, wordFloor * 0.45);
+  }
+  if (/name of(?:\s+the)?\s+work/.test(lower)) return Math.max(14, wordFloor + dataBoost * 0.35);
+  if (/age\s*(?:&|and)?\s*sex/.test(lower)) return Math.max(7, wordFloor);
+  if (/permanent/.test(lower) && /address/.test(lower)) {
+    return Math.max(22, wordFloor + 4 + dataBoost);
+  }
+  if (/local\s+address/.test(lower)) {
+    return Math.max(20, wordFloor + 3 + dataBoost);
+  }
+  if (/designation|nature of work/.test(lower)) return Math.max(12, wordFloor + dataBoost * 0.25);
+  if (/father|husband/.test(lower)) return Math.max(12, wordFloor + dataBoost * 0.2);
+  if (/date of entry|entry into/.test(lower)) return Math.max(10, wordFloor);
+  if (/rate of wages?/.test(lower)) return Math.max(9, wordFloor);
+  if (/number of days|days of work|days worked/.test(lower)) return Math.max(10, wordFloor);
+  // Date of Termination / Signature of workman / Signature of contractor — extra width.
+  if (isFormXXVITamilNaduTrailingWideHeader(h)) {
+    return Math.max(18, wordFloor + 4);
+  }
+  if (/daily\s+hours/.test(lower)) return 1.2;
+  return Math.max(wordFloor, Math.min(dataBoost + 5, 14));
+};
+
+/**
+ * Cap Form XXVI day columns and give freed width to address / identity columns.
+ */
+const redistributeFormXXVIPdfColumnWidths = (widths, headers, dayBand, usableWidth) => {
+  const next = Array.isArray(widths) ? widths.map((w) => Math.max(0, Number(w) || 0)) : [];
+  if (!next.length || !dayBand) return next;
+  const total = Math.max(1, Number(usableWidth) || next.reduce((a, b) => a + b, 0));
+  const dayStart = Number(dayBand.start);
+  const dayEnd = Number(dayBand.end);
+  if (!Number.isFinite(dayStart) || !Number.isFinite(dayEnd) || dayEnd < dayStart) return next;
+
+  // ~1.4% of page each — enough for P/WO/CL, not address-eating.
+  const dayCap = Math.max(9, total * 0.014);
+  let freed = 0;
+  for (let c = dayStart; c <= dayEnd && c < next.length; c += 1) {
+    if (next[c] > dayCap) {
+      freed += next[c] - dayCap;
+      next[c] = dayCap;
+    }
+  }
+  if (freed < 0.5) return next;
+
+  const priority = (header) => {
+    const lower = String(header || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    // Prefer the three trailing data columns the user asked to widen.
+    if (isFormXXVITamilNaduTrailingWideHeader(header)) return 6.5;
+    if (/permanent/.test(lower) && /address/.test(lower)) return 3.2;
+    if (/local\s+address/.test(lower)) return 3.0;
+    if (/name of(?:\s+the)?\s+work/.test(lower)) return 2.4;
+    if (/designation|father|husband/.test(lower)) return 1.8;
+    if (/date of entry|rate of wages|number of days|age\s*(?:&|and)?\s*sex/.test(lower)) return 1.5;
+    if (/^(?:s|sr|si|sl)\.?\s*no\b|^serial/.test(lower)) return 1.0;
+    return 0.8;
+  };
+
+  const shareIdx = [];
+  const shareW = [];
+  for (let c = 0; c < next.length; c += 1) {
+    if (c >= dayStart && c <= dayEnd) continue;
+    const h = headers?.[c] || '';
+    if (/^\(?\s*\d{1,2}\s*\)?$/.test(String(h).trim())) continue;
+    shareIdx.push(c);
+    shareW.push(priority(h));
+  }
+  const shareSum = shareW.reduce((a, b) => a + b, 0) || 1;
+  shareIdx.forEach((c, i) => {
+    next[c] += (shareW[i] / shareSum) * freed;
+  });
+
+  // Keep total exactly usableWidth.
+  const sum = next.reduce((a, b) => a + b, 0) || 1;
+  if (Math.abs(sum - total) > 0.5) {
+    const scale = total / sum;
+    for (let i = 0; i < next.length; i += 1) next[i] *= scale;
+  }
+  return next;
+};
+
+/**
+ * Wrap PDF cell text on whole words only (never mid-word like "Permanen" / "t").
+ * Falls back to one word per line when the column is narrow but still fits the longest word.
+ */
+const wrapPdfTextPreferWholeWords = (doc, text, maxWidth, lineCap = 12) => {
+  const raw = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!raw) return [' '];
+  const width = Math.max(Number(maxWidth) || 0, 6);
+  const words = raw.split(' ').filter(Boolean);
+  if (!words.length) return [' '];
+
+  const lines = [];
+  let current = '';
+  for (let i = 0; i < words.length; i += 1) {
+    const word = words[i];
+    const trial = current ? `${current} ${word}` : word;
+    let trialW = width + 1;
+    try {
+      trialW = doc.getTextWidth(trial);
+    } catch (_) {
+      trialW = trial.length * 4.2;
+    }
+    if (!current || trialW <= width) {
+      current = trial;
+      continue;
+    }
+    lines.push(current);
+    current = word;
+    if (lines.length >= lineCap) break;
+  }
+  if (current && lines.length < lineCap) lines.push(current);
+  return lines.length ? lines.slice(0, lineCap) : [' '];
 };
 
 const resolveLeafHeaderTexts = (rows, tableStart, headerBandEnd, colCount) => {
@@ -7544,7 +7734,13 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     const inDayBand = dayBand && c >= dayBand.start && c <= dayBand.end;
     if (inDayBand) {
       weights.push(
-        isApMultiLevelForm ? 1.6 : isFormTKASheet ? 1.8 : headerModel.isFormXXVI ? 2.8 : 2.2
+        isApMultiLevelForm
+          ? 1.6
+          : isFormTKASheet
+            ? 1.8
+            : headerModel.isFormXXVI
+              ? 0.42
+              : 2.2
       );
       continue;
     }
@@ -7602,6 +7798,10 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       weights.push(formXXVIITamilNaduColumnWeight(leafHeaders[c], maxDataLen || maxLen));
       continue;
     }
+    if (headerModel.isFormXXVI) {
+      weights.push(formXXVITamilNaduColumnWeight(leafHeaders[c], maxDataLen || maxLen));
+      continue;
+    }
     if (
       isApMultiLevelForm &&
       (c === formXVIRemarksColumn ||
@@ -7655,8 +7855,18 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       isFormXXIIIAPSE ||
       isFormXXIIIGJOt,
     tightSerial: isFormXVIAP,
-    compactSex: isFormXVIAP || isFormXXIIIGJOt
+    compactSex: isFormXVIAP || isFormXXIIIGJOt,
+    formXXVIWordSafe: headerModel.isFormXXVI === true
   });
+  if (headerModel.isFormXXVI && dayBand) {
+    const redistributed = redistributeFormXXVIPdfColumnWidths(
+      colWidths,
+      leafHeaders,
+      dayBand,
+      usableWidth
+    );
+    for (let i = 0; i < colWidths.length; i += 1) colWidths[i] = redistributed[i] ?? colWidths[i];
+  }
   const colXs = [marginX];
   for (let i = 0; i < colWidths.length; i += 1) colXs.push(colXs[i] + colWidths[i]);
   if (isFormXIVKALayout && colCount === 2) {
@@ -7948,7 +8158,10 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
           continue;
         }
       }
-      const wrapped = doc.splitTextToSize(text, Math.max(width, 6));
+      const wrapped =
+        headerModel.isFormXXVI && isHeaderRow
+          ? wrapPdfTextPreferWholeWords(doc, text, Math.max(width, 6), 10)
+          : doc.splitTextToSize(text, Math.max(width, 6));
       const lineCap =
         groupBand && isFormVIFestivalGroupLabel(groupBand.label)
           ? 10
@@ -7959,6 +8172,8 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
           : isHeaderRow
             ? headerModel.isFormW
               ? 6
+              : headerModel.isFormXXVI
+                ? 10
               : String(text || '').length >= 40
                 ? 14
                 : 8
@@ -7970,6 +8185,10 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     if (headerModel?.formPGJGujarat && isHeaderRow) return Math.max(24, rowHeight);
     if (headerModel?.formQMaharashtra && isHeaderRow) return Math.max(56, rowHeight);
     if (headerModel?.formBTamilNadu && isHeaderRow) return Math.max(28, rowHeight);
+    // Form XXVI: tall header boxes so whole-word stacks (Permanent / Home / Address) fit.
+    if (headerModel?.isFormXXVI && isHeaderRow) {
+      return Math.max(42, maxLines * (fontSize + 2.2) + 10);
+    }
     // Form X_RJ: tall header boxes so wrapped labels like
     // "Sl. No. of the register of workman employed" are not clipped.
     if (headerModel?.formXRajasthanEmployment && isHeaderRow) {
@@ -8360,10 +8579,15 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
         ? 12
         : isHeaderRow && headerModel.isFormW
           ? 6
+          : isHeaderRow && headerModel.isFormXXVI
+            ? 10
           : isHeaderRow && raw.length >= 40
             ? 14
             : 8;
-      const lines = doc.splitTextToSize(raw, cellW).slice(0, lineCap);
+      const lines =
+        headerModel.isFormXXVI && isHeaderRow
+          ? wrapPdfTextPreferWholeWords(doc, raw, cellW, lineCap)
+          : doc.splitTextToSize(raw, cellW).slice(0, lineCap);
       if (alignRight && !isFormQKALayout) {
         doc.text(lines, colXs[c] + colWidths[c] - 1.5, y + fontSize + 1, { align: 'right' });
       } else if (!isFormQKALayout && (isHeaderRow || isPureNilPdfText(raw))) {
@@ -9654,6 +9878,11 @@ export const statutoryDraftPdfTestUtils = {
   looksLikeFormWPdfContext,
   formWTamilNaduColumnWeight,
   formXXVIITamilNaduColumnWeight,
+  formXXVITamilNaduColumnWeight,
+  formXXVITamilNaduLongestHeaderWord,
+  isFormXXVITamilNaduTrailingWideHeader,
+  wrapPdfTextPreferWholeWords,
+  redistributeFormXXVIPdfColumnWidths,
   looksLikeFormXXVIITamilNaduRegisterPdfContext,
   looksLikeFormXVIIITamilNaduPdfContext,
   FORM_XVIII_TN_PDF_TABLE_FONT_SIZE,

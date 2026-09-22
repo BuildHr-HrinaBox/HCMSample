@@ -1060,3 +1060,73 @@ describe('Form XXVII Tamil Nadu Register of Wages PDF', () => {
     );
   });
 });
+
+describe('Form XXVI Tamil Nadu PDF header widths', () => {
+  test('Permanent Home Address weight exceeds day leaf and Rate of Wages', () => {
+    const { formXXVITamilNaduColumnWeight, formXXVITamilNaduLongestHeaderWord } =
+      statutoryDraftPdfTestUtils;
+    expect(formXXVITamilNaduLongestHeaderWord('Permanent Home Address')).toBe('Permanent');
+    expect(formXXVITamilNaduColumnWeight('Permanent Home Address', 40)).toBeGreaterThan(
+      formXXVITamilNaduColumnWeight('1', 1)
+    );
+    expect(formXXVITamilNaduColumnWeight('Permanent Home Address', 40)).toBeGreaterThan(
+      formXXVITamilNaduColumnWeight('Rate of Wages', 8)
+    );
+    expect(formXXVITamilNaduColumnWeight('Number of days of work', 4)).toBeGreaterThan(
+      formXXVITamilNaduColumnWeight('Age & Sex', 4)
+    );
+  });
+
+  test('trailing Date of Termination and contractor signature get extra width', () => {
+    const { formXXVITamilNaduColumnWeight, isFormXXVITamilNaduTrailingWideHeader } =
+      statutoryDraftPdfTestUtils;
+    expect(isFormXXVITamilNaduTrailingWideHeader('Date of Termination of Employment')).toBe(true);
+    expect(isFormXXVITamilNaduTrailingWideHeader('Signature of contractor/representative')).toBe(
+      true
+    );
+    expect(
+      isFormXXVITamilNaduTrailingWideHeader('Signature/thumb impression of workman')
+    ).toBe(true);
+    expect(formXXVITamilNaduColumnWeight('Date of Termination of Employment', 0)).toBeGreaterThan(
+      formXXVITamilNaduColumnWeight('Rate of Wages', 8)
+    );
+    expect(
+      formXXVITamilNaduColumnWeight('Signature of contractor/representative', 0)
+    ).toBeGreaterThan(formXXVITamilNaduColumnWeight('Number of days of work', 4));
+  });
+
+  test('redistributeFormXXVIPdfColumnWidths grows address cols by capping day band', () => {
+    const { redistributeFormXXVIPdfColumnWidths } = statutoryDraftPdfTestUtils;
+    const headers = [
+      'Sr. No.',
+      'Name of the Workman',
+      'Age & Sex',
+      'Permanent Home Address',
+      'Local Address',
+      ...Array.from({ length: 31 }, (_, i) => String(i + 1)),
+      'Number of days of work',
+      'Signature/thumb impression of workman',
+      'Date of Termination of Employment',
+      'Signature of contractor/representative'
+    ];
+    const widths = headers.map((h) => (/^\d+$/.test(h) ? 18 : 30));
+    const usable = widths.reduce((a, b) => a + b, 0);
+    const out = redistributeFormXXVIPdfColumnWidths(widths, headers, { start: 5, end: 35 }, usable);
+    const termIdx = headers.indexOf('Date of Termination of Employment');
+    const contractorIdx = headers.indexOf('Signature of contractor/representative');
+    expect(out[termIdx]).toBeGreaterThan(widths[termIdx]);
+    expect(out[contractorIdx]).toBeGreaterThan(widths[contractorIdx]);
+    expect(out[5]).toBeLessThan(widths[5]);
+  });
+
+  test('wrapPdfTextPreferWholeWords keeps Permanent / Home / Address intact', () => {
+    const { wrapPdfTextPreferWholeWords } = statutoryDraftPdfTestUtils;
+    const fakeDoc = {
+      getTextWidth: (s) => String(s || '').length * 5
+    };
+    // Width fits one long word (~9*5=45) but not two (~14*5=70).
+    const lines = wrapPdfTextPreferWholeWords(fakeDoc, 'Permanent Home Address', 48, 6);
+    expect(lines).toEqual(['Permanent', 'Home', 'Address']);
+    expect(lines.every((line) => !/Permanen$|^t |W$|^ages|Num$|^ber/.test(line))).toBe(true);
+  });
+});

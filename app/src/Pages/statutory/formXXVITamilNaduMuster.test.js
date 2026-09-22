@@ -380,12 +380,48 @@ describe('formXXVITamilNaduMuster worksite + employee name', () => {
     expect(ensured.indexOf('10_31')).toBeLessThan(ensured.indexOf('Number of Days Worked'));
   });
 
-  test('ensureFormXXVITamilNaduDayColumnHeaders keeps a full 31-day band unchanged', () => {
+  test('ensureFormXXVITamilNaduDayColumnHeaders keeps a full 31-day band and injects Rate of Wages', () => {
     const headers = [
       'Name of the Workman',
       ...Array.from({ length: 31 }, (_, i) => `10_${i + 1}`),
       'Number of Days Worked'
     ];
-    expect(ensureFormXXVITamilNaduDayColumnHeaders(headers)).toEqual(headers);
+    const ensured = ensureFormXXVITamilNaduDayColumnHeaders(headers);
+    expect(ensured.filter((h) => /^10_/.test(h))).toHaveLength(31);
+    expect(ensured).toContain('Rate of Wages');
+    expect(ensured.indexOf('Rate of Wages')).toBeLessThan(ensured.indexOf('10_1'));
+    expect(ensured.indexOf('10_31')).toBeLessThan(ensured.indexOf('Number of Days Worked'));
+  });
+
+  test('short identity prefix still maps Age / wages / attendance by alias (download model)', () => {
+    // Regression: only Serial/Name/Age before day band used to push Age into Rate of Wages
+    // and leave Daily hours empty on PDF/Excel download.
+    const headers = ensureFormXXVITamilNaduDayColumnHeaders([
+      'Serial Number',
+      'Name of the Workman',
+      'Age and Sex',
+      ...Array.from({ length: 31 }, (_, i) => `10_${i + 1}`),
+      'Number of Days Worked'
+    ]);
+    expect(headers).toContain('Rate of Wages');
+    expect(headers.indexOf('Rate of Wages')).toBeLessThan(headers.indexOf('10_1'));
+    expect(headers.filter((h) => /^10_/.test(h))).toHaveLength(31);
+
+    const row = {
+      'Serial Number': '1',
+      'Name of the Workman': 'Selva P',
+      'Age and Sex': '26 Male',
+      'Age & Sex': '26 Male',
+      'Rate of Wages': '8965',
+      '10_1': 'P',
+      '10_2': 'WO',
+      '10_3': 'CL',
+      'Number of Days Worked': '17'
+    };
+    expect(readFormXXVITamilNaduCellValue(row, 'Age and Sex')).toMatch(/26/);
+    expect(readFormXXVITamilNaduCellValue(row, 'Rate of Wages')).toBe('8965');
+    expect(readFormXXVITamilNaduCellValue(row, '10_1')).toBe('P');
+    expect(readFormXXVITamilNaduCellValue(row, '10_2')).toBe('WO');
+    expect(readFormXXVITamilNaduCellValue(row, 'Number of Days Worked')).toBe('17');
   });
 });

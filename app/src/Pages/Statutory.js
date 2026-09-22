@@ -1682,12 +1682,12 @@ function writeSystemGeneratedDocumentNoteToWorksheet(worksheet) {
   const remarksOrLast = findExcelJSRemarksOrLastHeaderCol(worksheet, {
     headerRow: Math.max(1, lastContentRow - 2),
     startCol: 1,
-    scanCols: 40
+    scanCols: 60
   });
   let lastBorderCol = 0;
   const borderScanRows = Math.max(lastContentRow, 1);
   for (let r = 1; r <= borderScanRows; r += 1) {
-    for (let c = 1; c <= 40; c += 1) {
+    for (let c = 1; c <= 60; c += 1) {
       if (excelJSCellHasBorder(worksheet.getCell(r, c))) {
         lastBorderCol = Math.max(lastBorderCol, c);
       }
@@ -1695,7 +1695,10 @@ function writeSystemGeneratedDocumentNoteToWorksheet(worksheet) {
   }
 
   const stashedKeep = Number(worksheet._formXxApTableKeepCol) || 0;
+  const xxviColMin = Number(worksheet._formXxviTableColMin) || 0;
+  const xxviColMax = Number(worksheet._formXxviTableColMax) || 0;
   const noteRow = Math.max(1, lastContentRow + 4);
+  let leftCol = 1;
   let rightCol = Math.max(
     stashedKeep || 0,
     remarksOrLast || 0,
@@ -1708,7 +1711,16 @@ function writeSystemGeneratedDocumentNoteToWorksheet(worksheet) {
   else if (lastBorderCol > 0 && lastBorderCol <= 12) rightCol = Math.max(rightCol, lastBorderCol);
   else rightCol = Math.max(rightCol, Math.min(lastBorderCol || 12, 12));
 
-  const leftCol = 1;
+  // Form XXVI (and other wide day-grid registers): merge across the FULL table
+  // so "This is a System Generated Document" centers under all columns, not A–L.
+  if (xxviColMax > 12) {
+    leftCol = Math.max(1, xxviColMin || 1);
+    rightCol = Math.max(rightCol, xxviColMax);
+  } else if (lastBorderCol > 20 || lastContentCol > 20) {
+    leftCol = 1;
+    rightCol = Math.max(rightCol, lastBorderCol, lastContentCol);
+  }
+
   const rightLetter = excelColumnLetterFrom1Based(rightCol);
   const leftLetter = excelColumnLetterFrom1Based(leftCol);
   const rangeAddr = `${leftLetter}${noteRow}:${rightLetter}${noteRow}`;
@@ -17851,15 +17863,21 @@ const rebuildFormXXVIDailyHoursHeaders = ({
     return !t || /^\(?\d{1,2}\)?$/.test(t);
   };
 
-  // Official Form XXVI: identity cols 1–9 sit immediately left of day 1.
-  // Always anchor Rate of Wages at bandStartCol-1 so spacer/vertical headers
-  // cannot shift attendance into the wages column.
-  const leftCount = Math.min(Math.max(bandStartCol, 1), FORM_XXVI_TN_LEFT_HEADERS.length);
+  // Official Form XXVI: always emit all 9 identity cols left of day 1.
+  // Rate of Wages must sit at bandStartCol-1 so Age never lands in wages and
+  // attendance (P/WO/CL/A) stays in Daily hours 1–31 on download.
+  const leftCount = FORM_XXVI_TN_LEFT_HEADERS.length;
+  let leftStartCol = bandStartCol - leftCount;
+  if (leftStartCol < 0) leftStartCol = 0;
   const leftColEntries = [];
   const leftHeaders = [];
   for (let i = 0; i < leftCount; i += 1) {
-    const col = bandStartCol - leftCount + i;
-    const label = FORM_XXVI_TN_LEFT_HEADERS[i] || `Column ${i + 1}`;
+    const col = leftStartCol + i;
+    const fromSheet = pickColumnLabel(col, true);
+    const label =
+      (!isBareColumnNumberLabel(fromSheet) && fromSheet) ||
+      FORM_XXVI_TN_LEFT_HEADERS[i] ||
+      `Column ${i + 1}`;
     leftHeaders.push(label);
     leftColEntries.push({ col, label });
   }

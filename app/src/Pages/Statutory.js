@@ -269,12 +269,14 @@ import {
 } from './statutory/formXXIXTamilNadu';
 import {
   FORM_XXVII_TN_WAGE_PERIOD_DEFAULT,
+  FORM_XXVII_TN_DAILY_RATED_TYPE_DEFAULT,
   FORM_XXVII_TN_OVERTIME_RATE_DEFAULT,
   applyFormXXVIITamilNaduPayrollToRow,
   buildFormXXVIITamilNaduWagePeriodLine,
   formXXVIITamilNaduNeedsOtherAllowancesGroupThead,
   isFormXXVIITamilNaduContext,
   isFormXXVIITamilNaduDailyRatedHeader,
+  isFormXXVIITamilNaduDailyRatedTypeHeader,
   isFormXXVIITamilNaduHraHeader,
   isFormXXVIITamilNaduOtherAllowancesEccaHeader,
   isFormXXVIITamilNaduOtherDeductionsHeader,
@@ -77981,6 +77983,13 @@ const Statutory = ({ userEmail, userRole }) => {
               row[header] = FORM_XXVII_TN_OVERTIME_RATE_DEFAULT;
               return;
             }
+            if (
+              formXXVIITamilNaduAutofillContext &&
+              isFormXXVIITamilNaduDailyRatedTypeHeader(header)
+            ) {
+              row[header] = FORM_XXVII_TN_DAILY_RATED_TYPE_DEFAULT;
+              return;
+            }
             if (formXXVIIAutofillContext && isFormXXVIIRateOrPeriodColumnHeader(header)) {
               // WAGE PERIOD — WEEKLY/FN/MONTHLY defaults to Monthly (no payroll needed).
               if (
@@ -86345,6 +86354,9 @@ const Statutory = ({ userEmail, userRole }) => {
             if (isFormXXVIITamilNaduOvertimeRateHeader(header)) {
               row[header] = FORM_XXVII_TN_OVERTIME_RATE_DEFAULT;
             }
+            if (isFormXXVIITamilNaduDailyRatedTypeHeader(header)) {
+              row[header] = FORM_XXVII_TN_DAILY_RATED_TYPE_DEFAULT;
+            }
             // Never leave OTHER DEDUCTIONS as Nil for Form XXVII TN.
             if (
               isFormXXVIITamilNaduOtherDeductionsHeader(header) &&
@@ -86408,6 +86420,14 @@ const Statutory = ({ userEmail, userRole }) => {
               payrollMap,
             });
           }
+          currentHeaders.forEach((header) => {
+            if (isFormXXVIITamilNaduDailyRatedTypeHeader(header)) {
+              row[header] = FORM_XXVII_TN_DAILY_RATED_TYPE_DEFAULT;
+            }
+            if (isFormXXVIITamilNaduOvertimeRateHeader(header)) {
+              row[header] = FORM_XXVII_TN_OVERTIME_RATE_DEFAULT;
+            }
+          });
           xxviiFilled += 1;
         });
         if (xxviiFilled > 0) {

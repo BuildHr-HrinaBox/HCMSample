@@ -20,7 +20,8 @@ import {
  *
  * Autofill (Sample Payroll):
  *   TOTAL / UNITS days worked ← paid_days (firstname + lastname, or full employee_name)
- *   DAILY/PIECE/MONTHLY RATED ← gross_pay
+ *   DAILY/PIECE/MONTHLY RATED (type) ← "Monthly" (never fetch payroll)
+ *   DAILY RATED WAGES / PIECE RATES (amount) ← gross_pay
  *   WAGE PERIOD ← "Monthly"
  *   OVERTIME RATE ← NIL (never fetch payroll)
  *   HRA ← hra
@@ -198,10 +199,19 @@ export function isFormXXVIITamilNaduColumnIndexHeader(text) {
   return /^\(?\s*\d{1,2}\s*\)?$/.test(String(text || '').trim());
 }
 
-export function isFormXXVIITamilNaduColumnIndexRow(row) {
-  const filled = (Array.isArray(row) ? row : []).filter((c) => String(c || '').trim());
-  if (filled.length < 8) return false;
-  return filled.filter((c) => isFormXXVIITamilNaduColumnIndexHeader(c)).length >= 8;
+export function isFormXXVIITamilNaduColumnIndexRow(row, expectedCols = 28) {
+  if (!Array.isArray(row) || row.length === 0) return false;
+  const limit = Math.min(Math.max(1, expectedCols), row.length);
+  let consecutive = 0;
+  for (let c = 0; c < limit; c += 1) {
+    const raw = String(row[c] ?? '').trim();
+    if (!isFormXXVIITamilNaduColumnIndexHeader(raw)) break;
+    const n = Number(String(raw).replace(/^\(|\)$/g, ''));
+    if (n !== c + 1) break;
+    consecutive += 1;
+  }
+  const minRequired = Math.min(20, limit);
+  return consecutive >= minRequired;
 }
 
 /**
@@ -243,12 +253,12 @@ export function isFormXXVIITamilNaduVerticalHeaderText(text) {
  * Split long vertical Form XXVII headings so they fit the header-box height
  * (Excel textRotation 90 / PDF angle 90). Short labels stay one line.
  */
-export function splitFormXXVIITamilNaduVerticalHeaderLines(text, maxLines = 3) {
+export function splitFormXXVIITamilNaduVerticalHeaderLines(text, maxLines = 4) {
   const label = String(text || '')
     .replace(/\s+/g, ' ')
     .trim();
   if (!label) return [];
-  const limit = Math.max(1, Math.min(4, Number(maxLines) || 3));
+  const limit = Math.max(1, Math.min(4, Number(maxLines) || 4));
   if (limit === 1) return [label];
 
   const preferred = [
@@ -282,12 +292,12 @@ export function splitFormXXVIITamilNaduVerticalHeaderLines(text, maxLines = 3) {
     [/^net\s+wages?/i, ['NET', 'WAGES']],
     [
       /^signature/i,
-      ['SIGNATURE / THUMB IMPRESSION', 'CHEQUE No. & DATE / BANK', 'ADVICE TO BE APPENDED']
+      ['SIGNATURE / THUMB', 'IMPRESSION', 'CHEQUE No. & DATE', '/ BANK']
     ],
     [/^total\s+(?:un|um)paid/i, ['TOTAL UNPAID', 'AMOUNT ACCUMULATED']]
   ];
   for (const [re, parts] of preferred) {
-    if (re.test(label) && parts.length <= limit) return parts.slice(0, limit);
+    if (re.test(label)) return parts.slice(0, Math.max(limit, parts.length));
   }
 
   if (label.length <= 18 || !/[\s/]/.test(label)) return [label];
@@ -697,6 +707,8 @@ export function formXXVIITamilNaduNeedsOtherAllowancesGroupThead(headers) {
 
 /** Column default for "WAGE PERIOD — WEEKLY/FN/MONTHLY". */
 export const FORM_XXVII_TN_WAGE_PERIOD_DEFAULT = 'Monthly';
+/** DAILY RATED / PIECE RATED / MONTHLY RATED type column — never fetch payroll. */
+export const FORM_XXVII_TN_DAILY_RATED_TYPE_DEFAULT = 'Monthly';
 /** OVERTIME RATE is never fetched from Sample Payroll. */
 export const FORM_XXVII_TN_OVERTIME_RATE_DEFAULT = 'NIL';
 
@@ -722,17 +734,28 @@ function firstPresentFormXXVII(...vals) {
   return '';
 }
 
-/** DAILY RATED / PIECE RATED / MONTHLY RATED ← gross_pay */
+/** Type column: DAILY RATED / PIECE RATED / MONTHLY RATED ← Monthly (no payroll). */
+export function isFormXXVIITamilNaduDailyRatedTypeHeader(header) {
+  const s = formXXVIITamilNaduHeaderNorm(header);
+  if (!s) return false;
+  if (/over[\s-]*time|wage\s*period|units?\s+of\s+work|days?\s+worked|basic\s+wage/.test(s)) {
+    return false;
+  }
+  if (/daily\s+rated\s+wages?/.test(s) && !/monthly\s+rated/.test(s)) return false;
+  return /monthly\s+rated/.test(s) || (/daily\s+rated/.test(s) && /piece\s+rated/.test(s));
+}
+
+/** Amount column: DAILY RATED WAGES / PIECE RATES ← gross_pay */
 export function isFormXXVIITamilNaduDailyRatedHeader(header) {
   const s = formXXVIITamilNaduHeaderNorm(header);
   if (!s) return false;
+  if (isFormXXVIITamilNaduDailyRatedTypeHeader(header)) return false;
   if (/over[\s-]*time|wage\s*period|units?\s+of\s+work|days?\s+worked|basic\s+wage/.test(s)) {
     return false;
   }
   return (
     /daily\s+rated/.test(s) ||
     /piece\s+rated/.test(s) ||
-    /monthly\s+rated/.test(s) ||
     /daily\s+rate/.test(s) ||
     (/piece\s+rate/.test(s) && !/over[\s-]*time/.test(s))
   );
@@ -945,7 +968,12 @@ export function resolveFormXXVIITamilNaduTotalDeductions(payrollRow, payrollMap 
   return computeFormXXVIITamilNaduTotalDeductions(gross, net);
 }
 
-/** DAILY/PIECE/MONTHLY RATED ← gross_pay */
+/** Type column is always Monthly — do not fetch payroll. */
+export function resolveFormXXVIITamilNaduDailyRatedType(_payrollRow) {
+  return FORM_XXVII_TN_DAILY_RATED_TYPE_DEFAULT;
+}
+
+/** DAILY RATED WAGES / PIECE RATES ← gross_pay */
 export function resolveFormXXVIITamilNaduDailyRated(payrollRow) {
   if (!payrollRow || payrollRow.fetch_error) return '';
   const gross = readForm10GrossPayAmount(payrollRow);
@@ -1097,6 +1125,10 @@ export function applyFormXXVIITamilNaduPayrollToRow(row, payrollRow, headers, he
     }
     if (isFormXXVIITamilNaduOvertimeRateHeader(header)) {
       if (setCell(header, FORM_XXVII_TN_OVERTIME_RATE_DEFAULT)) hit = true;
+      return;
+    }
+    if (isFormXXVIITamilNaduDailyRatedTypeHeader(header)) {
+      if (setCell(header, FORM_XXVII_TN_DAILY_RATED_TYPE_DEFAULT)) hit = true;
       return;
     }
     // Days worked: paid_days only when firstname + lastname + paid_days exist; else clear

@@ -1065,6 +1065,100 @@ describe('Form XXVII Tamil Nadu Register of Wages PDF', () => {
       formXXVIITamilNaduColumnWeight('Name of the Workman', 20)
     );
   });
+
+  test('removes partial 1…12 body row that causes double line after employee 7', () => {
+    const { sanitizeFormXXVIITamilNaduRegisterPdfRows, isFormXXVIITamilNaduStrayBodyGridRow } =
+      statutoryDraftPdfTestUtils;
+    const headerBandEnd = 4;
+    const employee7 = [
+      '7',
+      'Raja Ayyavu',
+      'Male',
+      'Senior Master Technician',
+      'Monthly',
+      'Monthly',
+      '31',
+      ...Array(21).fill('100')
+    ];
+    const partialIndex = Array.from({ length: 28 }, (_, i) => (i < 12 ? String(i + 1) : ''));
+    const employee8 = [
+      '8',
+      'Ayudaiyappan Muthukrishnan',
+      'Male',
+      'Assistant Manager',
+      'Monthly',
+      'Monthly',
+      '31',
+      ...Array(21).fill('100')
+    ];
+    expect(isFormXXVIITamilNaduStrayBodyGridRow(partialIndex, 28, headerBandEnd, 11)).toBe(true);
+    const rows = Array.from({ length: 10 }, (_, i) => [`header-${i}`]);
+    rows.push(employee7, partialIndex, employee8);
+    const out = sanitizeFormXXVIITamilNaduRegisterPdfRows(rows, 28, headerBandEnd);
+    expect(out).toHaveLength(12);
+    expect(out[10][1]).toBe('Raja Ayyavu');
+    expect(out[11][1]).toBe('Ayudaiyappan Muthukrishnan');
+  });
+
+  test('removes sparse numeric template row after employee 8 (double horizontal line)', () => {
+    const { sanitizeFormXXVIITamilNaduRegisterPdfRows, isFormXXVIITamilNaduStrayBodyGridRow } =
+      statutoryDraftPdfTestUtils;
+    const headerBandEnd = 4;
+    const employee8 = [
+      '8',
+      'Avudaiyappan Muthukrishnan',
+      'Male',
+      'Assistant Manager',
+      'Monthly',
+      'Monthly',
+      '31',
+      ...Array(21).fill('100')
+    ];
+    const sparseLeak = Array.from({ length: 28 }, () => '');
+    sparseLeak[0] = '9';
+    const employee9 = [
+      '9',
+      'Dineshkumar Pachaiyappan',
+      'Male',
+      'Engineer',
+      'Monthly',
+      'Monthly',
+      '31',
+      ...Array(21).fill('100')
+    ];
+    expect(isFormXXVIITamilNaduStrayBodyGridRow(sparseLeak, 28, headerBandEnd, 12)).toBe(true);
+    const offsetStrip = Array.from({ length: 28 }, () => '');
+    offsetStrip[1] = '1';
+    offsetStrip[2] = '2';
+    offsetStrip[3] = '3';
+    expect(isFormXXVIITamilNaduStrayBodyGridRow(offsetStrip, 28, headerBandEnd, 12)).toBe(true);
+    const rows = Array.from({ length: 10 }, (_, i) => [`header-${i}`]);
+    rows.push(employee8, sparseLeak, employee9);
+    const out = sanitizeFormXXVIITamilNaduRegisterPdfRows(rows, 28, headerBandEnd);
+    expect(out).toHaveLength(12);
+    expect(out[10][1]).toBe('Avudaiyappan Muthukrishnan');
+    expect(out[11][1]).toBe('Dineshkumar Pachaiyappan');
+  });
+
+  test('drops any non-employee row immediately after the 1–28 index strip', () => {
+    const { sanitizeFormXXVIITamilNaduRegisterPdfRows } = statutoryDraftPdfTestUtils;
+    const indexRow = Array.from({ length: 28 }, (_, i) => String(i + 1));
+    const junk = Array.from({ length: 28 }, () => '');
+    junk[5] = 'Monthly';
+    const employee = [
+      '1',
+      'Selva P',
+      'Male',
+      'Junior Engineer',
+      'Monthly',
+      'Monthly',
+      '26',
+      ...Array(21).fill('')
+    ];
+    const out = sanitizeFormXXVIITamilNaduRegisterPdfRows([indexRow, junk, employee], 28, 0);
+    expect(out).toHaveLength(2);
+    expect(out[1][1]).toBe('Selva P');
+  });
 });
 
 describe('Form XXVI Tamil Nadu PDF header widths', () => {

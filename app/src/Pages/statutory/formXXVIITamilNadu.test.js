@@ -4,6 +4,7 @@ import {
   FORM_XXVII_TN_OTHER_ALLOWANCE_LEAVES,
   FORM_XXVII_TN_OTHER_DEDUCTION_LEAVES,
   FORM_XXVII_TN_WAGE_PERIOD_DEFAULT,
+  FORM_XXVII_TN_DAILY_RATED_TYPE_DEFAULT,
   FORM_XXVII_TN_OVERTIME_RATE_DEFAULT,
   applyFormXXVIITamilNaduPayrollToRow,
   buildFormXXVIITamilNaduColumnGroupLabels,
@@ -19,6 +20,7 @@ import {
   isFormXXVIITamilNaduVerticalHeaderText,
   isFormXXVIITamilNaduContext,
   isFormXXVIITamilNaduDailyRatedHeader,
+  isFormXXVIITamilNaduDailyRatedTypeHeader,
   isFormXXVIITamilNaduDaysWorkedHeader,
   isFormXXVIITamilNaduOtherAllowancesEccaHeader,
   isFormXXVIITamilNaduOtherDeductionsHeader,
@@ -157,6 +159,11 @@ describe('formXXVIITamilNadu column grouping', () => {
     expect(isFormXXVIITamilNaduColumnIndexRow(['1', '2', '3', '4', '5', '6', '7', '8'])).toBe(true);
     expect(splitFormXXVIITamilNaduVerticalHeaderLines('BASIC WAGE')).toEqual(['BASIC', 'WAGE']);
     expect(splitFormXXVIITamilNaduVerticalHeaderLines('HRA')).toEqual(['HRA']);
+    expect(
+      splitFormXXVIITamilNaduVerticalHeaderLines(
+        'SIGNATURE / THUMB IMPRESSION CHEQUE No. & DATE / BANK'
+      )
+    ).toEqual(['SIGNATURE / THUMB', 'IMPRESSION', 'CHEQUE No. & DATE', '/ BANK']);
   });
 
   test('skips autofill for cash-in-lieu and unpaid accumulated columns', () => {
@@ -195,8 +202,11 @@ describe('formXXVIITamilNadu Sample Payroll autofill', () => {
 
   test('detects daily rated / wage period / overtime rate / ECCA / PT / other deductions headers', () => {
     expect(isFormXXVIITamilNaduDailyRatedHeader('DAILY RATED WAGES/PIECE RATES')).toBe(true);
-    expect(isFormXXVIITamilNaduDailyRatedHeader('DAILY RATED/ PIECE RATED/MONTHLY RATED')).toBe(
+    expect(isFormXXVIITamilNaduDailyRatedTypeHeader('DAILY RATED/ PIECE RATED/MONTHLY RATED')).toBe(
       true
+    );
+    expect(isFormXXVIITamilNaduDailyRatedHeader('DAILY RATED/ PIECE RATED/MONTHLY RATED')).toBe(
+      false
     );
     expect(isFormXXVIITamilNaduWagePeriodColumnHeader('WAGE PERIOD- WEEKLY/FN/MONTHLY')).toBe(
       true
@@ -207,8 +217,14 @@ describe('formXXVIITamilNadu Sample Payroll autofill', () => {
     expect(isFormXXVIITamilNaduOtherDeductionsHeader('OTHER DEDUCTIONS')).toBe(true);
   });
 
-  test('DAILY RATED ← gross_pay', () => {
+  test('DAILY RATED type column defaults to Monthly (never fetch payroll)', () => {
     expect(resolveFormXXVIITamilNaduDailyRated(payrollRow)).toBe('104065');
+    const typeHdr = 'DAILY RATED/ PIECE RATED/MONTHLY RATED';
+    const row = { [typeHdr]: '104065' };
+    applyFormXXVIITamilNaduPayrollToRow(row, payrollRow, [typeHdr], { overwrite: true });
+    expect(row[typeHdr]).toBe(FORM_XXVII_TN_DAILY_RATED_TYPE_DEFAULT);
+    applyFormXXVIITamilNaduPayrollToRow(row, null, [typeHdr], { overwrite: true });
+    expect(row[typeHdr]).toBe(FORM_XXVII_TN_DAILY_RATED_TYPE_DEFAULT);
   });
 
   test('OVERTIME RATE is always NIL (never fetch payroll)', () => {

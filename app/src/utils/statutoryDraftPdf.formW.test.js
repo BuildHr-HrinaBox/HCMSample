@@ -1058,6 +1058,12 @@ describe('Form XXVII Tamil Nadu Register of Wages PDF', () => {
     expect(formXXVIITamilNaduColumnWeight('S.No', 2)).toBeLessThan(
       formXXVIITamilNaduColumnWeight('BASIC WAGE', 8)
     );
+    expect(formXXVIITamilNaduColumnWeight('Sex', 4)).toBeLessThan(
+      formXXVIITamilNaduColumnWeight('Name of the Workman', 20)
+    );
+    expect(formXXVIITamilNaduColumnWeight('Signature with date or thumb impression', 12)).toBeLessThan(
+      formXXVIITamilNaduColumnWeight('Name of the Workman', 20)
+    );
   });
 });
 

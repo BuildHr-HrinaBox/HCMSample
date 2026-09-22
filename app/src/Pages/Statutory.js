@@ -269,6 +269,7 @@ import {
 } from './statutory/formXXIXTamilNadu';
 import {
   FORM_XXVII_TN_WAGE_PERIOD_DEFAULT,
+  FORM_XXVII_TN_OVERTIME_RATE_DEFAULT,
   applyFormXXVIITamilNaduPayrollToRow,
   buildFormXXVIITamilNaduWagePeriodLine,
   formXXVIITamilNaduNeedsOtherAllowancesGroupThead,
@@ -70039,6 +70040,14 @@ const Statutory = ({ userEmail, userRole }) => {
               : formWPayrollLookup?.payrollRows || [];
         const extraParts = collectForm10RowNameParts(row, currentHeaders);
         if (tamilNaduStrictNameMatch) {
+          if (formXXVIITamilNaduAutofillContext) {
+            const xxviiHit = findFormWTamilNaduPayrollRowByFirstAndLastName(
+              emp,
+              payrollRowsForMatch,
+              extraParts
+            );
+            if (xxviiHit && !xxviiHit.fetch_error) return xxviiHit;
+          }
           const namedHit = findForm10PayrollRowByFirstAndLastName(
             emp,
             payrollRowsForMatch,
@@ -70132,7 +70141,7 @@ const Statutory = ({ userEmail, userRole }) => {
           return String(h || '').toLowerCase().includes('overtime');
         }),
         overtimeHeaders: headers.filter((h) => {
-          // OVERTIME RATE is filled separately for Form XXVII TN ((Basic/26/8)*2).
+          // OVERTIME RATE is always NIL for Form XXVII TN (never fetch payroll).
           if (isFormXXVIITamilNaduOvertimeRateHeader(h)) return false;
           return String(h || '').toLowerCase().includes('overtime');
         }),
@@ -70327,7 +70336,7 @@ const Statutory = ({ userEmail, userRole }) => {
               : [];
           dedHeaders.forEach((header) => setCell(header, dedVal));
         } else if (formXXVIITamilNaduAutofillContext) {
-          overtimeHeaders.forEach((header) => setCell(header, formWPayrollMap.overtimeWages));
+          overtimeHeaders.forEach((header) => setCell(header, FORM_XXVII_TN_OVERTIME_RATE_DEFAULT));
           // Form XXVII TN: TOTAL DEDUCTIONS = gross_pay − net_pay (not payroll total_deductions).
           const xxviiDedVal =
             formWPayrollMap.deductionsFromGrossNet !== '' &&
@@ -70367,7 +70376,7 @@ const Statutory = ({ userEmail, userRole }) => {
             setCell(header, val);
           });
         }
-        // Form XXVII TN: daily rated ← gross; wage period ← Monthly; OT rate ← (Basic/26/8)*2;
+        // Form XXVII TN: daily rated ← gross; wage period ← Monthly; OT rate ← NIL;
         // HRA / OTHER ALLOWANCES,ECCA / PT / OTHER DEDUCTIONS (total − PT − ESI − PF).
         if (formXXVIITamilNaduAutofillContext) {
           const xxviiHeaders = Array.isArray(currentHeaders) ? currentHeaders : [];
@@ -73504,6 +73513,10 @@ const Statutory = ({ userEmail, userRole }) => {
       const resolvePayrollRowForPeople = (em, payrollRows) => {
         if (!em || !Array.isArray(payrollRows) || payrollRows.length === 0) return null;
         if (tamilNaduStrictNameMatch) {
+          if (formXXVIITamilNaduAutofillContext) {
+            const xxviiHit = findFormWTamilNaduPayrollRowByFirstAndLastName(em, payrollRows);
+            if (xxviiHit && !xxviiHit.fetch_error) return xxviiHit;
+          }
           const namedHit = findForm10PayrollRowByFirstAndLastName(em, payrollRows);
           if (namedHit && !namedHit.fetch_error) return namedHit;
           const namesAgree = (hit) =>
@@ -77964,6 +77977,10 @@ const Statutory = ({ userEmail, userRole }) => {
               );
               return;
             }
+            if (formXXVIITamilNaduAutofillContext && isFormXXVIITamilNaduOvertimeRateHeader(header)) {
+              row[header] = FORM_XXVII_TN_OVERTIME_RATE_DEFAULT;
+              return;
+            }
             if (formXXVIIAutofillContext && isFormXXVIIRateOrPeriodColumnHeader(header)) {
               // WAGE PERIOD — WEEKLY/FN/MONTHLY defaults to Monthly (no payroll needed).
               if (
@@ -81135,7 +81152,7 @@ const Statutory = ({ userEmail, userRole }) => {
           // while Basic still fills from VE0042 defaults. Always prefer the Form W matcher
           // when it finds a Sample Payroll row that actually has Paid_days.
           if (
-            formWTamilNaduAutofillContext &&
+            (formWTamilNaduAutofillContext || formXXVIITamilNaduAutofillContext) &&
             Array.isArray(statutoryPayrollRows) &&
             statutoryPayrollRows.length > 0
           ) {
@@ -86292,7 +86309,7 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
 
-      // Form XXVII TN final pass: DAILY RATED ← gross; OT RATE ← (Basic/26/8)*2;
+      // Form XXVII TN final pass: DAILY RATED ← gross; OT RATE ← NIL;
       // OTHER DEDUCTIONS ← TOTAL − PT − ESI − PF (never Nil).
       if (
         formXXVIITamilNaduAutofillContext &&
@@ -86317,13 +86334,16 @@ const Statutory = ({ userEmail, userRole }) => {
         let xxviiFilled = 0;
         mappedData.forEach((row, rowIndex) => {
           if (!row || typeof row !== 'object') return;
-          // Always default wage-period column; payroll fields need a matched row.
+          // Always default wage-period + overtime rate; payroll fields need a matched row.
           currentHeaders.forEach((header) => {
             if (isFormXXVIITamilNaduWagePeriodColumnHeader(header)) {
               const cur = String(row[header] ?? '').trim();
               if (!cur || /^enter\b/i.test(cur) || /^nil+$/i.test(cur)) {
                 row[header] = FORM_XXVII_TN_WAGE_PERIOD_DEFAULT;
               }
+            }
+            if (isFormXXVIITamilNaduOvertimeRateHeader(header)) {
+              row[header] = FORM_XXVII_TN_OVERTIME_RATE_DEFAULT;
             }
             // Never leave OTHER DEDUCTIONS as Nil for Form XXVII TN.
             if (
@@ -86336,11 +86356,18 @@ const Statutory = ({ userEmail, userRole }) => {
           const empItem = Array.isArray(xxviiEmpList) ? xxviiEmpList[rowIndex] : null;
           const emp = empItem?.Employee || empItem?.employee || empItem || null;
           const extraParts = collectForm10RowNameParts(row, currentHeaders);
-          let payrollRow = findForm10PayrollRowByFirstAndLastName(
-            emp,
+          let payrollRow = findFormWTamilNaduPayrollRowByFirstAndLastName(
+            emp || row,
             xxviiPayrollSource,
             extraParts
           );
+          if (!payrollRow) {
+            payrollRow = findForm10PayrollRowByFirstAndLastName(
+              emp,
+              xxviiPayrollSource,
+              extraParts
+            );
+          }
           if (!payrollRow && emp && Array.isArray(xxviiPayrollSource) && xxviiPayrollSource.length) {
             const peopleHit = resolvePayrollRowForPeople(emp, xxviiPayrollSource);
             if (

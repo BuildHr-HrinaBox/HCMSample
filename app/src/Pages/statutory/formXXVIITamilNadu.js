@@ -19,10 +19,10 @@ import {
  *     FINES | OTHER DEDUCTIONS | TOTAL DEDUCTIONS
  *
  * Autofill (Sample Payroll):
- *   TOTAL / UNITS days worked ← paid_days (only when firstname + lastname + paid_days present)
+ *   TOTAL / UNITS days worked ← paid_days (firstname + lastname, or full employee_name)
  *   DAILY/PIECE/MONTHLY RATED ← gross_pay
  *   WAGE PERIOD ← "Monthly"
- *   OVERTIME RATE ← (Basic/26/8)*2
+ *   OVERTIME RATE ← NIL (never fetch payroll)
  *   HRA ← hra
  *   OTHER ALLOWANCES, ECCA ← gross − basic − hra
  *   PT ← professional_tax
@@ -191,6 +191,136 @@ export function formXXVIITamilNaduHeaderNorm(txt) {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+/** Column-number strip (1–28) under Form XXVII headings — always horizontal. */
+export function isFormXXVIITamilNaduColumnIndexHeader(text) {
+  return /^\(?\s*\d{1,2}\s*\)?$/.test(String(text || '').trim());
+}
+
+export function isFormXXVIITamilNaduColumnIndexRow(row) {
+  const filled = (Array.isArray(row) ? row : []).filter((c) => String(c || '').trim());
+  if (filled.length < 8) return false;
+  return filled.filter((c) => isFormXXVIITamilNaduColumnIndexHeader(c)).length >= 8;
+}
+
+/**
+ * Official Form XXVII model: Sr.No / Name / Sex / Designation stay horizontal
+ * in wide identity cells. Father/husband and employee number follow the same band.
+ */
+export function isFormXXVIITamilNaduIdentityHeaderText(text) {
+  const h = formXXVIITamilNaduHeaderNorm(text);
+  if (!h) return false;
+  if (/^(?:s|sr|si|sl)\.?\s*no\b|^serial\s*(?:no|number)/.test(h)) return true;
+  if (/name of(?:\s+the)?\s+(?:work(?:man|er)|employee)/.test(h)) return true;
+  if (/^sex$/.test(h) || /^gender$/.test(h)) return true;
+  if (/designation|nature of work/.test(h)) return true;
+  if (/father|husband/.test(h)) return true;
+  if (/employee\s*(?:number|id|code)/.test(h)) return true;
+  return false;
+}
+
+/**
+ * Official Form XXVII model: wage / allowance / deduction leaf titles read
+ * bottom→top (vertical). Group banners and identity columns stay horizontal.
+ */
+export function isFormXXVIITamilNaduVerticalHeaderText(text) {
+  const raw = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!raw) return false;
+  if (isFormXXVIITamilNaduColumnIndexHeader(raw)) return false;
+  if (isFormXXVIITamilNaduIdentityHeaderText(raw)) return false;
+  const n = formXXVIITamilNaduHeaderNorm(raw);
+  if (/^wages?\s+earned$/.test(n)) return false;
+  if (/^deductions?$/.test(n)) return false;
+  if (/other\s+allowances?\s*\/\s*cash\s+payment|cash\s+payment\s+nature/.test(n)) return false;
+  if (/^other$/.test(n)) return false;
+  return true;
+}
+
+/**
+ * Split long vertical Form XXVII headings so they fit the header-box height
+ * (Excel textRotation 90 / PDF angle 90). Short labels stay one line.
+ */
+export function splitFormXXVIITamilNaduVerticalHeaderLines(text, maxLines = 3) {
+  const label = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!label) return [];
+  const limit = Math.max(1, Math.min(4, Number(maxLines) || 3));
+  if (limit === 1) return [label];
+
+  const preferred = [
+    [
+      /^daily\s+rated\s*\/\s*piece\s+rate/i,
+      ['DAILY RATED/', 'PIECE RATE/', 'MONTHLY RATED']
+    ],
+    [/^wage\s*period/i, ['WAGE PERIOD', 'WEEKLY/FN/MONTHLY']],
+    [
+      /^total\s+number\s+of\s+days\s+worked/i,
+      ['TOTAL NUMBER OF DAYS', 'WORKED DURING THE', 'WEEK/FN/MONTH']
+    ],
+    [/^units\s+of\s+work/i, ['UNITS OF', 'WORK DONE']],
+    [/^daily\s+rated\s+wages?/i, ['DAILY RATED WAGES/', 'PIECE RATES']],
+    [/^over\s*-?\s*time\s+rate/i, ['OVER TIME', 'RATE']],
+    [/^basic\s+wage/i, ['BASIC', 'WAGE']],
+    [/^dearness\s+allow/i, ['DEARNESS', 'ALLOWANCE']],
+    [/^wash\s+allow/i, ['WASH', 'ALLOW']],
+    [
+      /^wages?\s+including\s+cash\s+in\s+lieu/i,
+      ['WAGES INCLUDING', 'CASH IN LIEU', 'OF KINDS']
+    ],
+    [/^leave\s+with\s+wages/i, ['LEAVE WITH WAGES', 'INCLUDING CASH', 'IN LIEU OF KIND']],
+    [/^other\s+allowances?\s*,?\s*ecca/i, ['OTHER ALLOWANCES,', 'ECCA']],
+    [/^providen/i, ['PROVIDENT', 'FUND']],
+    [/^uniform\s+deposits?/i, ['UNIFORM', 'DEPOSITS']],
+    [/^fines?/i, ['FINES', '(IF ANY)']],
+    [/^other\s+deductions?/i, ['OTHER', 'DEDUCTIONS']],
+    [/^total\s+deductions?/i, ['TOTAL', 'DEDUCTIONS']],
+    [/^gross\s+wages?/i, ['GROSS', 'WAGES']],
+    [/^net\s+wages?/i, ['NET', 'WAGES']],
+    [
+      /^signature/i,
+      ['SIGNATURE / THUMB IMPRESSION', 'CHEQUE No. & DATE / BANK', 'ADVICE TO BE APPENDED']
+    ],
+    [/^total\s+(?:un|um)paid/i, ['TOTAL UNPAID', 'AMOUNT ACCUMULATED']]
+  ];
+  for (const [re, parts] of preferred) {
+    if (re.test(label) && parts.length <= limit) return parts.slice(0, limit);
+  }
+
+  if (label.length <= 18 || !/[\s/]/.test(label)) return [label];
+
+  const words = label
+    .replace(/\s*\/\s*/g, ' / ')
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length <= 2) return [label];
+
+  if (limit <= 2) {
+    const total = label.length;
+    let best = 1;
+    let bestScore = Infinity;
+    for (let i = 1; i < words.length; i += 1) {
+      const left = words.slice(0, i).join(' ');
+      const right = words.slice(i).join(' ');
+      if (!right) continue;
+      const score = Math.abs(left.length - right.length) + Math.abs(left.length - total / 2) * 0.25;
+      if (score < bestScore) {
+        bestScore = score;
+        best = i;
+      }
+    }
+    return [words.slice(0, best).join(' '), words.slice(best).join(' ')].filter(Boolean);
+  }
+
+  const chunk = Math.ceil(words.length / Math.min(limit, 3));
+  const lines = [];
+  for (let i = 0; i < words.length && lines.length < limit; i += chunk) {
+    lines.push(words.slice(i, i + chunk).join(' '));
+  }
+  return lines.filter(Boolean);
 }
 
 /** Form 27 / XXVII — underscore filenames break \\b word boundaries. */
@@ -567,6 +697,8 @@ export function formXXVIITamilNaduNeedsOtherAllowancesGroupThead(headers) {
 
 /** Column default for "WAGE PERIOD — WEEKLY/FN/MONTHLY". */
 export const FORM_XXVII_TN_WAGE_PERIOD_DEFAULT = 'Monthly';
+/** OVERTIME RATE is never fetched from Sample Payroll. */
+export const FORM_XXVII_TN_OVERTIME_RATE_DEFAULT = 'NIL';
 
 function parseFormXXVIITamilNaduMoney(value) {
   if (value == null || value === '') return NaN;
@@ -626,10 +758,10 @@ export function isFormXXVIITamilNaduDaysWorkedHeader(header) {
 /** Read firstname / lastname from a Sample Payroll row (required for days-worked autofill). */
 export function readFormXXVIITamilNaduSamplePayrollNameParts(payrollRow) {
   if (!payrollRow || typeof payrollRow !== 'object' || payrollRow.fetch_error) {
-    return { firstName: '', lastName: '' };
+    return { firstName: '', lastName: '', fullName: '' };
   }
   const flat = flattenPayrollEarningColumns(payrollRow);
-  const firstName = String(
+  let firstName = String(
     firstPresentFormXXVII(
       flat.first_name,
       flat.firstname,
@@ -643,7 +775,7 @@ export function readFormXXVIITamilNaduSamplePayrollNameParts(payrollRow) {
       payrollRow.firstName
     ) || ''
   ).trim();
-  const lastName = String(
+  let lastName = String(
     firstPresentFormXXVII(
       flat.last_name,
       flat.lastname,
@@ -657,12 +789,33 @@ export function readFormXXVIITamilNaduSamplePayrollNameParts(payrollRow) {
       payrollRow.lastName
     ) || ''
   ).trim();
-  return { firstName, lastName };
+  const fullName = String(
+    firstPresentFormXXVII(
+      flat.employee_name,
+      flat.EmployeeName,
+      flat.full_name,
+      payrollRow.employee_name,
+      payrollRow.EmployeeName,
+      payrollRow.full_name,
+      payrollRow.name
+    ) || ''
+  ).trim();
+  if ((!firstName || !lastName) && fullName) {
+    const parts = fullName.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      if (!firstName) firstName = parts[0];
+      if (!lastName) lastName = parts[parts.length - 1];
+    }
+  }
+  return { firstName, lastName, fullName };
 }
 
 export function hasFormXXVIITamilNaduSamplePayrollNameParts(payrollRow) {
-  const { firstName, lastName } = readFormXXVIITamilNaduSamplePayrollNameParts(payrollRow);
-  return Boolean(firstName && lastName);
+  const { firstName, lastName, fullName } = readFormXXVIITamilNaduSamplePayrollNameParts(payrollRow);
+  if (firstName && lastName) return true;
+  return String(fullName || '')
+    .split(/\s+/)
+    .filter(Boolean).length >= 2;
 }
 
 /** Read paid_days from Sample Payroll (empty when missing). */
@@ -713,7 +866,7 @@ export function isFormXXVIITamilNaduWagePeriodColumnHeader(header) {
   return true;
 }
 
-/** OVERTIME RATE ← (Basic/26/8)*2 */
+/** OVERTIME RATE — never fetch Sample Payroll; always NIL. */
 export function isFormXXVIITamilNaduOvertimeRateHeader(header) {
   const s = formXXVIITamilNaduHeaderNorm(header);
   if (!s || /earning|wages?\s+earned|normal/.test(s)) return false;
@@ -799,18 +952,9 @@ export function resolveFormXXVIITamilNaduDailyRated(payrollRow) {
   return gross === '' || gross == null ? '' : String(gross);
 }
 
-/**
- * OVERTIME RATE = (Basic / 26 / 8) * 2
- * Basic from Sample Payroll wage breakdown.
- */
-export function resolveFormXXVIITamilNaduOvertimeRate(payrollRow) {
-  if (!payrollRow || payrollRow.fetch_error) return '';
-  const { basic } = readPayrollForm15WageAmounts(payrollRow);
-  const basicNum = Number(basic);
-  if (!Number.isFinite(basicNum) || basicNum <= 0) return '';
-  const rate = (basicNum / 26 / 8) * 2;
-  if (!Number.isFinite(rate) || rate <= 0) return '';
-  return String(Math.round(rate * 100) / 100);
+/** OVERTIME RATE is always NIL — do not compute or fetch payroll OT. */
+export function resolveFormXXVIITamilNaduOvertimeRate(_payrollRow) {
+  return FORM_XXVII_TN_OVERTIME_RATE_DEFAULT;
 }
 
 /** HRA ← Sample Payroll hra / hra_fbp */
@@ -937,7 +1081,6 @@ export function applyFormXXVIITamilNaduPayrollToRow(row, payrollRow, headers, he
   let hit = false;
   const daysWorked = resolveFormXXVIITamilNaduDaysWorked(payrollRow);
   const dailyRated = resolveFormXXVIITamilNaduDailyRated(payrollRow);
-  const otRate = resolveFormXXVIITamilNaduOvertimeRate(payrollRow);
   const hra = resolveFormXXVIITamilNaduHra(payrollRow);
   const otherAllow = resolveFormXXVIITamilNaduOtherAllowancesEcca(payrollRow);
   const pt = resolveFormXXVIITamilNaduPt(payrollRow);
@@ -950,6 +1093,10 @@ export function applyFormXXVIITamilNaduPayrollToRow(row, payrollRow, headers, he
   headers.forEach((header) => {
     if (isFormXXVIITamilNaduWagePeriodColumnHeader(header)) {
       if (setCell(header, FORM_XXVII_TN_WAGE_PERIOD_DEFAULT)) hit = true;
+      return;
+    }
+    if (isFormXXVIITamilNaduOvertimeRateHeader(header)) {
+      if (setCell(header, FORM_XXVII_TN_OVERTIME_RATE_DEFAULT)) hit = true;
       return;
     }
     // Days worked: paid_days only when firstname + lastname + paid_days exist; else clear
@@ -969,10 +1116,6 @@ export function applyFormXXVIITamilNaduPayrollToRow(row, payrollRow, headers, he
     if (!payrollRow || payrollRow.fetch_error) return;
     if (isFormXXVIITamilNaduDailyRatedHeader(header)) {
       if (setCell(header, dailyRated)) hit = true;
-      return;
-    }
-    if (isFormXXVIITamilNaduOvertimeRateHeader(header)) {
-      if (setCell(header, otRate)) hit = true;
       return;
     }
     if (isFormXXVIITamilNaduHraHeader(header)) {

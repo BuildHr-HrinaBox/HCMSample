@@ -4,6 +4,7 @@ import {
   FORM_XXVII_TN_OTHER_ALLOWANCE_LEAVES,
   FORM_XXVII_TN_OTHER_DEDUCTION_LEAVES,
   FORM_XXVII_TN_WAGE_PERIOD_DEFAULT,
+  FORM_XXVII_TN_OVERTIME_RATE_DEFAULT,
   applyFormXXVIITamilNaduPayrollToRow,
   buildFormXXVIITamilNaduColumnGroupLabels,
   buildFormXXVIITamilNaduWagePeriodLine,
@@ -12,6 +13,10 @@ import {
   computeFormXXVIITamilNaduTotalDeductions,
   formXXVIITamilNaduNeedsOtherAllowancesGroupThead,
   hasFormXXVIITamilNaduSamplePayrollNameParts,
+  isFormXXVIITamilNaduColumnIndexHeader,
+  isFormXXVIITamilNaduColumnIndexRow,
+  isFormXXVIITamilNaduIdentityHeaderText,
+  isFormXXVIITamilNaduVerticalHeaderText,
   isFormXXVIITamilNaduContext,
   isFormXXVIITamilNaduDailyRatedHeader,
   isFormXXVIITamilNaduDaysWorkedHeader,
@@ -34,6 +39,7 @@ import {
   resolveFormXXVIITamilNaduTableHeaders,
   resolveFormXXVIITamilNaduTotalDeductions,
   sanitizeFormXXVIITamilNaduColumnGroupLabels,
+  splitFormXXVIITamilNaduVerticalHeaderLines,
 } from './formXXVIITamilNadu';
 
 describe('formXXVIITamilNadu column grouping', () => {
@@ -129,6 +135,30 @@ describe('formXXVIITamilNadu column grouping', () => {
     ).toBe(false);
   });
 
+  test('official model: identity headings stay horizontal; wage leaves rotate vertical', () => {
+    expect(isFormXXVIITamilNaduIdentityHeaderText('Sr. No.')).toBe(true);
+    expect(isFormXXVIITamilNaduIdentityHeaderText('Name of the Workman')).toBe(true);
+    expect(isFormXXVIITamilNaduIdentityHeaderText('Sex')).toBe(true);
+    expect(isFormXXVIITamilNaduIdentityHeaderText('Designation (Nature of work)')).toBe(true);
+    expect(isFormXXVIITamilNaduVerticalHeaderText('Sr. No.')).toBe(false);
+    expect(isFormXXVIITamilNaduVerticalHeaderText('WAGES EARNED')).toBe(false);
+    expect(isFormXXVIITamilNaduVerticalHeaderText('DEDUCTIONS')).toBe(false);
+    expect(
+      isFormXXVIITamilNaduVerticalHeaderText('OTHER ALLOWANCES/CASH PAYMENT NATURE TO BE SPECIFIED')
+    ).toBe(false);
+    expect(isFormXXVIITamilNaduVerticalHeaderText('DAILY RATED/PIECE RATE/MONTHLY RATED')).toBe(
+      true
+    );
+    expect(isFormXXVIITamilNaduVerticalHeaderText('BASIC WAGE')).toBe(true);
+    expect(isFormXXVIITamilNaduVerticalHeaderText('HRA')).toBe(true);
+    expect(isFormXXVIITamilNaduVerticalHeaderText('GROSS WAGES')).toBe(true);
+    expect(isFormXXVIITamilNaduVerticalHeaderText('NET WAGES')).toBe(true);
+    expect(isFormXXVIITamilNaduColumnIndexHeader('18')).toBe(true);
+    expect(isFormXXVIITamilNaduColumnIndexRow(['1', '2', '3', '4', '5', '6', '7', '8'])).toBe(true);
+    expect(splitFormXXVIITamilNaduVerticalHeaderLines('BASIC WAGE')).toEqual(['BASIC', 'WAGE']);
+    expect(splitFormXXVIITamilNaduVerticalHeaderLines('HRA')).toEqual(['HRA']);
+  });
+
   test('skips autofill for cash-in-lieu and unpaid accumulated columns', () => {
     expect(
       isFormXXVIITamilNaduSkipAutofillHeader('WAGES INCLUDING CASH IN LIEU OF KINDS')
@@ -181,9 +211,9 @@ describe('formXXVIITamilNadu Sample Payroll autofill', () => {
     expect(resolveFormXXVIITamilNaduDailyRated(payrollRow)).toBe('104065');
   });
 
-  test('OVERTIME RATE ← (Basic/26/8)*2', () => {
-    // 26781 / 26 / 8 * 2 = 257.509… → 257.51
-    expect(resolveFormXXVIITamilNaduOvertimeRate(payrollRow)).toBe('257.51');
+  test('OVERTIME RATE is always NIL (never fetch payroll)', () => {
+    expect(resolveFormXXVIITamilNaduOvertimeRate(payrollRow)).toBe(FORM_XXVII_TN_OVERTIME_RATE_DEFAULT);
+    expect(resolveFormXXVIITamilNaduOvertimeRate(null)).toBe(FORM_XXVII_TN_OVERTIME_RATE_DEFAULT);
   });
 
   test('HRA ← Sample Payroll hra', () => {
@@ -263,6 +293,25 @@ describe('formXXVIITamilNadu Sample Payroll autofill', () => {
     );
     expect(row[totalHdr]).toBe('26');
     expect(row[unitsHdr]).toBe('26');
+
+    applyFormXXVIITamilNaduPayrollToRow(
+      row,
+      {
+        employee_name: 'Pal Pandian V',
+        paid_days: 15,
+      },
+      hdrs,
+      { overwrite: true }
+    );
+    expect(row[totalHdr]).toBe('15');
+    expect(row[unitsHdr]).toBe('15');
+
+    expect(
+      resolveFormXXVIITamilNaduDaysWorked({
+        employee_name: 'Vinu Monikandan Muruganatha',
+        paid_days: 31,
+      })
+    ).toBe('31');
   });
 
   test('applyFormXXVIITamilNaduPayrollToRow fills mapped columns', () => {
@@ -281,7 +330,7 @@ describe('formXXVIITamilNadu Sample Payroll autofill', () => {
     applyFormXXVIITamilNaduPayrollToRow(row, payrollRow, hdrs, { overwrite: true });
     expect(row['DAILY RATED WAGES/PIECE RATES']).toBe('104065');
     expect(row['WAGE PERIOD- WEEKLY/FN/MONTHLY']).toBe(FORM_XXVII_TN_WAGE_PERIOD_DEFAULT);
-    expect(row['OVERTIME RATE']).toBe('257.51');
+    expect(row['OVERTIME RATE']).toBe(FORM_XXVII_TN_OVERTIME_RATE_DEFAULT);
     expect(row.HRA).toBe('12000');
     expect(row['OTHER ALLOWANCES, ECCA']).toBe(65284);
     expect(row.PT).toBe('200');

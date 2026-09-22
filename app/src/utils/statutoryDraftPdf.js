@@ -112,6 +112,13 @@ import {
   looksLikeFormXVIIITamilNaduPdfContext,
 } from '../Pages/statutory/formXVIIITamilNaduWagesMuster';
 import {
+  isFormXXVIITamilNaduColumnIndexHeader,
+  isFormXXVIITamilNaduColumnIndexRow,
+  isFormXXVIITamilNaduIdentityHeaderText,
+  isFormXXVIITamilNaduVerticalHeaderText,
+  splitFormXXVIITamilNaduVerticalHeaderLines,
+} from '../Pages/statutory/formXXVIITamilNadu';
+import {
   detectFormBTamilNaduPdfGroupBands,
   formBTamilNaduPdfColumnWeight,
   isFormBTamilNaduAmountsDeductedGroupLabel,
@@ -5137,29 +5144,31 @@ const formWTamilNaduColumnWeight = (headerText, maxDataLen) => {
   return Math.max(6, Math.min(maxDataLen || 4, 9));
 };
 
-/** Form XXVII TN Register of Wages — keep identity cols readable; amount cols compact. */
+/** Form XXVII TN Register of Wages — identity cols readable; vertical amount cols compact. */
 const formXXVIITamilNaduColumnWeight = (headerText, maxDataLen) => {
   const h = String(headerText || '')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
-  if (!h) return Math.max(4.5, Math.min(maxDataLen || 3, 7));
-  if (/^(?:s|sr|si|sl)\.?\s*no\b|^serial\s*(?:no|number)/.test(h)) return 3.2;
-  if (/name of(?:\s+the)?\s+(?:work(?:man|er)|employee)/.test(h)) return 11;
+  if (!h) return Math.max(4.2, Math.min(maxDataLen || 3, 6.5));
+  if (/^(?:s|sr|si|sl)\.?\s*no\b|^serial\s*(?:no|number)/.test(h)) return 3;
+  if (/name of(?:\s+the)?\s+(?:work(?:man|er)|employee)/.test(h)) return 12;
+  if (/^sex$|^gender$/.test(h)) return 2.6;
   if (/father|husband/.test(h)) return 8;
-  if (/designation|employee\s*(?:number|id|code)/.test(h)) return 6.5;
-  if (/signature|thumb\s+impression|cheque/.test(h)) return 8;
-  if (/unpaid|umpaid/.test(h)) return 6.5;
-  if (/wage\s*period|number\s+worked|units\s+of\s+work|days\s+worked/.test(h)) return 5;
-  if (/daily\s+rated|piece\s+rate|overtime\s+rate/.test(h)) return 5.5;
+  if (/designation|nature of work/.test(h)) return 6.8;
+  if (/employee\s*(?:number|id|code)/.test(h)) return 5.5;
+  if (/signature|thumb\s+impression|cheque/.test(h)) return 4.6;
+  if (/unpaid|umpaid/.test(h)) return 4.6;
+  if (/wage\s*period|number\s+worked|units\s+of\s+work|days\s+worked/.test(h)) return 4.2;
+  if (/daily\s+rated|piece\s+rate|overtime\s+rate/.test(h)) return 4.4;
   if (
     /basic\s+wage|dearness|wash\s+allow|\bhra\b|\bstb\b|cash\s+in\s+lieu|ecca|gross\s+wages?|net\s+wages?|providen|esi|fines?|other\s+deduction|total\s+deduction|\bpt\b|uniform/.test(
       h
     )
   ) {
-    return Math.max(5.5, Math.min(Math.max(maxDataLen || 0, 5) + 1.2, 8.5));
+    return Math.max(4.2, Math.min(Math.max(maxDataLen || 0, 5) + 0.8, 6.5));
   }
-  return Math.max(5, Math.min(maxDataLen || 4, 7.5));
+  return Math.max(4.2, Math.min(maxDataLen || 4, 6.5));
 };
 
 /** Longest word in a Form XXVI heading — used so PDF never mid-splits "Permanent" / "Wages". */
@@ -8478,7 +8487,7 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       : null;
     const isHeaderRow = rowIndex <= headerBandEnd;
     let maxLines = 1;
-
+   
     if (nilSpan) {
       const bandW = colXs[nilSpan.end + 1] - colXs[nilSpan.start] - 3;
       const wrapped = doc.splitTextToSize(nilSpan.text, Math.max(bandW, 6));
@@ -8520,6 +8529,22 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
           : groupBand && c === groupBand.start
             ? groupBand.label
             : String(row[c] ?? '') || ' ';
+      // Form XXVII official model: identity stays horizontal in a merged tall cell;
+      // wage/deduction leaves rotate 90° — neither should inflate this row via wrap.
+      if (headerModel.isFormXXVIIRegister && isHeaderRow) {
+        if (isFormXXVIITamilNaduColumnIndexHeader(text)) {
+          maxLines = Math.max(maxLines, 1);
+          continue;
+        }
+        if (
+          !groupBand &&
+          (isFormXXVIITamilNaduIdentityHeaderText(text) ||
+            isFormXXVIITamilNaduVerticalHeaderText(text))
+        ) {
+          maxLines = Math.max(maxLines, 1);
+          continue;
+        }
+      }
       // Data rows: never wrap pure numbers (they shrink-to-fit when painted),
       // except Form A UAN / Aadhaar / long IDs which keep the same font and wrap.
       if (!isHeaderRow && isPurePdfNumericText(text)) {
@@ -8603,6 +8628,16 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
     if (headerModel?.formXRajasthanEmployment && isHeaderRow) {
       return Math.max(46, maxLines * (fontSize + 2.4) + 12);
     }
+    // Form XXVII: thin group-banner rows; tall last text row for vertical leaves.
+    if (headerModel?.isFormXXVIIRegister && isHeaderRow) {
+      if (isFormXXVIITamilNaduColumnIndexRow(row)) return Math.max(fontSize + 4, 12);
+      let nextIsIndex = rowIndex >= headerBandEnd;
+      if (rowIndex + 1 <= headerBandEnd) {
+        nextIsIndex = isFormXXVIITamilNaduColumnIndexRow(rows[rowIndex + 1] || []);
+      }
+      if (nextIsIndex) return Math.max(70, rowHeight);
+      return Math.max(rowHeight, 16);
+    }
     return isFormXVIAP ? Math.max(34, rowHeight * 1.35) : rowHeight;
   };
 
@@ -8667,11 +8702,96 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
       return;
     }
 
+    const formXXVIIHeaderSpanHeight = (startRow, col, baseH) => {
+      let spanH = baseH;
+      for (let hr = startRow + 1; hr <= headerBandEnd; hr += 1) {
+        const belowRow = rows[hr] || [];
+        if (isFormXXVIITamilNaduColumnIndexRow(belowRow)) break;
+        const below = String(belowRow[col] ?? '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (below) break;
+        spanH += measureRowHeight(belowRow, hr);
+      }
+      return spanH;
+    };
+
+    const isFormXXVIISpannedContinuation = (col) => {
+      if (!headerModel.isFormXXVIIRegister || !isHeaderRow) return false;
+      if (isFormXXVIITamilNaduColumnIndexRow(row)) return false;
+      const cur = String(row[col] ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (cur) return false;
+      for (let hr = rowIndex - 1; hr >= tableStart; hr -= 1) {
+        if (groupBandAt(hr, col)) return false;
+        const above = String(rows[hr]?.[col] ?? '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!above) continue;
+        if (isFormXXVIITamilNaduColumnIndexHeader(above)) return false;
+        if (isStatutoryGroupHeaderLabel(above)) return false;
+        return (
+          isFormXXVIITamilNaduIdentityHeaderText(above) ||
+          isFormXXVIITamilNaduVerticalHeaderText(above)
+        );
+      }
+      return false;
+    };
+
+    const paintFormXXVIISpannedHeader = (label, col, mode) => {
+      const spanH = formXXVIIHeaderSpanHeight(rowIndex, col, rowH);
+      doc.rect(colXs[col], y, colWidths[col], spanH, 'S');
+      const trimmed = String(label || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!trimmed) return;
+      if (mode === 'horizontal') {
+        const cellW = Math.max(colWidths[col] - 3, 6);
+        let size = Math.min(fontSize, 7);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(size);
+        let lines = doc.splitTextToSize(trimmed, cellW);
+        while (size > 4 && lines.length * (size + 1.2) > spanH - 4) {
+          size -= 0.25;
+          doc.setFontSize(size);
+          lines = doc.splitTextToSize(trimmed, cellW);
+        }
+        const textH = lines.length * (size + 1.2);
+        doc.text(lines, colXs[col] + colWidths[col] / 2, y + (spanH - textH) / 2 + size, {
+          align: 'center'
+        });
+        doc.setFontSize(fontSize);
+        return;
+      }
+      let lines = splitFormXXVIITamilNaduVerticalHeaderLines(trimmed, 3);
+      let size = Math.min(fontSize, 6.2);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(size);
+      const maxLen = Math.max(spanH - 6, 10);
+      const colW = Math.max(colWidths[col] - 2, 5);
+      const longest = () => Math.max(...lines.map((ln) => doc.getTextWidth(ln)), 0);
+      const linesNeedWidth = () =>
+        lines.length <= 1 ? 0 : (lines.length - 1) * (size + 1.1) + size;
+      while (size > 3.4 && (longest() > maxLen || linesNeedWidth() > colW)) {
+        size -= 0.2;
+        doc.setFontSize(size);
+      }
+      const tw = longest();
+      const blockW = lines.length > 1 ? (lines.length - 1) * (size + 1.1) : 0;
+      const cx = colXs[col] + colWidths[col] / 2;
+      const cy = y + spanH / 2;
+      doc.text(lines, cx + size * 0.35 - blockW / 2, cy + tw / 2, { angle: 90 });
+      doc.setFontSize(fontSize);
+      doc.setFont('helvetica', isHeaderRow ? 'bold' : 'normal');
+    };
+
     for (let c = 0; c < colCount; c += 1) {
       if (mergeDayLabel && dayBand && c > dayBand.start && c <= dayBand.end) continue;
       if (xxviColIndexRow && dayBand && c > dayBand.start && c <= dayBand.end) continue;
       const groupBand = groupBandAt(rowIndex, c);
       if (groupBand && c > groupBand.start && c <= groupBand.end) continue;
+      if (isFormXXVIISpannedContinuation(c)) continue;
 
       if (mergeDayLabel && dayBand && c === dayBand.start) {
         const bandW = colXs[dayBand.end + 1] - colXs[dayBand.start];
@@ -8712,6 +8832,29 @@ const drawMatrixSheet = (doc, matrix, startY, pdfOpts = {}) => {
           align: 'center'
         });
         continue;
+      }
+
+      if (headerModel.isFormXXVIIRegister && isHeaderRow && !groupBand) {
+        const xxviiLabel = String(row[c] ?? '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (xxviiLabel) {
+          if (isFormXXVIITamilNaduIdentityHeaderText(xxviiLabel)) {
+            paintFormXXVIISpannedHeader(xxviiLabel, c, 'horizontal');
+            continue;
+          }
+          if (isFormXXVIITamilNaduColumnIndexHeader(xxviiLabel)) {
+            doc.rect(colXs[c], y, colWidths[c], rowH, 'S');
+            doc.text(xxviiLabel, colXs[c] + colWidths[c] / 2, y + (rowH + fontSize) / 2 - 1, {
+              align: 'center'
+            });
+            continue;
+          }
+          if (isFormXXVIITamilNaduVerticalHeaderText(xxviiLabel)) {
+            paintFormXXVIISpannedHeader(xxviiLabel, c, 'vertical');
+            continue;
+          }
+        }
       }
 
       doc.rect(colXs[c], y, colWidths[c], rowH, 'S');

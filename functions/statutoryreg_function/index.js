@@ -2254,7 +2254,7 @@ app.get('/statutory/:id/sampledata', async (req, res) => {
         rows: tableRows
       };
     };
-
+    
     const allMapped = rows.map(mapSampleRow);
     let matching = [];
 

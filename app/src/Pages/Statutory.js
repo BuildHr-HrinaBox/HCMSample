@@ -191,6 +191,8 @@ import {
   buildFormXXVITamilNaduColumnGroupLabels,
   buildFormXXVITamilNaduWorksiteText,
   buildFormXXVITamilNaduWorkbookWithTemplateStyles,
+  resolveFormXXVITamilNaduDownloadContext,
+  stampFormXXVITamilNaduWorkbookHeaderForPdf,
   enrichFormXXVITamilNaduDisplayHeader,
   ensureFormXXVITamilNaduDayColumnHeaders,
   getFormXXVITamilNaduEmployeeName,
@@ -201,6 +203,7 @@ import {
   isFormXXVITamilNaduWorkmanNameHeader,
   resolveFormXXVITamilNaduHeaderFieldLayout,
   stripFormXXVITamilNaduNonTableHeaders,
+  scrubFormXXVITamilNaduPreJoinDayMarks,
 } from './statutory/formXXVITamilNaduMuster';
 import {
   applyFormXVIIITamilNaduAutofillFromSite,
@@ -3783,6 +3786,32 @@ function isSyntheticStatutoryRowId(id) {
     idStr.startsWith('checklist_') ||
     idStr.startsWith('placeholder_')
   );
+}
+
+function isStatutoryRecordNotFoundMessage(message) {
+  return /statutory record not found/i.test(String(message || '').trim());
+}
+
+/**
+ * True when `id` is a Catalyst Statutory table ROWID.
+ * Form Master / checklist / bulk synthetic ids must not be PUT/GET against /statutory/:id.
+ * Note: enrich may set isFromFormmaster on real Statutory rows (template source) — do not treat that flag alone as non-Statutory.
+ */
+function isStatutoryDatastoreRowId(id, item) {
+  const idStr = String(id ?? '').trim();
+  if (!isNumericStatutoryBackendId(idStr) || isSyntheticStatutoryRowId(idStr)) return false;
+  if (item?.isFromChecklist || String(item?.id ?? '').startsWith('checklist_')) return false;
+  if (String(item?.id ?? '').startsWith('formmaster_')) return false;
+  return true;
+}
+
+function resolveStatutoryDatastoreRowIdForWrite(item) {
+  if (!item) return '';
+  const linked = String(item.draftStatutoryRowIdForFile ?? '').trim();
+  if (isNumericStatutoryBackendId(linked) && !isSyntheticStatutoryRowId(linked)) return linked;
+  const idStr = String(item.id ?? '').trim();
+  if (!isStatutoryDatastoreRowId(idStr, item)) return '';
+  return idStr;
 }
 
 /** When this user is logged in, Statutory is filtered by ?site= (Delphi site → sector); separate from Site Management industry scope */
@@ -17939,7 +17968,8 @@ const rebuildFormXXVIDailyHoursHeaders = ({
     columnGroupLabels[labelIdx + ri] = h;
   });
 
-  const newHeaderRowIndex = columnNumberRow >= 0 ? columnNumberRow : tableHeaderRow;
+  // Leaf titles (Sr. No., Name, …) — column index 1–14 sits on the next Excel row.
+  const newHeaderRowIndex = tableHeaderRow;
   const newStartIndex = dayRow + 1;
   const mainHeaders = [...leftHeaders, columnBandParent, ...rightHeaders];
 
@@ -47483,15 +47513,13 @@ const Statutory = ({ userEmail, userRole }) => {
         isFormXXVIContext(null, item, fn) ||
         isFormXXVIContext(null, item, templateMeta.formFileName || resolvedFormFileItem.formFileName || '') ||
         isFormXXVIContext(parsed?.formHeader, item, fn);
-      const isFormXXVITamilNaduDownload =
-        isFormXXVIDownload &&
-        isFormXXVITamilNaduClraContext(
-          parsed?.formHeader,
-          item,
-          templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
-          headersToUse,
-          parsed?.sheetText || formFileModalData?.sheetText || ''
-        );
+      const isFormXXVITamilNaduDownload = resolveFormXXVITamilNaduDownloadContext(
+        parsed?.formHeader,
+        item,
+        templateMeta.formFileName || resolvedFormFileItem.formFileName || fn,
+        headersToUse,
+        parsed?.sheetText || formFileModalData?.sheetText || sheetTextForDownload || ''
+      );
       const isFormTSEDownload = isFormTSEContext(
         parsed?.formHeader || {},
         item,
@@ -48669,6 +48697,11 @@ const Statutory = ({ userEmail, userRole }) => {
         usedLiveModalGrid &&
         Array.isArray(mappedData) &&
         mappedData.length > 0;
+      const formXXVITamilNaduLiveGridFastPath =
+        isFormXXVITamilNaduDownload &&
+        usedLiveModalGrid &&
+        Array.isArray(mappedData) &&
+        mappedData.length > 0;
       // Form XXIII GJ: download must match Autofill UI exactly — never reintroduce SampleData people.
       const formXXIIIGJLiveGridFastPath =
         (isFormXXIIIGJContext(
@@ -48687,6 +48720,7 @@ const Statutory = ({ userEmail, userRole }) => {
         if (
           !form10LiveGridFastPath &&
           !formXVIIIClraLiveGridFastPath &&
+          !formXXVITamilNaduLiveGridFastPath &&
           !formXXIIIGJLiveGridFastPath &&
           !cachedSampleBlockForDownload
         ) {
@@ -48702,6 +48736,7 @@ const Statutory = ({ userEmail, userRole }) => {
         if (
           !form10LiveGridFastPath &&
           !formXVIIIClraLiveGridFastPath &&
+          !formXXVITamilNaduLiveGridFastPath &&
           !formXXIIIGJLiveGridFastPath &&
           cachedSampleBlockForDownload?.rows?.length
         ) {
@@ -48785,10 +48820,12 @@ const Statutory = ({ userEmail, userRole }) => {
         if (
           !form10LiveGridFastPath &&
           !formXVIIIClraLiveGridFastPath &&
+          !formXXVITamilNaduLiveGridFastPath &&
           !formXXIIIGJLiveGridFastPath &&
           !(isForm10Download && usedSnapshot) &&
           !(isFormXVIIIDownload && usedSnapshot) &&
           !(isFormXVIIIClraWagesCumMusterDownload && (usedLiveModalGrid || usedSnapshot)) &&
+          !(isFormXXVITamilNaduDownload && (usedLiveModalGrid || usedSnapshot)) &&
           !usedSnapshot
         ) {
           mappedData = await overlayStatutoryDataOntoGridRows(
@@ -49053,6 +49090,15 @@ const Statutory = ({ userEmail, userRole }) => {
           formXVIIIClraLiveGridFastPath ||
           autofillExportCacheMatches);
 
+      const formXXVITamilNaduFastDownloadReady =
+        isFormXXVITamilNaduDownload &&
+        downloadHasMeaningfulRows &&
+        (usedSnapshot ||
+          usedSavedDraftFile ||
+          usedLiveModalGrid ||
+          formXXVITamilNaduLiveGridFastPath ||
+          autofillExportCacheMatches);
+
       const downloadSnapshotFastReady =
         downloadHasMeaningfulRows &&
         (usedSnapshot ||
@@ -49065,7 +49111,8 @@ const Statutory = ({ userEmail, userRole }) => {
           formWFastDownloadReady ||
           formUFastDownloadReady ||
           formVFastDownloadReady ||
-          formXVIIIClraFastDownloadReady);
+          formXVIIIClraFastDownloadReady ||
+          formXXVITamilNaduFastDownloadReady);
 
       const downloadFetchPerfDefaults = {
         skipPerEmployeePayrollFetch: true,
@@ -51106,6 +51153,11 @@ const Statutory = ({ userEmail, userRole }) => {
               row && typeof row === 'object' && !Array.isArray(row) ? { ...row } : row
             );
             if (modalHdrs.length > 0) headersToUse = [...modalHdrs];
+          } else if (isFormXXVITamilNaduDownload) {
+            mappedData = liveRows.map((row) =>
+              row && typeof row === 'object' && !Array.isArray(row) ? { ...row } : row
+            );
+            if (modalHdrs.length > 0) headersToUse = [...modalHdrs];
           } else if (Array.isArray(mappedData) && mappedData.length > 0 && liveRows.length <= mappedData.length) {
             mappedData = overlayLiveModalRowsOntoDownload(mappedData, liveRows, modalHdrs, headersToUse);
           } else {
@@ -52011,6 +52063,49 @@ const Statutory = ({ userEmail, userRole }) => {
               [FORM_XVI_AP_ESTABLISHMENT_CONTRACT_KEY]: xviEstablishment
             };
           }
+        }
+      }
+
+      if (isFormXXVITamilNaduDownload) {
+        downloadHeaderFormData = applyStatutorySeparateMonthYearToHeaderData(
+          downloadHeaderFormData,
+          selectedMonth,
+          item,
+          parsed?.formHeader?.wagePeriodText || formFileModalData?.parsedFormHeader?.wagePeriodText || ''
+        );
+        const { fullMonth: xxviMonth, year: xxviYear } = resolveForm25PeriodMonthYear(
+          selectedMonth,
+          item,
+          parsed?.formHeader?.wagePeriodText || formFileModalData?.parsedFormHeader?.wagePeriodText || ''
+        );
+        downloadHeaderFormData = applyFormXXVITamilNaduAutofillFromSite(downloadHeaderFormData, {
+          monthName:
+            String(downloadHeaderFormData.form_x_month || '').trim() ||
+            xxviMonth ||
+            resolveToFullMonthName(selectedMonth) ||
+            '',
+          year:
+            String(downloadHeaderFormData.form_x_year || '').trim() ||
+            xxviYear ||
+            String(new Date().getFullYear())
+        });
+        if (Array.isArray(mappedData) && mappedData.length > 0) {
+          const xxviDownloadHeaders = ensureFormXXVITamilNaduDayColumnHeaders(
+            stripFormXXVITamilNaduNonTableHeaders(headersToUse || [])
+          );
+          scrubFormXXVITamilNaduPreJoinDayMarks(
+            mappedData,
+            xxviDownloadHeaders,
+            resolvePayrollMonthIsoFromStatutoryContext(
+              selectedMonth,
+              item,
+              parsed?.formHeader?.wagePeriodText ||
+                formFileModalData?.parsedFormHeader?.wagePeriodText ||
+                ''
+            ) || selectedMonth || '',
+            downloadHeaderFormData,
+            { employees: autofillEmployeesRef.current, rowIndexOffset: 0 }
+          );
         }
       }
 
@@ -56972,7 +57067,9 @@ const Statutory = ({ userEmail, userRole }) => {
                                     parsed?.formHeader?.wagePeriodText ||
                                       formFileModalData?.parsedFormHeader?.wagePeriodText ||
                                       ''
-                                  ) || selectedMonth || ''
+                                  ) || selectedMonth || '',
+                                employeesForExport: autofillEmployeesRef.current || [],
+                                employeeRowIndexOffset: 0
                               })
                   : isFormXAPFinesDownload
                     ? await buildFormXXAPWorkbookWithTemplateStyles({
@@ -57407,6 +57504,27 @@ const Statutory = ({ userEmail, userRole }) => {
         blob = await finalizeStatutoryDownloadWorkbookBlob(blob, {
           appendNote: !skipSystemGeneratedNote,
         });
+      }
+      if (isFormXXVITamilNaduDownload && blob && !/\.zip$/i.test(String(fileName || ''))) {
+        try {
+          const stampedBuffer = await stampFormXXVITamilNaduWorkbookHeaderForPdf(
+            await blob.arrayBuffer(),
+            {
+              headerFormData: downloadHeaderFormData,
+              parsedFormHeader: parsed?.formHeader,
+              sheetNameHint:
+                resolvedDownloadSheetName ||
+                formFileModalData?.sheetName ||
+                parsed?.sheetName ||
+                ''
+            }
+          );
+          blob = new Blob([stampedBuffer], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          });
+        } catch (xxviExcelStampErr) {
+          console.warn('Form XXVI TN Excel month/header re-stamp skipped:', xxviExcelStampErr);
+        }
       }
       // Form Q MH: last-pass column repair after ExcelJS note/seal round-trips.
       // Always run — section-index row 1,2,3 under Sr. No. previously disabled repair.
@@ -59293,11 +59411,62 @@ const Statutory = ({ userEmail, userRole }) => {
       }
 
       setSuccess('Building PDF...');
+      let pdfHeaderFormData =
+        headerFormData && typeof headerFormData === 'object' && Object.keys(headerFormData).length > 0
+          ? { ...headerFormData }
+          : formFileModalData?.parsedHeaderFormData &&
+              typeof formFileModalData.parsedHeaderFormData === 'object'
+            ? { ...formFileModalData.parsedHeaderFormData }
+            : {};
+      const isFormXXVITamilNaduPdf =
+        isFormXXVIContext(null, lineItem, sourceFileName) &&
+        isFormXXVITamilNaduClraContext(
+          formFileModalData?.parsedFormHeader || {},
+          lineItem,
+          sourceFileName,
+          formFileModalData?.parsedTableHeaders || [],
+          formFileModalData?.sheetText || ''
+        );
+      if (isFormXXVITamilNaduPdf) {
+        pdfHeaderFormData = applyStatutorySeparateMonthYearToHeaderData(
+          pdfHeaderFormData,
+          selectedMonth,
+          lineItem,
+          formFileModalData?.parsedFormHeader?.wagePeriodText || ''
+        );
+        const { fullMonth: xxviPdfMonth, year: xxviPdfYear } = resolveForm25PeriodMonthYear(
+          selectedMonth,
+          lineItem,
+          formFileModalData?.parsedFormHeader?.wagePeriodText || ''
+        );
+        pdfHeaderFormData = applyFormXXVITamilNaduAutofillFromSite(pdfHeaderFormData, {
+          monthName:
+            String(pdfHeaderFormData.form_x_month || '').trim() ||
+            xxviPdfMonth ||
+            resolveToFullMonthName(selectedMonth) ||
+            '',
+          year:
+            String(pdfHeaderFormData.form_x_year || '').trim() ||
+            xxviPdfYear ||
+            String(new Date().getFullYear())
+        });
+        try {
+          arrayBuffer = await stampFormXXVITamilNaduWorkbookHeaderForPdf(arrayBuffer, {
+            headerFormData: pdfHeaderFormData,
+            parsedFormHeader: formFileModalData?.parsedFormHeader || null,
+            sheetNameHint: formFileModalData?.sheetName || ''
+          });
+        } catch (xxviStampErr) {
+          console.warn('Form XXVI PDF header stamp skipped:', xxviStampErr);
+        }
+      }
+
       const pdfBlob = await buildStatutoryDraftPdfBlob({
         arrayBuffer,
         fileName: sourceFileName,
         title: pdfTitle,
-        monthLabel: selectedMonth || ''
+        monthLabel: selectedMonth || '',
+        headerFormData: pdfHeaderFormData
       });
       triggerPdfDownload(pdfBlob);
       setSuccess('PDF downloaded.');
@@ -62591,7 +62760,9 @@ const Statutory = ({ userEmail, userRole }) => {
               selectedMonth,
               currentItem,
               parsedFormHeaderForSave?.wagePeriodText || formHeader?.wagePeriodText || ''
-            ) || selectedMonth || ''
+            ) || selectedMonth || '',
+          employeesForExport: autofillEmployeesRef.current || [],
+          employeeRowIndexOffset: 0
         }));
       } else if (formTSESave && templateWb) {
         // Always re-read the live grid at write time (Save starts with long async template I/O).
@@ -63229,11 +63400,15 @@ const Statutory = ({ userEmail, userRole }) => {
         .replace(/\s+/g, ' ')
         .trim();
 
-      const idStr = currentItem?.id != null ? String(currentItem.id).trim() : '';
-      const isSyntheticId = isSyntheticStatutoryRowId(idStr);
-      const isUpdate = !!currentItem?.id && !isFromChecklist && !isSyntheticId;
+      const backendRowId = resolveStatutoryDatastoreRowIdForWrite(currentItem);
+      let isUpdate = !!backendRowId && !isFromChecklist;
 
-      const latestRecord = currentItem?.id && statutoryData?.length ? statutoryData.find(r => String(r.id) === String(currentItem.id)) : null;
+      const latestRecord =
+        backendRowId && statutoryData?.length
+          ? statutoryData.find((r) => String(r.id) === String(backendRowId))
+          : currentItem?.id && statutoryData?.length
+            ? statutoryData.find((r) => String(r.id) === String(currentItem.id))
+            : null;
       const preservedFormFile = latestRecord?.formFile ?? latestRecord?.FormFile ?? currentItem?.formFile ?? currentItem?.FormFile ?? null;
       const preservedFormFileName = latestRecord?.formFileName ?? latestRecord?.FormFileName ?? currentItem?.formFileName ?? currentItem?.FormFileName ?? fileName;
       const hasFormFile = preservedFormFile && String(preservedFormFile).trim() !== '' && preservedFormFile !== 'null';
@@ -63351,16 +63526,16 @@ const Statutory = ({ userEmail, userRole }) => {
         { employees: autofillEmployeesRef.current }
       );
 
-      // Autofill → Save: UPDATE if this is an existing Statutory record; otherwise POST to create (e.g. when opened from form master row).
-      const sendDraftSaveRequest = async (requestPayload) => {
-        if (isUpdate) {
-          console.log('Updating existing record with draft file (no new record):', currentItem.id);
+      // Autofill → Save: UPDATE only a real Statutory ROWID; otherwise POST to create (Form Master / first save).
+      const sendDraftSaveRequest = async (requestPayload, { forceCreate = false } = {}) => {
+        if (isUpdate && !forceCreate && backendRowId) {
+          console.log('Updating existing record with draft file (no new record):', backendRowId);
           const { formFile: _f, formFileName: _n, ...putPayload } = requestPayload;
           if (!sectorForSave) delete putPayload.sector;
           if (!sectorForSave) delete putPayload.Sector;
           if (!stateForSave) delete putPayload.state;
           if (!stateForSave) delete putPayload.State;
-          return fetch(`/server/statutoryreg_function/statutory/${currentItem.id}`, {
+          return fetch(`/server/statutoryreg_function/statutory/${backendRowId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(putPayload)
@@ -63402,6 +63577,27 @@ const Statutory = ({ userEmail, userRole }) => {
 
       let response = await sendDraftSaveRequest(requestPayload);
       let { data, rawText: saveRawText } = await parseStatutorySaveResponse(response);
+
+      const missingStatutoryRow =
+        isUpdate &&
+        (Number(response.status) === 404 || !response.ok) &&
+        isStatutoryRecordNotFoundMessage(data?.message || data?.error || saveRawText);
+      if (missingStatutoryRow) {
+        console.warn(
+          'Statutory PUT returned record-not-found; creating a new Statutory row for this Autofill save.',
+          backendRowId
+        );
+        isUpdate = false;
+        if (hasFormFile && preservedFormFile) {
+          requestPayload = {
+            ...requestPayload,
+            formFile: preservedFormFile,
+            formFileName: preservedFormFileName || fileName
+          };
+        }
+        response = await sendDraftSaveRequest(requestPayload, { forceCreate: true });
+        ({ data, rawText: saveRawText } = await parseStatutorySaveResponse(response));
+      }
 
       const shouldRetryWithoutSample =
         payloadIncludesSampleDataSnapshot(requestPayload) &&
@@ -63463,8 +63659,8 @@ const Statutory = ({ userEmail, userRole }) => {
        
         // Delete stale Catalyst rows same form/act/month/site but no draft (common after POST from checklist bulk).
         const keeperStatutoryId =
-          isUpdate && currentItem?.id != null
-            ? String(currentItem.id).trim()
+          isUpdate && backendRowId
+            ? String(backendRowId).trim()
             : data?.data?.statutory?.id != null
               ? String(data.data.statutory.id).trim()
               : '';
@@ -63685,7 +63881,9 @@ const Statutory = ({ userEmail, userRole }) => {
       } else {
         const errorMessage = data?.message || data?.error || `Failed to save draft (HTTP ${response.status})`;
         console.error('Save draft error:', errorMessage, data);
-        setError(errorMessage);
+        if (!isStatutoryRecordNotFoundMessage(errorMessage)) {
+          setError(errorMessage);
+        }
       }
      
     } catch (err) {
@@ -74247,6 +74445,14 @@ const Statutory = ({ userEmail, userRole }) => {
             ? getFormXXVITamilNaduEmployeeName(unwrapStatutoryAutofillEmployee(employees[0]))
             : '';
         // Worksite Name ← site name (fallback EmployeeName); Location ← Location name.
+        nextHeaderData = applyStatutorySeparateMonthYearToHeaderData(
+          nextHeaderData,
+          selectedMonth,
+          modalData?.item || formFileModalData?.item,
+          modalData?.parsedFormHeader?.wagePeriodText ||
+            formFileModalData?.parsedFormHeader?.wagePeriodText ||
+            ''
+        );
         nextHeaderData = applyFormXXVITamilNaduAutofillFromSite(nextHeaderData, {
           contractorText: siteForFormXXVI ? buildSiteContractorNameAndAddress(siteForFormXXVI) : '',
           principalEmployerText: buildCompanyNameAndAddress(companyForXXVI),
@@ -74259,6 +74465,7 @@ const Statutory = ({ userEmail, userRole }) => {
             locationName: locationNameText
           }),
           monthName:
+            String(nextHeaderData.form_x_month || '').trim() ||
             resolveToFullMonthName(selectedMonth) ||
             resolveForm25PeriodMonthYear(
               selectedMonth,
@@ -74269,6 +74476,7 @@ const Statutory = ({ userEmail, userRole }) => {
             ).fullMonth ||
             '',
           year:
+            String(nextHeaderData.form_x_year || '').trim() ||
             resolveForm25PeriodMonthYear(
               selectedMonth,
               modalData?.item || formFileModalData?.item,
@@ -78147,6 +78355,14 @@ const Statutory = ({ userEmail, userRole }) => {
             return;
           }
 
+          if (
+            formXXVIAutofillContext &&
+            /date.*entry.*service/i.test(String(header || '').replace(/_/g, ' ').toLowerCase())
+          ) {
+            row[header] = sanitizeValue(formatStatutoryDateDisplay(getEmployeeDateofjoiningRaw(emp)));
+            return;
+          }
+
           // Form XVI AP: Name of the Employee ← fullname or firstname + lastname.
           if (formXVIAutofillContext && isFormXVIAPEmployeeNameHeader(header)) {
             row[header] = sanitizeValue(
@@ -79850,20 +80066,10 @@ const Statutory = ({ userEmail, userRole }) => {
           ) {
             row[header] = sanitizeValue(formatStatutoryDateDisplay(getEmployeeDateofexitRaw(emp)));
           }
-          // Date of Entry into Service (Form 12) -> Dateofjoining
+          // Date of Entry into Service (Form 12 / Form XXVI) -> Dateofjoining (normalized display date).
           else if (headerLower.includes('date') && headerLower.includes('entry') && headerLower.includes('service')) {
-            const entryDate = emp.Dateofjoining ||
-                         emp['Dateofjoining'] ||
-                         emp.DateofJoining ||
-                         emp['Date of Joining'] ||
-                         emp['DateofJoining'] ||
-                         emp.dateOfJoining ||
-                         emp['Date of joining'] ||
-                         emp.Date_of_Joining ||
-                         emp['Date_of_Joining'] ||
-                         '';
-
-            row[header] = entryDate;
+            const entryDate = formatStatutoryDateDisplay(getEmployeeDateofjoiningRaw(emp));
+            row[header] = sanitizeValue(entryDate);
             if (entryDate) {
               console.log(`✓ Mapped Date of Entry into Service for employee ${index + 1}: ${entryDate} (from Dateofjoining)`);
             }
@@ -90167,6 +90373,18 @@ const Statutory = ({ userEmail, userRole }) => {
       );
       const formXXVITamilNaduPaidDaysContext = formXXVITamilNaduClraPaidDays || formXXVIAutofillContext;
       if (formXXVITamilNaduClraPaidDays) tamilNaduStrictNameMatch = true;
+      if (formXXVITamilNaduPaidDaysContext && !returnMappedData) {
+        setHeaderFormData((prev) =>
+          applyStatutorySeparateMonthYearToHeaderData(
+            prev,
+            selectedMonth,
+            modalData?.item || formFileModalData?.item,
+            parsedFormHeaderForAutofill?.wagePeriodText ||
+              formFileModalData?.parsedFormHeader?.wagePeriodText ||
+              ''
+          )
+        );
+      }
       if (formXXVITamilNaduPaidDaysContext && Array.isArray(mappedData)) {
         // Remove worksite / header-only labels if they leaked into the grid.
         const strippedXxviHeaders = stripFormXXVITamilNaduNonTableHeaders(currentHeaders);
@@ -90617,6 +90835,25 @@ const Statutory = ({ userEmail, userRole }) => {
           modalData?.parsedTableHeaders || tableHeaders,
           currentHeaders
         );
+      } else if (
+        (formXXVITamilNaduPaidDaysContext || formXXVIAutofillContext) &&
+        Array.isArray(mappedData)
+      ) {
+        scrubStatutoryPreJoinDayMarks(
+          mappedData,
+          employeesForMapping,
+          currentHeaders,
+          {
+            selectedMonth,
+            rowIndexOffset: employeePageOffset,
+            item: modalData?.item || formFileModalData?.item,
+            wagePeriodLine:
+              modalData?.parsedFormHeader?.wagePeriodText ||
+              formFileModalData?.parsedFormHeader?.wagePeriodText ||
+              '',
+          }
+        );
+        tableDataToSet = mappedData;
       } else if (formQAutofillContext) {
         scrubStatutoryPreJoinDayMarks(
           mappedData,
@@ -96774,9 +97011,8 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     }
 
-    if (!isSyntheticStatutoryRowId(idStr) && /^\d+$/.test(idStr)) {
-      const primary = `/server/statutoryreg_function/statutory/${idStr}/file/Form`;
-      return primary ? [primary] : [];
+    if (isStatutoryDatastoreRowId(idStr, item)) {
+      return [`/server/statutoryreg_function/statutory/${idStr}/file/Form`];
     }
 
     return [];
@@ -101319,20 +101555,33 @@ const Statutory = ({ userEmail, userRole }) => {
             try {
               const sampleRowId =
                 (modalDraftSourceItem?.draftStatutoryRowIdForFile &&
-                isNumericStatutoryBackendId(modalDraftSourceItem.draftStatutoryRowIdForFile)
+                isStatutoryDatastoreRowId(
+                  modalDraftSourceItem.draftStatutoryRowIdForFile,
+                  modalDraftSourceItem
+                )
                   ? String(modalDraftSourceItem.draftStatutoryRowIdForFile).trim()
                   : null) ||
                 (savedDraftSourceItem?.draftStatutoryRowIdForFile &&
-                isNumericStatutoryBackendId(savedDraftSourceItem.draftStatutoryRowIdForFile)
+                isStatutoryDatastoreRowId(
+                  savedDraftSourceItem.draftStatutoryRowIdForFile,
+                  savedDraftSourceItem
+                )
                   ? String(savedDraftSourceItem.draftStatutoryRowIdForFile).trim()
                   : null) ||
-                (sentDraftDonorForModal?.id != null ? String(sentDraftDonorForModal.id).trim() : null) ||
+                (sentDraftDonorForModal?.id != null &&
+                isStatutoryDatastoreRowId(sentDraftDonorForModal.id, sentDraftDonorForModal)
+                  ? String(sentDraftDonorForModal.id).trim()
+                  : null) ||
                 resolveStatutorySampleDataFetchId(modalDraftSourceItem, { preferSiteSubmittedDraft: true }) ||
                 resolveStatutorySampleDataFetchId(savedDraftSourceItem, { preferSiteSubmittedDraft: true }) ||
                 resolveStatutorySampleDataFetchId(item, { preferSiteSubmittedDraft: true }) ||
-                (isNumericStatutoryBackendId(modalDraftSourceItem?.id) ? String(modalDraftSourceItem.id).trim() : null) ||
-                (isNumericStatutoryBackendId(savedDraftSourceItem?.id) ? String(savedDraftSourceItem.id).trim() : null) ||
-                (isNumericStatutoryBackendId(item?.id) ? String(item.id).trim() : null);
+                (isStatutoryDatastoreRowId(modalDraftSourceItem?.id, modalDraftSourceItem)
+                  ? String(modalDraftSourceItem.id).trim()
+                  : null) ||
+                (isStatutoryDatastoreRowId(savedDraftSourceItem?.id, savedDraftSourceItem)
+                  ? String(savedDraftSourceItem.id).trim()
+                  : null) ||
+                (isStatutoryDatastoreRowId(item?.id, item) ? String(item.id).trim() : null);
               if (sampleRowId) {
                 // ImportData / SampleData is the exact grid the site user saved, including manual add/delete/edit cells.
                 const sampleBlock = await fetchFirstAvailableStatutorySampleDataSnapshot(
@@ -101802,7 +102051,9 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     } catch (err) {
       console.error('Error loading form file:', err);
-      setError(err.message || 'Failed to load form file');
+      if (!isStatutoryRecordNotFoundMessage(err?.message)) {
+        setError(err.message || 'Failed to load form file');
+      }
       setFormFileLoading(false);
     } finally {
       setFormFileLoading(false);

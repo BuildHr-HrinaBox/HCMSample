@@ -1095,7 +1095,51 @@ describe('Form XXVI Tamil Nadu PDF header widths', () => {
     ).toBeGreaterThan(formXXVITamilNaduColumnWeight('Number of days of work', 4));
   });
 
-  test('redistributeFormXXVIPdfColumnWidths grows address cols by capping day band', () => {
+  test('ensureFormXXVIPdfHeaderBand adds index row and day band when missing', () => {
+    const {
+      ensureFormXXVIPdfHeaderBand,
+      isFormXXVIStatutoryColumnIndexRow,
+      isFormXXVIDayLeafNumberRow,
+      inferFormXXVIPdfDayBand
+    } = statutoryDraftPdfTestUtils;
+    const colCount = 44;
+    const textRow = [
+      'Sr. No.',
+      'Name of the Workman',
+      'Age & Sex',
+      'Permanent Home Address',
+      'Local Address',
+      'Designation (Nature of work)',
+      "Father's/Husband's Name",
+      'Date of entry into the service',
+      'Rate of Wages',
+      'Daily hours of work',
+      ...Array.from({ length: 30 }, () => ''),
+      'Number of days of work',
+      'Signature/thumb impression of workman',
+      'Date of Termination of Employment',
+      'Signature of contractor/representative'
+    ];
+    while (textRow.length < colCount) textRow.push('');
+    const matrix = {
+      name: 'Form_XXVI_TamilNadu.xlsx',
+      colCount,
+      tableStartRow: 0,
+      metaLines: ['FORM XXVI', 'Register of Employment of Contractual Labour'],
+      rows: [textRow, ['Employee', 'Test']]
+    };
+    ensureFormXXVIPdfHeaderBand(matrix);
+    expect(matrix.rows.length).toBeGreaterThanOrEqual(3);
+    const dayBand = inferFormXXVIPdfDayBand(matrix.rows, 0, colCount);
+    expect(isFormXXVIStatutoryColumnIndexRow(matrix.rows[1], dayBand, false)).toBe(true);
+    expect(isFormXXVIDayLeafNumberRow(matrix.rows[2], dayBand, false)).toBe(true);
+    expect(matrix.rows[2][dayBand.start]).toBe('1');
+    expect(matrix.rows[2][dayBand.start + 30]).toBe('31');
+    expect(matrix.rows[2][0]).toBe('');
+    expect(matrix.rows[2][dayBand.end + 1]).toBe('');
+  });
+
+  test('redistributeFormXXVIPdfColumnWidths widens day band and trims leading cols', () => {
     const { redistributeFormXXVIPdfColumnWidths } = statutoryDraftPdfTestUtils;
     const headers = [
       'Sr. No.',
@@ -1109,14 +1153,20 @@ describe('Form XXVI Tamil Nadu PDF header widths', () => {
       'Date of Termination of Employment',
       'Signature of contractor/representative'
     ];
-    const widths = headers.map((h) => (/^\d+$/.test(h) ? 18 : 30));
+    const widths = headers.map((h, i) => {
+      if (/^\d+$/.test(h)) return 10;
+      if (i <= 4) return 55;
+      return 30;
+    });
     const usable = widths.reduce((a, b) => a + b, 0);
     const out = redistributeFormXXVIPdfColumnWidths(widths, headers, { start: 5, end: 35 }, usable);
-    const termIdx = headers.indexOf('Date of Termination of Employment');
-    const contractorIdx = headers.indexOf('Signature of contractor/representative');
-    expect(out[termIdx]).toBeGreaterThan(widths[termIdx]);
-    expect(out[contractorIdx]).toBeGreaterThan(widths[contractorIdx]);
-    expect(out[5]).toBeLessThan(widths[5]);
+    const dayBandWidth = out.slice(5, 36).reduce((a, b) => a + b, 0);
+    const dayBandBefore = widths.slice(5, 36).reduce((a, b) => a + b, 0);
+    expect(dayBandWidth).toBeGreaterThan(dayBandBefore);
+    expect(out[0]).toBeLessThan(widths[0]);
+    expect(out[1]).toBeLessThan(widths[1]);
+    expect(out[3]).toBeLessThan(widths[3]);
+    expect(out[4]).toBeLessThan(widths[4]);
   });
 
   test('wrapPdfTextPreferWholeWords keeps Permanent / Home / Address intact', () => {

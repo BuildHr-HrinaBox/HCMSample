@@ -14,10 +14,13 @@ import {
   isFormXXVITamilNaduRateOfWagesHeaderKey,
   isFormXXVITamilNaduWorkmanNameHeader,
   detectFormXXVITamilNaduDayColumnMap,
+  resolveFormXXVITamilNaduTableTextHeaderRow,
   ensureFormXXVITamilNaduDayColumnHeaders,
   readFormXXVITamilNaduCellValue,
   resolveFormXXVITamilNaduRateOfWages,
   stripFormXXVITamilNaduNonTableHeaders,
+  scrubFormXXVITamilNaduPreJoinDayMarks,
+  resolveFormXXVITamilNaduEmployeeJoinDate,
 } from './formXXVITamilNaduMuster';
 import { isFormXVIIITamilNaduClraContext } from './formXVIIITamilNaduWagesMuster';
 
@@ -348,6 +351,20 @@ describe('formXXVITamilNaduMuster worksite + employee name', () => {
     expect(readFormXXVITamilNaduCellValue(row, '10_1')).toBe('A');
   });
 
+  test('resolveFormXXVITamilNaduTableTextHeaderRow prefers descriptive row over numeric band', () => {
+    const getCell = (r, c) => {
+      if (r === 8 && c === 1) return 'Sr. No.';
+      if (r === 8 && c === 2) return 'Name of the Workman';
+      if (r === 8 && c === 10) return 'Daily hours of work';
+      if (r === 9 && c >= 1 && c <= 9) return String(c);
+      if (r === 9 && c === 10) return '10';
+      if (r === 10 && c >= 10 && c <= 40) return String(c - 9);
+      return '';
+    };
+    expect(resolveFormXXVITamilNaduTableTextHeaderRow(getCell, 9, 20, 50)).toBe(8);
+    expect(resolveFormXXVITamilNaduTableTextHeaderRow(getCell, 8, 20, 50)).toBe(8);
+  });
+
   test('detectFormXXVITamilNaduDayColumnMap ignores column-index (1)-(14) row', () => {
     // Row 1: identity column numbers 1–14 at cols 1–14
     // Row 2: real days 1–31 starting at col 11
@@ -391,6 +408,53 @@ describe('formXXVITamilNaduMuster worksite + employee name', () => {
     expect(ensured).toContain('Rate of Wages');
     expect(ensured.indexOf('Rate of Wages')).toBeLessThan(ensured.indexOf('10_1'));
     expect(ensured.indexOf('10_31')).toBeLessThan(ensured.indexOf('Number of Days Worked'));
+  });
+
+  test('resolveFormXXVITamilNaduEmployeeJoinDate prefers Zoho DOJ over row entry date', () => {
+    const row = { 'Date of Entry into Service': '11 Aug 2026' };
+    const emp = { Dateofjoining: '17-Aug-2026' };
+    const join = resolveFormXXVITamilNaduEmployeeJoinDate(emp, row, []);
+    expect(join?.getDate()).toBe(17);
+    expect(join?.getMonth()).toBe(7);
+  });
+
+  test('scrubFormXXVITamilNaduPreJoinDayMarks clears days before Date of Entry', () => {
+    const headers = ensureFormXXVITamilNaduDayColumnHeaders([
+      'Name of the Workman',
+      'Date of Entry into Service',
+      ...Array.from({ length: 31 }, (_, i) => `10_${i + 1}`),
+      'Number of Days Worked'
+    ]);
+    const row = {
+      'Name of the Workman': 'Selva P',
+      'Date of Entry into Service': '17 Aug 2026',
+      ...Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`10_${i + 1}`, 'P'])),
+    };
+    scrubFormXXVITamilNaduPreJoinDayMarks([row], headers, '2026-08', {
+      form_x_month: 'August',
+      form_x_year: '2026'
+    });
+    expect(row['10_16']).toBe('');
+    expect(row['10_17']).toBe('P');
+    expect(row['10_1']).toBe('');
+  });
+
+  test('scrubFormXXVITamilNaduPreJoinDayMarks uses employee DOJ when row date differs', () => {
+    const headers = ensureFormXXVITamilNaduDayColumnHeaders([
+      'Name of the Workman',
+      'Date of Entry into Service',
+      ...Array.from({ length: 31 }, (_, i) => `10_${i + 1}`),
+    ]);
+    const row = {
+      'Name of the Workman': 'Selva P',
+      'Date of Entry into Service': '11 Aug 2026',
+      ...Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`10_${i + 1}`, 'P'])),
+    };
+    scrubFormXXVITamilNaduPreJoinDayMarks([row], headers, '2026-08', { form_x_month: 'August', form_x_year: '2026' }, {
+      employees: [{ Dateofjoining: '17-Aug-2026' }],
+    });
+    expect(row['10_13']).toBe('');
+    expect(row['10_17']).toBe('P');
   });
 
   test('short identity prefix still maps Age / wages / attendance by alias (download model)', () => {

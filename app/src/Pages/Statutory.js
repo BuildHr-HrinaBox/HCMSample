@@ -3762,12 +3762,8 @@ function statutoryRowMatchesActiveSite(item, targetSiteSingle) {
   if (!t) return true;
   const explicit = pickSingleSiteNameToken(item?.site ?? item?.Site ?? '');
   if (!explicit) {
-    // Empty Site with draft/sent is legacy/other-site data — keep the form, but not as this site's save.
-    const hasWorkflow =
-      hasStatutoryDraftFileRef(item) ||
-      statutorySendForApprovalIsSent(item) ||
-      !!(item?.proofSubmissionFile ?? item?.ProofSubmissionFile);
-    return !hasWorkflow;
+    // ChecklistBulk rows often have no Site; draft/proof still belongs in this single-site view.
+    return true;
   }
   return explicit.toLowerCase() === t;
 }
@@ -13077,6 +13073,200 @@ function statutoryDraftPreserveLooseKey(row) {
   return `form:${form}|${act}|${desc}|${month}|${site || 'nosite'}`;
 }
 
+function clearStatutoryDraftFieldsOnRow(item) {
+  if (!item || typeof item !== 'object') return item;
+  return {
+    ...item,
+    draftFile: null,
+    DraftFile: null,
+    draftFileName: null,
+    DraftFileName: null,
+    draft: '',
+    Draft: '',
+    draftStatutoryRowIdForFile: null
+  };
+}
+
+/** Best saved statutory row with DraftFile for a ChecklistBulk line (same month + metadata). */
+function pickStatutoryDraftDonorForBulkRow(bulkRow, candidateRows, uiMonthNorm, selectedMonth, donorScoreFn) {
+  const pool = (candidateRows || [])
+    .filter((row, idx, arr) => arr.indexOf(row) === idx)
+    .filter((row) => hasStatutoryDraftFileRef(row) && statutoryLineMetadataMatches(bulkRow, row))
+    .filter((row) =>
+      uiMonthNorm === 'nomonth' ? true : statutoryMonthMatchesUiFilter(row, uiMonthNorm, selectedMonth)
+    );
+  if (pool.length === 0) return null;
+  return [...pool].sort((a, b) => donorScoreFn(b) - donorScoreFn(a))[0];
+}
+
+/** Match bulk/checklist display row to a Catalyst row that holds DraftFile (fresh tab / new browser). */
+function findServerStatutoryDraftRowForDisplayLine(displayRow, serverRows, selectedMonth) {
+  if (!displayRow || !Array.isArray(serverRows) || serverRows.length === 0) return null;
+  const uiMonthNorm = statutoryDedupeMonthNorm(
+    displayRow,
+    selectedMonth ?? displayRow?.monthFilter ?? displayRow?.MonthFilter
+  );
+  let best = null;
+  let bestScore = -1;
+  serverRows.forEach((srv) => {
+    if (!isNumericStatutoryBackendId(srv?.id)) return;
+    if (!hasStatutoryDraftFileRef(srv)) return;
+    if (!statutoryLineMetadataMatches(displayRow, srv)) return;
+    if (uiMonthNorm !== 'nomonth' && !statutoryMonthMatchesUiFilter(srv, uiMonthNorm, selectedMonth)) return;
+    const score = statutoryRowRichnessScore(srv);
+    if (score > bestScore) {
+      bestScore = score;
+      best = srv;
+    }
+  });
+  return best;
+}
+
+/** Fallback when act/description text differs slightly between ChecklistBulk and StatutoryData. */
+function findServerStatutoryDraftRowLoose(displayRow, serverRows, selectedMonth) {
+  if (!displayRow || !Array.isArray(serverRows) || serverRows.length === 0) return null;
+  const formNorm = baseFormNameKey(displayRow?.formName || displayRow?.FormName);
+  if (!formNorm) return null;
+  const uiMonthNorm = statutoryDedupeMonthNorm(
+    { monthFilter: selectedMonth, MonthFilter: selectedMonth },
+    selectedMonth
+  );
+  const descNorm = String(displayRow?.description || displayRow?.Description || '')
+    .trim()
+    .toLowerCase();
+  const stateNorm = String(displayRow?.state || displayRow?.State || '')
+    .trim()
+    .toLowerCase();
+  let best = null;
+  let bestScore = -1;
+  serverRows.forEach((srv) => {
+    if (!isNumericStatutoryBackendId(srv?.id)) return;
+    if (!hasStatutoryDraftFileRef(srv)) return;
+    if (baseFormNameKey(srv?.formName || srv?.FormName) !== formNorm) return;
+    if (uiMonthNorm !== 'nomonth' && !statutoryMonthMatchesUiFilter(srv, uiMonthNorm, selectedMonth)) return;
+    const srvDesc = String(srv?.description || srv?.Description || '')
+      .trim()
+      .toLowerCase();
+    const srvState = String(srv?.state || srv?.State || '')
+      .trim()
+      .toLowerCase();
+    if (descNorm && srvDesc && descNorm !== srvDesc) {
+      if (!descNorm.includes(srvDesc) && !srvDesc.includes(descNorm)) return;
+    }
+    if (stateNorm && srvState && stateNorm !== srvState) return;
+    const score = statutoryRowRichnessScore(srv) + (statutoryLineMetadataMatches(displayRow, srv) ? 50 : 0);
+    if (score > bestScore) {
+      bestScore = score;
+      best = srv;
+    }
+  });
+  return best;
+}
+
+function overlayStatutoryDraftFromServer(displayRows, serverRows, selectedMonth) {
+  if (!Array.isArray(displayRows) || displayRows.length === 0) return displayRows;
+  if (!Array.isArray(serverRows) || serverRows.length === 0) return displayRows;
+  return displayRows.map((row) => {
+    if (hasStatutoryDraftFileRef(row) && row?.draftStatutoryRowIdForFile) return row;
+    const match =
+      findServerStatutoryDraftRowForDisplayLine(row, serverRows, selectedMonth) ||
+      findServerStatutoryDraftRowLoose(row, serverRows, selectedMonth);
+    if (!match) return row;
+    return {
+      ...row,
+      draftFile: match.draftFile ?? match.DraftFile,
+      DraftFile: match.draftFile ?? match.DraftFile,
+      draftFileName: match.draftFileName ?? match.DraftFileName ?? row.draftFileName,
+      DraftFileName: match.draftFileName ?? match.DraftFileName ?? row.DraftFileName,
+      draft: match.draft ?? match.Draft ?? row.draft ?? 'Draft',
+      Draft: match.draft ?? match.Draft ?? row.Draft ?? 'Draft',
+      draftStatutoryRowIdForFile: String(match.id)
+    };
+  });
+}
+
+/** ChecklistBulk display rows + raw Catalyst rows (draft lives on numeric ids removed from the grid). */
+function mergeStatutoryRowsForDraftLookup(displayRows, serverRows) {
+  const byId = new Map();
+  (Array.isArray(displayRows) ? displayRows : []).forEach((row) => {
+    const id = String(row?.id ?? '').trim();
+    if (id) byId.set(id, row);
+  });
+  (Array.isArray(serverRows) ? serverRows : []).forEach((row) => {
+    const id = String(row?.id ?? '').trim();
+    if (!isNumericStatutoryBackendId(id)) return;
+    const existing = byId.get(id);
+    if (!existing) {
+      byId.set(id, row);
+      return;
+    }
+    if (hasStatutoryDraftFileRef(row) && !hasStatutoryDraftFileRef(existing)) {
+      byId.set(id, {
+        ...existing,
+        draftFile: row.draftFile ?? row.DraftFile,
+        DraftFile: row.draftFile ?? row.DraftFile,
+        draftFileName: row.draftFileName ?? row.DraftFileName,
+        DraftFileName: row.draftFileName ?? row.DraftFileName,
+        draftStatutoryRowIdForFile: id
+      });
+    }
+  });
+  return [...byId.values()];
+}
+
+/** Drop draft links on checklist rows when Catalyst Statutory table has no matching saved record. */
+function reconcileStatutoryDraftLinksWithServer(displayRows, serverRows) {
+  if (!Array.isArray(displayRows) || displayRows.length === 0) return displayRows;
+  const serverById = new Map();
+  (Array.isArray(serverRows) ? serverRows : []).forEach((row) => {
+    const id = String(row?.id ?? '').trim();
+    if (isNumericStatutoryBackendId(id)) serverById.set(id, row);
+  });
+
+  return displayRows.map((row) => {
+    const selfId = String(row?.id ?? '').trim();
+    const linkedId = String(row?.draftStatutoryRowIdForFile ?? '').trim();
+    let serverRow = isNumericStatutoryBackendId(selfId)
+      ? serverById.get(selfId)
+      : isNumericStatutoryBackendId(linkedId)
+        ? serverById.get(linkedId)
+        : null;
+    if (!serverRow || !hasStatutoryDraftFileRef(serverRow)) {
+      const metaMatch =
+        findServerStatutoryDraftRowForDisplayLine(row, serverRows, row?.monthFilter ?? row?.MonthFilter) ||
+        findServerStatutoryDraftRowLoose(row, serverRows, row?.monthFilter ?? row?.MonthFilter);
+      if (metaMatch) serverRow = metaMatch;
+    }
+
+    if (serverRow) {
+      const srvDraft = serverRow.draftFile ?? serverRow.DraftFile;
+      const hasSrvDraft =
+        srvDraft != null && String(srvDraft).trim() !== '' && String(srvDraft).trim() !== 'null';
+      if (hasSrvDraft) {
+        const serverId = isNumericStatutoryBackendId(serverRow?.id) ? String(serverRow.id) : null;
+        return {
+          ...row,
+          draftFile: srvDraft,
+          DraftFile: srvDraft,
+          draftFileName: serverRow.draftFileName ?? serverRow.DraftFileName ?? row.draftFileName,
+          DraftFileName: serverRow.draftFileName ?? serverRow.DraftFileName ?? row.DraftFileName,
+          draftStatutoryRowIdForFile:
+            row.draftStatutoryRowIdForFile || serverId || (isNumericStatutoryBackendId(selfId) ? selfId : linkedId || null)
+        };
+      }
+      if (hasStatutoryDraftFileRef(row)) {
+        return clearStatutoryDraftFieldsOnRow(row);
+      }
+      return row;
+    }
+
+    if (hasStatutoryDraftFileRef(row) || isNumericStatutoryBackendId(linkedId)) {
+      return clearStatutoryDraftFieldsOnRow(row);
+    }
+    return row;
+  });
+}
+
 /** Keep draft file links visible after save when a background refresh briefly drops donor metadata. */
 function preserveStatutoryDraftFieldsAfterFetch(prevRows, nextRows) {
   if (!Array.isArray(prevRows) || !Array.isArray(nextRows) || prevRows.length === 0) {
@@ -13085,6 +13275,9 @@ function preserveStatutoryDraftFieldsAfterFetch(prevRows, nextRows) {
   const preserved = new Map();
   prevRows.forEach((row) => {
     if (!hasStatutoryDraftFileRef(row)) return;
+    const rowId = String(row?.id ?? '').trim();
+    const linkedId = String(row?.draftStatutoryRowIdForFile ?? '').trim();
+    if (!isNumericStatutoryBackendId(rowId) && !isNumericStatutoryBackendId(linkedId)) return;
     const lineKey = statutorySubmittedDatePreserveKey(row);
     const looseKey = statutoryDraftPreserveLooseKey(row);
     const payload = {
@@ -29466,6 +29659,9 @@ const Statutory = ({ userEmail, userRole }) => {
 
   const [form, setForm] = useState(initialForm);
   const [statutoryData, setStatutoryData] = useState(() => initialStatutoryData);
+  /** Raw GET /statutory rows — draft file ids live here while the grid shows ChecklistBulk bulk_* ids. */
+  const [statutoryServerRows, setStatutoryServerRows] = useState([]);
+  const statutoryServerRowsRef = useRef([]);
   const [formmasterTemplates, setFormmasterTemplates] = useState([]); // Formmaster file list for Form File column lookup by form name
   const [setupFormRows, setSetupFormRows] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -29492,8 +29688,12 @@ const Statutory = ({ userEmail, userRole }) => {
   const lastLocalDraftSaveAtRef = useRef(0);
   const isFormFileModalOpenRef = useRef(false);
   const pendingSilentRefreshWhileModalRef = useRef(false);
+  /** After Download Draft File, skip the queued silent refresh so draft links are not wiped. */
+  const suppressSilentRefreshAfterDraftDownloadRef = useRef(false);
   /** True while Download Draft File / generate runs — blocks silent refresh so draft links stay visible. */
   const formFileLoadingRef = useRef(false);
+  /** Nested downloads (PDF → regenerate Excel) must not clear the pin until the outermost operation ends. */
+  const formFileLoadingDepthRef = useRef(0);
   /** Snapshot of draft-bearing rows taken when a download starts (belt-and-suspenders vs poll). */
   const draftLinksPinRef = useRef(null);
   const statutoryDataRef = useRef(statutoryData);
@@ -29501,42 +29701,52 @@ const Statutory = ({ userEmail, userRole }) => {
   const [formFileModalData, setFormFileModalData] = useState(null);
   const [formFileLoading, setFormFileLoadingState] = useState(false);
   const setFormFileLoading = (next) => {
-    const value = typeof next === 'function' ? next(formFileLoadingRef.current) : !!next;
-    if (value && !formFileLoadingRef.current) {
-      const rows = Array.isArray(statutoryDataRef.current) ? statutoryDataRef.current : [];
-      draftLinksPinRef.current = rows.filter((row) => hasStatutoryDraftFileRef(row));
-    }
-    if (!value) {
-      const pin = draftLinksPinRef.current;
-      const pendingRefresh = pendingSilentRefreshWhileModalRef.current;
-      if (Array.isArray(pin) && pin.length) {
-        setStatutoryData((prev) => {
-          const merged = preserveStatutoryDraftFieldsAfterFetch(
-            pin,
-            Array.isArray(prev) ? prev : []
-          );
-          statutoryDataRef.current = merged;
-          try {
-            localStorage.setItem('statutoryData', JSON.stringify(merged));
-          } catch (_) {
-            /* ignore quota errors */
-          }
-          return merged;
-        });
+    const wantOn =
+      typeof next === 'function' ? next(formFileLoadingDepthRef.current > 0) : !!next;
+    if (wantOn) {
+      if (formFileLoadingDepthRef.current === 0) {
+        const rows = Array.isArray(statutoryDataRef.current) ? statutoryDataRef.current : [];
+        draftLinksPinRef.current = rows.filter((row) => hasStatutoryDraftFileRef(row));
       }
-      draftLinksPinRef.current = null;
-      pendingSilentRefreshWhileModalRef.current = false;
-      formFileLoadingRef.current = value;
-      setFormFileLoadingState(value);
-      if (pendingRefresh) {
-        window.setTimeout(() => {
-          fetchStatutoryDataRef.current?.({ silentRefresh: true, force: true });
-        }, 50);
-      }
+      formFileLoadingDepthRef.current += 1;
+      formFileLoadingRef.current = true;
+      setFormFileLoadingState(true);
       return;
     }
-    formFileLoadingRef.current = value;
-    setFormFileLoadingState(value);
+    if (formFileLoadingDepthRef.current <= 0) {
+      return;
+    }
+    formFileLoadingDepthRef.current -= 1;
+    if (formFileLoadingDepthRef.current > 0) {
+      return;
+    }
+    const pin = draftLinksPinRef.current;
+    const pendingRefresh = pendingSilentRefreshWhileModalRef.current;
+    if (Array.isArray(pin) && pin.length) {
+      setStatutoryData((prev) => {
+        const merged = preserveStatutoryDraftFieldsAfterFetch(
+          pin,
+          Array.isArray(prev) ? prev : []
+        );
+        statutoryDataRef.current = merged;
+        try {
+          localStorage.setItem('statutoryData', JSON.stringify(merged));
+        } catch (_) {
+          /* ignore quota errors */
+        }
+        return merged;
+      });
+    }
+    draftLinksPinRef.current = null;
+    pendingSilentRefreshWhileModalRef.current = false;
+    formFileLoadingRef.current = false;
+    setFormFileLoadingState(false);
+    if (pendingRefresh && !suppressSilentRefreshAfterDraftDownloadRef.current) {
+      window.setTimeout(() => {
+        fetchStatutoryDataRef.current?.({ silentRefresh: true, force: true });
+      }, 50);
+    }
+    suppressSilentRefreshAfterDraftDownloadRef.current = false;
   };
   const [tableAutofillLoading, setTableAutofillLoading] = useState(false);
   const [tableAutofillProgress, setTableAutofillProgress] = useState('');
@@ -30050,6 +30260,8 @@ const Statutory = ({ userEmail, userRole }) => {
       let parsedBulkDataCache = null;
       let siteScopeCategories = null;
       let lastSiteMeta = null;
+      /** Snapshot of GET /statutory only — used to drop stale browser-cache draft links on checklist rows. */
+      let apiStatutoryRowsFromServer = null;
 
       if (response.ok) {
         const data = await response.json();
@@ -30084,6 +30296,9 @@ const Statutory = ({ userEmail, userRole }) => {
             approvedDate:
               item.approvedDate || item.ApprovedDate || item.approvalDate || item.ApprovalDate || ''
           }));
+          apiStatutoryRowsFromServer = baseStatutoryData.map((row) => ({ ...row }));
+          setStatutoryServerRows(apiStatutoryRowsFromServer);
+          statutoryServerRowsRef.current = apiStatutoryRowsFromServer;
 
           // Paint Act/Description immediately — do not wait for Site Management / checklist merge.
           siteScopeCategories = scResolved;
@@ -30615,11 +30830,21 @@ const Statutory = ({ userEmail, userRole }) => {
             resolveToFullMonthName(String(selectedMonth || '').trim()) ||
             String(selectedMonth || '').trim() ||
             null;
+          const draftDonorCandidateRows = [
+            ...strictDonorCandidates,
+            ...filterWorkflowDonors(formActDescMatches),
+            ...filterWorkflowDonors(formMatches),
+            ...(baseStatutoryData || []).filter((row) => hasStatutoryDraftFileRef(row))
+          ];
+          const draftDonorForRow = pickStatutoryDraftDonorForBulkRow(
+            bulkRow,
+            draftDonorCandidateRows,
+            uiMonthNormForAlign,
+            selectedMonth,
+            donorScore
+          );
           if (!monthDonor) {
-            const draftOnlyDonor = [...strictDonorCandidates, ...filterWorkflowDonors(formActDescMatches), ...filterWorkflowDonors(formMatches)]
-              .filter((row, idx, arr) => arr.indexOf(row) === idx)
-              .filter((row) => hasStatutoryDraftFileRef(row) && statutoryLineMetadataMatches(bulkRow, row))
-              .sort((a, b) => donorScore(b) - donorScore(a))[0] || null;
+            const draftOnlyDonor = draftDonorForRow;
             const fmExactNoDonor =
               formmasterFileByMatchKey.get(buildFormmasterMatchKey(bulkRow)) ||
               formmasterFileByMatchKey.get(checklistBulkRowIdentityKey(bulkRow));
@@ -30660,6 +30885,7 @@ const Statutory = ({ userEmail, userRole }) => {
             );
           }
           const donor = monthDonor;
+          const draftDonor = draftDonorForRow || (hasStatutoryDraftFileRef(donor) ? donor : null);
           const fmExact =
             formmasterFileByMatchKey.get(buildFormmasterMatchKey(bulkRow)) ||
             formmasterFileByMatchKey.get(checklistBulkRowIdentityKey(bulkRow));
@@ -30672,9 +30898,14 @@ const Statutory = ({ userEmail, userRole }) => {
             formFile: fmExact?.formFile ?? formDonor?.formFile ?? formDonor?.FormFile ?? bulkRow.formFile,
             formFileName: fmExact?.formFileName ?? formDonor?.formFileName ?? formDonor?.FormFileName ?? bulkRow.formFileName,
             isFromFormmaster: !!fmExact || !!formDonor?.isFromFormmaster,
-            draftFile: donor?.draftFile ?? donor?.DraftFile ?? bulkRow.draftFile,
-            draftFileName: donor?.draftFileName ?? donor?.DraftFileName ?? bulkRow.draftFileName,
-            draft: donor?.draft ?? donor?.Draft ?? bulkRow.draft,
+            draftFile: draftDonor?.draftFile ?? draftDonor?.DraftFile ?? donor?.draftFile ?? donor?.DraftFile ?? bulkRow.draftFile,
+            draftFileName:
+              draftDonor?.draftFileName ??
+              draftDonor?.DraftFileName ??
+              donor?.draftFileName ??
+              donor?.DraftFileName ??
+              bulkRow.draftFileName,
+            draft: draftDonor?.draft ?? draftDonor?.Draft ?? donor?.draft ?? donor?.Draft ?? bulkRow.draft,
             proofSubmissionFile: donor?.proofSubmissionFile ?? donor?.ProofSubmissionFile ?? bulkRow.proofSubmissionFile ?? null,
             proofSubmissionFileName: donor?.proofSubmissionFileName ?? donor?.ProofSubmissionFileName ?? bulkRow.proofSubmissionFileName ?? null,
             sendForApproval: donor?.sendForApproval ?? donor?.SendForApproval ?? bulkRow.sendForApproval ?? '',
@@ -30719,7 +30950,11 @@ const Statutory = ({ userEmail, userRole }) => {
             monthFilter: donor?.monthFilter ?? donor?.MonthFilter ?? donor?.monthfilter ?? bulkRow.monthFilter ?? null,
             MonthFilter: donor?.monthFilter ?? donor?.MonthFilter ?? donor?.monthfilter ?? bulkRow.MonthFilter ?? null,
             monthfilter: donor?.monthFilter ?? donor?.MonthFilter ?? donor?.monthfilter ?? bulkRow.monthfilter ?? null,
-            draftStatutoryRowIdForFile: donor?.id ?? null
+            draftStatutoryRowIdForFile: isNumericStatutoryBackendId(draftDonor?.id)
+              ? String(draftDonor.id)
+              : isNumericStatutoryBackendId(donor?.id)
+                ? String(donor.id)
+                : null
           });
         });
         console.log(
@@ -30854,15 +31089,27 @@ const Statutory = ({ userEmail, userRole }) => {
         byFormName[name]++;
       });
       console.log(`📊 Entries by form name:`, byFormName);
+
+      if (apiStatutoryRowsFromServer) {
+        mergedData = overlayStatutoryDraftFromServer(
+          mergedData,
+          apiStatutoryRowsFromServer,
+          selectedMonth
+        );
+        mergedData = reconcileStatutoryDraftLinksWithServer(mergedData, apiStatutoryRowsFromServer);
+      }
      
       setStatutoryData((prev) => {
         // In-flight refresh can finish after Download Draft File starts — freeze so links stay visible.
         if (formFileLoadingRef.current) {
           const pin = draftLinksPinRef.current;
+          const nextWhileLoading = apiStatutoryRowsFromServer
+            ? reconcileStatutoryDraftLinksWithServer(mergedData, apiStatutoryRowsFromServer)
+            : mergedData;
           if (Array.isArray(pin) && pin.length) {
-            return preserveStatutoryDraftFieldsAfterFetch(pin, Array.isArray(prev) ? prev : []);
+            return preserveStatutoryDraftFieldsAfterFetch(pin, nextWhileLoading);
           }
-          return prev;
+          return Array.isArray(prev) && prev.length > 0 ? prev : nextWhileLoading;
         }
         const withPreservedSubmitted = preserveStatutorySubmittedDatesAfterFetch(prev, mergedData);
         const withPreservedSendForApproval = preserveStatutorySendForApprovalAfterFetch(
@@ -30879,7 +31126,10 @@ const Statutory = ({ userEmail, userRole }) => {
           );
         }
         // Never let a later refresh shrink Fatehgarh+Maliya → Fatehgarh-only.
-        const committed = preferWiderStatutorySnapshotData(prev, withPreservedDrafts);
+        let committed = preferWiderStatutorySnapshotData(prev, withPreservedDrafts);
+        if (apiStatutoryRowsFromServer) {
+          committed = reconcileStatutoryDraftLinksWithServer(committed, apiStatutoryRowsFromServer);
+        }
         localStorage.setItem('statutoryData', JSON.stringify(committed));
         if (skipCacheForSiteScope) {
           writeStatutoryScopedSnapshot(userEmail, siteFromUrl, siteScopeCategories, {
@@ -31503,8 +31753,6 @@ const Statutory = ({ userEmail, userRole }) => {
         draft: form.draft || null,
         proofSubmissionFile: proofFileForPayload,
         proofSubmissionFileName: proofNameForPayload,
-        draftFile: draftFileId != null ? String(draftFileId) : null,
-        draftFileName: draftFileName || null,
         approval: form.approval != null && String(form.approval).trim() !== '' ? String(form.approval).trim() : null,
         status: form.status != null && String(form.status).trim() !== '' ? String(form.status).trim() : null,
         sendForApproval:
@@ -31513,6 +31761,17 @@ const Statutory = ({ userEmail, userRole }) => {
             : null,
         remarks: form.remarks != null && String(form.remarks).trim() !== '' ? String(form.remarks).trim() : null
       };
+      const draftIdForSave =
+        draftFileId != null &&
+        String(draftFileId).trim() !== '' &&
+        String(draftFileId).trim() !== 'null' &&
+        String(draftFileId).trim() !== 'undefined'
+          ? String(draftFileId).trim()
+          : null;
+      if (isNewDraftFile || draftIdForSave) {
+        payload.draftFile = draftIdForSave;
+        payload.draftFileName = draftFileName || null;
+      }
 
       const existingMonthNorm = (form.originalMonthFilter || '').trim().toLowerCase().substring(0, 3);
       const savingMonthNorm = (monthFilterValue || '').trim().toLowerCase().substring(0, 3);
@@ -57561,7 +57820,6 @@ const Statutory = ({ userEmail, userRole }) => {
         }
       }
       if (generateOptions?.returnBlobOnly) {
-        setFormFileLoading(false);
         setSuccess('');
         return { blob, fileName };
       }
@@ -57626,7 +57884,6 @@ const Statutory = ({ userEmail, userRole }) => {
         setIsFormFileModalOpen(true);
         isFormFileModalOpenRef.current = true;
       }
-      setFormFileLoading(false);
       setSuccess(
         usedLiveModalGrid
           ? 'Draft downloaded from current Autofill grid.'
@@ -57897,7 +58154,10 @@ const Statutory = ({ userEmail, userRole }) => {
 
   const handleDownloadSavedDraftFile = async (draftApiRowId, fileName, sourceItem, resolvedFormFileItem) => {
     // Pin draft column links before any async fetch so polling cannot blank them.
+    suppressSilentRefreshAfterDraftDownloadRef.current = true;
+    pendingSilentRefreshWhileModalRef.current = false;
     setFormFileLoading(true);
+    try {
     if (!draftApiRowId) {
       await handleViewDraftFileGenerate(sourceItem, resolvedFormFileItem);
       return;
@@ -58555,6 +58815,7 @@ const Statutory = ({ userEmail, userRole }) => {
         URL.revokeObjectURL(url);
         setSuccess('Draft file downloaded.');
         setTimeout(() => setSuccess(''), 3000);
+        suppressSilentRefreshAfterDraftDownloadRef.current = true;
         setFormFileLoading(false);
         return true;
       } catch (fastErr) {
@@ -59123,6 +59384,13 @@ const Statutory = ({ userEmail, userRole }) => {
       console.error('Saved draft direct download error:', err);
       setError(err?.message || 'Failed to download saved draft file.');
     } finally {
+      suppressSilentRefreshAfterDraftDownloadRef.current = true;
+      pendingSilentRefreshWhileModalRef.current = false;
+      setFormFileLoading(false);
+    }
+    } finally {
+      suppressSilentRefreshAfterDraftDownloadRef.current = true;
+      pendingSilentRefreshWhileModalRef.current = false;
       setFormFileLoading(false);
     }
   };
@@ -102449,6 +102717,11 @@ const Statutory = ({ userEmail, userRole }) => {
     );
   }, [statutoryDataWithPinnedDrafts, siteFromUrl]);
 
+  const statutoryDraftLookupPool = useMemo(
+    () => mergeStatutoryRowsForDraftLookup(siteScopedStatutoryLookup, statutoryServerRows),
+    [siteScopedStatutoryLookup, statutoryServerRows]
+  );
+
   // Filter statutory data by month and ensure forms are properly separated by act
   // Items with "Monthly Basis" due date should appear in every month (treated as 15th of that month)
   const filteredStatutoryData = useMemo(() => {
@@ -102988,7 +103261,7 @@ const Statutory = ({ userEmail, userRole }) => {
   // (same form + act + description + month + sector + state) to avoid cross-row bleed.
   const draftRowByFormActMonthKey = useMemo(() => {
     const map = new Map();
-    const pool = siteScopedStatutoryLookup;
+    const pool = statutoryDraftLookupPool;
     if (!Array.isArray(pool) || pool.length === 0) return map;
     const uiMonthNorm = statutoryDedupeMonthNorm(
       { monthFilter: selectedMonth, MonthFilter: selectedMonth },
@@ -103030,7 +103303,7 @@ const Statutory = ({ userEmail, userRole }) => {
       }
     });
     return map;
-  }, [siteScopedStatutoryLookup, selectedMonth, siteFromUrl, resolveSiteForDisplay]);
+  }, [statutoryDraftLookupPool, selectedMonth, siteFromUrl, resolveSiteForDisplay]);
 
   // Autofill/View modal: use format read from the View File (parsed form header + table headers) so each form opens with its own structure
   const displayFormHeader = useMemo(() => {
@@ -106739,7 +107012,7 @@ const Statutory = ({ userEmail, userRole }) => {
                           );
                           const draftLookupKey = `${String(item.formName || '').toLowerCase().trim()}|${String(item.act || '').toLowerCase().trim()}|${descPart}|${(rowMonthNorm || selectedMonthNorm || 'nomonth')}|${secPart}|${statePart}|${sitePart || 'nosite'}`;
                           const draftLookupKeyDeduped = `${statutoryFormDedupeKey(item)}|${String(item.act || '').toLowerCase().trim()}|${descPart}|${(rowMonthNorm || selectedMonthNorm || 'nomonth')}|${secPart}|${statePart}|${sitePart || 'nosite'}`;
-                          const siblingLookupRows = siteScopedStatutoryLookup;
+                          const siblingLookupRows = statutoryDraftLookupPool;
                           const approverDraftDonorRow =
                             showApprovalColumn && Array.isArray(siblingLookupRows)
                               ? findStatutoryDraftDonorForApproverView(

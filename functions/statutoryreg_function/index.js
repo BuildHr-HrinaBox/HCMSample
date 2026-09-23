@@ -119,16 +119,31 @@ function approvedDateFromBody(body) {
 
 function mapStatutoryRowToApi(row) {
   if (!row) return null;
+  const monthFilter = row.MonthFilter || row.monthFilter || row.monthfilter || '';
+  const formNameRaw =
+    row.FormName ||
+    row.FormFieldName ||
+    row.formFieldName ||
+    row.formName ||
+    '';
+  const formNameFromDraft =
+    !String(formNameRaw || '').trim() && row.DraftFileName
+      ? String(row.DraftFileName)
+          .replace(/\.xlsx$/i, '')
+          .trim()
+      : '';
   return {
     id: row.ROWID,
-    formName: row.FormName || '',
+    formName: String(formNameRaw || formNameFromDraft || '').trim(),
     act: row.Act || '',
     description: row.Description || '',
     dueDate: row.DueDate || '',
     sector: row.Sector || '',
     state: row.State || '',
     site: row.Site || '',
-    monthfilter: row.MonthFilter || '',
+    monthFilter,
+    MonthFilter: monthFilter,
+    monthfilter: monthFilter,
     autofill: row.Autofill || '',
     draft: row.Draft || '',
     formFile: row.FormFile || null,
@@ -1316,6 +1331,30 @@ const isFileMissingError = (err) =>
   err?.statusCode === 404 ||
   err?.code === 'INVALID_ID' ||
   (err?.message && err.message.includes('No such file'));
+
+/** Download from configured folder id, then from folder resolved by name (upload may use a different id). */
+async function downloadStatutoryFileFromStore(catalyst, docType, fileId) {
+  const folderCandidates = new Set();
+  const configured = DOC_TYPE_TO_FOLDER_ID[docType];
+  if (configured) folderCandidates.add(String(configured));
+  try {
+    const resolved = await getOrCreateFolderId(catalyst, docType);
+    if (resolved) folderCandidates.add(String(resolved));
+  } catch (resolveErr) {
+    console.warn('Could not resolve filestore folder for download:', docType, resolveErr.message);
+  }
+  let lastErr;
+  for (const folderId of folderCandidates) {
+    try {
+      return await catalyst.filestore().folder(folderId).downloadFile(fileId);
+    } catch (err) {
+      lastErr = err;
+      if (!isFileMissingError(err)) throw err;
+      console.warn(`Draft/Form download miss in folder ${folderId}:`, err.message);
+    }
+  }
+  throw lastErr || new Error('File not found in filestore');
+}
 
 const getContentType = (filename) => {
   const ext = String(filename || '').toLowerCase().split('.').pop();
@@ -2689,8 +2728,13 @@ app.put('/statutory/:id', async (req, res) => {
         updateData.ProofSubmissionFileName = null;
       }
     }
-    if (draftFile !== undefined) updateData.DraftFile = normalizeFileRef(draftFile);
-    if (draftFileName !== undefined) updateData.DraftFileName = draftFileName;
+    // Preserve existing draft when client sends null/empty (Autofill/edit saves must not wipe DraftFile).
+    if (draftFile !== undefined && draftFile != null && String(draftFile).trim() !== '') {
+      updateData.DraftFile = normalizeFileRef(draftFile);
+    }
+    if (draftFileName !== undefined && draftFileName != null && String(draftFileName).trim() !== '') {
+      updateData.DraftFileName = draftFileName;
+    }
     if (approval !== undefined) {
       updateData.Approval = approval != null && String(approval).trim() !== '' ? String(approval).trim() : null;
     }
@@ -3033,40 +3077,26 @@ app.get('/statutory/:id/file/:docType', async (req, res) => {
     
     let fileBuffer;
     try {
-      fileBuffer = await catalyst.filestore().folder(folderId).downloadFile(fileId);
+      fileBuffer = await downloadStatutoryFileFromStore(catalyst, docType, fileId);
     } catch (downloadErr) {
       console.error('Error downloading file from filestore:', downloadErr);
-      
-      // Check if it's a file not found error
+
       if (isFileMissingError(downloadErr)) {
-        console.error(`File with ID ${fileId} does not exist in folder ${folderId}`);
+        console.error(`File with ID ${fileId} does not exist for docType ${docType}`);
         if (useTemplateForProof && serveTemplateIfAvailable('proof submission file missing from filestore')) {
           return;
         }
         if (serveTemplateIfAvailable('file missing from filestore')) {
           return;
         }
-        // For Draft: clear broken file reference in DB so edit form can open and user can re-upload
-        if (docType === 'Draft') {
-          try {
-            const table = catalyst.datastore().table('Statutory');
-            await table.updateRow({
-              ROWID: id,
-              DraftFile: null,
-              DraftFileName: null
-            });
-            console.log(`Cleared missing Draft file reference for statutory record ${id}`);
-          } catch (clearErr) {
-            console.error('Error clearing draft file reference:', clearErr);
-          }
-        }
-        return res.status(404).json({ 
-          status: 'failure', 
-          message: 'File no longer exists in storage. The record has been updated. Please re-upload the file from the Edit form.'
+        // Do not clear DraftFile/FormFile on failed download — keeps UI links and allows retry after folder fix.
+        return res.status(404).json({
+          status: 'failure',
+          message:
+            'File could not be read from storage. The statutory record was not changed. Try Save again or re-upload from Edit.'
         });
       }
-      
-      // Re-throw other errors to be caught by outer catch
+
       throw downloadErr;
     }
     
